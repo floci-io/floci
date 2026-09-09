@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -28,6 +29,7 @@ class DynamoDbProjectionIntegrationTest {
 
     private static final String CT = "application/x-amz-json-1.0";
     private static final String TABLE = "ProjectionBugTable";
+    private static int testPort;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -37,6 +39,7 @@ class DynamoDbProjectionIntegrationTest {
     @Test
     @Order(1)
     void createTable() {
+        testPort = RestAssured.port;
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
             .contentType(CT)
@@ -169,8 +172,8 @@ class DynamoDbProjectionIntegrationTest {
 
     @AfterAll
     static void cleanup() {
-        try {
-            given()
+        given()
+                .port(testPort)
                 .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
                 .contentType(CT)
                 .body("""
@@ -180,7 +183,6 @@ class DynamoDbProjectionIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200);
-        } catch (Exception ignored) {}
     }
 
     /**

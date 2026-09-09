@@ -1,0 +1,197 @@
+package io.github.hectorvent.floci.services.kinesisanalytics.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/**
+ * In-memory representation of a Managed Service for Apache Flink application
+ * (Kinesis Analytics V2). Mirrors the {@code amazonmq/model/Broker} shape: a mutable
+ * POJO whose {@link ApplicationStatus} transitions in place (READY → STARTING → RUNNING)
+ * as the backing Flink container comes up.
+ *
+ * <p>Wire keys are PascalCase to match the Kinesis Analytics V2 (application/x-amz-json-1.1)
+ * protocol (e.g. {@code ApplicationName}, {@code ApplicationARN}).
+ */
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class FlinkApplication {
+
+    @JsonProperty("ApplicationName")
+    private String applicationName;
+
+    @JsonProperty("ApplicationARN")
+    private String applicationArn;
+
+    @JsonProperty("ApplicationDescription")
+    private String applicationDescription;
+
+    @JsonProperty("RuntimeEnvironment")
+    private String runtimeEnvironment;
+
+    @JsonProperty("ServiceExecutionRole")
+    private String serviceExecutionRole;
+
+    @JsonProperty("ApplicationStatus")
+    private ApplicationStatus applicationStatus;
+
+    @JsonProperty("ApplicationVersionId")
+    private long applicationVersionId;
+
+    @JsonProperty("ApplicationMode")
+    private String applicationMode;
+
+    @JsonProperty("CreateTimestamp")
+    private Instant createTimestamp;
+
+    @JsonProperty("LastUpdateTimestamp")
+    private Instant lastUpdateTimestamp;
+
+    // Internal bookkeeping — NOT part of the AWS response shape, but persisted so the
+    // application stays manageable after an emulator restart in persistent mode (container
+    // teardown, account-aware storage routing). The handler builds the ApplicationDetail
+    // response explicitly, so these are never exposed to clients despite being stored.
+    private String containerId;
+
+    private String accountId;
+
+    // JobManager REST endpoint (host:port) resolved when the container starts; used by the
+    // readiness probe. Re-resolved on every StartApplication, so it is transient bookkeeping.
+    private String restEndpoint;
+
+    // TaskManager container id (only present when a job is deployed; the JobManager alone has no
+    // task slots). Bookkeeping, not part of the AWS shape.
+    private String taskManagerContainerId;
+
+    // Flink job id assigned once the application JAR is submitted to the cluster; used to poll job
+    // state and to cancel on stop. Bookkeeping, not part of the AWS shape.
+    private String flinkJobId;
+
+    // ApplicationCodeConfiguration.CodeContent.S3ContentLocation — the S3 object holding the Flink
+    // application JAR. These ARE echoed back on DescribeApplication (built explicitly by the handler).
+    private String codeS3Bucket;
+    private String codeS3Key;
+    private String codeS3ObjectVersion;
+
+    // FlinkApplicationConfiguration.ParallelismConfiguration.Parallelism (defaults to 1).
+    private int parallelism = 1;
+
+    // ApplicationSnapshotConfiguration.SnapshotsEnabled — real AWS defaults this to true when the
+    // application is created without specifying it.
+    private boolean snapshotsEnabled = true;
+
+    // Resource tags. Real AWS never echoes these in ApplicationDetail (CreateApplication /
+    // DescribeApplication) — only ListTagsForResource returns them — so this is bookkeeping only,
+    // like containerId/accountId above, not part of the wire response the handler builds.
+    private Map<String, String> tags = new LinkedHashMap<>();
+
+    // ApplicationConfiguration.EnvironmentProperties.PropertyGroups, keyed by PropertyGroupId (the
+    // key a Flink app looks it up by via KinesisAnalyticsRuntime.getApplicationProperties()). Echoed
+    // back on DescribeApplication (unlike tags) as ApplicationConfigurationDescription
+    // .EnvironmentPropertyDescriptions.PropertyGroupDescriptions, built explicitly by the handler.
+    private Map<String, Map<String, String>> environmentProperties = new LinkedHashMap<>();
+
+    // Application snapshots (Flink savepoints), keyed by SnapshotName. Bookkeeping — snapshots are
+    // only ever returned via CreateApplicationSnapshot/DescribeApplicationSnapshot/
+    // ListApplicationSnapshots, never embedded in ApplicationDetail.
+    private Map<String, Snapshot> snapshots = new LinkedHashMap<>();
+
+    public FlinkApplication() {}
+
+    public FlinkApplication(String applicationName, String applicationArn,
+                            String runtimeEnvironment, String serviceExecutionRole,
+                            String applicationMode) {
+        this.applicationName = applicationName;
+        this.applicationArn = applicationArn;
+        this.runtimeEnvironment = runtimeEnvironment;
+        this.serviceExecutionRole = serviceExecutionRole;
+        this.applicationMode = applicationMode;
+        this.applicationStatus = ApplicationStatus.READY;
+        this.applicationVersionId = 1L;
+        this.createTimestamp = Instant.now();
+        this.lastUpdateTimestamp = this.createTimestamp;
+    }
+
+    public String getApplicationName() { return applicationName; }
+    public void setApplicationName(String applicationName) { this.applicationName = applicationName; }
+
+    public String getApplicationArn() { return applicationArn; }
+    public void setApplicationArn(String applicationArn) { this.applicationArn = applicationArn; }
+
+    public String getApplicationDescription() { return applicationDescription; }
+    public void setApplicationDescription(String applicationDescription) { this.applicationDescription = applicationDescription; }
+
+    public String getRuntimeEnvironment() { return runtimeEnvironment; }
+    public void setRuntimeEnvironment(String runtimeEnvironment) { this.runtimeEnvironment = runtimeEnvironment; }
+
+    public String getServiceExecutionRole() { return serviceExecutionRole; }
+    public void setServiceExecutionRole(String serviceExecutionRole) { this.serviceExecutionRole = serviceExecutionRole; }
+
+    public ApplicationStatus getApplicationStatus() { return applicationStatus; }
+    public void setApplicationStatus(ApplicationStatus applicationStatus) { this.applicationStatus = applicationStatus; }
+
+    public long getApplicationVersionId() { return applicationVersionId; }
+    public void setApplicationVersionId(long applicationVersionId) { this.applicationVersionId = applicationVersionId; }
+
+    public String getApplicationMode() { return applicationMode; }
+    public void setApplicationMode(String applicationMode) { this.applicationMode = applicationMode; }
+
+    public Instant getCreateTimestamp() { return createTimestamp; }
+    public void setCreateTimestamp(Instant createTimestamp) { this.createTimestamp = createTimestamp; }
+
+    public Instant getLastUpdateTimestamp() { return lastUpdateTimestamp; }
+    public void setLastUpdateTimestamp(Instant lastUpdateTimestamp) { this.lastUpdateTimestamp = lastUpdateTimestamp; }
+
+    public String getContainerId() { return containerId; }
+    public void setContainerId(String containerId) { this.containerId = containerId; }
+
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public String getRestEndpoint() { return restEndpoint; }
+    public void setRestEndpoint(String restEndpoint) { this.restEndpoint = restEndpoint; }
+
+    public String getTaskManagerContainerId() { return taskManagerContainerId; }
+    public void setTaskManagerContainerId(String taskManagerContainerId) { this.taskManagerContainerId = taskManagerContainerId; }
+
+    public String getFlinkJobId() { return flinkJobId; }
+    public void setFlinkJobId(String flinkJobId) { this.flinkJobId = flinkJobId; }
+
+    public String getCodeS3Bucket() { return codeS3Bucket; }
+    public void setCodeS3Bucket(String codeS3Bucket) { this.codeS3Bucket = codeS3Bucket; }
+
+    public String getCodeS3Key() { return codeS3Key; }
+    public void setCodeS3Key(String codeS3Key) { this.codeS3Key = codeS3Key; }
+
+    public String getCodeS3ObjectVersion() { return codeS3ObjectVersion; }
+    public void setCodeS3ObjectVersion(String codeS3ObjectVersion) { this.codeS3ObjectVersion = codeS3ObjectVersion; }
+
+    public int getParallelism() { return parallelism; }
+    public void setParallelism(int parallelism) { this.parallelism = parallelism; }
+
+    public boolean isSnapshotsEnabled() { return snapshotsEnabled; }
+    public void setSnapshotsEnabled(boolean snapshotsEnabled) { this.snapshotsEnabled = snapshotsEnabled; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? tags : new LinkedHashMap<>(); }
+
+    public Map<String, Map<String, String>> getEnvironmentProperties() { return environmentProperties; }
+    public void setEnvironmentProperties(Map<String, Map<String, String>> environmentProperties) {
+        this.environmentProperties = environmentProperties != null ? environmentProperties : new LinkedHashMap<>();
+    }
+
+    public Map<String, Snapshot> getSnapshots() { return snapshots; }
+    public void setSnapshots(Map<String, Snapshot> snapshots) {
+        this.snapshots = snapshots != null ? snapshots : new LinkedHashMap<>();
+    }
+
+    /** True when the application has a code artifact to deploy (S3 JAR), i.e. a job should run. */
+    public boolean hasCode() {
+        return codeS3Bucket != null && !codeS3Bucket.isBlank()
+                && codeS3Key != null && !codeS3Key.isBlank();
+    }
+}

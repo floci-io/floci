@@ -48,6 +48,7 @@ class EventBridgeSchedulerIntegrationTest {
         eventBridgeService = new EventBridgeService(
                 busStore, ruleStore, targetStore,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT),
                 new ObjectMapper(), scheduler, invoker, replayDispatcher,
                 new ResourceGroupsTaggingService(null));
@@ -295,9 +296,7 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public String defaultAccountId() { return ACCOUNT; }
             @Override
-            public int maxRequestSize() { return 512; }
-            @Override
-            public String ecrBaseUri() { return ""; }
+            public Optional<String> aiMockConfigFile() { return Optional.empty(); }
             @Override
             public StorageConfig storage() { return null; }
             @Override
@@ -324,6 +323,7 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public ProtocolsConfig protocols() {
                 return new ProtocolsConfig() {
+                    @Override public int maxRequestSize() { return 512; }
                     @Override public boolean strictClaiming() { return false; }
                     @Override public boolean rejectUnknownServiceScope() { return true; }
                 };

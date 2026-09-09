@@ -304,6 +304,19 @@ class EventBridgeReplayIntegrationTest {
                 .header("X-Amz-Target", "AWSEvents.DescribeArchive")
                 .body("{\"ArchiveName\":\"replay-test-archive\"}")
                 .when().post("/")
-                .then().statusCode(404);
+                .then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(13)
+    void missingReplayUsesAwsResourceNotFoundStatus() {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.DescribeReplay")
+                .body("{\"ReplayName\":\"missing-replay\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
     }
 }

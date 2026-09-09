@@ -39,6 +39,14 @@ The following providers execute against local Floci services:
 AWS-managed providers without a corresponding Floci execution adapter fail the action with an
 AWS-shaped action error. Floci does not call real AWS accounts or third-party SaaS providers.
 
+## Approvals
+
+`PutApprovalResult` completes waiting Manual approval actions with AWS-shaped validation
+and error responses. Floci validates the stage and action names, enforces `result.status`
+as `Approved` or `Rejected`, limits `result.summary` to 512 characters, returns
+`InvalidApprovalTokenException` for unknown tokens, and returns
+`ApprovalAlreadyCompletedException` if the same approval token is reused after completion.
+
 ## Configuration
 
 | Variable | Default | Description |

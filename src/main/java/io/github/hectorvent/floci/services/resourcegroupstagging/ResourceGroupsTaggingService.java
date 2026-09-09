@@ -41,6 +41,14 @@ public class ResourceGroupsTaggingService implements Resettable {
         return region + "::" + arn;
     }
 
+    /**
+     * Returns the tags for a single resource, or an empty map if no tags have been applied.
+     */
+    public Map<String, String> getTagsForResource(String region, String arn) {
+        ResourceTagMapping mapping = store.get(key(region, arn));
+        return mapping != null ? Collections.unmodifiableMap(mapping.getTags()) : Map.of();
+    }
+
     // ─── TagResources ──────────────────────────────────────────────────────────
 
     // Mutators are synchronized: StorageBackedMap has no atomic computeIfAbsent, so

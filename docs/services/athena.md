@@ -3,7 +3,7 @@
 **Protocol:** JSON 1.1
 **Endpoint:** `http://localhost:4566/`
 
-Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duck](https://hub.docker.com/r/floci/floci-duck) sidecar container running DuckDB. When a query is submitted, Floci spins up the sidecar on first use, injects `CREATE OR REPLACE VIEW` statements for each Glue-registered table pointing to S3 data, then executes the SQL and stores results as CSV in S3.
+Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duck](https://hub.docker.com/r/floci/floci-duck) sidecar container running DuckDB. When a query is submitted, Floci spins up the sidecar on first use, registers every Glue database as a DuckDB schema (`CREATE SCHEMA IF NOT EXISTS "<schema>"`) with qualified views (`"<db>"."<table>"`) pointing to S3 data, creates unqualified view aliases for the query context database in DuckDB's default `main` schema, then executes the SQL and stores results as CSV in S3.
 
 ## Supported Actions
 
@@ -29,7 +29,7 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 ## How it works
 
 1. **Lazy sidecar start**: On the first `StartQueryExecution` call, Floci checks for a local `floci/floci-duck:latest` image and starts the container. Subsequent queries reuse the running container.
-2. **Glue DDL injection**: Floci reads all Glue tables for the target database and generates `CREATE OR REPLACE VIEW` statements mapping each table name to its S3 location via DuckDB's `read_parquet`, `read_json_auto`, or `read_csv_auto` functions — chosen based on the table's `InputFormat` or SerDe serialization library.
+2. **Glue DDL injection**: Floci registers every Glue database as a DuckDB schema (`CREATE SCHEMA IF NOT EXISTS "<schema>"`) and creates qualified views (`CREATE OR REPLACE VIEW "<db>"."<table>"`) mapping each table to its S3 location via DuckDB's `read_parquet`, `read_json_auto`, or `read_csv_auto` functions, chosen based on the table's `InputFormat` or SerDe serialization library. In addition, tables in the query context database receive unqualified view aliases (`CREATE OR REPLACE VIEW "<table>"` in DuckDB's default `main` schema), so queries can reference tables as both `FROM db.table` and `FROM table`.
 3. **Query execution**: The user's SQL is wrapped in `COPY (...) TO 's3://...' (FORMAT CSV, HEADER)` and executed. Results are written directly to the output S3 path.
 4. **Results retrieval**: `GetQueryResults` reads the CSV back from S3 and returns it in the standard Athena `ResultSet` shape.
 
@@ -48,11 +48,11 @@ The DuckDB read function is chosen from the Glue table's `StorageDescriptor`:
 
 | Property | Default | Description |
 |---|---|---|
-| `FLOCI_SERVICES_ATHENA_MOCK` | `false` | Set to `true` to disable DuckDB execution — queries immediately succeed with empty results |
+| `FLOCI_SERVICES_ATHENA_MOCK` | `false` | Set to `true` to disable DuckDB execution: queries immediately succeed with empty results |
 | `FLOCI_SERVICES_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` | DuckDB sidecar image pulled on first use |
 | `FLOCI_SERVICES_DUCK_URL` | *(unset)* | Point to an existing floci-duck instance and skip container management |
 
-## Example — simple query
+## Example: simple query
 
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566
@@ -70,7 +70,7 @@ aws athena get-query-execution --query-execution-id $QUERY_ID
 aws athena get-query-results --query-execution-id $QUERY_ID
 ```
 
-## Example — data lake query (S3 + Glue + Athena)
+## Example: data lake query (S3 + Glue + Athena)
 
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566
@@ -126,12 +126,12 @@ aws athena get-query-results --query-execution-id $QUERY_ID
 
 ## Shared sidecar with S3 Select
 
-The floci-duck sidecar is shared between Athena and S3 Select. Once started by the first Athena query, it is also used by `SelectObjectContent` for CSV (with `FileHeaderInfo=USE`), JSON, and Parquet inputs. If Athena has not yet executed a query, S3 Select falls back to the built-in Java evaluator for CSV and JSON — Parquet always requires the sidecar.
+The floci-duck sidecar is shared between Athena and S3 Select. Once started by the first Athena query, it is also used by `SelectObjectContent` for CSV (with `FileHeaderInfo=USE`), JSON, and Parquet inputs. If Athena has not yet executed a query, S3 Select falls back to the built-in Java evaluator for CSV and JSON. Parquet always requires the sidecar.
 
 See [S3 Select](s3.md#s3-select) for details on execution modes and supported SQL operators.
 
 ## Mock mode
 
-Set `FLOCI_SERVICES_ATHENA_MOCK=true` to skip DuckDB entirely for Athena. In this mode queries transition to `SUCCEEDED` immediately with an empty result set — useful for unit tests that only exercise the Athena state machine, not the query results.
+Set `FLOCI_SERVICES_ATHENA_MOCK=true` to skip DuckDB entirely for Athena. In this mode queries transition to `SUCCEEDED` immediately with an empty result set, useful for unit tests that only exercise the Athena state machine, not the query results.
 
 When mock mode is enabled the sidecar does **not** start. S3 Select will use the Java evaluator for CSV and JSON. Parquet queries will fail unless `FLOCI_SERVICES_DUCK_URL` points to an already-running floci-duck instance.

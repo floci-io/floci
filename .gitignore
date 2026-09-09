@@ -37,6 +37,13 @@ scripts/node_modules/
 __pycache__/
 *.pyc
 
+# .mission/ is per-machine operational scratch (deploy scripts, ledgers, run
+# artifacts) for driving the emulator locally. It was previously hidden by a
+# per-clone .git/info/exclude rule (#2218); ignoring it here makes the rule
+# visible on every clone. Tooling meant to be shared must be committed to the
+# repo proper, not kept in .mission/.
+.mission/
+
 # The Release Cut toolchain is pinned; its lockfile must be committed
 # (npm ci fails without it) despite the global package-lock.json ignore.
 !.github/release-tooling/package-lock.json

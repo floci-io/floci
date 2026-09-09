@@ -59,6 +59,20 @@ class SchemaCompatibilityCheckerTest {
                     + "  required string phone = 3;\n"
                     + "}\n";
 
+    private static final String JSON_V1 =
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\","
+                    + "\"properties\":{\"id\":{\"type\":\"integer\"}},\"required\":[\"id\"]}";
+
+    private static final String JSON_ADD_OPTIONAL =
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\","
+                    + "\"properties\":{\"id\":{\"type\":\"integer\"},"
+                    + "\"email\":{\"type\":\"string\"}},\"required\":[\"id\"]}";
+
+    private static final String JSON_ADD_REQUIRED =
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\","
+                    + "\"properties\":{\"id\":{\"type\":\"integer\"},"
+                    + "\"email\":{\"type\":\"string\"}},\"required\":[\"id\",\"email\"]}";
+
     @Test
     void noneAlwaysCompatible() {
         var r = SchemaCompatibilityChecker.check("NONE", List.of(AVRO_V1), AVRO_ADD_REQUIRED, "AVRO");
@@ -157,5 +171,41 @@ class SchemaCompatibilityCheckerTest {
     void validateDefinitionRejectsInvalidAvro() {
         String error = SchemaCompatibilityChecker.validateDefinition("{garbage", "AVRO");
         assertNotNull(error);
+    }
+
+    // JSON goes through apicurio's JsonSchemaCompatibilityChecker and JsonSchemaContentValidator,
+    // which are backed by the org.everit.json.schema library. These cases are what prove that
+    // library actually loads: the AVRO and PROTOBUF paths never touch it, so before this the JSON
+    // branch of checkerFor/validatorFor was entirely uncovered.
+
+    @Test
+    void jsonBackwardAcceptsAnUnchangedSchema() {
+        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_V1, "JSON");
+        assertTrue(r.compatible(), () -> "expected compatible, got: " + r.reason());
+    }
+
+    /**
+     * Apicurio treats adding even an optional property as narrowing, because data that carried that
+     * key with another type validated before and no longer does. Asserted as observed rather than
+     * assumed: it is the opposite of the AVRO case above.
+     */
+    @Test
+    void jsonBackwardTreatsANewOptionalPropertyAsNarrowing() {
+        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_ADD_OPTIONAL, "JSON");
+        assertFalse(r.compatible());
+        assertNotNull(r.reason());
+    }
+
+    @Test
+    void jsonBackwardRejectsAddingARequiredProperty() {
+        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(JSON_V1), JSON_ADD_REQUIRED, "JSON");
+        assertFalse(r.compatible());
+        assertNotNull(r.reason());
+    }
+
+    @Test
+    void jsonFirstVersionIsCompatible() {
+        var r = SchemaCompatibilityChecker.check("BACKWARD", List.of(), JSON_V1, "JSON");
+        assertTrue(r.compatible(), () -> "expected compatible, got: " + r.reason());
     }
 }

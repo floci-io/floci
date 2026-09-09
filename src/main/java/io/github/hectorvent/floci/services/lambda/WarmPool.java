@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
-import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
+import io.github.hectorvent.floci.services.lambda.launcher.LambdaRuntimeLauncher;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.annotation.PostConstruct;
@@ -14,7 +14,9 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -38,23 +40,32 @@ public class WarmPool implements ContainerTeardown {
 
     private static final int DEFAULT_MAX_POOL_SIZE = Math.max(4, Runtime.getRuntime().availableProcessors());
 
-    private final ContainerLauncher containerLauncher;
+    private final LambdaRuntimeLauncher lambdaRuntimeLauncher;
     private final EmulatorConfig config;
     private final int maxPoolSizePerFunction;
-    private final ConcurrentHashMap<String, ArrayDeque<ContainerHandle>> pool = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, PoolState> poolStates = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ContainerHandle, Lease> activeLeases = new ConcurrentHashMap<>();
     private final ScheduledExecutorService evictionScheduler = Executors.newSingleThreadScheduledExecutor(
             r -> { Thread t = new Thread(r, "warm-pool-evictor"); t.setDaemon(true); return t; });
 
+    private static final class PoolState {
+        private final Map<String, ArrayDeque<ContainerHandle>> idleByEnvironment = new HashMap<>();
+        private final Map<String, Long> epochByEnvironment = new HashMap<>();
+    }
+
+    private record Lease(PoolState poolState, long epoch, String environmentKey) {
+    }
+
     @Inject
-    public WarmPool(ContainerLauncher containerLauncher, EmulatorConfig config) {
-        this.containerLauncher = containerLauncher;
+    public WarmPool(LambdaRuntimeLauncher lambdaRuntimeLauncher, EmulatorConfig config) {
+        this.lambdaRuntimeLauncher = lambdaRuntimeLauncher;
         this.config = config;
         this.maxPoolSizePerFunction = DEFAULT_MAX_POOL_SIZE;
     }
 
     /** Package-private constructor for testing (empty pool, no containers to drain). */
     WarmPool() {
-        this.containerLauncher = null;
+        this.lambdaRuntimeLauncher = null;
         this.config = null;
         this.maxPoolSizePerFunction = DEFAULT_MAX_POOL_SIZE;
     }
@@ -104,15 +115,22 @@ public class WarmPool implements ContainerTeardown {
     public ContainerHandle acquire(LambdaFunction fn) {
         boolean ephemeral = config != null && config.services().lambda().ephemeral();
         ContainerHandle handle = null;
+        PoolState poolState = null;
+        long leaseEpoch = 0;
+        String environmentKey = executionEnvironmentKey(fn);
 
         if (!ephemeral) {
-            ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(fn.getFunctionName(), k -> new ArrayDeque<>());
+            poolState = poolStates.computeIfAbsent(fn.getFunctionName(), ignored -> new PoolState());
+            synchronized (poolState) {
+                leaseEpoch = poolState.epochByEnvironment.computeIfAbsent(environmentKey, ignored -> 0L);
+            }
             // Skip pooled handles whose container died out-of-band — otherwise the
             // caller would wait the full Lambda function timeout.
             while (true) {
                 ContainerHandle candidate;
-                synchronized (queue) {
-                    candidate = queue.pollFirst();
+                synchronized (poolState) {
+                    ArrayDeque<ContainerHandle> idle = poolState.idleByEnvironment.get(environmentKey);
+                    candidate = idle == null ? null : idle.pollFirst();
                 }
                 if (candidate == null) {
                     break;
@@ -126,7 +144,7 @@ public class WarmPool implements ContainerTeardown {
                     stopQuietly(candidate);
                     continue;
                 }
-                if (containerLauncher.isAlive(candidate)) {
+                if (lambdaRuntimeLauncher.isAlive(candidate)) {
                     handle = candidate;
                     break;
                 }
@@ -139,9 +157,12 @@ public class WarmPool implements ContainerTeardown {
         if (handle == null) {
             LOG.debugv(ephemeral ? "Ephemeral start for function: {0}" : "Cold start for function: {0}",
                     fn.getFunctionName());
-            handle = containerLauncher.launch(fn);
+            handle = lambdaRuntimeLauncher.launch(fn);
         } else {
             LOG.debugv("Reusing warm container for function: {0}", fn.getFunctionName());
+        }
+        if (!ephemeral) {
+            activeLeases.put(handle, new Lease(poolState, leaseEpoch, environmentKey));
         }
         handle.setState(ContainerState.BUSY);
         return handle;
@@ -153,6 +174,7 @@ public class WarmPool implements ContainerTeardown {
      * Otherwise it is returned to the warm pool.
      */
     public void release(ContainerHandle handle) {
+        Lease lease = activeLeases.remove(handle);
         boolean ephemeral = config != null && config.services().lambda().ephemeral();
         // An extension reporting an init/exit error is fatal to the execution environment in real
         // AWS. RuntimeApiServer already refuses new work at that point; the container is torn down
@@ -171,17 +193,32 @@ public class WarmPool implements ContainerTeardown {
             return;
         }
 
-        handle.setState(ContainerState.WARM);
-        handle.touchLastUsed();
-        ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(handle.getFunctionName(), k -> new ArrayDeque<>());
+        if (lease == null) {
+            LOG.warnv("Container {0} for function {1} has no active warm-pool lease; stopping it",
+                    handle.getContainerId(), handle.getFunctionName());
+            stopQuietly(handle);
+            return;
+        }
+
+        boolean stale;
         boolean returned;
-        synchronized (queue) {
-            returned = queue.size() < maxPoolSizePerFunction;
+        synchronized (lease.poolState()) {
+            stale = lease.epoch() != lease.poolState().epochByEnvironment
+                    .getOrDefault(lease.environmentKey(), 0L);
+            returned = !stale && idleSize(lease.poolState()) < maxPoolSizePerFunction;
             if (returned) {
-                queue.addFirst(handle);
+                handle.setState(ContainerState.WARM);
+                handle.touchLastUsed();
+                lease.poolState().idleByEnvironment
+                        .computeIfAbsent(lease.environmentKey(), ignored -> new ArrayDeque<>())
+                        .addFirst(handle);
             }
         }
-        if (returned) {
+        if (stale) {
+            LOG.debugv("Pool was invalidated while container {0} was busy; stopping it",
+                    handle.getContainerId());
+            stopQuietly(handle);
+        } else if (returned) {
             LOG.debugv("Released container back to pool for function: {0}", handle.getFunctionName());
         } else {
             LOG.debugv("Pool full for function {0}, stopping excess container", handle.getFunctionName());
@@ -196,7 +233,7 @@ public class WarmPool implements ContainerTeardown {
     public void pushCodeUpdate(LambdaFunction fn) {
         LOG.infov("Reactive S3 Sync: invalidating warm pool for function {0} to pick up new code",
                 fn.getFunctionName());
-        drainFunction(fn.getFunctionName());
+        drainEnvironment(fn);
     }
 
     /**
@@ -205,31 +242,52 @@ public class WarmPool implements ContainerTeardown {
      * stop is needed — no pool bookkeeping required.
      */
     public void destroyHandle(ContainerHandle handle) {
+        activeLeases.remove(handle);
         LOG.debugv("Destroying timed-out container {0} for function {1}",
                 handle.getContainerId(), handle.getFunctionName());
         stopQuietly(handle);
     }
 
     /**
-     * Stops and removes all warm containers for the given function.
-     * Called on function delete or code update.
+     * Stops and removes warm containers for one immutable execution environment, such as
+     * {@code $LATEST}. Published versions keep their independently keyed warm containers.
+     */
+    public void drainEnvironment(LambdaFunction fn) {
+        String functionName = fn.getFunctionName();
+        String environmentKey = executionEnvironmentKey(fn);
+        PoolState poolState = poolStates.computeIfAbsent(functionName, ignored -> new PoolState());
+        List<ContainerHandle> toStop;
+        synchronized (poolState) {
+            poolState.epochByEnvironment.merge(environmentKey, 1L, Long::sum);
+            ArrayDeque<ContainerHandle> idle = poolState.idleByEnvironment.remove(environmentKey);
+            toStop = idle == null ? List.of() : new ArrayList<>(idle);
+        }
+        LOG.infov("Draining {0} container(s) for Lambda environment: {1}",
+                toStop.size(), environmentKey);
+        stopInParallel(toStop);
+    }
+
+    /**
+     * Stops and removes all warm containers for every environment of the given function.
+     * Called on function deletion and emulator shutdown.
      */
     public void drainFunction(String functionName) {
-        ArrayDeque<ContainerHandle> queue = pool.remove(functionName);
-        if (queue == null) {
-            return;
-        }
+        PoolState poolState = poolStates.computeIfAbsent(functionName, ignored -> new PoolState());
         List<ContainerHandle> toStop;
-        synchronized (queue) {
-            toStop = new ArrayList<>(queue);
-            queue.clear();
+        synchronized (poolState) {
+            poolState.epochByEnvironment.replaceAll((ignored, epoch) -> epoch + 1);
+            toStop = new ArrayList<>();
+            poolState.idleByEnvironment.values().forEach(toStop::addAll);
+            poolState.idleByEnvironment.clear();
         }
         LOG.infov("Draining {0} container(s) for function: {1}", toStop.size(), functionName);
         stopInParallel(toStop);
     }
 
     private void stopInParallel(List<ContainerHandle> handles) {
-        if (handles.isEmpty()) return;
+        if (handles.isEmpty()) {
+            return;
+        }
         int parallelism = Math.min(handles.size(), 16);
         ExecutorService pool = Executors.newFixedThreadPool(parallelism,
                 r -> { Thread t = new Thread(r, "warm-pool-drainer"); t.setDaemon(true); return t; });
@@ -251,34 +309,38 @@ public class WarmPool implements ContainerTeardown {
     }
 
     private void drainAll() {
-        for (String functionName : new ArrayList<>(pool.keySet())) {
+        for (String functionName : new ArrayList<>(poolStates.keySet())) {
             drainFunction(functionName);
         }
     }
 
     private void evictIdleContainers() {
-        if (config == null) return;
+        if (config == null) {
+            return;
+        }
         long idleTimeoutMs = config.services().lambda().containerIdleTimeoutSeconds() * 1000L;
         long now = System.currentTimeMillis();
 
-        for (var entry : pool.entrySet()) {
+        for (var entry : poolStates.entrySet()) {
             String functionName = entry.getKey();
-            ArrayDeque<ContainerHandle> queue = entry.getValue();
+            PoolState poolState = entry.getValue();
             List<ContainerHandle> toEvict = new ArrayList<>();
 
-            synchronized (queue) {
-                queue.removeIf(handle -> {
-                    if (handle.getState() == ContainerState.WARM
-                            && (now - handle.getLastUsedMs()) >= idleTimeoutMs) {
-                        toEvict.add(handle);
-                        return true;
-                    }
-                    return false;
-                });
+            synchronized (poolState) {
+                for (ArrayDeque<ContainerHandle> idle : poolState.idleByEnvironment.values()) {
+                    idle.removeIf(handle -> {
+                        if (handle.getState() == ContainerState.WARM
+                                && (now - handle.getLastUsedMs()) >= idleTimeoutMs) {
+                            toEvict.add(handle);
+                            return true;
+                        }
+                        return false;
+                    });
+                }
+                poolState.idleByEnvironment.values().removeIf(ArrayDeque::isEmpty);
             }
 
-            // Re-check that the queue is still registered to avoid double-stop with drainFunction.
-            if (!toEvict.isEmpty() && pool.get(functionName) == queue) {
+            if (!toEvict.isEmpty()) {
                 LOG.infov("Evicting {0} idle container(s) for function: {1}", toEvict.size(), functionName);
                 for (ContainerHandle handle : toEvict) {
                     stopQuietly(handle);
@@ -287,9 +349,25 @@ public class WarmPool implements ContainerTeardown {
         }
     }
 
+    private static String executionEnvironmentKey(LambdaFunction fn) {
+        String functionArn = fn.getFunctionArn();
+        if (functionArn != null && !functionArn.isBlank()) {
+            return functionArn;
+        }
+        return fn.getFunctionName() + ":" + fn.getVersion();
+    }
+
+    private static int idleSize(PoolState poolState) {
+        int size = 0;
+        for (ArrayDeque<ContainerHandle> idle : poolState.idleByEnvironment.values()) {
+            size += idle.size();
+        }
+        return size;
+    }
+
     private void stopQuietly(ContainerHandle handle) {
         try {
-            containerLauncher.stop(handle);
+            lambdaRuntimeLauncher.stop(handle);
         } catch (Exception e) {
             LOG.warnv("Error stopping container {0}: {1}", handle.getContainerId(), e.getMessage());
         }

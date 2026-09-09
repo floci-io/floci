@@ -633,6 +633,37 @@ class SesTemplateV2IntegrationTest {
             .body("Tags.find { it.Key == 'team' }.Value", equalTo("platform"));
     }
 
+    @Test
+    @Order(24)
+    void createTemplate_invalidTags_returns400_andNotPersisted() {
+        // Route-level coverage: CreateEmailTemplate must reject an invalid tag set (here duplicate
+        // keys) atomically, before the template is persisted.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "TemplateName": "v2-badtags",
+                  "TemplateContent": {"Subject": "S", "Text": "T"},
+                  "Tags": [{"Key": "dup", "Value": "1"}, {"Key": "dup", "Value": "2"}]
+                }
+                """)
+        .when()
+            .post("/v2/email/templates")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Cannot provide multiple tags with the same key"));
+
+        // The failed create must leave no template behind.
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/templates/v2-badtags")
+        .then()
+            .statusCode(404);
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("malformedSendEmailBodies")
     @Order(50)

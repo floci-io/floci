@@ -3,8 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import java.util.Optional;
 
 /**
- * Port that maps an STS temporary access key ID (e.g. {@code ASIA...}) to the AWS
- * account the request should resolve to.
+ * Port that maps an IAM or STS access key ID to the AWS account the request should resolve to.
  *
  * <p>Declared in {@code core.common} so {@link AccountContextFilter} can route
  * assumed-role and other temporary credentials to the correct account without
@@ -14,8 +13,8 @@ import java.util.Optional;
 public interface SessionAccountLookup {
 
     /**
-     * Returns the account ID associated with the given temporary access key ID,
-     * or {@link Optional#empty()} if it is not a known, live session.
+     * Returns the account ID associated with the given access key ID, or
+     * {@link Optional#empty()} if it is not a known, active credential.
      */
     Optional<String> resolveAccountId(String accessKeyId);
 }

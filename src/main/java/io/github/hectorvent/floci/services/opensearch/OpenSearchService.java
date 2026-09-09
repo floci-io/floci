@@ -24,14 +24,19 @@ import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class OpenSearchService {
+public class OpenSearchService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchService.class);
 
@@ -96,12 +101,12 @@ public class OpenSearchService {
 
     public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
                                 EbsOptions ebsOptions, Map<String, String> tags, String region) {
-        return createDomain(domainName, engineVersion, clusterConfig, ebsOptions, tags,
+        return createDomain(domainName, engineVersion, clusterConfig, ebsOptions, tags, null,
                 DomainOptions.EMPTY, region);
     }
 
     public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
-                                EbsOptions ebsOptions, Map<String, String> tags,
+                                EbsOptions ebsOptions, Map<String, String> tags, String accessPolicies,
                                 DomainOptions options, String region) {
         validateDomainName(domainName);
         OpenSearchVersions.validate(engineVersion);
@@ -119,6 +124,7 @@ public class OpenSearchService {
         domain.setAccountId(accountId);
         domain.setArn(AwsArnUtils.Arn.of("es", region, accountId, "domain/" + domainName).toString());
         domain.setEngineVersion(engineVersion != null ? engineVersion : DEFAULT_ENGINE_VERSION);
+        domain.setAccessPolicies(accessPolicies);
         domain.setProcessing(false);
         domain.setDeleted(false);
         domain.setEndpoint("");
@@ -140,7 +146,9 @@ public class OpenSearchService {
             domain.setProcessing(false);
         } else {
             domain.setProcessing(true);
-            domainManager.startDomain(domain);
+            if (!domainManager.tryStartDomain(domain)) {
+                domain.setProcessing(false);
+            }
         }
 
         domainStore.put(domainName, domain);
@@ -171,21 +179,23 @@ public class OpenSearchService {
     }
 
     public Domain updateDomainConfig(String domainName, String engineVersion,
-                                      ClusterConfig clusterConfig, EbsOptions ebsOptions,
-                                      String region) {
-        return updateDomainConfig(domainName, engineVersion, clusterConfig, ebsOptions,
-                DomainOptions.EMPTY, region);
+                                      ClusterConfig clusterConfig, EbsOptions ebsOptions) {
+        return updateDomainConfig(domainName, engineVersion, clusterConfig, ebsOptions, null,
+                DomainOptions.EMPTY);
     }
 
     public Domain updateDomainConfig(String domainName, String engineVersion,
                                       ClusterConfig clusterConfig, EbsOptions ebsOptions,
-                                      DomainOptions options, String region) {
+                                      String accessPolicies, DomainOptions options) {
         Domain domain = describeDomain(domainName);
         OpenSearchVersions.validate(engineVersion);
         validateOptions(options);
 
         if (engineVersion != null && !engineVersion.isBlank()) {
             domain.setEngineVersion(engineVersion);
+        }
+        if (accessPolicies != null) {
+            domain.setAccessPolicies(accessPolicies);
         }
         if (clusterConfig != null) {
             ClusterConfig existing = domain.getClusterConfig();
@@ -362,5 +372,27 @@ public class OpenSearchService {
         } else {
             domainStore.put(domain.getDomainName(), domain);
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Domain domain : listDomainNames(null)) {
+            if (domain.getArn() == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(domain.getArn());
+            resources.add(new ExplorerResource(
+                    domain.getArn(), "es:domain", "es",
+                    parsed.region(), parsed.accountId(),
+                    domain.getCreatedAt() != null ? domain.getCreatedAt() : Instant.now(),
+                    domain.getTags() != null ? domain.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("es:domain", "es", true));
     }
 }

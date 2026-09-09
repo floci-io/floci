@@ -32,11 +32,28 @@ created through IAM with a real trust policy.
 
 ### Known limitations
 
-- **`Condition` blocks are not evaluated.** A trust policy that requires `sts:ExternalId` (the
-  confused-deputy guard) is matched on its principal alone, so the role is assumable without passing
-  `ExternalId`, and the `ExternalId` request parameter is ignored. This matches moto/LocalStack.
+- **`Condition` blocks are not evaluated for `AssumeRole`.** A trust policy that requires
+  `sts:ExternalId` (the confused-deputy guard) is matched on its principal alone, so the role is
+  assumable without passing `ExternalId`, and the `ExternalId` request parameter is ignored. This
+  matches moto/LocalStack. Conditions *are* evaluated on the `AssumeRoleWithWebIdentity` path (see below).
 - **Only the trust policy is checked.** Cross-account `AssumeRole` in AWS also requires the caller's
   own identity policy to allow `sts:AssumeRole`; that side is not enforced.
+
+## Web Identity Validation (IRSA)
+
+`AssumeRoleWithWebIdentity` validates tokens minted by an OIDC issuer Floci hosts - currently an EKS cluster's IRSA provider.
+
+When the token's `iss` names a known Floci issuer, all of the following are enforced:
+
+- the RS256 signature, against the issuer's public key
+- `iss` matches that issuer exactly
+- `aud` contains `sts.amazonaws.com`
+- `exp` / `nbf`, with 60s of clock-skew tolerance
+- the role's trust policy — `Principal.Federated` plus the `Condition` block, comparing `<oidcProvider>:sub` and `<oidcProvider>:aud` with exact, **case-sensitive** equality (`StringEquals`, `StringNotEquals`, `StringLike`, and `StringNotLike` are supported)
+
+The response carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. A bad token returns `InvalidIdentityToken` (400), an expired one returns `ExpiredTokenException` (400), and a trust policy that does not permit the subject returns `AccessDenied` (403).
+
+By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, those tokens return `InvalidIdentityToken` because Floci cannot verify a third-party provider's signature. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
 
 ## Examples
 

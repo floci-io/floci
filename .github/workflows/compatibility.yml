@@ -6,9 +6,15 @@ on:
       - 'src/**'
       - 'pom.xml'
       - 'docker/Dockerfile.native-package'
+      - 'docker/Dockerfile.compat'
       - 'docker/entrypoint.sh'
       - 'docker/localstack-parity.sh'
+      - 'docker/healthcheck.sh'
       - 'compatibility-tests/**'
+      - '.github/ci/compat-timing-report.py'
+      - '.github/ci/compat-opentofu-drift-check.py'
+      - '.github/ci/compat-opentofu-allowlist-tf-only.txt'
+      - '.github/ci/compat-opentofu-allowlist-otf-only.txt'
       - '.github/workflows/compatibility.yml'
 
 permissions:
@@ -19,31 +25,190 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-native:
-    name: Build native floci image
+  compat-aws-cli-shim:
+    name: compat / aws CLI endpoint resolution
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: graalvm/setup-graalvm@0def53c0fd8534bc13416c9469f5be45265824fd # v1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build compat image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile.compat
+          build-args: VERSION=latest
+          load: true
+          tags: floci-compat-shim-test
+          # Read-only; warm-compat-caches.yml produces this scope on main from the
+          # tools stage. Unlike floci-native above, those layers are worth caching:
+          # the tools stage depends only on ubi9-minimal and the Dockerfile, so it
+          # changes only when the Dockerfile does. The final stage copies the binary
+          # out of the published floci/floci:latest and is never cacheable. Writing
+          # from here would put a per-PR copy no other PR can read back into the
+          # budget.
+          cache-from: type=gha,scope=compat-shim
+
+      - name: Compat image starts and reports healthy
+        run: |
+          docker run -d --name compat-smoke floci-compat-shim-test
+          for _ in $(seq 1 30); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' compat-smoke)
+            [ "$health" = healthy ] && break
+            sleep 1
+          done
+          docker logs compat-smoke 2>&1 | tail -20
+          docker rm -f compat-smoke >/dev/null
+          [ "$health" = healthy ] || { echo "::error::compat image did not become healthy: $health"; exit 1; }
+
+      - name: Unflagged aws sqs call routes to AWS_ENDPOINT_URL
+        run: |
+          out=$(docker run --rm --entrypoint sh floci-compat-shim-test -c \
+            "aws sqs create-queue --queue-name smoke-test 2>&1" || true)
+          echo "$out"
+          echo "$out" | grep -q "localhost:4566" \
+            || { echo "::error::unflagged aws call did not target localhost:4566"; exit 1; }
+          echo "$out" | grep -qi "queue.amazonaws.com\|InvalidClientTokenId" \
+            && { echo "::error::unflagged aws call reached real AWS endpoint"; exit 1; }
+          exit 0
+
+      - name: AWS_ENDPOINT_URL_SQS alone routes correctly
+        run: |
+          out=$(docker run --rm --entrypoint sh -e AWS_ENDPOINT_URL= \
+            -e AWS_ENDPOINT_URL_SQS=http://localhost:4566 \
+            floci-compat-shim-test -c \
+            "aws sqs create-queue --queue-name smoke-test-service-override 2>&1" || true)
+          echo "$out"
+          echo "$out" | grep -q "localhost:4566" \
+            || { echo "::error::AWS_ENDPOINT_URL_SQS was not honored"; exit 1; }
+          echo "$out" | grep -qi "queue.amazonaws.com\|InvalidClientTokenId" \
+            && { echo "::error::AWS_ENDPOINT_URL_SQS call reached real AWS endpoint"; exit 1; }
+          exit 0
+
+      - name: Explicit --endpoint-url before the subcommand overrides AWS_ENDPOINT_URL
+        run: |
+          out=$(docker run --rm --entrypoint sh floci-compat-shim-test -c \
+            "AWS_ENDPOINT_URL=http://example.com aws --endpoint-url http://other.example.com sqs list-queues 2>&1" || true)
+          echo "$out"
+          echo "$out" | grep -q "other.example.com" \
+            || { echo "::error::pre-subcommand --endpoint-url flag was not honored over AWS_ENDPOINT_URL"; exit 1; }
+
+      - name: Explicit --endpoint-url after the subcommand overrides AWS_ENDPOINT_URL
+        run: |
+          out=$(docker run --rm --entrypoint sh floci-compat-shim-test -c \
+            "AWS_ENDPOINT_URL=http://example.com aws sqs list-queues --endpoint-url http://other.example.com 2>&1" || true)
+          echo "$out"
+          echo "$out" | grep -q "other.example.com" \
+            || { echo "::error::post-subcommand --endpoint-url flag was not honored over AWS_ENDPOINT_URL"; exit 1; }
+
+  compat-opentofu-drift-check:
+    name: compat / opentofu resource parity
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            compatibility-tests
+            .github/ci
+
+      - name: Compare compat-terraform and compat-opentofu resource lists
+        run: python3 .github/ci/compat-opentofu-drift-check.py
+
+  build-native:
+    name: Build native floci image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # Both published architectures. The native image is the only place an
+    # arch-specific resource can go missing (snappy-java's JNI library is
+    # registered per platform), and one arch cannot prove the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2 # v1
         with:
           java-version: '25'
           distribution: 'mandrel'
-          cache: maven
+          # no `cache: maven` — it keys on setup-graalvm-Linux-maven-<hash>, which
+          # only this pull_request-only workflow ever writes. Actions caches are
+          # ref-scoped, so those writes land in refs/pull/N/merge and no run can
+          # read another's: it logged "maven cache is not found" on 6 of 6 sampled
+          # runs while dutifully saving 211 MB each time. Restore ci.yml's cache
+          # below instead, which push-to-main genuinely populates.
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Restore-only, and deliberately keyed identically to ci.yml:54-59 so this
+      # reads the ~/.m2 that ci.yml's shard 1 saves on every push to main. ci.yml
+      # stays the single owner of the save; a second writer would just race it.
+      # Two known partial-hit caveats, both cheap: `runner.os` is Linux for both
+      # but ci.yml runs x64 while the arm64 leg here does not (Maven artifacts are
+      # arch-neutral, so only classifier-based natives re-download), and
+      # `-Dnative` pulls native-image plugins that ci.yml's `mvn test` never
+      # fetches. Expect most of the ~66s of cold resolution back, not all of it.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: maven-${{ runner.os }}-
+
       - name: Build native executable (quick build)
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-Ob"
+        # Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
+        # REST invokers for AwsQueryController.dispatch and AwsJson11Controller.handle are each the
+        # single call site of a very large method; inlined, the method outgrows the aarch64
+        # conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
+        # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
+        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-Ob,-H:-AOTSingleCallsiteInline"
+
+      # Quarkus always writes GraalVM's build-output JSON next to the native source jar. Surfacing
+      # it here gives every PR a size record for both architectures: code area, image heap, total
+      # image size and reachable type/method counts, plus the gzip size of the binary, which tracks
+      # the compressed layer Docker Hub will report. No extra build flags, a few seconds.
+      - name: Record native build size
+        run: |
+          python3 - "$GITHUB_STEP_SUMMARY" "${{ matrix.arch }}" <<'PY'
+          import glob, json, subprocess, sys
+          summary, arch = sys.argv[1], sys.argv[2]
+          stats = json.load(open(glob.glob("target/*-native-image-source-jar/*-build-output-stats.json")[0]))
+          d, a = stats["image_details"], stats["analysis_results"]
+          runner = glob.glob("target/*-runner")[0]
+          gz = int(subprocess.run(f"gzip -c '{runner}' | wc -c", shell=True, capture_output=True, text=True).stdout)
+          mib = lambda b: f"{b / 2**20:.1f} MiB"
+          rows = [("total image", mib(d["total_bytes"])), ("code area", mib(d["code_area"]["bytes"])),
+                  ("image heap", mib(d["image_heap"]["bytes"])),
+                  ("resources in heap", f"{mib(d['image_heap']['resources']['bytes'])} ({d['image_heap']['resources']['count']} files)"),
+                  ("binary gzip (Hub layer estimate)", f"{gz / 1e6:.2f} MB"),
+                  ("reachable types / methods", f"{a['types']['reachable']} / {a['methods']['reachable']}")]
+          with open(summary, "a") as f:
+              f.write(f"### Native build size ({arch}, quick build)\n\n| metric | value |\n|---|---|\n")
+              f.writelines(f"| {k} | {v} |\n" for k, v in rows)
+          print("\n".join(f"{k}: {v}" for k, v in rows))
+          PY
+
+      - name: Upload native build stats
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-build-stats-${{ matrix.arch }}
+          path: target/*-native-image-source-jar/*-build-output-stats.json
+          retention-days: 30
 
       - name: Stage native binary for packaging
         run: |
-          mkdir -p native/arm64
-          cp target/*-runner native/arm64/application
+          mkdir -p native/${{ matrix.arch }}
+          cp target/*-runner native/${{ matrix.arch }}/application
           # include any sidecar .so the runtime image may need (matches nightly artifact set)
-          cp target/*.so native/arm64/ 2>/dev/null || true
+          cp target/*.so native/${{ matrix.arch }}/ 2>/dev/null || true
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build native Docker image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -52,27 +217,43 @@ jobs:
           file: docker/Dockerfile.native-package
           tags: floci:test-native
           outputs: type=docker,dest=/tmp/floci-native-image.tar
-          cache-from: type=gha,scope=floci-native
-          cache-to: type=gha,scope=floci-native,mode=max
+          # No layer cache here, deliberately. The `COPY native/$TARGETARCH/`
+          # below brings in a binary that changes every commit, and Docker layer
+          # reuse is sequential, so nothing after it can ever be reused. Measured:
+          # the build imported a cache manifest but reported **zero CACHED
+          # layers** — it was write-only. `mode=max` still stored the whole image
+          # including that volatile multi-hundred-MB binary layer, per PR ref,
+          # which was the largest single consumer of the repo's 10 GB budget.
+          # The step costs ~19-28s either way.
 
       - name: Compress native image
         run: gzip /tmp/floci-native-image.tar
 
       - name: Upload native floci image
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: floci-native-image
+          name: floci-native-image-${{ matrix.arch }}
           path: /tmp/floci-native-image.tar.gz
           retention-days: 1
 
   native-compat-test:
-    name: native / ${{ matrix.test }}
+    name: native ${{ matrix.arch }} / ${{ matrix.test }}
     needs: build-native
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    # The suites run against the arm64 image only. What they check is
+    # arch-neutral, and running all eight on both arches (16 jobs per PR) left
+    # them queued for the shared runner pools for longer than they take to run.
+    # The amd64 image is still built above so both published arches are proven
+    # to link and package, and one amd64 suite stays: sdk-test-python carries
+    # the Firehose compression delivery test that proves the x86_64 snappy JNI
+    # library survived the native build (the resource that can go missing per
+    # platform, see the build-native comment).
     strategy:
       fail-fast: false
       matrix:
+        arch:
+          - arm64
         test:
           - sdk-test-node
           - sdk-test-python
@@ -82,12 +263,18 @@ jobs:
           - compat-cdk
           - compat-terraform
           - compat-opentofu
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            test: sdk-test-python
+            runner: ubuntu-latest
 
     steps:
       - name: Download native floci image
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: floci-native-image
+          name: floci-native-image-${{ matrix.arch }}
           path: /tmp
 
       - name: Load native floci image
@@ -110,17 +297,40 @@ jobs:
             -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
             -e FLOCI_TLS_ENABLED=true \
             -e FLOCI_SERVICES_EC2_MOCK=true \
+            -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
             floci:test-native
 
-      - name: Wait for floci to be ready
-        run: timeout 60 bash -c 'until curl -sf http://localhost:4566/ >/dev/null 2>&1; do sleep 1; done'
+      # Waits on Docker's health status rather than curling the port so the image's
+      # HEALTHCHECK runs under CI on every arch: the native image has no curl and probes
+      # over bash's /dev/tcp, and a malformed probe would otherwise leave the container
+      # "unhealthy" while the suites pass against the open port. Healthy takes one
+      # interval (5 s); unhealthy takes retries x interval (25 s) and fails fast here.
+      - name: Wait for floci to be healthy
+        run: |
+          health=starting
+          for _ in $(seq 1 60); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' floci)
+            if [ "$health" = healthy ]; then
+              exit 0
+            fi
+            if [ "$health" = unhealthy ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "::error::floci did not report healthy (last status: $health)"
+          docker inspect -f '{{json .State.Health}}' floci
+          docker logs --tail 50 floci
+          exit 1
 
       - name: Checkout repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: compatibility-tests
+          sparse-checkout: |
+            compatibility-tests
+            .github/ci
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build test image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -128,8 +338,14 @@ jobs:
           context: compatibility-tests/${{ matrix.test }}
           load: true
           tags: compat-${{ matrix.test }}
+          # Read-only on purpose. Actions caches are ref-scoped: a pull_request
+          # run's writes land in refs/pull/N/merge, private to that PR and
+          # unreadable by any other. Eight images x every open PR overran the
+          # repo's 10 GB cache budget (13.2 GB measured, 95% of it in four PR
+          # refs), so entries were evicted between a PR's own runs and this
+          # build swung 29s-211s at random. `warm-compat-caches.yml` populates
+          # these scopes on main instead; PRs read that single shared copy.
           cache-from: type=gha,scope=${{ matrix.test }}
-          cache-to: type=gha,scope=${{ matrix.test }},mode=max
 
       - name: Run tests
         id: tests
@@ -168,6 +384,25 @@ jobs:
         uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
         with:
           paths: test-results/*.xml
+
+      # The test body inside the container runs its build tool quietly, so the
+      # job log carries no per-class timings and the slow legs (sdk-test-java,
+      # ~10 min) are a black box. Surface the timings from the junit XMLs the
+      # suites already export, and upload the raw XMLs so the numbers are
+      # machine-readable across runs.
+      - name: Report slowest test classes
+        if: always() && steps.tests.outcome != 'skipped'
+        # Measurement-only: a reporting bug must never fail an otherwise-green leg.
+        continue-on-error: true
+        run: python3 .github/ci/compat-timing-report.py test-results
+
+      - name: Upload test results
+        if: always() && steps.tests.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-results-${{ matrix.arch }}-${{ matrix.test }}
+          path: test-results/
+          if-no-files-found: warn
 
       - name: Dump floci logs
         if: failure()

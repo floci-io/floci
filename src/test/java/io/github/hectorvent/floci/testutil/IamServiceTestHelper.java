@@ -49,6 +49,19 @@ public final class IamServiceTestHelper {
 
     @SuppressWarnings("unchecked")
     public static IamService iamServiceWithSessionCredential(String accessKeyId, String secretAccessKey) {
+        return iamServiceWithSessionCredential(
+                accessKeyId, secretAccessKey, "session-token", Instant.now().plusSeconds(3600));
+    }
+
+    @SuppressWarnings("unchecked")
+    public static IamService iamServiceWithSessionCredential(
+            String accessKeyId, String secretAccessKey, Instant expiration) {
+        return iamServiceWithSessionCredential(accessKeyId, secretAccessKey, "session-token", expiration);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static IamService iamServiceWithSessionCredential(
+            String accessKeyId, String secretAccessKey, String sessionToken, Instant expiration) {
         try {
             Constructor<IamService> constructor = IamService.class.getDeclaredConstructor(
                     StorageBackend.class,
@@ -63,8 +76,8 @@ public final class IamServiceTestHelper {
             constructor.setAccessible(true);
 
             InMemoryStorage<String, SessionCredential> sessions = new InMemoryStorage<>();
-            SessionCredential cred = new SessionCredential(accessKeyId, secretAccessKey, null,
-                    Instant.now().plusSeconds(3600), null);
+            SessionCredential cred = new SessionCredential(
+                    accessKeyId, secretAccessKey, sessionToken, null, expiration, null);
             sessions.put(accessKeyId, cred);
 
             return constructor.newInstance(

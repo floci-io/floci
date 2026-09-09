@@ -30,8 +30,11 @@ import java.util.Set;
  * {@code @ptr}, or a dotted path into the JSON log message (e.g. {@code params.job_id}, {@code level}).
  *
  * <p>This is intentionally <em>not</em> a full Insights implementation: unsupported commands
- * (e.g. {@code stats}, {@code parse}) are ignored with a warning. Pipes ({@code |}) inside quoted
- * filter values are respected and do not split the query into stages.
+ * (e.g. {@code stats}, {@code parse}) and unsupported filter operators (e.g. {@code >=},
+ * {@code like}) mark the query as unsupported (see {@link #isUnsupported()}) rather than being
+ * silently dropped, so the caller can fail the query instead of returning a result set that does
+ * not correspond to what was asked. Pipes ({@code |}) inside quoted filter values are respected
+ * and do not split the query into stages.
  */
 final class LogsInsightsQuery {
 
@@ -46,6 +49,7 @@ final class LogsInsightsQuery {
     private boolean sortDesc;
     private List<String> dedupFields;
     private Integer limit;
+    private String unsupportedReason;
 
     private record Filter(String field, boolean negate, String value) {}
 
@@ -70,6 +74,21 @@ final class LogsInsightsQuery {
             q.fields.add("@message");
         }
         return q;
+    }
+
+    /**
+     * Whether the query contains a command or filter expression this engine cannot evaluate.
+     * Such a query must not be executed as if the unsupported stage were absent: the caller
+     * (see {@link #getUnsupportedReason()}) should fail the query rather than return a result
+     * set that silently omits it.
+     */
+    boolean isUnsupported() {
+        return unsupportedReason != null;
+    }
+
+    /** The first unsupported command or filter expression encountered, or {@code null} if none. */
+    String getUnsupportedReason() {
+        return unsupportedReason;
     }
 
     /**
@@ -108,6 +127,8 @@ final class LogsInsightsQuery {
                 Filter f = parseFilter(args);
                 if (f != null) {
                     filters.add(f);
+                } else {
+                    noteUnsupported("Unsupported filter expression: " + args);
                 }
             }
             case "sort", "order" -> {
@@ -115,20 +136,37 @@ final class LogsInsightsQuery {
                 if (s.length > 0 && !s[0].isEmpty()) {
                     sortField = s[0].trim();
                     sortDesc = s.length > 1 && s[1].trim().equalsIgnoreCase("desc");
+                } else {
+                    noteUnsupported("Sort command is missing its field");
                 }
             }
             case "dedup" -> {
                 dedupFields = new ArrayList<>();
                 splitCsv(args, dedupFields);
+                if (dedupFields.isEmpty()) {
+                    noteUnsupported("Dedup command is missing its field(s): " + args);
+                }
             }
             case "limit" -> {
                 try {
                     limit = Integer.parseInt(args.trim());
                 } catch (NumberFormatException e) {
-                    LOG.warnv("Ignoring invalid Logs Insights limit: {0}", args);
+                    noteUnsupported("Invalid limit argument: " + args);
                 }
             }
-            default -> LOG.warnv("Ignoring unsupported Logs Insights command: {0}", cmd);
+            default -> noteUnsupported("Unsupported command: " + cmd);
+        }
+    }
+
+    /**
+     * Record the first unsupported command or filter expression the query contains. Only the
+     * first is kept: it is enough to fail the whole query, and later stages may reference fields
+     * or state the earlier failure never let this engine establish.
+     */
+    private void noteUnsupported(String reason) {
+        LOG.warnv("Logs Insights query contains unsupported syntax, failing the query: {0}", reason);
+        if (unsupportedReason == null) {
+            unsupportedReason = reason;
         }
     }
 
@@ -154,6 +192,10 @@ final class LogsInsightsQuery {
                 }
             } else if (c == '\'' || c == '"') {
                 quote = c;
+            } else if (expr.startsWith(">=", i) || expr.startsWith("<=", i) || expr.startsWith("=~", i)) {
+                // The '=' in >=, <= and =~ would be read as equality below, mangling the field
+                // (>=, <=) or the value (=~) into a dead match; stop so they warn instead.
+                break;
             } else if (i > 0) {
                 String op = expr.startsWith("!=", i) ? "!="
                         : expr.startsWith("==", i) ? "=="
@@ -166,7 +208,6 @@ final class LogsInsightsQuery {
                 }
             }
         }
-        LOG.warnv("Ignoring unsupported Logs Insights filter: {0}", expr);
         return null;
     }
 

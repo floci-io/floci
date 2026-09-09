@@ -9,6 +9,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -17,6 +18,9 @@ import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Forwards Bedrock Converse requests to any OpenAI-compatible {@code /chat/completions}
@@ -51,55 +55,15 @@ public class ProxyBackend implements BedrockBackend {
     public ObjectNode converse(String modelId, ObjectNode bedrockRequest) {
         EmulatorConfig.BedrockProxyConfig proxyConfig = config.services().bedrockRuntime().proxy();
         String resolvedModel = resolveModel(modelId, proxyConfig);
-        String baseUrl = proxyConfig.url()
-                .filter(url -> !url.isBlank())
-                .orElseThrow(() -> new AwsException("ValidationException",
-                        "floci.services.bedrock-runtime.proxy.url is required when backend=proxy.", 400));
-
-        ObjectNode openAiRequest = BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, bedrockRequest, resolvedModel);
-
-        URI uri;
-        HttpRequest.Builder builder;
-        try {
-            uri = URI.create(stripTrailingSlash(baseUrl) + "/chat/completions");
-            builder = HttpRequest.newBuilder()
-                    .uri(uri)
-                    .timeout(Duration.ofSeconds(proxyConfig.requestTimeoutSeconds()))
-                    .header("Content-Type", "application/json");
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException",
-                    "floci.services.bedrock-runtime.proxy.url is not a valid URL: " + e.getMessage(), 400);
-        }
-        proxyConfig.apiKey()
-                .filter(key -> !key.isBlank())
-                .ifPresent(key -> builder.header("Authorization", "Bearer " + key));
-
-        String requestBody;
-        try {
-            requestBody = objectMapper.writeValueAsString(openAiRequest);
-        } catch (Exception e) {
-            throw new AwsException("InternalServerException", "Failed to serialize proxy request: " + e.getMessage(), 500);
-        }
-        builder.POST(HttpRequest.BodyPublishers.ofString(requestBody));
+        ObjectNode openAiRequest = BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, bedrockRequest, resolvedModel, false);
+        HttpRequest request = buildHttpRequest(proxyConfig, openAiRequest);
 
         long start = System.nanoTime();
-        HttpResponse<String> response;
-        try {
-            response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
-        } catch (HttpTimeoutException e) {
-            LOG.warnv("Bedrock proxy backend timed out: modelId={0}, url={1}, error={2}", modelId, uri, e.getMessage());
-            throw new AwsException("ModelTimeoutException", "Proxy backend timed out: " + e.getMessage(), 408);
-        } catch (Exception e) {
-            LOG.warnv("Bedrock proxy backend call failed: modelId={0}, url={1}, error={2}", modelId, uri, e.getMessage());
-            throw new AwsException("ModelErrorException", "Failed to reach proxy backend: " + e.getMessage(), 424);
-        }
+        HttpResponse<String> response = invoke(modelId, request, HttpResponse.BodyHandlers.ofString());
         long latencyMs = (System.nanoTime() - start) / 1_000_000;
 
         if (response.statusCode() >= 300) {
-            LOG.warnv("Bedrock proxy backend returned HTTP {0}: {1}", response.statusCode(), response.body());
-            throw new AwsException("ModelErrorException",
-                    "Proxy backend returned HTTP " + response.statusCode() + ": " + truncate(response.body(), 512),
-                    424);
+            throw failedRequest(response.statusCode(), response.body());
         }
 
         JsonNode openAiResponse;
@@ -116,6 +80,85 @@ public class ProxyBackend implements BedrockBackend {
     public byte[] invokeModel(String modelId, byte[] body) {
         throw new AwsException("ValidationException",
                 "InvokeModel is not supported by the bedrock-runtime proxy backend; use Converse.", 400);
+    }
+
+    @Override
+    public Consumer<OutputStream> converseStream(String modelId, ObjectNode bedrockRequest) {
+        EmulatorConfig.BedrockProxyConfig proxyConfig = config.services().bedrockRuntime().proxy();
+        String resolvedModel = resolveModel(modelId, proxyConfig);
+        ObjectNode openAiRequest = BedrockOpenAiTranslator.toOpenAiRequest(objectMapper, bedrockRequest, resolvedModel, true);
+
+        // Everything that can fail with a proper HTTP status - resolving the model, opening the
+        // connection, checking the upstream status code - happens here, before any bytes of our
+        // own response are written. Once the returned Consumer is invoked, JAX-RS has
+        // already committed a 200, so failures discovered while consuming the body stream can
+        // only be reported as an in-band Bedrock stream exception event (see
+        // BedrockOpenAiTranslator.streamBedrockEvents).
+        HttpRequest request = buildHttpRequest(proxyConfig, openAiRequest);
+        long startNanos = System.nanoTime();
+        HttpResponse<Stream<String>> response = invoke(modelId, request, HttpResponse.BodyHandlers.ofLines());
+
+        if (response.statusCode() >= 300) {
+            String errorBody;
+            try (Stream<String> body = response.body()) {
+                errorBody = body.limit(50).collect(Collectors.joining("\n"));
+            }
+            throw failedRequest(response.statusCode(), errorBody);
+        }
+
+        return output -> BedrockOpenAiTranslator.streamBedrockEvents(objectMapper, response.body(), output, startNanos);
+    }
+
+    private static AwsException failedRequest(int response, String errorBody) {
+        LOG.warnv("Bedrock proxy backend returned HTTP {0}: {1}", response, errorBody);
+        return new AwsException("ModelErrorException",
+                "Proxy backend returned HTTP %d: %s".formatted(response, truncate(errorBody, 512)), 424);
+    }
+
+    private <T> HttpResponse<T> invoke(String modelId, HttpRequest request, HttpResponse.BodyHandler<T> bodyHandler) {
+        try {
+            return httpClient.send(request, bodyHandler);
+        } catch (HttpTimeoutException e) {
+            LOG.warnv("Bedrock proxy backend timed out: modelId={0}, url={1}, error={2}",
+                    modelId, request.uri(), e.getMessage());
+            throw new AwsException("ModelTimeoutException", "Proxy backend timed out: " + e.getMessage(), 408);
+        } catch (Exception e) {
+            LOG.warnv("Bedrock proxy backend call failed: modelId={0}, url={1}, error={2}",
+                    modelId, request.uri(), e.getMessage());
+            throw new AwsException("ModelErrorException", "Failed to reach proxy backend: " + e.getMessage(), 424);
+        }
+    }
+
+    private HttpRequest buildHttpRequest(EmulatorConfig.BedrockProxyConfig proxyConfig, ObjectNode openAiRequest) {
+        String baseUrl = proxyConfig.url()
+                .filter(url -> !url.isBlank())
+                .orElseThrow(() -> new AwsException("ValidationException",
+                        "floci.services.bedrock-runtime.proxy.url is required when backend=proxy.", 400));
+
+        byte[] requestBody;
+        try {
+            requestBody = objectMapper.writeValueAsBytes(openAiRequest);
+        } catch (Exception e) {
+            throw new AwsException("InternalServerException", "Failed to serialize proxy request: " + e.getMessage(), 500);
+        }
+
+        HttpRequest.Builder builder;
+        try {
+            URI uri = URI.create(stripTrailingSlash(baseUrl) + "/chat/completions");
+            builder = HttpRequest.newBuilder()
+                    .uri(uri)
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(requestBody))
+                    .timeout(Duration.ofSeconds(proxyConfig.requestTimeoutSeconds()))
+                    .header("Content-Type", "application/json");
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException",
+                    "floci.services.bedrock-runtime.proxy.url is not a valid URL: " + e.getMessage(), 400);
+        }
+        proxyConfig.apiKey()
+                .filter(key -> !key.isBlank())
+                .ifPresent(key -> builder.header("Authorization", "Bearer " + key));
+
+        return builder.build();
     }
 
     String resolveModel(String bedrockModelId, EmulatorConfig.BedrockProxyConfig proxyConfig) {

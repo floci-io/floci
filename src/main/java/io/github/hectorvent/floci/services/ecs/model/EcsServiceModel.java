@@ -21,8 +21,16 @@ public class EcsServiceModel {
     private int pendingCount;
     private String status;
     private Instant createdAt;
+    /** When the current deployment began: service creation, or the last task-definition change. */
+    private Instant lastDeploymentAt;
+    /** Current deployment identifier ("ecs-svc/<hex>"). Rolls on a task-definition change or forceNewDeployment. */
+    private String deploymentId;
+    /** The deploymentId last observed to reach steady state; guards against re-emitting COMPLETED. */
+    private String lastCompletedDeploymentId;
     private String namespace;
     private String deploymentController;
+    private String schedulingStrategy;
+    private String availabilityZoneRebalancing;
     private Map<String, String> tags = new HashMap<>();
     private List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
     private NetworkConfiguration networkConfiguration;
@@ -56,12 +64,30 @@ public class EcsServiceModel {
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+    public Instant getLastDeploymentAt() { return lastDeploymentAt; }
+    public void setLastDeploymentAt(Instant lastDeploymentAt) { this.lastDeploymentAt = lastDeploymentAt; }
+
+    public String getDeploymentId() { return deploymentId; }
+    public void setDeploymentId(String deploymentId) { this.deploymentId = deploymentId; }
+
+    public String getLastCompletedDeploymentId() { return lastCompletedDeploymentId; }
+    public void setLastCompletedDeploymentId(String lastCompletedDeploymentId) {
+        this.lastCompletedDeploymentId = lastCompletedDeploymentId;
+    }
 
     public String getNamespace() { return namespace; }
     public void setNamespace(String namespace) { this.namespace = namespace; }
 
     public String getDeploymentController() { return deploymentController; }
     public void setDeploymentController(String deploymentController) { this.deploymentController = deploymentController; }
+
+    public String getSchedulingStrategy() { return schedulingStrategy; }
+    public void setSchedulingStrategy(String schedulingStrategy) { this.schedulingStrategy = schedulingStrategy; }
+
+    public String getAvailabilityZoneRebalancing() { return availabilityZoneRebalancing; }
+    public void setAvailabilityZoneRebalancing(String availabilityZoneRebalancing) {
+        this.availabilityZoneRebalancing = availabilityZoneRebalancing;
+    }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

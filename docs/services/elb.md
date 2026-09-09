@@ -4,6 +4,10 @@
 
 Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB) through the ELBv2 management API. The control plane is AWS SDK / CLI / Terraform compatible, and HTTP listeners can forward to registered instance targets using the target's reachable local address.
 
+> Classic (v1) Elastic Load Balancing is a **different API** served from the same endpoint host —
+> see [ELB Classic (v1)](elb-classic.md). Requests are routed by their `Version` parameter:
+> `2015-12-01` here, `2012-06-01` there.
+
 ## Supported Actions
 
 ### Load Balancers
@@ -91,6 +95,7 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 - `DeleteRule` is rejected with `OperationNotPermitted` for the default rule.
 - `DescribeSSLPolicies` returns a pre-seeded list of standard AWS SSL policies (`ELBSecurityPolicy-*`).
 - `DescribeAccountLimits` returns standard default limits (e.g., 50 load balancers per region, 100 target groups, etc.).
+- `routing.http.preserve_host_header.enabled` (default `false`) controls whether the original client Host header is forwarded to targets unchanged, or replaced with the target's `host:port`.
 
 ## ARN Format
 

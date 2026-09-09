@@ -5,6 +5,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.*;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
@@ -189,5 +190,68 @@ class EventBridgeIntegrationTest {
                 .statusCode(200)
                 .body("Messages", hasSize(1))
                 .body("Messages[0].Body", notNullValue());
+    }
+
+    @Test
+    @Order(7)
+    void deleteOperationsAreIdempotentAndMissingResourcesUseAwsStatus() {
+        String busName = "eb-delete-compat-bus";
+        String ruleName = "eb-delete-compat-rule";
+
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.CreateEventBus")
+                .body("{\"Name\":\"" + busName + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.PutRule")
+                .body("{\"Name\":\"" + ruleName + "\",\"EventBusName\":\"" + busName + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            given()
+                    .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                    .header("X-Amz-Target", "AWSEvents.DeleteRule")
+                    .body("{\"Name\":\"" + ruleName + "\",\"EventBusName\":\"" + busName + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200);
+        }
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            given()
+                    .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                    .header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                    .body("{\"Name\":\"" + busName + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200);
+        }
+
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.DeleteRule")
+                .body("{\"Name\":\"" + ruleName + "\",\"EventBusName\":\"" + busName + "\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.DescribeRule")
+                .body("{\"Name\":\"missing-rule\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+                .body("{\"Rule\":\"missing-target-rule\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
     }
 }

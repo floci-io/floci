@@ -15,7 +15,7 @@ AWS Transfer Family managed file transfer server management. This implementation
 | `CreateServer` | Create a managed file transfer server |
 | `DescribeServer` | Get server metadata and configuration |
 | `UpdateServer` | Update protocols, endpoint type, logging role, security policy |
-| `DeleteServer` | Delete a server (must be in `OFFLINE` state) |
+| `DeleteServer` | Delete a server in any state, along with its users |
 | `ListServers` | Paginated list of servers |
 | `StartServer` | Transition server from `OFFLINE` to `ONLINE` |
 | `StopServer` | Transition server from `ONLINE` to `OFFLINE` |

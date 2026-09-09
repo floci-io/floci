@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import jakarta.annotation.PostConstruct;
@@ -15,7 +14,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -33,7 +31,7 @@ public class SchemaCreationWorker {
 
     private final SchemaRegistry schemaRegistry;
     private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
-    private final StorageBackend<String, String> schemaStore;
+    private final AccountAwareStorageBackend<String> schemaStore;
     private final EmulatorConfig config;
     private final ObjectMapper objectMapper;
 
@@ -42,7 +40,7 @@ public class SchemaCreationWorker {
     @Inject
     public SchemaCreationWorker(SchemaRegistry schemaRegistry,
                                 AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
-                                StorageBackend<String, String> schemaStore,
+                                AccountAwareStorageBackend<String> schemaStore,
                                 EmulatorConfig config,
                                 ObjectMapper objectMapper) {
         this.schemaRegistry = schemaRegistry;
@@ -88,7 +86,8 @@ public class SchemaCreationWorker {
     private void process(String apiId, String sdl, String accountId) {
         try {
             schemaRegistry.register(apiId, sdl);
-            schemaStore.put(apiId, sdl);
+            // Worker thread has no request context; write under the submitting account.
+            schemaStore.putForAccount(accountId, apiId, sdl);
             markStatus(accountId, apiId, SchemaCreationStatusType.SUCCESS, null);
             LOG.infov("Schema creation completed for API {0}", apiId);
         } catch (AwsException e) {
@@ -147,6 +146,34 @@ public class SchemaCreationWorker {
         }
         if (recovered > 0) {
             LOG.infov("Recovered {0} orphan schema creation(s) on startup", recovered);
+        }
+    }
+
+    /**
+     * Rehydrates executable schemas from persisted SDL into {@link SchemaRegistry}
+     * after storage load / orphan recovery so GraphQL execute works across restarts.
+     * Scans every account (startup has no request context); apiIds are globally unique.
+     * Parse failures are logged and skipped.
+     */
+    public void rehydrateSchemas() {
+        int loaded = 0;
+        int skipped = 0;
+        for (Map.Entry<String, String> entry : schemaStore.scanAllAccountsAsMap().entrySet()) {
+            String apiId = entry.getKey();
+            String sdl = entry.getValue();
+            if (sdl == null || sdl.isBlank()) {
+                continue;
+            }
+            try {
+                schemaRegistry.register(apiId, sdl);
+                loaded++;
+            } catch (RuntimeException e) {
+                skipped++;
+                LOG.warnv(e, "Skipping rehydrate of schema for API {0}: {1}", apiId, e.getMessage());
+            }
+        }
+        if (loaded > 0 || skipped > 0) {
+            LOG.infov("Rehydrated {0} schema(s) into registry ({1} skipped)", loaded, skipped);
         }
     }
 }

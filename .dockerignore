@@ -2,6 +2,7 @@
 !bin/awslocal
 !docker/entrypoint.sh
 !docker/localstack-parity.sh
+!docker/healthcheck.sh
 !pom.xml
 !src/**
 !target/*.so
@@ -11,3 +12,5 @@
 !target/lib/*
 !target/quarkus-app/*
 !native/**
+!.mvn/**
+!mvnw

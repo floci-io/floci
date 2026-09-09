@@ -4,10 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.glue.model.Database;
-import io.github.hectorvent.floci.services.glue.model.Partition;
-import io.github.hectorvent.floci.services.glue.model.Table;
-import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
+import io.github.hectorvent.floci.services.glue.model.*;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.Registry;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.RegistryId;
@@ -164,14 +161,67 @@ public class GlueJsonHandler {
             case "PutSchemaVersionMetadata" -> handlePutSchemaVersionMetadata(request);
             case "RemoveSchemaVersionMetadata" -> handleRemoveSchemaVersionMetadata(request);
             case "QuerySchemaVersionMetadata" -> handleQuerySchemaVersionMetadata(request);
-            case "TagResource" -> handleTagResource(request);
-            case "UntagResource" -> handleUntagResource(request);
-            case "GetTags" -> handleGetTags(request);
+            case "TagResource" -> handleTagResource(request, region);
+            case "UntagResource" -> handleUntagResource(request, region);
+            case "GetTags" -> handleGetTags(request, region);
+            case "CreateJob" -> {
+                CreateJobRequest req = mapper.treeToValue(request, CreateJobRequest.class);
+                Job job = toDomain(req);
+                glueService.createJob(job, req.getTags(), region);
+                yield Response.ok(new CreateJobResponse(job.getName())).build();
+            }
+            case "GetJob" -> {
+                GetJobRequest req = mapper.treeToValue(request, GetJobRequest.class);
+                yield Response.ok(new GetJobResponse(glueService.getJob(req.getJobName()))).build();
+            }
+            case "GetJobs" -> {
+                Integer maxResults = readMaxResults(request);
+                String nextToken = readNextToken(request);
+                GlueService.Page<Job> page = glueService.getJobs(maxResults, nextToken);
+                yield Response.ok(pageResponse("Jobs", page.items(), page.nextToken())).build();
+            }
+            case "UpdateJob" -> {
+                UpdateJobRequest req = mapper.treeToValue(request, UpdateJobRequest.class);
+                glueService.updateJob(req.getJobName(), req.getJobUpdate());
+                yield Response.ok(new UpdateJobResponse(req.getJobName())).build();
+            }
+            case "DeleteJob" -> {
+                DeleteJobRequest req = mapper.treeToValue(request, DeleteJobRequest.class);
+                glueService.deleteJob(req.getJobName(), region);
+                yield Response.ok(new DeleteJobResponse(req.getJobName())).build();
+            }
+            case "CreateCrawler" -> {
+                CreateCrawlerRequest req = mapper.treeToValue(request, CreateCrawlerRequest.class);
+                Crawler crawler = toDomain(req);
+                glueService.createCrawler(crawler, req.getTags(), region);
+                yield Response.ok().build();
+            }
+            case "GetCrawler" -> {
+                GetCrawlerRequest req = mapper.treeToValue(request, GetCrawlerRequest.class);
+                yield Response.ok(new GetCrawlerResponse(glueService.getCrawler(req.getName()))).build();
+            }
+            case "GetCrawlers" -> {
+                GetCrawlersRequest req = mapper.treeToValue(request, GetCrawlersRequest.class);
+                GlueService.Page<Crawler> page = glueService.getCrawlers(req.getMaxResults(), req.getNextToken());
+                GetCrawlersResponse res = new GetCrawlersResponse();
+                res.setCrawlers(page.items());
+                res.setNextToken(page.nextToken());
+                yield Response.ok(res).build();
+            }
+            case "UpdateCrawler" -> {
+                UpdateCrawlerRequest req = mapper.treeToValue(request, UpdateCrawlerRequest.class);
+                Crawler update = toDomain(req);
+                glueService.updateCrawler(update);
+                yield Response.ok().build();
+            }
+            case "DeleteCrawler" -> {
+                DeleteCrawlerRequest req = mapper.treeToValue(request, DeleteCrawlerRequest.class);
+                glueService.deleteCrawler(req.getName(), region);
+                yield Response.ok().build();
+            }
             // Read-only Glue actions for resources the emulator does not model. The AWS SDK
             // expects each to return a 200 with its result key present (empty), so we emit the
             // documented empty shape rather than an InvalidAction 400 that callers can't read.
-            case "GetJobs" -> Response.ok(Map.of("Jobs", List.of())).build();
-            case "GetCrawlers" -> Response.ok(Map.of("Crawlers", List.of())).build();
             case "ListDataQualityRulesets" -> Response.ok(Map.of("Rulesets", List.of())).build();
             case "GetSecurityConfigurations" -> Response.ok(Map.of("SecurityConfigurations", List.of())).build();
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
@@ -698,28 +748,104 @@ public class GlueJsonHandler {
     }
 
     @SuppressWarnings("unchecked")
-    private Response handleTagResource(JsonNode request) {
+    private Response handleTagResource(JsonNode request, String region) {
         String arn = request.path("ResourceArn").asText(null);
         Map<String, String> tagsToAdd = request.has("TagsToAdd")
                 ? mapper.convertValue(request.get("TagsToAdd"), Map.class)
                 : null;
-        schemaRegistryService.tagResource(arn, tagsToAdd);
-        return Response.ok(Map.of()).build();
+        glueService.tagResource(arn, tagsToAdd, region);
+        return Response.ok().build();
     }
 
     @SuppressWarnings("unchecked")
-    private Response handleUntagResource(JsonNode request) {
+    private Response handleUntagResource(JsonNode request, String region) {
         String arn = request.path("ResourceArn").asText(null);
         List<String> tagsToRemove = request.has("TagsToRemove")
                 ? mapper.convertValue(request.get("TagsToRemove"), List.class)
                 : null;
-        schemaRegistryService.untagResource(arn, tagsToRemove);
-        return Response.ok(Map.of()).build();
+        glueService.untagResource(arn, tagsToRemove, region);
+        return Response.ok().build();
     }
 
-    private Response handleGetTags(JsonNode request) {
+    private Response handleGetTags(JsonNode request, String region) {
         String arn = request.path("ResourceArn").asText(null);
-        Map<String, String> tags = schemaRegistryService.getTags(arn);
+        Map<String, String> tags = glueService.getTags(arn, region);
         return Response.ok(Map.of("Tags", tags)).build();
+    }
+
+    private Job toDomain(CreateJobRequest req) {
+        Job job = new Job();
+        job.setName(req.getName());
+        job.setAllocatedCapacity(req.getAllocatedCapacity());
+        job.setCodeGenConfigurationNodes(req.getCodeGenConfigurationNodes());
+        job.setCommand(req.getCommand());
+        job.setConnections(req.getConnections());
+        job.setDefaultArguments(req.getDefaultArguments());
+        job.setDescription(req.getDescription());
+        job.setExecutionClass(req.getExecutionClass());
+        job.setExecutionProperty(req.getExecutionProperty());
+        job.setGlueVersion(req.getGlueVersion());
+        job.setJobMode(req.getJobMode());
+        job.setJobRunQueuingEnabled(req.getJobRunQueuingEnabled());
+        job.setLogUri(req.getLogUri());
+        job.setMaintenanceWindow(req.getMaintenanceWindow());
+        job.setMaxCapacity(req.getMaxCapacity());
+        job.setMaxRetries(req.getMaxRetries());
+        job.setNonOverridableArguments(req.getNonOverridableArguments());
+        job.setNotificationProperty(req.getNotificationProperty());
+        job.setNumberOfWorkers(req.getNumberOfWorkers());
+        job.setRole(req.getRole());
+        job.setSecurityConfiguration(req.getSecurityConfiguration());
+        job.setTimeout(req.getTimeout());
+        job.setWorkerType(req.getWorkerType());
+        return job;
+    }
+
+    private Crawler toDomain(CreateCrawlerRequest req) {
+        Crawler crawler = new Crawler();
+        crawler.setName(req.getName());
+        crawler.setClassifiers(req.getClassifiers());
+        crawler.setConfiguration(req.getConfiguration());
+        crawler.setCrawlerSecurityConfiguration(req.getCrawlerSecurityConfiguration());
+        crawler.setDatabaseName(req.getDatabaseName());
+        crawler.setDescription(req.getDescription());
+        crawler.setLakeFormationConfiguration(req.getLakeFormationConfiguration());
+        crawler.setLineageConfiguration(req.getLineageConfiguration());
+        crawler.setRecrawlPolicy(req.getRecrawlPolicy());
+        crawler.setRole(req.getRole());
+        crawler.setSchemaChangePolicy(req.getSchemaChangePolicy());
+        crawler.setTablePrefix(req.getTablePrefix());
+        crawler.setTargets(req.getTargets());
+        if (req.getSchedule() != null && !req.getSchedule().isBlank()) {
+            Schedule schedule = new Schedule();
+            schedule.setScheduleExpression(req.getSchedule());
+            schedule.setState("SCHEDULED");
+            crawler.setSchedule(schedule);
+        }
+        return crawler;
+    }
+
+    private Crawler toDomain(UpdateCrawlerRequest req) {
+        Crawler crawler = new Crawler();
+        crawler.setName(req.getName());
+        crawler.setClassifiers(req.getClassifiers());
+        crawler.setConfiguration(req.getConfiguration());
+        crawler.setCrawlerSecurityConfiguration(req.getCrawlerSecurityConfiguration());
+        crawler.setDatabaseName(req.getDatabaseName());
+        crawler.setDescription(req.getDescription());
+        crawler.setLakeFormationConfiguration(req.getLakeFormationConfiguration());
+        crawler.setLineageConfiguration(req.getLineageConfiguration());
+        crawler.setRecrawlPolicy(req.getRecrawlPolicy());
+        crawler.setRole(req.getRole());
+        crawler.setSchemaChangePolicy(req.getSchemaChangePolicy());
+        crawler.setTablePrefix(req.getTablePrefix());
+        crawler.setTargets(req.getTargets());
+        if (req.getSchedule() != null && !req.getSchedule().isBlank()) {
+            Schedule schedule = new Schedule();
+            schedule.setScheduleExpression(req.getSchedule());
+            schedule.setState("SCHEDULED");
+            crawler.setSchedule(schedule);
+        }
+        return crawler;
     }
 }

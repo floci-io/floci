@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.model.*;
@@ -12,10 +16,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.*;
@@ -35,7 +38,7 @@ import java.util.stream.Collectors;
  * @see <a href="https://docs.aws.amazon.com/acm/latest/APIReference/Welcome.html">AWS ACM API Reference</a>
  */
 @ApplicationScoped
-public class AcmService {
+public class AcmService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(AcmService.class);
     private static final int MAX_TAGS = 50;
@@ -43,10 +46,12 @@ public class AcmService {
     private static final int MAX_TAG_VALUE_LENGTH = 256;
     private static final int MAX_SANS = 100;
     private static final int MAX_DOMAIN_LENGTH = 253;
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
-
+    /** Key algorithms real ACM accepts for RequestCertificate; the wider enum stays valid for ImportCertificate. */
+    private static final Set<KeyAlgorithm> REQUESTABLE_KEY_ALGORITHMS =
+        EnumSet.of(KeyAlgorithm.RSA_2048, KeyAlgorithm.EC_prime256v1, KeyAlgorithm.EC_secp384r1);
     private final StorageBackend<String, Certificate> store;
     private final CertificateGenerator certificateGenerator;
+    private final FlociCertificateAuthority certificateAuthority;
     private final RegionResolver regionResolver;
     private final int validationWaitSeconds;
     private final AtomicInteger accountDaysBeforeExpiry = new AtomicInteger(45);
@@ -66,23 +71,24 @@ public class AcmService {
 
     @Inject
     public AcmService(StorageFactory factory, CertificateGenerator certificateGenerator,
-                      EmulatorConfig config, RegionResolver regionResolver) {
+                      FlociCertificateAuthority certificateAuthority, EmulatorConfig config,
+                      RegionResolver regionResolver) {
         this(factory.create("acm", "acm-certificates.json",
                 new TypeReference<Map<String, Certificate>>() {}),
             certificateGenerator,
+            certificateAuthority,
             regionResolver,
             config.services().acm().validationWaitSeconds());
     }
 
     AcmService(StorageBackend<String, Certificate> store, CertificateGenerator certificateGenerator,
-               RegionResolver regionResolver, int validationWaitSeconds) {
+               FlociCertificateAuthority certificateAuthority, RegionResolver regionResolver,
+               int validationWaitSeconds) {
         this.store = store;
         this.certificateGenerator = certificateGenerator;
+        this.certificateAuthority = certificateAuthority;
         this.regionResolver = regionResolver;
         this.validationWaitSeconds = validationWaitSeconds;
-
-        // Validate Root CA resource availability
-        validateRootCaResource();
     }
 
     /**
@@ -96,33 +102,36 @@ public class AcmService {
         }
     }
 
-    private void validateRootCaResource() {
-        try (InputStream is = getClass().getResourceAsStream("/certs/amazon-root-ca.pem")) {
-            if (is == null) {
-                LOG.warn("Amazon Root CA certificate not found at /certs/amazon-root-ca.pem - " +
-                         "certificate chains will be empty");
-            } else {
-                LOG.info("Amazon Root CA certificate loaded successfully");
-            }
-        } catch (IOException e) {
-            LOG.warnv("Failed to validate Root CA resource: {0}", e.getMessage());
-        }
-    }
-
     // ============ RequestCertificate ============
 
     public Certificate requestCertificate(String domainName, List<String> sans, ValidationMethod validationMethod,
                                           String idempotencyToken, KeyAlgorithm keyAlgorithm,
                                           String certAuthorityArn, CertificateOptions options,
                                           Map<String, String> tags, String region) {
+        return requestCertificate(domainName, sans, validationMethod, idempotencyToken, keyAlgorithm,
+            certAuthorityArn, options, tags, Map.of(), region);
+    }
+
+    /**
+     * @param validationDomains the {@code ValidationDomain} of each requested {@code DomainValidationOptions}
+     *                          entry, keyed by its {@code DomainName}. Domains absent from the map validate
+     *                          against themselves, which is what AWS reports when the caller supplies nothing.
+     */
+    public Certificate requestCertificate(String domainName, List<String> sans, ValidationMethod validationMethod,
+                                          String idempotencyToken, KeyAlgorithm keyAlgorithm,
+                                          String certAuthorityArn, CertificateOptions options,
+                                          Map<String, String> tags, Map<String, String> validationDomains,
+                                          String region) {
         logSecurityWarningOnce();
         validateDomainName(domainName);
         validateSans(sans);
+        Map<String, String> requestedValidationDomains = indexValidationDomains(validationDomains, domainName, sans);
         if (tags != null) {
             validateTags(tags);
         }
 
         KeyAlgorithm alg = keyAlgorithm != null ? keyAlgorithm : KeyAlgorithm.RSA_2048;
+        validateRequestableKeyAlgorithm(alg, region);
 
         // Check idempotency with parameter validation
         if (idempotencyToken != null && !idempotencyToken.isEmpty()) {
@@ -147,10 +156,10 @@ public class AcmService {
             status = validationWaitSeconds > 0 ? CertificateStatus.PENDING_VALIDATION : CertificateStatus.ISSUED;
         }
 
-        // Generate real X.509 certificate
-        CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateCertificate(
-            domainName, sans, alg
-        );
+        // A server leaf signed by the local CA, so Certificate plus CertificateChain from
+        // GetCertificate validate the way an ACM certificate and its chain do on AWS.
+        CertificateGenerator.GeneratedCertificate generated = certificateAuthority.issueServerCertificate(
+            domainName, sans, alg, null);
 
         Instant now = Instant.now();
 
@@ -180,16 +189,16 @@ public class AcmService {
         cert.setSignatureAlgorithm(generated.signatureAlgorithm());
         cert.setCertificateBody(generated.certificatePem());
         cert.setPrivateKey(generated.privateKeyPem());
-        cert.setCertificateChain(getAwsRootCa());
+        cert.setCertificateChain(certificateAuthority.caPem());
         cert.setCertOptions(options != null ? options : CertificateOptions.defaultOptions());
         cert.setCertAuthorityArn(certAuthorityArn);
         cert.setIdempotencyToken(idempotencyToken);
         cert.setTags(tags != null ? new HashMap<>(tags) : new HashMap<>());
 
-        // Generate domain validation options with correct status based on type
         List<DomainValidation> validations = new ArrayList<>();
         for (String san : allSans) {
-            validations.add(generateDomainValidation(san, validationMethod, type));
+            validations.add(generateDomainValidation(san, requestedValidationDomains.get(san.toLowerCase(Locale.ROOT)),
+                validationMethod, status));
         }
         cert.setDomainValidationOptions(validations);
 
@@ -246,6 +255,7 @@ public class AcmService {
 
         List<Certificate> allCerts = store.scan(k -> true).stream()
             .filter(c -> c.getArn().contains(":acm:" + region + ":"))
+            .map(c -> settleValidation(c, region))
             .filter(c -> statuses == null || statuses.isEmpty() || statuses.contains(c.getStatus()))
             .filter(c -> keyTypes == null || keyTypes.isEmpty() || keyTypes.contains(c.getKeyAlgorithm()))
             .sorted(Comparator.comparing(Certificate::getArn))
@@ -320,6 +330,37 @@ public class AcmService {
         LOG.infov("Deleted certificate: {0}", certificateArn);
     }
 
+    // ============ InUseBy ============
+
+    /**
+     * Records {@code consumerArn} as a user of the certificate, so DeleteCertificate refuses with
+     * ResourceInUseException until it is released. Registering the same consumer twice is a no-op.
+     */
+    public void addInUseBy(String certificateArn, String consumerArn, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        if (!cert.getInUseBy().contains(consumerArn)) {
+            cert.getInUseBy().add(consumerArn);
+            store.put(regionKey(region, cert.extractCertificateId()), cert);
+        }
+    }
+
+    /** Releases {@code consumerArn}. A certificate that no longer exists has nothing to release. */
+    public void removeInUseBy(String certificateArn, String consumerArn, String region) {
+        Certificate cert;
+        try {
+            cert = getCertificateByArn(certificateArn, region);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Certificate {0} is gone, nothing to release for {1}", certificateArn, consumerArn);
+            return;
+        }
+        if (cert.getInUseBy().remove(consumerArn)) {
+            store.put(regionKey(region, cert.extractCertificateId()), cert);
+        }
+    }
+
     // ============ ImportCertificate ============
 
     public Certificate importCertificate(String certificatePem, String privateKeyPem, String chainPem,
@@ -371,11 +412,11 @@ public class AcmService {
         cert.setIssuedAt(now);
         cert.setNotBefore(x509Cert.getNotBefore().toInstant());
         cert.setNotAfter(x509Cert.getNotAfter().toInstant());
-        cert.setSerial(x509Cert.getSerialNumber().toString());
+        cert.setSerial(CertificateGenerator.colonHex(x509Cert.getSerialNumber()));
         cert.setSubject(x509Cert.getSubjectX500Principal().getName());
         cert.setIssuer(x509Cert.getIssuerX500Principal().getName());
         cert.setKeyAlgorithm(keyAlg);
-        cert.setSignatureAlgorithm(x509Cert.getSigAlgName());
+        cert.setSignatureAlgorithm(x509Cert.getSigAlgName().toUpperCase(Locale.ROOT));
         cert.setCertificateBody(certificatePem);
         cert.setPrivateKey(privateKeyPem);
         cert.setCertificateChain(chainPem);
@@ -481,15 +522,112 @@ public class AcmService {
         this.accountDaysBeforeExpiry.set(daysBeforeExpiry);
     }
 
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Certificate cert : store.scan(k -> true)) {
+            String arn = cert.getArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "acm:certificate", "acm",
+                    parsed.region(), parsed.accountId(),
+                    cert.getCreatedAt() != null ? cert.getCreatedAt() : Instant.now(),
+                    cert.getTags() != null ? cert.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("acm:certificate", "acm", true));
+    }
+
+    public Certificate revokeCertificate(String certificateArn, RevocationReason reason, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        boolean exportEnabled = cert.getCertOptions() != null && "ENABLED".equals(cert.getCertOptions().export());
+        if (!exportEnabled) {
+            throw new AwsException("ValidationException",
+                "Certificate " + certificateArn + " cannot be revoked because it is not export-enabled.", 400);
+        }
+        cert.setStatus(CertificateStatus.REVOKED);
+        store.put(regionKey(region, cert.extractCertificateId()), cert);
+        return cert;
+    }
+
+    public Certificate renewCertificate(String certificateArn, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
+            throw new AwsException("RequestInProgressException", "Certificate is pending validation", 400);
+        }
+        if (cert.getType() != CertificateType.PRIVATE || cert.getStatus() != CertificateStatus.ISSUED) {
+            throw new AwsException("InvalidArnException", "Certificate is not a private issued certificate", 400);
+        }
+        // TODO: certificate/key reissuance material is not regenerated in this local emulator.
+        Instant now = Instant.now();
+        cert.setIssuedAt(now);
+        cert.setNotBefore(now);
+        cert.setNotAfter(now.plusSeconds(365L * 24L * 60L * 60L));
+        store.put(regionKey(region, cert.extractCertificateId()), cert);
+        return cert;
+    }
+
+    public void updateCertificateOptions(String certificateArn, CertificateOptions options, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        CertificateOptions current = cert.getCertOptions() != null
+            ? cert.getCertOptions() : CertificateOptions.defaultOptions();
+        cert.setCertOptions(new CertificateOptions(
+            options.certificateTransparencyLoggingPreference() != null
+                ? options.certificateTransparencyLoggingPreference()
+                : current.certificateTransparencyLoggingPreference(),
+            options.export() != null ? options.export() : current.export()));
+        store.put(regionKey(region, cert.extractCertificateId()), cert);
+    }
+
     // ============ Helper Methods ============
 
     private Certificate getCertificateByArn(String arn, String region) {
         String certId = extractCertificateIdFromArn(arn);
         String storageKey = regionKey(region, certId);
 
-        return store.get(storageKey).orElseThrow(() ->
+        Certificate cert = store.get(storageKey).orElseThrow(() ->
             new AwsException("ResourceNotFoundException",
                 "The certificate " + arn + " does not exist.", 404));
+        return settleValidation(cert, region);
+    }
+
+    /**
+     * Brings a stored certificate in line on read. A PENDING_VALIDATION certificate whose configured
+     * validation wait has passed is issued, since nothing else moves it along; and a certificate
+     * that has been issued (status ISSUED, or IssuedAt set on one revoked or expired since) reports
+     * SUCCESS for every domain, which also repairs records stored by earlier releases as ISSUED
+     * with pending entries. A certificate revoked before it was ever issued keeps its pending
+     * entries. Changes are stored, which is what a client polling ACM observes.
+     */
+    private Certificate settleValidation(Certificate cert, String region) {
+        boolean changed = false;
+        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION && cert.getCreatedAt() != null
+                && !Instant.now().isBefore(cert.getCreatedAt().plusSeconds(validationWaitSeconds))) {
+            cert.setStatus(CertificateStatus.ISSUED);
+            cert.setIssuedAt(Instant.now());
+            LOG.debugv("Certificate {0} issued after the validation wait", cert.getArn());
+            changed = true;
+        }
+        boolean issued = cert.getStatus() == CertificateStatus.ISSUED || cert.getIssuedAt() != null;
+        if (issued && !cert.getDomainValidationOptions().stream()
+                .allMatch(validation -> "SUCCESS".equals(validation.validationStatus()))) {
+            cert.setDomainValidationOptions(cert.getDomainValidationOptions().stream()
+                .map(validation -> new DomainValidation(validation.domainName(), validation.validationDomain(),
+                    "SUCCESS", validation.validationMethod(), validation.resourceRecord(), validation.validationEmails()))
+                .toList());
+            changed = true;
+        }
+        if (changed) {
+            store.put(regionKey(region, cert.extractCertificateId()), cert);
+        }
+        return cert;
     }
 
     /**
@@ -552,6 +690,16 @@ public class AcmService {
         }
     }
 
+    private void validateRequestableKeyAlgorithm(KeyAlgorithm alg, String region) {
+        if (REQUESTABLE_KEY_ALGORITHMS.contains(alg)) {
+            return;
+        }
+        // Real ACM quirk: the RSA_4096 message carries the account id where the region goes.
+        String location = alg == KeyAlgorithm.RSA_4096 ? regionResolver.getAccountId() : region;
+        throw new AwsException("ValidationException",
+            "Encryption Algorithm " + alg.name() + " is not supported in " + location + " region", 400);
+    }
+
     private void validateSans(List<String> sans) {
         if (sans != null && sans.size() > MAX_SANS) {
             throw new AwsException("ValidationException",
@@ -588,24 +736,65 @@ public class AcmService {
     }
 
     /**
-     * Generates domain validation options with status based on certificate type.
-     * Private certificates have SUCCESS status immediately; public certificates
-     * start with PENDING_VALIDATION until DNS/email validation completes.
+     * Indexes the {@code ValidationDomain} of each requested {@code DomainValidationOptions} entry by a
+     * lowercased {@code DomainName}, rejecting the entries AWS rejects: a {@code DomainName} that is not
+     * part of the request, and a {@code ValidationDomain} that is neither the domain itself nor one of
+     * its superdomains.
      */
-    private DomainValidation generateDomainValidation(String domain, ValidationMethod method, CertificateType type) {
+    private Map<String, String> indexValidationDomains(Map<String, String> validationDomains,
+                                                       String domainName, List<String> sans) {
+        if (validationDomains == null || validationDomains.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> requested = new HashSet<>();
+        requested.add(domainName.toLowerCase(Locale.ROOT));
+        if (sans != null) {
+            sans.forEach(san -> requested.add(san.toLowerCase(Locale.ROOT)));
+        }
+        Map<String, String> indexed = new HashMap<>();
+        validationDomains.forEach((domain, validationDomain) -> {
+            String key = domain.toLowerCase(Locale.ROOT);
+            if (!requested.contains(key) || !isValidationDomainOf(domain, validationDomain)) {
+                throw new AwsException("InvalidDomainValidationOptionsException",
+                    "One or more values in the DomainValidationOption structure is incorrect.", 400);
+            }
+            indexed.put(key, validationDomain);
+        });
+        return indexed;
+    }
+
+    /**
+     * A {@code ValidationDomain} is only usable for a domain when it is that domain or one of its
+     * superdomains: it is the suffix of the mailboxes ACM will accept an approval from.
+     */
+    static boolean isValidationDomainOf(String domain, String validationDomain) {
+        String lowerDomain = domain.toLowerCase(Locale.ROOT);
+        String lowerValidationDomain = validationDomain.toLowerCase(Locale.ROOT);
+        return lowerDomain.equals(lowerValidationDomain) || lowerDomain.endsWith("." + lowerValidationDomain);
+    }
+
+    /**
+     * Generates a domain validation entry whose status follows the certificate: an ISSUED
+     * certificate has validated every domain, a PENDING_VALIDATION one has not yet.
+     *
+     * @param requestedValidationDomain the {@code ValidationDomain} the caller asked for, or {@code null}
+     *                                  to validate the domain against itself
+     */
+    private DomainValidation generateDomainValidation(String domain, String requestedValidationDomain,
+                                                      ValidationMethod method, CertificateStatus status) {
         String validationToken = generateValidationToken(domain);
+        String recordBase = baseDomain(domain);
         ResourceRecord resourceRecord = new ResourceRecord(
-            "_" + validationToken.substring(0, 32) + "." + domain + ".",
+            "_" + validationToken.substring(0, 32) + "." + recordBase + ".",
             "CNAME",
             "_" + validationToken.substring(32) + ".acm-validations.aws."
         );
 
-        // Private certificates don't need validation; public certificates do
-        String validationStatus = (type == CertificateType.PRIVATE) ? "SUCCESS" : "PENDING_VALIDATION";
+        String validationStatus = status == CertificateStatus.ISSUED ? "SUCCESS" : "PENDING_VALIDATION";
 
         return new DomainValidation(
             domain,
-            domain,
+            requestedValidationDomain != null ? requestedValidationDomain : domain,
             validationStatus,
             method != null ? method.name() : "DNS",
             resourceRecord,
@@ -614,9 +803,19 @@ public class AcmService {
     }
 
     private String generateValidationToken(String domain) {
-        byte[] randomBytes = new byte[32];
-        SECURE_RANDOM.nextBytes(randomBytes);
-        return HexFormat.of().formatHex(randomBytes);
+        String tokenInput = regionResolver.getAccountId() + ":" + baseDomain(domain);
+        try {
+            return HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(tokenInput.getBytes(StandardCharsets.UTF_8))
+            );
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
+    }
+
+    private static String baseDomain(String domain) {
+        String stripped = domain.startsWith("*.") ? domain.substring(2) : domain;
+        return stripped.toLowerCase(Locale.ROOT);
     }
 
     private String buildCertificateArn(String region, String certId) {
@@ -641,18 +840,5 @@ public class AcmService {
             .findFirst()
             .map(s -> s.substring(3))
             .orElse(dn);
-    }
-
-    private String getAwsRootCa() {
-        try (InputStream is = getClass().getResourceAsStream("/certs/amazon-root-ca.pem")) {
-            if (is == null) {
-                LOG.warn("Could not load Amazon Root CA from resources, using empty chain");
-                return "";
-            }
-            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            LOG.warn("Failed to load Amazon Root CA: " + e.getMessage());
-            return "";
-        }
     }
 }

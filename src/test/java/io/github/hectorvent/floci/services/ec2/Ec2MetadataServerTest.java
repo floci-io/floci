@@ -90,6 +90,16 @@ class Ec2MetadataServerTest {
     }
 
     @Test
+    void unregisteredContainerMessageExplainsMissingEc2Record() {
+        String message = Ec2MetadataServer.unregisteredContainerMessage("172.17.0.9");
+
+        assertTrue(message.startsWith("Instance not found"));
+        assertTrue(message.contains("172.17.0.9"));
+        assertTrue(message.contains("RunInstances"));
+        assertTrue(message.contains("SSM managed instance"));
+    }
+
+    @Test
     void iamCredentialRoleNameComesFromInstanceProfileRole() {
         IamService iamService = mock(IamService.class);
         InstanceProfile profile = new InstanceProfile();

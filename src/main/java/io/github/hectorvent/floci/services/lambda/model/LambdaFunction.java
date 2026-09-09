@@ -39,6 +39,14 @@ public class LambdaFunction {
     private List<Map<String, Object>> policies = new ArrayList<>();
     private long lastModified;
     private String revisionId;
+    /**
+     * For a published version, the {@code revisionId} that {@code $LATEST} carried when this
+     * version was cut. AWS does not publish a second version when nothing has changed since the
+     * last one, and {@code $LATEST}'s revision is regenerated on every code and configuration
+     * update, so matching it is exactly the "unchanged since" test (issue #2822). Null on
+     * {@code $LATEST} itself, and on versions published before this was recorded.
+     */
+    private String sourceRevisionId;
     private String version = "$LATEST";
     private LambdaUrlConfig urlConfig;
     private Integer reservedConcurrentExecutions;
@@ -49,6 +57,17 @@ public class LambdaFunction {
     private List<String> layers = new ArrayList<>();
     private String kmsKeyArn;
     private Map<String, Object> vpcConfig;
+    /**
+     * Resolved at attach time from the first VpcConfig subnet. Response-only: the AWS model's
+     * VpcConfigResponse carries VpcId, while the VpcConfig request shape does not.
+     */
+    private String vpcId;
+    private String snapStartApplyOn = "None";
+    private String logFormat = "Text";
+    private String applicationLogLevel;
+    private String systemLogLevel;
+    private String logGroup;
+    private List<LambdaFileSystemConfig> fileSystemConfigs = new ArrayList<>();
     private String codeSha256;
 
     /** Non-null only for hot-reload functions. Holds the Docker-host path bind-mounted into /var/task. */
@@ -136,6 +155,8 @@ public class LambdaFunction {
     public void setLastModified(long lastModified) { this.lastModified = lastModified; }
 
     public String getRevisionId() { return revisionId; }
+    public String getSourceRevisionId() { return sourceRevisionId; }
+    public void setSourceRevisionId(String sourceRevisionId) { this.sourceRevisionId = sourceRevisionId; }
     public void setRevisionId(String revisionId) { this.revisionId = revisionId; }
 
     public String getVersion() { return version; }
@@ -167,6 +188,29 @@ public class LambdaFunction {
 
     public Map<String, Object> getVpcConfig() { return vpcConfig; }
     public void setVpcConfig(Map<String, Object> vpcConfig) { this.vpcConfig = vpcConfig; }
+
+    public String getVpcId() { return vpcId; }
+    public void setVpcId(String vpcId) { this.vpcId = vpcId; }
+
+    public String getSnapStartApplyOn() { return snapStartApplyOn; }
+    public void setSnapStartApplyOn(String snapStartApplyOn) { this.snapStartApplyOn = snapStartApplyOn; }
+
+    public String getLogFormat() { return logFormat; }
+    public void setLogFormat(String logFormat) { this.logFormat = logFormat; }
+
+    public String getApplicationLogLevel() { return applicationLogLevel; }
+    public void setApplicationLogLevel(String applicationLogLevel) { this.applicationLogLevel = applicationLogLevel; }
+
+    public String getSystemLogLevel() { return systemLogLevel; }
+    public void setSystemLogLevel(String systemLogLevel) { this.systemLogLevel = systemLogLevel; }
+
+    public String getLogGroup() { return logGroup; }
+    public void setLogGroup(String logGroup) { this.logGroup = logGroup; }
+
+    public List<LambdaFileSystemConfig> getFileSystemConfigs() { return fileSystemConfigs; }
+    public void setFileSystemConfigs(List<LambdaFileSystemConfig> fileSystemConfigs) {
+        this.fileSystemConfigs = fileSystemConfigs == null ? new ArrayList<>() : new ArrayList<>(fileSystemConfigs);
+    }
 
     public String getCodeSha256() { return codeSha256; }
     public void setCodeSha256(String codeSha256) { this.codeSha256 = codeSha256; }

@@ -216,4 +216,120 @@ class ConfigurationRecorderIntegrationTest {
             .statusCode(200)
             .body("DeliveryChannels", hasSize(1));
     }
+
+    // --- Deletes ---
+
+    @Test
+    @Order(10)
+    void deleteDeliveryChannelWhileRecorderRunning() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "StartConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorderName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteDeliveryChannel")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"DeliveryChannelName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("LastDeliveryChannelDeleteFailedException"));
+    }
+
+    @Test
+    @Order(11)
+    void deleteDeliveryChannelAfterRecorderStopped() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "StopConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorderName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteDeliveryChannel")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"DeliveryChannelName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(12)
+    void deleteDeliveryChannelAgain() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteDeliveryChannel")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"DeliveryChannelName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchDeliveryChannelException"));
+    }
+
+    @Test
+    @Order(13)
+    void deleteConfigurationRecorder() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorderName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(14)
+    void describeConfigurationRecordersAfterDelete() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigurationRecorders")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConfigurationRecorders", hasSize(0));
+    }
+
+    @Test
+    @Order(15)
+    void deleteConfigurationRecorderAgain() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorderName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+    }
 }

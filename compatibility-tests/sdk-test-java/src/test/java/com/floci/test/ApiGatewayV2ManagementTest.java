@@ -40,6 +40,7 @@ import software.amazon.awssdk.services.apigatewayv2.model.NotFoundException;
 import software.amazon.awssdk.services.apigatewayv2.model.ProtocolType;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -311,6 +312,7 @@ class ApiGatewayV2ManagementTest {
                 .stageName(stageName)
                 .deploymentId(deploymentId)
                 .autoDeploy(false)
+                .tags(Map.of("environment", "test", "owner", "platform"))
                 .build());
 
         assertThat(response.stageName()).isEqualTo(stageName);
@@ -318,6 +320,9 @@ class ApiGatewayV2ManagementTest {
         assertThat(response.autoDeploy()).isFalse();
         assertThat(response.createdDate()).isNotNull();
         assertThat(response.lastUpdatedDate()).isNotNull();
+        assertThat(response.tags())
+                .containsEntry("environment", "test")
+                .containsEntry("owner", "platform");
         stageCreated = true;
     }
 
@@ -333,6 +338,9 @@ class ApiGatewayV2ManagementTest {
 
         assertThat(getResponse.stageName()).isEqualTo(stageName);
         assertThat(getResponse.deploymentId()).isEqualTo(deploymentId);
+        assertThat(getResponse.tags())
+                .containsEntry("environment", "test")
+                .containsEntry("owner", "platform");
 
         var listResponse = apigwv2.getStages(GetStagesRequest.builder()
                 .apiId(apiId)
@@ -347,6 +355,13 @@ class ApiGatewayV2ManagementTest {
                 .first()
                 .extracting(item -> item.deploymentId())
                 .isEqualTo(deploymentId);
+        assertThat(listResponse.items())
+                .filteredOn(item -> stageName.equals(item.stageName()))
+                .first()
+                .extracting(item -> item.tags())
+                .satisfies(tags -> assertThat(tags)
+                        .containsEntry("environment", "test")
+                        .containsEntry("owner", "platform"));
     }
 
     @Test

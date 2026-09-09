@@ -3,14 +3,18 @@ package io.github.hectorvent.floci.services.route53;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.route53.model.ChangeInfo;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
 import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -22,24 +26,37 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class Route53Service {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final int MAX_VPC_ASSOCIATIONS_PER_ZONE = 300;
+    private static final int MAX_VPC_ASSOCIATION_AUTHORIZATIONS = 1000;
 
     public record CreateZoneResult(HostedZone zone, ChangeInfo change) {}
+    private record OwnedZone(String accountId, HostedZone zone) {}
 
     private final StorageBackend<String, HostedZone> zoneStore;
     private final StorageBackend<String, List<ResourceRecordSet>> recordStore;
     private final StorageBackend<String, HealthCheck> healthCheckStore;
     private final StorageBackend<String, ChangeInfo> changeStore;
     private final StorageBackend<String, Map<String, String>> tagStore;
+    private final StorageBackend<String, List<VpcAssociation>> vpcAuthorizationStore;
     private final List<String> nameServers;
+    private final String defaultAccountId;
+    private final RegionResolver regionResolver;
+    private final Ec2Service ec2Service;
+    private final long vpcAssociationControlPlaneDelayMs;
+    private final Map<String, Long> hostedZoneMutationBusyUntilNanos = new ConcurrentHashMap<>();
+    private final Map<String, Long> authorizationMutationBusyUntilNanos = new ConcurrentHashMap<>();
 
     @Inject
-    public Route53Service(StorageFactory factory, EmulatorConfig config) {
+    public Route53Service(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver,
+                          Ec2Service ec2Service) {
         this.zoneStore = factory.create("route53", "route53-zones.json",
                 new TypeReference<Map<String, HostedZone>>() {});
         this.recordStore = factory.create("route53", "route53-records.json",
@@ -50,6 +67,8 @@ public class Route53Service {
                 new TypeReference<Map<String, ChangeInfo>>() {});
         this.tagStore = factory.create("route53", "route53-tags.json",
                 new TypeReference<Map<String, Map<String, String>>>() {});
+        this.vpcAuthorizationStore = factory.create("route53", "route53-vpc-association-authorizations.json",
+                new TypeReference<Map<String, List<VpcAssociation>>>() {});
 
         EmulatorConfig.Route53ServiceConfig r53 = config.services().route53();
         this.nameServers = List.of(
@@ -58,12 +77,16 @@ public class Route53Service {
                 r53.defaultNameserver3(),
                 r53.defaultNameserver4()
         );
+        this.defaultAccountId = config.defaultAccountId();
+        this.regionResolver = regionResolver;
+        this.ec2Service = ec2Service;
+        this.vpcAssociationControlPlaneDelayMs = Math.max(0, r53.vpcAssociationControlPlaneDelayMs());
     }
 
     // ── Hosted Zones ──────────────────────────────────────────────────────────
 
     public synchronized CreateZoneResult createHostedZone(String name, String callerReference,
-                                                           String comment, boolean privateZone) {
+                                                           String comment, VpcAssociation vpcAssociation) {
         String normalizedName = normalizeName(name);
 
         for (HostedZone existing : zoneStore.scan(k -> true)) {
@@ -74,7 +97,13 @@ public class Route53Service {
         }
 
         String id = generateZoneId();
-        HostedZone zone = new HostedZone(id, normalizedName, callerReference, comment, privateZone);
+        String callerAccountId = callerAccountId();
+        validateVpcOwnershipIfKnown(vpcAssociation, callerAccountId);
+        HostedZone zone = new HostedZone(id, normalizedName, callerReference, comment, vpcAssociation);
+        zone.setOwnerAccountId(callerAccountId);
+        if (vpcAssociation != null) {
+            vpcAssociation.setOwnerAccountId(callerAccountId);
+        }
         zoneStore.put(id, zone);
         recordStore.put(id, buildDefaultRecords(normalizedName));
         ChangeInfo change = newChange(null);
@@ -102,6 +131,7 @@ public class Route53Service {
         zoneStore.delete(id);
         recordStore.delete(id);
         tagStore.delete("hostedzone/" + id);
+        vpcAuthorizationStore.delete(id);
         return newChange(null);
     }
 
@@ -148,6 +178,202 @@ public class Route53Service {
 
     public long getHostedZoneCount() {
         return zoneStore.keys().size();
+    }
+
+    // ── VPC Associations ──────────────────────────────────────────────────────
+
+    public synchronized VpcAssociation createVpcAssociationAuthorization(String zoneId, VpcAssociation vpc) {
+        getHostedZoneOwnedByCaller(zoneId);
+        rejectAuthorizationMutationOverlap(zoneId);
+        resolveVpcOwnerAccount(vpc).ifPresent(vpc::setOwnerAccountId);
+        List<VpcAssociation> authorizations = new ArrayList<>(vpcAuthorizationStore.get(zoneId).orElse(List.of()));
+        if (findAssociation(authorizations, vpc) == null) {
+            if (authorizations.size() >= MAX_VPC_ASSOCIATION_AUTHORIZATIONS) {
+                throw new AwsException("TooManyVPCAssociationAuthorizations",
+                        "The maximum number of VPC association authorizations has been reached for hosted zone " + zoneId + ".", 400);
+            }
+            authorizations.add(vpc);
+            vpcAuthorizationStore.put(zoneId, authorizations);
+            markMutationBusy(authorizationMutationBusyUntilNanos, zoneId);
+        }
+        return vpc;
+    }
+
+    public synchronized void deleteVpcAssociationAuthorization(String zoneId, VpcAssociation vpc) {
+        getHostedZoneOwnedByCaller(zoneId);
+        rejectAuthorizationMutationOverlap(zoneId);
+        List<VpcAssociation> authorizations = new ArrayList<>(vpcAuthorizationStore.get(zoneId).orElse(List.of()));
+        VpcAssociation existing = findAssociation(authorizations, vpc);
+        if (existing == null) {
+            throw new AwsException("VPCAssociationAuthorizationNotFound",
+                    "The VPC that you specified is not authorized to be associated with the hosted zone.", 404);
+        }
+        authorizations.remove(existing);
+        if (authorizations.isEmpty()) {
+            vpcAuthorizationStore.delete(zoneId);
+        } else {
+            vpcAuthorizationStore.put(zoneId, authorizations);
+        }
+        markMutationBusy(authorizationMutationBusyUntilNanos, zoneId);
+    }
+
+    public List<VpcAssociation> listVpcAssociationAuthorizations(String zoneId) {
+        getHostedZoneOwnedByCaller(zoneId);
+        List<VpcAssociation> authorizations = new ArrayList<>(vpcAuthorizationStore.get(zoneId).orElse(List.of()));
+        authorizations.sort((a, b) -> {
+            int id = a.getVpcId().compareTo(b.getVpcId());
+            return id != 0 ? id : a.getVpcRegion().compareTo(b.getVpcRegion());
+        });
+        return authorizations;
+    }
+
+    /** Associates a VPC with a private hosted zone. */
+    public synchronized ChangeInfo associateVpcWithHostedZone(String zoneId, VpcAssociation vpc,
+                                                              String comment) {
+        OwnedZone ownedZone = getHostedZoneAcrossAccounts(zoneId);
+        HostedZone zone = ownedZone.zone();
+        if (!zone.isPrivateZone()) {
+            throw new AwsException("PublicZoneVPCAssociation",
+                    "You're trying to associate a VPC with a public hosted zone. "
+                            + "Public hosted zones can't be associated with a VPC.", 400);
+        }
+        rejectHostedZoneMutationOverlap(zoneId);
+        if (findAssociation(zone, vpc) == null) {
+            String callerAccountId = callerAccountId();
+            validateVpcOwnershipIfKnown(vpc, callerAccountId);
+            List<VpcAssociation> authorizations = new ArrayList<>(
+                    getVpcAuthorizationsForAccount(ownedZone.accountId(), zoneId));
+            VpcAssociation authorization = findAssociation(authorizations, vpc);
+            boolean crossAccount = !callerAccountId.equals(ownerAccountId(zone));
+            if (crossAccount && authorization == null) {
+                throw new AwsException("NotAuthorizedException",
+                        "Associating the specified VPC with the specified hosted zone has not been authorized.", 401);
+            }
+            if (crossAccount && authorization.getOwnerAccountId() == null) {
+                String resolvedOwner = resolveVpcOwnerAccount(vpc).orElseThrow(() ->
+                        new AwsException("InvalidVPCId",
+                                "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
+                                400));
+                authorization.setOwnerAccountId(resolvedOwner);
+                putVpcAuthorizationsForAccount(ownedZone.accountId(), zoneId, authorizations);
+            }
+            if (authorization != null && authorization.getOwnerAccountId() != null
+                    && !authorization.getOwnerAccountId().equals(callerAccountId)) {
+                throw new AwsException("NotAuthorizedException",
+                        "Associating the specified VPC with the specified hosted zone has not been authorized.", 401);
+            }
+            if (zone.getVpcAssociations().size() >= MAX_VPC_ASSOCIATIONS_PER_ZONE) {
+                throw new AwsException("LimitsExceeded",
+                        "The maximum number of VPCs that can be associated with this hosted zone has been reached.", 400);
+            }
+            for (HostedZone other : listHostedZonesByVpc(vpc.getVpcId(), vpc.getVpcRegion())) {
+                if (!other.getId().equals(zoneId) && other.getName().equals(zone.getName())) {
+                    throw new AwsException("ConflictingDomainExists",
+                            "The VPC that you chose, " + vpc.getVpcId() + " in region " + vpc.getVpcRegion()
+                                    + ", is already associated with another hosted zone that has the same name.",
+                            400);
+                }
+            }
+            vpc.setOwnerAccountId(resolveVpcOwnerAccount(vpc).orElse(callerAccountId));
+            zone.getVpcAssociations().add(vpc);
+            putZoneForAccount(ownedZone.accountId(), zoneId, zone);
+            markMutationBusy(hostedZoneMutationBusyUntilNanos, zoneId);
+        }
+        return newChange(comment);
+    }
+
+    /**
+     * Disassociates a VPC from a private hosted zone. AWS refuses to remove the
+     * only remaining association — the zone would become unresolvable.
+     */
+    public synchronized ChangeInfo disassociateVpcFromHostedZone(String zoneId, VpcAssociation vpc,
+                                                                 String comment) {
+        OwnedZone ownedZone = getHostedZoneAcrossAccounts(zoneId);
+        HostedZone zone = ownedZone.zone();
+        VpcAssociation existing = findAssociation(zone, vpc);
+        if (existing == null) {
+            throw new AwsException("VPCAssociationNotFound",
+                    "The VPC " + vpc.getVpcId() + " in region " + vpc.getVpcRegion()
+                            + " is not associated with hosted zone " + zoneId + ".", 404);
+        }
+        String associationOwner = existing.getOwnerAccountId();
+        String callerAccountId = callerAccountId();
+        String zoneOwner = ownerAccountId(zone);
+        if (associationOwner == null && !zoneOwner.equals(callerAccountId)) {
+            associationOwner = resolveVpcOwnerAccount(existing).orElseThrow(() ->
+                    new AwsException("InvalidVPCId",
+                            "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
+                            400));
+            if (!associationOwner.equals(callerAccountId)) {
+                throw new AwsException("InvalidVPCId",
+                        "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
+                        400);
+            }
+            existing.setOwnerAccountId(associationOwner);
+            putZoneForAccount(ownedZone.accountId(), zoneId, zone);
+        }
+        if (associationOwner != null
+                && !associationOwner.equals(callerAccountId)
+                && !zoneOwner.equals(callerAccountId)) {
+            throw new AwsException("InvalidVPCId",
+                    "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
+                    400);
+        }
+        if (zone.getVpcAssociations().size() == 1) {
+            throw new AwsException("LastVPCAssociation",
+                    "The VPC that you chose, " + vpc.getVpcId() + " in region " + vpc.getVpcRegion()
+                            + ", is the last VPC that is associated with the hosted zone.", 400);
+        }
+        zone.getVpcAssociations().remove(existing);
+        putZoneForAccount(ownedZone.accountId(), zoneId, zone);
+        markMutationBusy(hostedZoneMutationBusyUntilNanos, zoneId);
+        return newChange(comment);
+    }
+
+    /**
+     * Returns every hosted zone associated with the given VPC, regardless of the
+     * account that created the zone.
+     */
+    public List<HostedZone> listHostedZonesByVpc(String vpcId, String vpcRegion) {
+        List<HostedZone> matches = new ArrayList<>();
+        for (OwnedZone owned : allHostedZonesAcrossAccounts()) {
+            HostedZone zone = owned.zone();
+            if (findAssociation(zone, new VpcAssociation(vpcId, vpcRegion)) != null) {
+                if (zone.getOwnerAccountId() == null) {
+                    zone.setOwnerAccountId(owned.accountId());
+                }
+                matches.add(zone);
+            }
+        }
+        // Tie-break by id: name alone leaves equal-named zones ordered by the backing store's
+        // own iteration, which can differ between the page-1 and page-2 scans and desync the
+        // id-based NextToken continuation point (skipping or repeating an entry).
+        matches.sort((a, b) -> {
+            int cmp = a.getName().compareTo(b.getName());
+            return cmp != 0 ? cmp : a.getId().compareTo(b.getId());
+        });
+        return matches;
+    }
+
+    /**
+     * {@link VpcAssociation} has no value equality, so associations are matched on
+     * their ID and region rather than by object identity.
+     */
+    private static VpcAssociation findAssociation(HostedZone zone, VpcAssociation vpc) {
+        if (zone.getVpcAssociations() == null) {
+            return null;
+        }
+        return findAssociation(zone.getVpcAssociations(), vpc);
+    }
+
+    private static VpcAssociation findAssociation(List<VpcAssociation> associations, VpcAssociation vpc) {
+        for (VpcAssociation candidate : associations) {
+            if (vpc.getVpcId().equals(candidate.getVpcId())
+                    && vpc.getVpcRegion().equals(candidate.getVpcRegion())) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     // ── Resource Record Sets ──────────────────────────────────────────────────
@@ -301,6 +527,173 @@ public class Route53Service {
 
     public List<String> getNameServers() {
         return nameServers;
+    }
+
+    public String getDefaultAccountId() {
+        return defaultAccountId;
+    }
+
+    public String ownerAccountId(HostedZone zone) {
+        return zone.getOwnerAccountId() != null ? zone.getOwnerAccountId() : defaultAccountId;
+    }
+
+    private OwnedZone getHostedZoneAcrossAccounts(String zoneId) {
+        if (zoneStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<HostedZone> accountAware =
+                    (AccountAwareStorageBackend<HostedZone>) rawAccountAware;
+            AccountAwareStorageBackend.OwnedEntry<HostedZone> entry = accountAware.findAnyAccountEntry(zoneId)
+                    .orElseThrow(() -> new AwsException("NoSuchHostedZone",
+                            "No hosted zone found with ID: " + zoneId, 404));
+            if (entry.value().getOwnerAccountId() == null) {
+                entry.value().setOwnerAccountId(entry.account());
+            }
+            return new OwnedZone(entry.account(), entry.value());
+        }
+        HostedZone zone = getHostedZone(zoneId);
+        return new OwnedZone(ownerAccountId(zone), zone);
+    }
+
+    private List<OwnedZone> allHostedZonesAcrossAccounts() {
+        if (zoneStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<HostedZone> accountAware =
+                    (AccountAwareStorageBackend<HostedZone>) rawAccountAware;
+            return accountAware.scanAllAccountEntries(k -> true).stream()
+                    .map(entry -> new OwnedZone(entry.accountId(), entry.value()))
+                    .toList();
+        }
+        return zoneStore.scan(k -> true).stream()
+                .map(zone -> new OwnedZone(ownerAccountId(zone), zone))
+                .toList();
+    }
+
+    private void putZoneForAccount(String accountId, String zoneId, HostedZone zone) {
+        if (zoneStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<HostedZone> accountAware =
+                    (AccountAwareStorageBackend<HostedZone>) rawAccountAware;
+            accountAware.putForAccount(accountId, zoneId, zone);
+            return;
+        }
+        zoneStore.put(zoneId, zone);
+    }
+
+    private List<VpcAssociation> getVpcAuthorizationsForAccount(String accountId, String zoneId) {
+        if (vpcAuthorizationStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<List<VpcAssociation>> accountAware =
+                    (AccountAwareStorageBackend<List<VpcAssociation>>) rawAccountAware;
+            return accountAware.getForAccount(accountId, zoneId).orElse(List.of());
+        }
+        return vpcAuthorizationStore.get(zoneId).orElse(List.of());
+    }
+
+    private void putVpcAuthorizationsForAccount(String accountId, String zoneId,
+                                                        List<VpcAssociation> authorizations) {
+        if (vpcAuthorizationStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<List<VpcAssociation>> accountAware =
+                    (AccountAwareStorageBackend<List<VpcAssociation>>) rawAccountAware;
+            accountAware.putForAccount(accountId, zoneId, authorizations);
+            return;
+        }
+        vpcAuthorizationStore.put(zoneId, authorizations);
+    }
+
+    private HostedZone getHostedZoneOwnedByCaller(String zoneId) {
+        String callerAccountId = callerAccountId();
+        if (zoneStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<HostedZone> accountAware =
+                    (AccountAwareStorageBackend<HostedZone>) rawAccountAware;
+            HostedZone zone = accountAware.getForAccount(callerAccountId, zoneId).orElse(null);
+            if (zone == null && callerAccountId.equals(defaultAccountId)) {
+                // Only the configured default account can claim pre-account-isolation unscoped data.
+                // AccountAwareStorageBackend#get migrates that legacy shape into the caller partition.
+                zone = accountAware.get(zoneId).orElse(null);
+            }
+            if (zone == null) {
+                throw new AwsException("NoSuchHostedZone",
+                        "No hosted zone found with ID: " + zoneId, 404);
+            }
+            if (zone.getOwnerAccountId() == null) {
+                zone.setOwnerAccountId(callerAccountId);
+                accountAware.putForAccount(callerAccountId, zoneId, zone);
+            }
+            if (!callerAccountId.equals(zone.getOwnerAccountId())) {
+                throw new AwsException("NoSuchHostedZone",
+                        "No hosted zone found with ID: " + zoneId, 404);
+            }
+            return zone;
+        }
+
+        HostedZone zone = getHostedZone(zoneId);
+        if (!ownerAccountId(zone).equals(callerAccountId)) {
+            throw new AwsException("NoSuchHostedZone",
+                    "No hosted zone found with ID: " + zoneId, 404);
+        }
+        return zone;
+    }
+
+    private String callerAccountId() {
+        return regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
+    }
+
+    private java.util.Optional<String> resolveVpcOwnerAccount(VpcAssociation vpc) {
+        if (vpc == null || ec2Service == null) {
+            return java.util.Optional.empty();
+        }
+        return ec2Service.findVpcOwnerAccount(vpc.getVpcRegion(), vpc.getVpcId());
+    }
+
+    private void validateVpcOwnershipIfKnown(VpcAssociation vpc, String callerAccountId) {
+        if (vpc == null) {
+            return;
+        }
+        java.util.Optional<String> owner = resolveVpcOwnerAccount(vpc);
+        if (owner.isPresent() && !owner.get().equals(callerAccountId)) {
+            throw new AwsException("InvalidVPCId",
+                    "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
+                    400);
+        }
+    }
+
+    private void rejectHostedZoneMutationOverlap(String zoneId) {
+        if (isMutationBusy(hostedZoneMutationBusyUntilNanos, zoneId)) {
+            throw new AwsException("PriorRequestNotComplete",
+                    "A previous request for this hosted zone is still being processed.", 400);
+        }
+    }
+
+    private void rejectAuthorizationMutationOverlap(String zoneId) {
+        if (isMutationBusy(authorizationMutationBusyUntilNanos, zoneId)) {
+            throw new AwsException("ConcurrentModification",
+                    "Another VPC association authorization mutation is still being processed.", 400);
+        }
+    }
+
+    private boolean isMutationBusy(Map<String, Long> busyUntilNanos, String zoneId) {
+        if (vpcAssociationControlPlaneDelayMs <= 0) {
+            return false;
+        }
+        Long deadline = busyUntilNanos.get(zoneId);
+        if (deadline == null) {
+            return false;
+        }
+        if (System.nanoTime() >= deadline) {
+            busyUntilNanos.remove(zoneId, deadline);
+            return false;
+        }
+        return true;
+    }
+
+    private void markMutationBusy(Map<String, Long> busyUntilNanos, String zoneId) {
+        if (vpcAssociationControlPlaneDelayMs <= 0) {
+            return;
+        }
+        busyUntilNanos.put(zoneId, System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(vpcAssociationControlPlaneDelayMs));
     }
 
     private static String normalizeName(String name) {

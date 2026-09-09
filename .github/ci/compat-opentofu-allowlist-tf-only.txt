@@ -1,0 +1,21 @@
+# Resource addresses allowed to exist ONLY in compat-terraform/main.tf (not
+# in compat-opentofu/main.tf), checked by compat-opentofu-drift-check.py.
+# One "type.name" per line; `#` starts a trailing comment. The reverse
+# direction -- addresses allowed only in compat-opentofu -- lives in
+# compat-opentofu-allowlist-otf-only.txt; an address moving from one side to
+# the other must move between these files or CI fails it as unreviewed drift.
+#
+# These are pre-existing gaps, not deliberate provider-specific fixtures --
+# see https://github.com/floci-io/floci/issues/2263. Remove an entry once its
+# resource (and matching bats coverage) is ported to compat-opentofu.
+aws_appautoscaling_policy.ecs_alb_requests                            # Application Auto Scaling not yet in compat-opentofu
+aws_appautoscaling_policy.ecs_cpu                                     # Application Auto Scaling not yet in compat-opentofu
+aws_appautoscaling_target.ecs_service                                 # Application Auto Scaling not yet in compat-opentofu
+aws_cloudwatch_metric_alarm.cpu                                       # CloudWatch alarm coverage not yet in compat-opentofu
+aws_db_instance.app                                                   # RDS coverage not yet in compat-opentofu
+aws_guardduty_organization_configuration_feature.runtime_monitoring   # GuardDuty org feature not yet in compat-opentofu
+aws_iam_policy.tagged                                                 # IAM tag coverage not yet in compat-opentofu
+aws_iam_role.managed_policy_attach                                    # IAM managed-policy attach path not yet in compat-opentofu
+aws_iam_role_policy_attachment.ec2_read_only                          # IAM managed-policy attach path not yet in compat-opentofu
+aws_iam_role_policy_attachment.emr_service_role                       # IAM managed-policy attach path not yet in compat-opentofu
+aws_iam_role.tagged                                                   # IAM tag coverage not yet in compat-opentofu

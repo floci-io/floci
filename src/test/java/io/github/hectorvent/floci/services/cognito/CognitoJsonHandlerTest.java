@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
 
 class CognitoJsonHandlerTest {
 
@@ -37,7 +39,8 @@ class CognitoJsonHandlerTest {
                 new InMemoryStorage<>(), // revokedTokenStore
                 "http://localhost:4566",
                 regionResolver,
-                null
+                null,
+                mock(AcmService.class)
         );
         handler = new CognitoJsonHandler(service, mapper);
     }
@@ -106,6 +109,33 @@ class CognitoJsonHandlerTest {
         assertNotNull(pool.get("AdminCreateUserConfig"));
         assertNotNull(pool.get("AccountRecoverySetting"));
         assertEquals("ESSENTIALS", pool.get("UserPoolTier").asText());
+    }
+
+    @Test
+    void createAndDescribeUserPoolAgreeOnUnconfiguredOptionalBlocks() {
+        // #2200: CreateUserPool and a later DescribeUserPool disagreed on DeviceConfiguration,
+        // EmailConfiguration, and UserPoolAddOns when the request never configured them - an
+        // empty object one moment, filled in or absent the next - so a Terraform apply looked
+        // clean and the very next plan reported perpetual drift.
+        ObjectNode request = mapper.createObjectNode();
+        request.put("PoolName", "minimal-pool");
+
+        JsonNode created = (JsonNode) handler.handle("CreateUserPool", request, "us-east-1").getEntity();
+        JsonNode createdPool = created.get("UserPool");
+
+        ObjectNode describeReq = mapper.createObjectNode();
+        describeReq.put("UserPoolId", createdPool.get("Id").asText());
+        JsonNode described = (JsonNode) handler.handle("DescribeUserPool", describeReq, "us-east-1").getEntity();
+        JsonNode describedPool = described.get("UserPool");
+
+        for (JsonNode pool : java.util.List.of(createdPool, describedPool)) {
+            // AWS's JSON protocol serializes only members with a value provided - an
+            // unconfigured pool omits these keys entirely, it doesn't write a JSON null
+            // (confirmed against moto's DescribeUserPool, which never emits either key unset).
+            assertFalse(pool.has("DeviceConfiguration"));
+            assertFalse(pool.has("UserPoolAddOns"));
+            assertEquals("COGNITO_DEFAULT", pool.get("EmailConfiguration").get("EmailSendingAccount").asText());
+        }
     }
 
     @Test
@@ -385,6 +415,79 @@ class CognitoJsonHandlerTest {
                 "CreateUserPoolClient must not return RefreshTokenRotation when not set");
     }
 
+    // Issue #1563 — AdminLinkProviderForUser
+
+    @Test
+    void adminLinkProviderForUserReturnsEmptyBody() {
+        String poolId = createPoolWithUser("link-pool", "alice");
+
+        Response response = handler.handle("AdminLinkProviderForUser",
+                linkRequest(poolId, "alice", "Google", "google-sub-123"), "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        JsonNode body = (JsonNode) response.getEntity();
+        assertTrue(body.isObject());
+        assertTrue(body.isEmpty(), "AdminLinkProviderForUser returns an empty JSON object");
+    }
+
+    @Test
+    void adminLinkProviderForUserIdentitySurfacesInAdminGetUser() {
+        String poolId = createPoolWithUser("link-getuser-pool", "alice");
+        handler.handle("AdminLinkProviderForUser",
+                linkRequest(poolId, "alice", "Google", "google-sub-123"), "us-east-1");
+
+        ObjectNode getUser = mapper.createObjectNode();
+        getUser.put("UserPoolId", poolId);
+        getUser.put("Username", "alice");
+        JsonNode body = (JsonNode) handler.handle("AdminGetUser", getUser, "us-east-1").getEntity();
+
+        String identities = StreamSupport.stream(Spliterators.spliteratorUnknownSize(
+                        body.get("UserAttributes").elements(), 0), false)
+                .filter(n -> "identities".equals(n.get("Name").asText()))
+                .map(n -> n.get("Value").asText())
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("identities attribute missing from AdminGetUser"));
+        assertTrue(identities.contains("\"userId\":\"google-sub-123\""), identities);
+        assertTrue(identities.contains("\"providerName\":\"Google\""), identities);
+    }
+
+    @Test
+    void adminLinkProviderForUserUnknownUserThrows() {
+        String poolId = createPoolWithUser("link-missing-pool", "alice");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                handler.handle("AdminLinkProviderForUser",
+                        linkRequest(poolId, "ghost", "Google", "google-sub-123"), "us-east-1"));
+        assertEquals("UserNotFoundException", exception.getErrorCode());
+    }
+
+    private String createPoolWithUser(String poolName, String username) {
+        ObjectNode poolReq = mapper.createObjectNode();
+        poolReq.put("PoolName", poolName);
+        JsonNode poolBody = (JsonNode) handler.handle("CreateUserPool", poolReq, "us-east-1").getEntity();
+        String poolId = poolBody.get("UserPool").get("Id").asText();
+
+        ObjectNode createUser = mapper.createObjectNode();
+        createUser.put("UserPoolId", poolId);
+        createUser.put("Username", username);
+        handler.handle("AdminCreateUser", createUser, "us-east-1");
+        return poolId;
+    }
+
+    private ObjectNode linkRequest(String poolId, String destinationUsername,
+            String sourceProviderName, String sourceUserId) {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("UserPoolId", poolId);
+        request.putObject("DestinationUser")
+                .put("ProviderName", "Cognito")
+                .put("ProviderAttributeValue", destinationUsername);
+        request.putObject("SourceUser")
+                .put("ProviderName", sourceProviderName)
+                .put("ProviderAttributeName", "Cognito_Subject")
+                .put("ProviderAttributeValue", sourceUserId);
+        return request;
+    }
+
     private Set<String> schemaNames(JsonNode pool) {
         return StreamSupport.stream(
                         Spliterators.spliteratorUnknownSize(pool.get("SchemaAttributes").elements(), 0), false)
@@ -392,4 +495,46 @@ class CognitoJsonHandlerTest {
                 .collect(Collectors.toSet());
     }
 
+    private String createPoolWithPrefixDomain(String domain) {
+        ObjectNode poolReq = mapper.createObjectNode().put("PoolName", "domain-pool");
+        String poolId = ((JsonNode) handler.handle("CreateUserPool", poolReq, "us-east-1").getEntity())
+                .get("UserPool").get("Id").asText();
+        ObjectNode domainReq = mapper.createObjectNode()
+                .put("Domain", domain)
+                .put("UserPoolId", poolId)
+                .put("ManagedLoginVersion", 1);
+        handler.handle("CreateUserPoolDomain", domainReq, "us-east-1");
+        return poolId;
+    }
+
+    @Test
+    void updateUserPoolDomainTreatsANullManagedLoginVersionAsAbsent() {
+        String poolId = createPoolWithPrefixDomain("null-version");
+        ObjectNode updateReq = mapper.createObjectNode().put("Domain", "null-version").put("UserPoolId", poolId);
+        updateReq.putNull("ManagedLoginVersion");
+
+        JsonNode updated = (JsonNode) handler.handle("UpdateUserPoolDomain", updateReq, "us-east-1").getEntity();
+
+        assertEquals(1, updated.get("ManagedLoginVersion").asInt());
+        JsonNode described = (JsonNode) handler.handle("DescribeUserPoolDomain",
+                mapper.createObjectNode().put("Domain", "null-version"), "us-east-1").getEntity();
+        assertEquals(1, described.get("DomainDescription").get("ManagedLoginVersion").asInt());
+    }
+
+    @Test
+    void userPoolDomainRejectsAManagedLoginVersionThatIsNotAnInteger() {
+        String poolId = createPoolWithPrefixDomain("typed-version");
+        ObjectNode updateReq = mapper.createObjectNode()
+                .put("Domain", "typed-version")
+                .put("UserPoolId", poolId)
+                .put("ManagedLoginVersion", "two");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateUserPoolDomain", updateReq, "us-east-1"));
+
+        assertEquals("SerializationException", failure.getErrorCode());
+        JsonNode described = (JsonNode) handler.handle("DescribeUserPoolDomain",
+                mapper.createObjectNode().put("Domain", "typed-version"), "us-east-1").getEntity();
+        assertEquals(1, described.get("DomainDescription").get("ManagedLoginVersion").asInt());
+    }
 }

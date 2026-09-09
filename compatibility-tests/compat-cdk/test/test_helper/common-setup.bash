@@ -24,6 +24,9 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
 export AWS_ENDPOINT_URL="$FLOCI_ENDPOINT"
+# aws-cdk-local v3 requires AWS_ENDPOINT_URL_S3; use Floci's virtual-hosted S3 domain so
+# <bucket>.s3.localhost.floci.io resolves (public DNS locally; Floci's embedded DNS in Docker).
+export AWS_ENDPOINT_URL_S3="${AWS_ENDPOINT_URL_S3:-http://s3.localhost.floci.io:4566}"
 
 aws_cmd() {
     aws --endpoint-url "$FLOCI_ENDPOINT" --region "$AWS_DEFAULT_REGION" --output json "$@"

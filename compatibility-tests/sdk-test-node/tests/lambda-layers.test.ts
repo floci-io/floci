@@ -249,3 +249,125 @@ describe('Lambda Layer Attachment', () => {
     expect(response.Layers![0].Arn).toBe(layerVersionArn);
   });
 });
+
+describe('Lambda Layers listing parameters', () => {
+  let lambda: LambdaClient;
+  let layerName: string;
+
+  const zip = (marker: string) =>
+    buildMinimalZip('nodejs/node_modules/shared/index.js', Buffer.from(marker));
+
+  beforeAll(async () => {
+    lambda = makeClient(LambdaClient);
+    layerName = `compat-layer-params-${uniqueName()}`;
+
+    // v1 nodejs20.x/x86_64, v2 python3.13/arm64, v3 nodejs20.x/arm64: every filter
+    // combination below then selects a different subset of the same layer.
+    await lambda.send(
+      new PublishLayerVersionCommand({
+        LayerName: layerName,
+        Content: { ZipFile: zip('v1') },
+        CompatibleRuntimes: ['nodejs20.x'],
+        CompatibleArchitectures: ['x86_64'],
+      })
+    );
+    await lambda.send(
+      new PublishLayerVersionCommand({
+        LayerName: layerName,
+        Content: { ZipFile: zip('v2') },
+        CompatibleRuntimes: ['python3.13'],
+        CompatibleArchitectures: ['arm64'],
+      })
+    );
+    await lambda.send(
+      new PublishLayerVersionCommand({
+        LayerName: layerName,
+        Content: { ZipFile: zip('v3') },
+        CompatibleRuntimes: ['nodejs20.x'],
+        CompatibleArchitectures: ['arm64'],
+      })
+    );
+  });
+
+  afterAll(async () => {
+    for (const VersionNumber of [1, 2, 3]) {
+      try {
+        await lambda.send(new DeleteLayerVersionCommand({ LayerName: layerName, VersionNumber }));
+      } catch { /* ignore */ }
+    }
+  });
+
+  it('filters listLayerVersions by CompatibleRuntime', async () => {
+    const response = await lambda.send(
+      new ListLayerVersionsCommand({ LayerName: layerName, CompatibleRuntime: 'python3.13' })
+    );
+
+    expect(response.LayerVersions?.map((v) => v.Version)).toEqual([2]);
+  });
+
+  it('filters listLayerVersions by CompatibleArchitecture', async () => {
+    const response = await lambda.send(
+      new ListLayerVersionsCommand({ LayerName: layerName, CompatibleArchitecture: 'arm64' })
+    );
+
+    expect(response.LayerVersions?.map((v) => v.Version).sort()).toEqual([2, 3]);
+  });
+
+  it('applies both filters together', async () => {
+    const response = await lambda.send(
+      new ListLayerVersionsCommand({
+        LayerName: layerName,
+        CompatibleRuntime: 'nodejs20.x',
+        CompatibleArchitecture: 'arm64',
+      })
+    );
+
+    expect(response.LayerVersions?.map((v) => v.Version)).toEqual([3]);
+  });
+
+  it('pages listLayerVersions with MaxItems and resumes from NextMarker', async () => {
+    const seen: number[] = [];
+    let marker: string | undefined;
+    let pages = 0;
+
+    do {
+      const page = await lambda.send(
+        new ListLayerVersionsCommand({ LayerName: layerName, MaxItems: 1, Marker: marker })
+      );
+      expect(page.LayerVersions).toHaveLength(1);
+      seen.push(page.LayerVersions![0].Version!);
+      marker = page.NextMarker;
+      pages += 1;
+    } while (marker && pages < 5);
+
+    // The marker walks every version exactly once and clears on the last page.
+    expect(marker).toBeFalsy();
+    expect(seen.sort()).toEqual([1, 2, 3]);
+  });
+
+  it('reports the newest matching version as LatestMatchingVersion, not the newest overall', async () => {
+    const python = await lambda.send(
+      new ListLayersCommand({ CompatibleRuntime: 'python3.13' })
+    );
+    const node = await lambda.send(new ListLayersCommand({ CompatibleRuntime: 'nodejs20.x' }));
+
+    expect(
+      python.Layers?.find((l) => l.LayerName === layerName)?.LatestMatchingVersion?.Version
+    ).toBe(2);
+    expect(
+      node.Layers?.find((l) => l.LayerName === layerName)?.LatestMatchingVersion?.Version
+    ).toBe(3);
+  });
+
+  it('drops a layer with no matching version out of listLayers', async () => {
+    const response = await lambda.send(new ListLayersCommand({ CompatibleRuntime: 'java21' }));
+
+    expect(response.Layers?.some((l) => l.LayerName === layerName)).toBe(false);
+  });
+
+  it('rejects an unknown CompatibleRuntime with ValidationException', async () => {
+    await expect(
+      lambda.send(new ListLayersCommand({ CompatibleRuntime: 'bogus9.x' }))
+    ).rejects.toMatchObject({ name: 'ValidationException' });
+  });
+});

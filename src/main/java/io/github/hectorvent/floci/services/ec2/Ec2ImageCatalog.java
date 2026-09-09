@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +50,22 @@ public class Ec2ImageCatalog {
         return Optional.ofNullable(loaded().imagesByIdOrAlias.get(imageId));
     }
 
+    /**
+     * Looks up the image published under one of AWS's public SSM parameter names, such as
+     * {@code /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}.
+     */
+    public Optional<CatalogImage> findByPublicParameterName(String parameterName) {
+        if (parameterName == null || parameterName.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(loaded().imagesByPublicParameterName.get(parameterName));
+    }
+
+    /** Every public SSM parameter name the catalog answers, in catalog order. */
+    public List<String> publicParameterNames() {
+        return List.copyOf(loaded().imagesByPublicParameterName.keySet());
+    }
+
     private Loaded loaded() {
         Loaded result = loaded;
         if (result == null) {
@@ -67,6 +84,7 @@ public class Ec2ImageCatalog {
         private final String defaultDockerImage;
         private final List<CatalogImage> images;
         private final Map<String, CatalogImage> imagesByIdOrAlias;
+        private final Map<String, CatalogImage> imagesByPublicParameterName;
 
         Loaded(Catalog catalog) {
             this.defaultDockerImage = require(catalog.defaultDockerImage, "defaultDockerImage");
@@ -75,6 +93,7 @@ public class Ec2ImageCatalog {
                 throw new IllegalStateException("EC2 image catalog has no images: " + CATALOG_RESOURCE_NAME);
             }
             this.imagesByIdOrAlias = indexImages(this.images);
+            this.imagesByPublicParameterName = indexPublicParameterNames(this.images);
         }
     }
 
@@ -107,6 +126,20 @@ public class Ec2ImageCatalog {
         return Map.copyOf(index);
     }
 
+    private static Map<String, CatalogImage> indexPublicParameterNames(List<CatalogImage> images) {
+        Map<String, CatalogImage> index = new LinkedHashMap<>();
+        for (CatalogImage image : images) {
+            for (String parameterName : image.publicParameterNames()) {
+                CatalogImage previous = index.putIfAbsent(parameterName, image);
+                if (previous != null) {
+                    throw new IllegalStateException(
+                            "Duplicate EC2 image catalog public parameter name: " + parameterName);
+                }
+            }
+        }
+        return Collections.unmodifiableMap(index);
+    }
+
     private static void addIndexEntry(Map<String, CatalogImage> index, String imageIdOrAlias, CatalogImage image) {
         CatalogImage previous = index.putIfAbsent(imageIdOrAlias, image);
         if (previous != null) {
@@ -133,6 +166,7 @@ public class Ec2ImageCatalog {
     public static final class CatalogImage {
         public String imageId;
         public List<String> aliases = List.of();
+        public List<String> publicParameterNames = List.of();
         public String dockerImage;
         public String name;
         public String description;
@@ -158,6 +192,14 @@ public class Ec2ImageCatalog {
 
         public List<String> aliases() {
             return aliases == null ? List.of() : List.copyOf(aliases);
+        }
+
+        /**
+         * The public SSM parameter names AWS publishes this image under. AWS seeds them in every
+         * account with no setup, so SSM answers a read of one of these names from the catalog.
+         */
+        public List<String> publicParameterNames() {
+            return publicParameterNames == null ? List.of() : List.copyOf(publicParameterNames);
         }
 
         public List<String> idsAndAliases() {

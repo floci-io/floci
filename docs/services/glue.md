@@ -44,6 +44,26 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 | UpdateUserDefinedFunction | Updates a stored user-defined function. |
 | DeleteUserDefinedFunction | Deletes a user-defined function from a database. |
 
+#### Jobs
+
+| Action | Description |
+|--------|-------------|
+| CreateJob | Creates a new job definition. |
+| GetJob | Retrieves an existing job definition. |
+| GetJobs | Retrieves all current job definitions. |
+| UpdateJob | Updates an existing job definition. |
+| DeleteJob | Deletes a specified job definition. |
+
+#### Crawlers
+
+| Action | Description |
+|--------|-------------|
+| CreateCrawler | Creates a new crawler with specified targets, role, configuration, and optional schedule. |
+| GetCrawler | Retrieves metadata for a specified crawler. |
+| GetCrawlers | Retrieves metadata for all crawlers defined in the customer account. |
+| UpdateCrawler | Updates a crawler. |
+| DeleteCrawler | Removes a specified crawler from the AWS Glue Data Catalog. |
+
 ### Schema Registry
 
 #### Registries

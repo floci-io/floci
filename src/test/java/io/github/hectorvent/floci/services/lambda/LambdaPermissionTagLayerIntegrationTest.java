@@ -297,6 +297,26 @@ class LambdaPermissionTagLayerIntegrationTest {
             .body("LayerVersions", empty());
     }
 
+    // ── GetFunction tags ──────────────────────────────────────────────────────
+
+    /**
+     * The Terraform provider and the SDKs read a function's tags from GetFunction rather than by
+     * calling ListTags, so omitting the field made a tagged function read back untagged and diff
+     * on every plan. Runs after the untag above, so it also pins that GetFunction reflects a
+     * removed tag rather than serving a stale set.
+     */
+    @Test
+    @Order(19)
+    void getFunction_includesTags() {
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + FN)
+        .then()
+            .statusCode(200)
+            .body("Tags.team", equalTo("platform"))
+            .body("Tags.env", nullValue());
+    }
+
     // ── cleanup ───────────────────────────────────────────────────────────────
 
     @Test

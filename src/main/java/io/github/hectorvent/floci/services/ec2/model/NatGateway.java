@@ -19,6 +19,7 @@ public class NatGateway {
     private String connectivityType = "public";
     private Instant createTime;
     private String region;
+    private List<NatGatewayAddress> natGatewayAddresses = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
 
     public NatGateway() {}
@@ -46,6 +47,9 @@ public class NatGateway {
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
+
+    public List<NatGatewayAddress> getNatGatewayAddresses() { return natGatewayAddresses; }
+    public void setNatGatewayAddresses(List<NatGatewayAddress> natGatewayAddresses) { this.natGatewayAddresses = natGatewayAddresses; }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }

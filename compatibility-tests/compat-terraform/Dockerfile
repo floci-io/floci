@@ -1,6 +1,6 @@
 FROM hashicorp/terraform:1.14.7 AS terraform
 
-FROM amazon/aws-cli:2.15.52
+FROM amazon/aws-cli:2.34.32
 
 # Copy terraform binary from official Terraform image
 COPY --from=terraform /bin/terraform /usr/local/bin/terraform

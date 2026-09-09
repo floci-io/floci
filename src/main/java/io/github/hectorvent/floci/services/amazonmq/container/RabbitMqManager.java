@@ -83,7 +83,10 @@ public class RabbitMqManager {
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withDockerNetwork(config.services().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "amazonmq", broker.getBrokerId(), regionResolver.getAccountId(),
+                        regionResolver.getDefaultRegion()));
 
         // Seed the broker's admin user. RabbitMQ's built-in `guest` user is
         // loopback-only, so it cannot authenticate over the mapped host port; a user

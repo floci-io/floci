@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
@@ -24,10 +24,11 @@ import static org.mockito.Mockito.when;
 class ElastiCacheMemcachedServiceTest {
 
     private ElastiCacheMemcachedService service;
+    private ElastiCacheMemcachedContainerManager containerManager;
 
     @BeforeEach
     void setUp() {
-        ElastiCacheMemcachedContainerManager containerManager = mock(ElastiCacheMemcachedContainerManager.class);
+        containerManager = mock(ElastiCacheMemcachedContainerManager.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
 
@@ -38,8 +39,8 @@ class ElastiCacheMemcachedServiceTest {
         when(ecConfig.defaultMemcachedImage()).thenReturn("memcached:1.6");
         when(config.hostname()).thenReturn(Optional.of("localhost"));
 
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> new InMemoryStorage<>());
-        when(containerManager.start(anyString(), anyString()))
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "cluster", "localhost", 11211));
 
         service = new ElastiCacheMemcachedService(containerManager, storageFactory, config);
@@ -110,8 +111,8 @@ class ElastiCacheMemcachedServiceTest {
         when(ecConfig.defaultMemcachedImage()).thenReturn("memcached:1.6");
         when(config.hostname()).thenReturn(Optional.empty());
 
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> new InMemoryStorage<>());
-        when(containerManager.start(anyString(), anyString()))
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "cluster", "172.20.0.10", 11211));
 
         ElastiCacheMemcachedService containerModeService =
@@ -120,5 +121,26 @@ class ElastiCacheMemcachedServiceTest {
         CacheCluster cluster = containerModeService.createCacheCluster("container-cluster");
 
         assertEquals("172.20.0.10", cluster.getConfigurationEndpoint().address());
+    }
+
+    @Test
+    void createClusterWithoutDockerDaemonStillReachesAvailable() {
+        // tryStart() returns null when no Docker daemon is reachable. The cache cluster record is
+        // metadata, so the create still succeeds and the cluster reaches 'available' on the first
+        // describe (what SDK/Terraform waiters poll), on Memcached's well-known port.
+        when(containerManager.tryStart(anyString(), anyString())).thenReturn(null);
+
+        CacheCluster cluster = service.createCacheCluster("no-docker-cluster");
+
+        assertEquals(CacheClusterStatus.AVAILABLE, cluster.getCacheClusterStatus());
+        assertEquals("localhost", cluster.getConfigurationEndpoint().address());
+        assertEquals(11211, cluster.getConfigurationEndpoint().port());
+        assertEquals("no-docker-cluster",
+                service.getCacheCluster("no-docker-cluster").getCacheClusterId());
+
+        // Delete must not reach for a container that was never created.
+        service.deleteCacheCluster("no-docker-cluster");
+        org.mockito.Mockito.verify(containerManager, org.mockito.Mockito.never())
+                .stop(org.mockito.ArgumentMatchers.any());
     }
 }

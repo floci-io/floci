@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * {@link TagHandler} implementation for AppConfig.
@@ -17,9 +18,14 @@ import java.util.Map;
  *   <li>{@code arn:aws:appconfig:<region>:<account>:application/<appId>}
  *   <li>{@code arn:aws:appconfig:<region>:<account>:application/<appId>/environment/<envId>}
  *   <li>{@code arn:aws:appconfig:<region>:<account>:application/<appId>/configurationprofile/<profileId>}
+ *   <li>{@code arn:aws:appconfig:<region>:<account>:deploymentstrategy/<strategyId>}
+ *   <li>{@code arn:aws:appconfig:<region>:<account>:extension/<extensionId>}
+ *   <li>{@code arn:aws:appconfig:<region>:<account>:extensionassociation/<associationId>}
  * </ul>
- * Only application-level tags are stored; environment and configurationprofile tag calls
- * are accepted (no-op) to satisfy Terraform provider reads.
+ * Only application-level tags are actually stored; every other recognized ARN shape above is
+ * accepted (not rejected with a 400) but the tag call itself is a no-op - this satisfies callers
+ * (e.g. Terraform's AWS provider) that read tags back after a write without erroring on a resource
+ * type Floci doesn't yet persist tags for.
  */
 @ApplicationScoped
 public class AppConfigTagHandler implements TagHandler {
@@ -68,6 +74,13 @@ public class AppConfigTagHandler implements TagHandler {
 
     private record ResourceRef(String type, String id) {}
 
+    // The AppConfig resource types AWS documents as taggable that are NOT nested under
+    // application/... (see e.g. the Tags property on AWS::AppConfig::DeploymentStrategy,
+    // AWS::AppConfig::Extension, and AWS::AppConfig::ExtensionAssociation) - every other
+    // taggable type (application, environment, configurationprofile) already nests under
+    // application/ and is handled by the branch below.
+    private static final Set<String> TOP_LEVEL_TYPES = Set.of("deploymentstrategy", "extension", "extensionassociation");
+
     private static ResourceRef parseArn(String arn) {
         // arn:aws:appconfig:<region>:<account>:<resource>
         String resource;
@@ -77,6 +90,9 @@ public class AppConfigTagHandler implements TagHandler {
             throw new AwsException("BadRequestException", "Invalid resource ARN: " + arn, 400);
         }
         String[] parts = resource.split("/");
+        if (parts.length == 2 && TOP_LEVEL_TYPES.contains(parts[0])) {
+            return new ResourceRef(parts[0], parts[1]);
+        }
         if (parts.length >= 2 && "application".equals(parts[0])) {
             // application/<appId>
             if (parts.length == 2) return new ResourceRef("application", parts[1]);

@@ -117,7 +117,8 @@ public class FlowLogService {
 
     public FlowLog createFlowLog(String region, String resourceId, String resourceType,
                                  String trafficType, String logDestinationType,
-                                 String logDestination, String logFormat, int maxAggregationInterval) {
+                                 String logDestination, String deliverLogsPermissionArn,
+                                 String logFormat, int maxAggregationInterval) {
         FlowLog fl = new FlowLog();
         fl.setFlowLogId("fl-" + randomHex(17));
         fl.setResourceId(resourceId);
@@ -125,6 +126,7 @@ public class FlowLogService {
         fl.setTrafficType(trafficType != null ? trafficType : "ALL");
         fl.setLogDestinationType(logDestinationType != null ? logDestinationType : "s3");
         fl.setLogDestination(logDestination);
+        fl.setDeliverLogsPermissionArn(deliverLogsPermissionArn);
         fl.setBucketName(bucketFromArn(logDestination));
         fl.setLogFormat(logFormat);
         fl.setMaxAggregationInterval(maxAggregationInterval);

@@ -95,21 +95,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
             // other services (e.g. CloudFormation) referencing resources that now appear missing
             // (see issue #1634). Quarantine the unreadable file and log loudly so the data loss is
             // detectable rather than masquerading as an empty store.
-            quarantineUnreadableFile(e);
-        }
-    }
-
-    private void quarantineUnreadableFile(IOException cause) {
-        Path quarantine = filePath.resolveSibling(filePath.getFileName() + ".corrupt");
-        try {
-            Files.move(filePath, quarantine, StandardCopyOption.REPLACE_EXISTING);
-            LOG.errorv(cause, "Failed to load persisted data from {0}; moved the unreadable file to "
-                    + "{1} and started with an empty store. This store's state was lost.",
-                    filePath, quarantine);
-        } catch (IOException moveError) {
-            LOG.errorv(cause, "Failed to load persisted data from {0}; could not quarantine it ({1}). "
-                    + "Starting with an empty store. This store's state was lost.",
-                    filePath, moveError.getMessage());
+            StorageQuarantine.quarantine(filePath, e, LOG);
         }
     }
 

@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -46,25 +46,21 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
         } else {
             name = ctx.generatePhysicalName(r.getLogicalId(), 128, false);
         }
-        String imageId = null;
-        String instanceType = null;
-        String keyName = null;
-        String encodedUserData = null;
-        String iamInstanceProfileArn = null;
-        List<String> securityGroupIds = null;
+        LaunchTemplateData data = new LaunchTemplateData();
         if (props != null && props.has("LaunchTemplateData")) {
-            JsonNode data = ctx.engine().resolveNode(props.get("LaunchTemplateData"));
-            imageId = data.path("ImageId").asText(null);
-            instanceType = data.path("InstanceType").asText(null);
-            keyName = data.path("KeyName").asText(null);
+            JsonNode node = ctx.engine().resolveNode(props.get("LaunchTemplateData"));
+            data.setImageId(node.path("ImageId").asText(null));
+            data.setInstanceType(node.path("InstanceType").asText(null));
+            data.setKeyName(node.path("KeyName").asText(null));
             // CFN carries UserData already base64-encoded.
-            encodedUserData = data.path("UserData").asText(null);
-            iamInstanceProfileArn = resolveIamInstanceProfileArn(data.path("IamInstanceProfile"), ctx);
-            if (data.has("SecurityGroupIds")) {
-                securityGroupIds = new ArrayList<>();
-                for (JsonNode sg : data.get("SecurityGroupIds")) {
-                    securityGroupIds.add(sg.asText());
+            data.setEncodedUserData(node.path("UserData").asText(null));
+            data.setIamInstanceProfile(iamInstanceProfile(node.path("IamInstanceProfile")));
+            if (node.has("SecurityGroupIds")) {
+                List<String> securityGroupIds = new ArrayList<>();
+                for (JsonNode securityGroup : node.get("SecurityGroupIds")) {
+                    securityGroupIds.add(securityGroup.asText());
                 }
+                data.setSecurityGroupIds(securityGroupIds);
             }
         }
         // UpdateStack re-provisions every resource. Creating unconditionally meant an explicit
@@ -74,12 +70,9 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
         // AWS::EC2::LaunchTemplate behaves when only its LaunchTemplateData changes.
         LaunchTemplate lt;
         if (existing != null && name.equals(existing.getLaunchTemplateName())) {
-            lt = ec2Service.createLaunchTemplateVersion(ctx.region(), previousId, null, null,
-                    imageId, instanceType, keyName, securityGroupIds, null, encodedUserData,
-                    iamInstanceProfileArn, null);
+            lt = ec2Service.createLaunchTemplateVersion(ctx.region(), previousId, null, null, data);
         } else {
-            lt = ec2Service.createLaunchTemplate(ctx.region(), name, imageId, instanceType, keyName,
-                    securityGroupIds, null, encodedUserData, iamInstanceProfileArn, null, null);
+            lt = ec2Service.createLaunchTemplate(ctx.region(), name, data, null);
             // A changed name is a replacement: drop the template the previous execution created,
             // once the new one exists, so the old one is not left behind.
             if (existing != null) {
@@ -112,19 +105,18 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * A profile given only by {@code Name} is normalized to its instance-profile ARN, matching
-     * what the EC2 query API does for {@code IamInstanceProfile.Name} request parameters
-     * (see {@code Ec2QueryHandler#resolveIamInstanceProfileArn}).
+     * Keeps the form CloudFormation supplied. EC2 stores {@code Arn} and {@code Name} as given and
+     * derives the ARN only at launch time, so normalizing {@code Name} into an ARN here would put
+     * back the drift this provisioner's template data is read back through.
      */
-    private String resolveIamInstanceProfileArn(JsonNode profile, ProvisionContext ctx) {
+    private LaunchTemplateData.IamInstanceProfile iamInstanceProfile(JsonNode profile) {
         String arn = profile.path("Arn").asText(null);
-        if (arn != null && !arn.isBlank()) {
-            return arn;
-        }
         String profileName = profile.path("Name").asText(null);
-        if (profileName == null || profileName.isBlank()) {
+        boolean hasArn = arn != null && !arn.isBlank();
+        boolean hasName = profileName != null && !profileName.isBlank();
+        if (!hasArn && !hasName) {
             return null;
         }
-        return AwsArnUtils.Arn.of("iam", "", ctx.accountId(), "instance-profile/" + profileName).toString();
+        return new LaunchTemplateData.IamInstanceProfile(hasArn ? arn : null, hasName ? profileName : null);
     }
 }

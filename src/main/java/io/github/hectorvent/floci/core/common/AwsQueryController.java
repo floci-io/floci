@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.autoscaling.AutoScalingQueryHandler;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.ec2.Ec2QueryHandler;
 import io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkQueryHandler;
+import io.github.hectorvent.floci.services.elb.ElbClassicQueryHandler;
 import io.github.hectorvent.floci.services.elbv2.ElbV2QueryHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsQueryHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
@@ -15,6 +16,8 @@ import io.github.hectorvent.floci.services.elasticache.ElastiCacheQueryHandler;
 import io.github.hectorvent.floci.services.iam.IamQueryHandler;
 import io.github.hectorvent.floci.services.iam.StsQueryHandler;
 import io.github.hectorvent.floci.services.rds.RdsQueryHandler;
+import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.redshift.RedshiftQueryHandler;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.ses.SesQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
@@ -82,6 +85,7 @@ public class AwsQueryController {
             "CreateGroup", "GetGroup", "DeleteGroup", "ListGroups",
             "AddUserToGroup", "RemoveUserFromGroup", "ListGroupsForUser",
             "CreateRole", "GetRole", "DeleteRole", "ListRoles", "UpdateRole",
+            "CreateServiceLinkedRole", "DeleteServiceLinkedRole", "GetServiceLinkedRoleDeletionStatus",
             "CreatePolicy", "GetPolicy", "DeletePolicy", "ListPolicies", "ListEntitiesForPolicy",
             "CreatePolicyVersion", "GetPolicyVersion", "DeletePolicyVersion",
             "ListPolicyVersions", "SetDefaultPolicyVersion",
@@ -138,7 +142,7 @@ public class AwsQueryController {
     );
 
     private static final Set<String> EC2_ACTIONS = Set.of(
-            "RunInstances", "DescribeInstances", "TerminateInstances", "StartInstances", "StopInstances",
+            "RunInstances", "CreateFleet", "DescribeInstances", "TerminateInstances", "StartInstances", "StopInstances",
             "RebootInstances", "DescribeInstanceStatus", "DescribeInstanceAttribute", "ModifyInstanceAttribute",
             "CreateVpc", "DescribeVpcs", "DeleteVpc", "ModifyVpcAttribute", "DescribeVpcAttribute",
             "DescribeVpcEndpointServices", "CreateVpcEndpoint", "DescribeVpcEndpoints", "DeleteVpcEndpoints",
@@ -156,11 +160,13 @@ public class AwsQueryController {
             "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
             "AttachInternetGateway", "DetachInternetGateway",
             "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
-            "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "DeleteRoute",
+            "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "ReplaceRoute", "DeleteRoute",
             "CreateNetworkAcl", "DescribeNetworkAcls", "DeleteNetworkAcl",
             "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
             "ReplaceNetworkAclAssociation",
             "CreateNatGateway", "DescribeNatGateways", "DeleteNatGateway",
+            "CreateCapacityReservation", "DescribeCapacityReservations",
+            "ModifyCapacityReservation", "CancelCapacityReservation",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
             "DescribeAddressesAttribute",
             "DescribeIamInstanceProfileAssociations",
@@ -180,6 +186,9 @@ public class AwsQueryController {
     private final NeptuneService neptuneService;
     private final DocDbQueryHandler docDbQueryHandler;
     private final DocDbService docDbService;
+    private final RdsService rdsService;
+    /** ARNs already reported as held by both services, so the warning is logged once each. */
+    private final java.util.Set<String> reportedArnCollisions = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;
@@ -189,8 +198,10 @@ public class AwsQueryController {
     private final CognitoJsonHandler cognitoJsonHandler;
     private final Ec2QueryHandler ec2QueryHandler;
     private final ElbV2QueryHandler elbV2QueryHandler;
+    private final ElbClassicQueryHandler elbClassicQueryHandler;
     private final AutoScalingQueryHandler autoScalingQueryHandler;
     private final ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler;
+    private final RedshiftQueryHandler redshiftQueryHandler;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
 
@@ -202,6 +213,7 @@ public class AwsQueryController {
                               NeptuneService neptuneService,
                               DocDbQueryHandler docDbQueryHandler,
                               DocDbService docDbService,
+                              RdsService rdsService,
                               SqsQueryHandler sqsQueryHandler, SnsQueryHandler snsQueryHandler,
                               SesQueryHandler sesQueryHandler,
                               IamQueryHandler iamQueryHandler, StsQueryHandler stsQueryHandler,
@@ -209,8 +221,10 @@ public class AwsQueryController {
                               CognitoJsonHandler cognitoJsonHandler,
                               Ec2QueryHandler ec2QueryHandler,
                               ElbV2QueryHandler elbV2QueryHandler,
+                              ElbClassicQueryHandler elbClassicQueryHandler,
                               AutoScalingQueryHandler autoScalingQueryHandler,
                               ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler,
+                              RedshiftQueryHandler redshiftQueryHandler,
                               ResolvedServiceCatalog catalog,
                               RegionResolver regionResolver) {
         this.cloudFormationQueryHandler = cloudFormationQueryHandler;
@@ -220,6 +234,7 @@ public class AwsQueryController {
         this.neptuneService = neptuneService;
         this.docDbQueryHandler = docDbQueryHandler;
         this.docDbService = docDbService;
+        this.rdsService = rdsService;
         this.sqsQueryHandler = sqsQueryHandler;
         this.snsQueryHandler = snsQueryHandler;
         this.sesQueryHandler = sesQueryHandler;
@@ -229,8 +244,10 @@ public class AwsQueryController {
         this.cognitoJsonHandler = cognitoJsonHandler;
         this.ec2QueryHandler = ec2QueryHandler;
         this.elbV2QueryHandler = elbV2QueryHandler;
+        this.elbClassicQueryHandler = elbClassicQueryHandler;
         this.autoScalingQueryHandler = autoScalingQueryHandler;
         this.elasticBeanstalkQueryHandler = elasticBeanstalkQueryHandler;
+        this.redshiftQueryHandler = redshiftQueryHandler;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
     }
@@ -282,40 +299,176 @@ public class AwsQueryController {
             case "sns" -> snsQueryHandler.handle(action, formParams, region);
             case "iam" -> iamQueryHandler.handle(action, formParams, authorization);
             case "sts" -> stsQueryHandler.handle(action, formParams);
-            case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams);
-            case "rds" -> { 
+            case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams, region);
+            case "rds" -> {
                 // Neptune signs requests with "rds" credential scope (same wire protocol).
-                // Route to Neptune when Engine=neptune (create ops) or when the cluster/instance
-                // already exists in Neptune storage (describe/modify/delete ops).
+                // Route to Neptune when Engine=neptune (create ops), when the cluster/instance
+                // already exists in Neptune storage (describe/modify/delete ops), or when a
+                // tagging ResourceName is a Neptune ARN.
                 String engine = formParams.getFirst("Engine");
                 String clusterId = formParams.getFirst("DBClusterIdentifier");
                 String instanceId = formParams.getFirst("DBInstanceIdentifier");
+
+                Response identifierClash = rdsAlreadyHoldsIdentifier(action, formParams, region);
+                if (identifierClash != null) {
+                    yield identifierClash;
+                }
+
                 if ("neptune".equalsIgnoreCase(engine)
                         || neptuneService.hasCluster(clusterId)
-                        || neptuneService.hasInstance(instanceId)) {
+                        || neptuneService.hasInstance(instanceId)
+                        || neptuneService.hasResourceWithArn(formParams.getFirst("ResourceName"))) {
                     yield neptuneQueryHandler.handle(action, formParams);
                 }
 
                 if ("docdb".equalsIgnoreCase(engine)
-                       || docDbService.hasCluster(clusterId)
-                       || docDbService.hasInstance(instanceId)) {
+                       || docDbService.hasCluster(clusterId, region)
+                       || docDbService.hasInstance(instanceId, region)
+                       || namesDocDbResource(formParams.getFirst("ResourceName"), region)) {
                         yield docDbQueryHandler.handle(action, formParams);
                 }
                 yield rdsQueryHandler.handle(action, formParams, region);
             }
-            case "neptune" -> neptuneQueryHandler.handle(action, formParams);
-            case "docdb" -> docDbQueryHandler.handle(action, formParams);
+            case "neptune" -> isFamilyListing(action, formParams)
+                    ? rdsQueryHandler.handle(action, formParams, region)
+                    : neptuneQueryHandler.handle(action, formParams);
+            case "docdb" -> {
+                // The same check as on the rds scope: DocumentDB is reachable under either, and a
+                // create that skipped it here would put a second record under an ARN RDS owns.
+                Response clash = rdsAlreadyHoldsIdentifier(action, formParams, region);
+                if (clash != null) {
+                    yield clash;
+                }
+                // The list form answers for the whole RDS family on either endpoint; the RDS
+                // handler assembles it from both stores.
+                if (isFamilyListing(action, formParams)) {
+                    yield rdsQueryHandler.handle(action, formParams, region);
+                }
+                yield docDbQueryHandler.handle(action, formParams);
+            }
             case "email" -> sesQueryHandler.handle(action, formParams, region);
             case "monitoring" -> cloudWatchMetricsQueryHandler.handle(action, formParams, region);
             case "cloudformation" -> cloudFormationQueryHandler.handle(action, formParams, region);
             case "cognito-idp" -> handleCognitoQuery(action, formParams, region);
             case "ec2" -> ec2QueryHandler.handle(action, formParams, region);
-            case "elasticloadbalancing" -> elbV2QueryHandler.handle(action, formParams, region);
+            case "elasticloadbalancing" -> isElbClassicRequest(action, formParams)
+                    ? elbClassicQueryHandler.handle(action, formParams, region)
+                    : elbV2QueryHandler.handle(action, formParams, region);
             case "autoscaling" -> autoScalingQueryHandler.handle(action, formParams, region);
             case "elasticbeanstalk" -> elasticBeanstalkQueryHandler.handle(action, formParams, region);
+            case "redshift" -> redshiftQueryHandler.handle(action, formParams);
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
+    }
+
+    /** The API version a Classic (v1) Elastic Load Balancing request declares. */
+    private static final String ELB_CLASSIC_API_VERSION = "2012-06-01";
+
+    /** The API version an ELBv2 (ALB/NLB) request declares. */
+    private static final String ELB_V2_API_VERSION = "2015-12-01";
+
+    /**
+     * Whether an {@code elasticloadbalancing} request is for the Classic (2012-06-01) API.
+     *
+     * <p>Classic ELB and ELBv2 share an endpoint host <em>and</em> a credential scope, so the
+     * service name cannot separate them — the same in-case split the {@code rds} scope already
+     * needs for Neptune and DocumentDB. What separates them is the API version, which every
+     * Query-protocol request carries as the {@code Version} form parameter and which both service
+     * models declare. That is the discriminator used here, in preference to guessing from the
+     * shape of the parameters: a client that says {@code Version=2012-06-01} has told us which API
+     * it is speaking, and answering it from the other one is the defect this routing exists to fix.
+     *
+     * <p>The parameter shape is only a fallback, for a hand-rolled client that omitted
+     * {@code Version}. Then an action unique to one API decides, and for the action names both
+     * APIs define, the presence of a Classic-only parameter does: {@code LoadBalancerName} or
+     * {@code LoadBalancerNames} identify a load balancer by name, which is Classic's addressing
+     * model, whereas ELBv2 uses {@code LoadBalancerArn}, {@code Name} or {@code ResourceArns}.
+     * With neither present the request stays with ELBv2, which is the pre-existing behaviour.
+     */
+    private static boolean isElbClassicRequest(String action, MultivaluedMap<String, String> formParams) {
+        String version = formParams.getFirst("Version");
+        if (ELB_CLASSIC_API_VERSION.equals(version)) {
+            return true;
+        }
+        if (ELB_V2_API_VERSION.equals(version)) {
+            return false;
+        }
+        if (ElbClassicQueryHandler.CLASSIC_ONLY_ACTIONS.contains(action)) {
+            return true;
+        }
+        if (!ElbClassicQueryHandler.SHARED_ACTIONS.contains(action)) {
+            return false;
+        }
+        return formParams.getFirst("LoadBalancerName") != null
+                || formParams.getFirst("LoadBalancerNames.member.1") != null;
+    }
+
+    /**
+     * The AlreadyExists answer when a create names an identifier RDS already holds here, or null.
+     *
+     * <p>One identifier space covers the whole RDS family: a live account refuses to create an
+     * Aurora cluster named like an existing DocumentDB one. Answering that way is what stops two
+     * services holding one identifier in one region, which no ARN could then tell apart — so the
+     * check has to run on every route that reaches DocumentDB, not only the {@code rds} scope.
+     *
+     * <p>Only the identifier being created is checked: {@code CreateDBInstance} names its parent
+     * cluster too, and that cluster existing in RDS is the normal case rather than a clash.
+     */
+    private Response rdsAlreadyHoldsIdentifier(String action,
+                                               MultivaluedMap<String, String> formParams,
+                                               String region) {
+        if ("CreateDBCluster".equals(action) && rdsService.hasClusterOrInstance(
+                formParams.getFirst("DBClusterIdentifier"), null, region)) {
+            return xmlErrorResponse("DBClusterAlreadyExistsFault", "DB Cluster already exists", 400);
+        }
+        if ("CreateDBInstance".equals(action) && rdsService.hasClusterOrInstance(
+                null, formParams.getFirst("DBInstanceIdentifier"), region)) {
+            return xmlErrorResponse("DBInstanceAlreadyExists", "DB Instance already exists", 400);
+        }
+        return null;
+    }
+
+    /**
+     * Whether a tagging {@code ResourceName} names a DocumentDB cluster or instance.
+     *
+     * <p>The tag actions carry no engine or identifier to route on — only the ARN of the resource
+     * they address — so without reading it they reach the RDS handler, which does not hold
+     * DocumentDB's records. The whole ARN is matched, not its trailing name: RDS and DocumentDB
+     * share one ARN space, so a name both services use would otherwise be answered from the wrong
+     * store, and an RDS parameter group or option group could be resolved as a cluster. Anything
+     * DocumentDB does not hold under that exact ARN stays with RDS.
+     *
+     * <p>State persisted before creates were made to share one identifier space can still hold the
+     * same identifier in both stores. DocumentDB answers it, which is what the identifier checks
+     * above already do for every other action on that record — describe, modify and delete
+     * included — so one identifier keeps one answer. The collision is logged once, because the
+     * RDS record behind it is unreachable on this scope and only deleting one of the two fixes it.
+     */
+    private static boolean isFamilyListing(String action, MultivaluedMap<String, String> formParams) {
+        return switch (action) {
+            case "DescribeDBClusters" -> isBlank(formParams.getFirst("DBClusterIdentifier"));
+            case "DescribeDBInstances" -> isBlank(formParams.getFirst("DBInstanceIdentifier"));
+            default -> false;
+        };
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    private boolean namesDocDbResource(String resourceName, String region) {
+        if (!docDbService.hasResourceWithArn(resourceName)) {
+            return false;
+        }
+        String identifier = resourceName.substring(resourceName.lastIndexOf(':') + 1);
+        if (rdsService.hasClusterOrInstance(identifier, identifier, region)
+                && reportedArnCollisions.add(resourceName)) {
+            LOG.warnv("RDS and DocumentDB both hold {0}; DocumentDB answers for it, as it does for "
+                    + "every other action on that identifier. Delete one of the two records.",
+                    resourceName);
+        }
+        return true;
     }
 
     private Response handleCognitoQuery(String action, MultivaluedMap<String, String> formParams, String region) {
@@ -349,7 +502,10 @@ public class AwsQueryController {
     private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(
             "PutMetricData", "ListMetrics", "GetMetricStatistics", "GetMetricData",
             "PutMetricAlarm", "DescribeAlarms", "DeleteAlarms", "SetAlarmState",
-            "ListTagsForResource", "TagResource", "UntagResource"
+            "ListTagsForResource", "TagResource", "UntagResource",
+            "PutDashboard", "GetDashboard", "ListDashboards", "DeleteDashboards",
+            "PutMetricStream", "GetMetricStream", "ListMetricStreams", "DeleteMetricStream",
+            "StartMetricStreams", "StopMetricStreams"
     );
 
     private static final Set<String> ELASTIC_BEANSTALK_ACTIONS = Set.of(
@@ -366,13 +522,23 @@ public class AwsQueryController {
             "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "ModifyDBSubnetGroup", "DeleteDBSubnetGroup",
             "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
+            "AddRoleToDBCluster", "RemoveRoleFromDBCluster",
+            "DescribeGlobalClusters",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
-            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters"
+            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
+            "DescribeDBProxies", "CreateDBProxy", "ModifyDBProxy", "DeleteDBProxy",
+            "RegisterDBProxyTargets", "DeregisterDBProxyTargets",
+            "DescribeDBProxyTargetGroups", "ModifyDBProxyTargetGroup", "DescribeDBProxyTargets",
+            "CreateDBClusterParameterGroup", "DescribeDBClusterParameterGroups",
+            "ModifyDBClusterParameterGroup", "DeleteDBClusterParameterGroup",
+            "DescribeDBClusterParameters",
+            "CreateOptionGroup", "DescribeOptionGroups", "ModifyOptionGroup", "DeleteOptionGroup",
+            "DescribeDBSnapshots", "DescribeDBClusterSnapshots"
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
             "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks", "UpdateTerminationProtection",
-            "ListStacks", "ListExports", "GetTemplate", "ValidateTemplate",
+            "ListStacks", "ListExports", "GetTemplate", "GetTemplateSummary", "ValidateTemplate",
             "CreateChangeSet", "DeleteChangeSet", "DescribeChangeSet", "ExecuteChangeSet", "ListChangeSets",
             "DescribeStackEvents", "DescribeStackResources", "ListStackResources", "DescribeStackResource",
             "SetStackPolicy", "GetStackPolicy",
@@ -388,6 +554,8 @@ public class AwsQueryController {
             "GetAccountSendingEnabled", "ListVerifiedEmailAddresses", "DeleteVerifiedEmailAddress",
             "SetIdentityNotificationTopic", "GetIdentityNotificationAttributes",
             "SetIdentityFeedbackForwardingEnabled",
+            "SetIdentityDkimEnabled",
+            "VerifyDomainDkim",
             "SetIdentityHeadersInNotificationsEnabled",
             "SetIdentityMailFromDomain", "GetIdentityMailFromDomainAttributes",
             "GetIdentityDkimAttributes",
@@ -395,6 +563,9 @@ public class AwsQueryController {
             "CreateTemplate", "UpdateTemplate", "GetTemplate", "DeleteTemplate",
             "ListTemplates", "SendTemplatedEmail", "SendBulkTemplatedEmail",
             "TestRenderTemplate",
+            "CreateCustomVerificationEmailTemplate", "GetCustomVerificationEmailTemplate",
+            "ListCustomVerificationEmailTemplates", "UpdateCustomVerificationEmailTemplate",
+            "DeleteCustomVerificationEmailTemplate", "SendCustomVerificationEmail",
             "CreateConfigurationSet", "DescribeConfigurationSet",
             "ListConfigurationSets", "DeleteConfigurationSet",
             "CreateConfigurationSetEventDestination",
@@ -405,7 +576,13 @@ public class AwsQueryController {
             "UpdateConfigurationSetTrackingOptions",
             "DeleteConfigurationSetTrackingOptions",
             "UpdateConfigurationSetReputationMetricsEnabled",
-            "PutConfigurationSetDeliveryOptions"
+            "PutConfigurationSetDeliveryOptions",
+            "CreateReceiptRuleSet", "DescribeReceiptRuleSet", "ListReceiptRuleSets",
+            "DeleteReceiptRuleSet", "SetActiveReceiptRuleSet", "DescribeActiveReceiptRuleSet",
+            "ReorderReceiptRuleSet", "CloneReceiptRuleSet",
+            "CreateReceiptRule", "DescribeReceiptRule", "UpdateReceiptRule",
+            "DeleteReceiptRule", "SetReceiptRulePosition",
+            "CreateReceiptFilter", "ListReceiptFilters", "DeleteReceiptFilter"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(
@@ -419,6 +596,16 @@ public class AwsQueryController {
             "CreateUserPoolClient", "DescribeUserPoolClient", "ListUserPoolClients", "DeleteUserPoolClient",
             "CreateGroup", "GetGroup", "ListGroups", "DeleteGroup",
             "AdminAddUserToGroup", "AdminRemoveUserFromGroup", "AdminListGroupsForUser"
+    );
+
+    private static final Set<String> REDSHIFT_ACTIONS = Set.of(
+            "CreateCluster", "DescribeClusters", "DeleteCluster",
+            "CreateClusterSnapshot", "DescribeClusterSnapshots", "DeleteClusterSnapshot", "RestoreFromClusterSnapshot",
+            "ModifyCluster", "RebootCluster",
+            "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
+            "ModifyClusterParameterGroup",
+            "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
+            "CreateTags", "DeleteTags", "DescribeTags"
     );
 
     private String resolveService(String authorization, String action) {
@@ -462,7 +649,8 @@ public class AwsQueryController {
         if (EC2_ACTIONS.contains(action)) {
             return "ec2";
         }
-        if (ELB_V2_ACTIONS.contains(action)) {
+        if (ELB_V2_ACTIONS.contains(action)
+                || ElbClassicQueryHandler.CLASSIC_ONLY_ACTIONS.contains(action)) {
             return "elasticloadbalancing";
         }
         if (AUTOSCALING_ACTIONS.contains(action)) {
@@ -470,6 +658,9 @@ public class AwsQueryController {
         }
         if (ELASTIC_BEANSTALK_ACTIONS.contains(action)) {
             return "elasticbeanstalk";
+        }
+        if (REDSHIFT_ACTIONS.contains(action)) {
+            return "redshift";
         }
         // SQS actions are numerous and not enumerated — fall back to sqs only for
         // requests that arrived without an Authorization header (raw/test clients)

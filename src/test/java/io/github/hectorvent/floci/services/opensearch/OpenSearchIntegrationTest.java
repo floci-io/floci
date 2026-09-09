@@ -76,7 +76,8 @@ class OpenSearchIntegrationTest {
             .body("DomainStatus.EngineVersion", equalTo("OpenSearch_2.11"))
             .body("DomainStatus.ClusterConfig.InstanceType", equalTo("m5.large.search"))
             .body("DomainStatus.ClusterConfig.InstanceCount", equalTo(1))
-            .body("DomainStatus.EBSOptions.EBSEnabled", equalTo(true));
+            .body("DomainStatus.EBSOptions.EBSEnabled", equalTo(true))
+            .body("DomainStatus.CognitoOptions.Enabled", equalTo(false));
     }
 
     @Test

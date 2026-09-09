@@ -4,7 +4,12 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.rum.model.AppMonitor;
@@ -13,6 +18,7 @@ import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -27,7 +33,10 @@ import java.util.regex.Pattern;
 
 /** CloudWatch RUM app-monitor lifecycle backed by the configured Floci storage mode. */
 @ApplicationScoped
-public class RumService {
+public class RumService implements ResourceProvider {
+
+    private static final String SERVICE = "rum";
+    private static final String RESOURCE_APP_MONITOR = "appmonitor";
 
     private static final int DEFAULT_MAX_RESULTS = 50;
     private static final int MAX_RESULTS = 100;
@@ -49,18 +58,20 @@ public class RumService {
     private static final Set<String> PLATFORMS = Set.of("Web", "Android", "iOS");
 
     private final StorageBackend<String, AppMonitor> monitorStore;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public RumService(StorageFactory storageFactory) {
+    public RumService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this(storageFactory.create(
                 "rum",
                 "rum-app-monitors.json",
                 new TypeReference<Map<String, AppMonitor>>() {
-                }));
+                }), regionResolver);
     }
 
-    RumService(StorageBackend<String, AppMonitor> monitorStore) {
+    RumService(StorageBackend<String, AppMonitor> monitorStore, RegionResolver regionResolver) {
         this.monitorStore = monitorStore;
+        this.regionResolver = regionResolver;
     }
 
     public synchronized AppMonitor createAppMonitor(String region, JsonNode request) {
@@ -97,6 +108,7 @@ public class RumService {
                 dataStorage(cwLogEnabled),
                 customEvents,
                 deobfuscation);
+        monitor.setOwnerAccountId(regionResolver.getAccountId());
         monitorStore.put(key, monitor);
         return monitor;
     }
@@ -152,6 +164,7 @@ public class RumService {
                 storage,
                 customEvents,
                 deobfuscation);
+        updated.setOwnerAccountId(current.getOwnerAccountId());
         monitorStore.put(key, updated);
     }
 
@@ -173,6 +186,57 @@ public class RumService {
         int end = Math.min(offset + maxResults, monitors.size());
         String responseToken = end < monitors.size() ? encodeOffset(end) : null;
         return new Page(monitors.subList(offset, end), responseToken);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        // RUM's stored model carries neither an ARN nor a region (its GetAppMonitor response has no
+        // such fields), so the region is recovered from the storage key and the ARN is rebuilt here.
+        // The owning account is the one captured when the monitor was created, not the account of the
+        // caller listing resources. Monitors reloaded from disk carry no owner account (the field is
+        // transient), but monitorStore.keys() is already scoped to the calling account by the
+        // account-aware backend, so a monitor reachable here is owned by that caller by construction.
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (String key : monitorStore.keys()) {
+            AppMonitor monitor = monitorStore.get(key).orElse(null);
+            if (monitor == null) {
+                continue;
+            }
+            String region = regionFromKey(key);
+            String accountId = monitor.getOwnerAccountId() != null
+                    ? monitor.getOwnerAccountId()
+                    : regionResolver.getAccountId();
+            String arn = AwsArnUtils.Arn.of(SERVICE, region, accountId,
+                    RESOURCE_APP_MONITOR + "/" + monitor.getName()).toString();
+            resources.add(new ExplorerResource(
+                    arn, SERVICE + ":" + RESOURCE_APP_MONITOR, SERVICE,
+                    region, accountId,
+                    reportedAt(monitor.getCreated()),
+                    monitor.getTags() != null ? monitor.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    private static String regionFromKey(String key) {
+        int separator = key.indexOf("::");
+        return separator > 0 ? key.substring(0, separator) : key;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType(
+                SERVICE + ":" + RESOURCE_APP_MONITOR, SERVICE, true));
+    }
+
+    private static Instant reportedAt(String created) {
+        if (created == null) {
+            return Instant.now();
+        }
+        try {
+            return LocalDateTime.parse(created, TIMESTAMP_FORMATTER).toInstant(ZoneOffset.UTC);
+        } catch (RuntimeException e) {
+            return Instant.now();
+        }
     }
 
     private static String storageKey(String region, String name) {

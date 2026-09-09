@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.apigateway.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.Map;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class CustomDomain {
@@ -19,6 +21,7 @@ public class CustomDomain {
     private String endpointConfigurationType; // REGIONAL or EDGE
     private String domainNameStatus; // AVAILABLE, UPDATING, PENDING
     private String securityPolicy;
+    private Map<String, String> tags;
 
     public CustomDomain() {
         this.domainNameStatus = "AVAILABLE";
@@ -64,4 +67,7 @@ public class CustomDomain {
 
     public String getSecurityPolicy() { return securityPolicy; }
     public void setSecurityPolicy(String securityPolicy) { this.securityPolicy = securityPolicy; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags; }
 }

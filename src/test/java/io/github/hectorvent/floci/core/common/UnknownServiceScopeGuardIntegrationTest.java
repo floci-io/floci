@@ -23,9 +23,9 @@ class UnknownServiceScopeGuardIntegrationTest {
     }
 
     @Test
-    void accountScopedRestRequestGetsUnknownOperation() {
+    void unsupportedRestServiceScopeGetsUnknownOperation() {
         given()
-            .header("Authorization", authorization("account"))
+            .header("Authorization", authorization("support"))
             .contentType("application/json")
             .body("{}")
         .when()
@@ -35,17 +35,6 @@ class UnknownServiceScopeGuardIntegrationTest {
             .contentType(containsString("application/json"))
             .header("X-Amzn-Errortype", "UnknownOperationException")
             .header("x-amzn-query-error", "UnknownOperationException;Sender")
-            .body("__type", equalTo("UnknownOperationException"));
-    }
-
-    @Test
-    void securityhubScopedRestRequestGetsUnknownOperation() {
-        given()
-            .header("Authorization", authorization("securityhub"))
-        .when()
-            .get("/accounts")
-        .then()
-            .statusCode(404)
             .body("__type", equalTo("UnknownOperationException"));
     }
 

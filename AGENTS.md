@@ -249,17 +249,75 @@ When adding functionality:
 
 ## Adding a New AWS Service
 
-1. Create a package under `services/`
-2. Add:
-   - Controller
-   - Service
-   - `model/`
-3. Register the service in `ServiceRegistry`
-4. Add config to `EmulatorConfig`
-5. Add YAML config in main and test config files
-6. Wire storage through `StorageFactory`
-7. Add tests
-8. Update documentation
+1. Create a package under `services/<svc>/` with a Controller, a Service, and `model/`
+2. Add a `<Svc>ServiceConfig` interface and its accessor on `ServicesConfig` in `EmulatorConfig`
+3. Add one `descriptor(...)` entry in `ResolvedServiceCatalog`. This is the registration point;
+   `ServiceRegistry` only reads the catalog and has no registration API
+4. Add `floci.services.<key>.enabled` to both `src/main/resources/application.yml` and
+   `src/test/resources/application.yml`
+5. JSON 1.1 only: inject the handler in `AwsJson11Controller`
+6. Obtain storage through `StorageFactory` and implement `Resettable`
+7. List any static `Random` or `SecureRandom` field under `--initialize-at-run-time` in
+   `application.yml`
+8. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
+9. Document it: `docs/services/<svc>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in
+   `docs/services/index.md`, and a row in the README category table
+10. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and
+    `make docs-check`
+11. Add a `TestFixtures` client factory and a `<Svc>Test` in `compatibility-tests/sdk-test-java`
+
+---
+
+## Adding a CloudFormation Resource Type
+
+**Do not add cases to `CloudFormationResourceProvisioner`.** That class is a legacy
+monolith being dismantled; new types go in per-service provisioners under
+`services/cloudformation/provisioners/`.
+
+1. Add the type to the existing `<Service>CfnProvisioner`, or create one:
+   `@ApplicationScoped`, injecting only the service it wraps. CDI discovery via
+   `CloudFormationResourceRegistry` handles registration: no manual wiring, but a
+   missing `@ApplicationScoped` silently means the type is never provisioned.
+2. `resourceTypes()` lists the `AWS::*` types; `provision(resource, props, ctx)`
+   does the work, switching on `resource.getResourceType()` when it serves several.
+3. Set **both** reference mechanisms. They are separate:
+   - `resource.setPhysicalId(...)` backs `Ref`
+   - `resource.getAttributes().put(...)` backs `Fn::GetAtt`, one entry per attribute
+   Omitting an attribute does not fail; `Fn::GetAtt` resolves to the literal
+   `"LogicalId.Attr"`. Source the attribute names from the type's registry schema in
+   `local/aws/cfn-resource-schemas/us-east-1/` (`readOnlyProperties`), and validate
+   `required` from the same file.
+4. **`provision` serves create *and* update.** On `UpdateStack` it is re-invoked with
+   the prior physical id and attributes already populated on the resource. Branch with
+   `ctx.isUpdate()` / `ctx.priorPhysicalId()`, not by reading the id off the resource:
+   `provision` assigns the new id as it runs, so a resource-derived check flips
+   mid-method.
+5. Override `delete(...)` when the type has a backing delete; tolerate already-deleted
+   via `CfnDeletes.safeDelete`, passing the specific "already gone" error codes. Never
+   a catch-all: a real failure such as `BucketNotEmpty` must propagate so the stack
+   reports `DELETE_FAILED`. When the delete needs a create-time attribute rather than
+   just the physical id, override `delete(StackResource, String)`.
+6. **Register in `src/test/resources/cloudformation/supported-resource-types.tsv`**
+   (`type<TAB>Owner`). `CfnResourceInventoryTest` diffs that file against the
+   CDI-resolved registry, so it also catches a missing `@ApplicationScoped`.
+7. **Add the provisioner to `CfnProvisionerFixture.inferredProvisioners()`** when it
+   takes a single service, or a fixture test naming that service silently falls through
+   to the stub arm.
+8. Tests: focused unit test mocking one service (`SqsCfnProvisioner`'s test is the
+   pattern) plus an integration test asserting the **exact `Fn::GetAtt` keys**. An
+   unmapped type is stubbed as `CREATE_COMPLETE` with a fake ARN, so asserting status
+   alone cannot detect a type that was never wired. Note the engine's constructor is
+   package-private, so tests in `provisioners/` mock it.
+9. Run `make docs-sync` and commit the result. The resource-type table in
+   `docs/services/cloudformation.md` is **generated** from the step-6 inventory; hand
+   edits fail `docs-check`. Labels, ordering and notes live in
+   `tools/docs/cfn_resource_types.yaml`.
+10. A schema `readOnlyProperties` entry you cannot set goes in
+    `src/test/resources/cloudformation/getatt-attribute-gaps.tsv` with a reason;
+    `CfnSchemaCoverageTest` requires every unset attribute to be fixed or recorded.
+
+References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
+(update-in-place and replacement), `LogsCfnProvisioner` (reconcile-vs-replace update).
 
 ---
 
@@ -274,6 +332,10 @@ When adding functionality:
 - Use modern Java features only when they improve clarity
 
 ---
+
+## Documentation Style
+
+- No em-dashes anywhere, in any content. Use colons, commas, or periods.
 
 ## Logging
 
@@ -345,6 +407,15 @@ Treat release workflows as critical infrastructure.
 - Producing inconsistent URLs or ARNs
 - Testing only with raw HTTP
 - Introducing unnecessary new patterns
+- Adding a CloudFormation type to `CloudFormationResourceProvisioner` instead of a
+  per-service provisioner
+- Setting a CloudFormation resource's physical id but not its `Fn::GetAtt`
+  attributes (they are two separate mechanisms, and the miss is silent)
+- Hand-editing the resource-type table in `docs/services/cloudformation.md`, which is
+  generated, run `make docs-sync` instead
+- Adding a CloudFormation provisioner without a row in
+  `supported-resource-types.tsv` or an entry in `CfnProvisionerFixture`, either of
+  which leaves a type quietly served by the stub arm
 
 ---
 

@@ -6,12 +6,15 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * Tests for edge cases: wildcard domains, max SANs (100), max tags (50).
@@ -26,11 +29,45 @@ class AcmEdgeCaseTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    private static String requestCertificate(String domain) {
+        return given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "DomainName": "%s"
+                }
+                """.formatted(domain))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CertificateArn", startsWith("arn:aws:acm:"))
+            .extract().jsonPath().getString("CertificateArn");
+    }
+
+    private static Map<String, String> validationRecord(String certificateArn) {
+        return given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s"
+                }
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath()
+            .getMap("Certificate.DomainValidationOptions[0].ResourceRecord");
+    }
+
     // ==================== Wildcard Domain Tests ====================
 
     @Test
     void wildcardDomainAsPrimary() {
-        given()
+        String certificateArn = given()
             .header("X-Amz-Target", "CertificateManager.RequestCertificate")
             .contentType(ACM_CONTENT_TYPE)
             .body("""
@@ -42,43 +79,106 @@ class AcmEdgeCaseTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("CertificateArn", startsWith("arn:aws:acm:"));
+            .body("CertificateArn", startsWith("arn:aws:acm:"))
+            .extract().jsonPath().getString("CertificateArn");
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s"
+                }
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate.DomainValidationOptions[0].DomainName", equalTo("*.example.com"))
+            .body("Certificate.DomainValidationOptions[0].ResourceRecord.Name",
+                matchesPattern("^_[0-9a-f]{32}\\.example\\.com\\.$"));
     }
 
     @Test
     void wildcardDomainAsSan() {
-        given()
+        String certificateArn = given()
             .header("X-Amz-Target", "CertificateManager.RequestCertificate")
             .contentType(ACM_CONTENT_TYPE)
             .body("""
                 {
                     "DomainName": "example.com",
-                    "SubjectAlternativeNames": ["*.example.com", "www.example.com"]
+                    "SubjectAlternativeNames": ["*.EXAMPLE.com", "www.example.com"]
                 }
                 """)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("CertificateArn", startsWith("arn:aws:acm:"));
+            .body("CertificateArn", startsWith("arn:aws:acm:"))
+            .extract().jsonPath().getString("CertificateArn");
+
+        var validationOptions = given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s"
+                }
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath();
+
+        String baseRecordName = validationOptions.getString(
+            "Certificate.DomainValidationOptions.find { it.DomainName == 'example.com' }.ResourceRecord.Name");
+        String baseRecordValue = validationOptions.getString(
+            "Certificate.DomainValidationOptions.find { it.DomainName == 'example.com' }.ResourceRecord.Value");
+        String wildcardRecordName = validationOptions.getString(
+            "Certificate.DomainValidationOptions.find { it.DomainName == '*.EXAMPLE.com' }.ResourceRecord.Name");
+        String wildcardRecordValue = validationOptions.getString(
+            "Certificate.DomainValidationOptions.find { it.DomainName == '*.EXAMPLE.com' }.ResourceRecord.Value");
+        String distinctRecordName = validationOptions.getString(
+            "Certificate.DomainValidationOptions.find { it.DomainName == 'www.example.com' }.ResourceRecord.Name");
+        String distinctRecordValue = validationOptions.getString(
+            "Certificate.DomainValidationOptions.find { it.DomainName == 'www.example.com' }.ResourceRecord.Value");
+
+        assertEquals(baseRecordName, wildcardRecordName);
+        assertEquals(baseRecordValue, wildcardRecordValue);
+        assertNotEquals(baseRecordName, distinctRecordName);
+        assertNotEquals(baseRecordValue, distinctRecordValue);
     }
 
     @Test
     void nestedWildcardDomain() {
         // AWS allows wildcards only at the leftmost position
+        String certificateArn = requestCertificate("*.api.example.com");
+
         given()
-            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
             .contentType(ACM_CONTENT_TYPE)
             .body("""
                 {
-                    "DomainName": "*.api.example.com"
+                    "CertificateArn": "%s"
                 }
-                """)
+                """.formatted(certificateArn))
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("CertificateArn", startsWith("arn:aws:acm:"));
+            .body("Certificate.DomainValidationOptions[0].ResourceRecord.Name",
+                matchesPattern("^_[0-9a-f]{32}\\.api\\.example\\.com\\.$"));
+    }
+
+    @Test
+    void validationRecordIsStableAcrossCertificates() {
+        String domain = "stable-" + UUID.randomUUID() + ".example.com";
+        String firstCertificateArn = requestCertificate(domain);
+        String secondCertificateArn = requestCertificate(domain);
+
+        assertNotEquals(firstCertificateArn, secondCertificateArn);
+        assertEquals(validationRecord(firstCertificateArn), validationRecord(secondCertificateArn));
     }
 
     // ==================== Max SANs Tests ====================
@@ -298,8 +398,8 @@ class AcmEdgeCaseTest {
     // ==================== Key Algorithm Tests ====================
 
     @Test
-    void allKeyAlgorithmsSupported() {
-        String[] algorithms = {"RSA_2048", "RSA_3072", "RSA_4096", "EC_prime256v1", "EC_secp384r1", "EC_secp521r1"};
+    void requestableKeyAlgorithmsAccepted() {
+        String[] algorithms = {"RSA_2048", "EC_prime256v1", "EC_secp384r1"};
 
         for (String algo : algorithms) {
             given()
@@ -316,6 +416,35 @@ class AcmEdgeCaseTest {
             .then()
                 .statusCode(200)
                 .body("CertificateArn", startsWith("arn:aws:acm:"));
+        }
+    }
+
+    @Test
+    void unsupportedKeyAlgorithmsRejected() {
+        // Real ACM rejects these on RequestCertificate. The RSA_4096 message carries the
+        // account id where the region goes, an AWS quirk replicated verbatim.
+        Map<String, String> expected = Map.of(
+            "RSA_1024", "Encryption Algorithm RSA_1024 is not supported in us-east-1 region",
+            "RSA_3072", "Encryption Algorithm RSA_3072 is not supported in us-east-1 region",
+            "RSA_4096", "Encryption Algorithm RSA_4096 is not supported in 000000000000 region",
+            "EC_secp521r1", "Encryption Algorithm EC_secp521r1 is not supported in us-east-1 region");
+
+        for (Map.Entry<String, String> entry : expected.entrySet()) {
+            given()
+                .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+                .contentType(ACM_CONTENT_TYPE)
+                .body("""
+                    {
+                        "DomainName": "%s.example.com",
+                        "KeyAlgorithm": "%s"
+                    }
+                    """.formatted(entry.getKey().toLowerCase().replace("_", "-"), entry.getKey()))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(entry.getValue()));
         }
     }
 }

@@ -19,7 +19,13 @@ public class Api {
     private String routeSelectionExpression;
     private String description;
     private String apiKeySelectionExpression;
+    private boolean disableExecuteApiEndpoint;
     private Cors corsConfiguration;
+    private String version;
+    /** Warnings reported when failOnWarnings is off during an OpenAPI import. */
+    private List<String> warnings;
+    /** Definition properties that the import ignored. */
+    private List<String> importInfo;
 
     public Api() {}
 
@@ -50,8 +56,23 @@ public class Api {
     public String getApiKeySelectionExpression() { return apiKeySelectionExpression; }
     public void setApiKeySelectionExpression(String apiKeySelectionExpression) { this.apiKeySelectionExpression = apiKeySelectionExpression; }
 
+    public boolean isDisableExecuteApiEndpoint() { return disableExecuteApiEndpoint; }
+    public void setDisableExecuteApiEndpoint(boolean disableExecuteApiEndpoint) {
+        this.disableExecuteApiEndpoint = disableExecuteApiEndpoint;
+    }
+
     public Cors getCorsConfiguration() { return corsConfiguration; }
     public void setCorsConfiguration(Cors corsConfiguration) { this.corsConfiguration = corsConfiguration; }
+
+    /** Caller-supplied API version string, e.g. "1.0.0". Opaque to AWS. */
+    public String getVersion() { return version; }
+    public void setVersion(String version) { this.version = version; }
+
+    public List<String> getWarnings() { return warnings; }
+    public void setWarnings(List<String> warnings) { this.warnings = warnings; }
+
+    public List<String> getImportInfo() { return importInfo; }
+    public void setImportInfo(List<String> importInfo) { this.importInfo = importInfo; }
 
     @RegisterForReflection
     public record Cors(

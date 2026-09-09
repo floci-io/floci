@@ -21,6 +21,7 @@ import static org.hamcrest.Matchers.*;
 class S3PresignedPostIntegrationTest {
 
     private static final String BUCKET = "presigned-post-bucket";
+    private static final String VERSIONED_BUCKET = "presigned-post-versioned-bucket";
     private static final DateTimeFormatter AMZ_DATE_FORMAT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
@@ -67,6 +68,113 @@ class S3PresignedPostIntegrationTest {
             .statusCode(200)
             .header("Content-Type", equalTo(contentType))
             .body(equalTo(fileContent));
+    }
+
+    @Test
+    @Order(15)
+    void presignedPostEmitsPostNotification() {
+        String postQueueName = "presigned-post-notification-queue";
+        String putQueueName = "presigned-put-notification-queue";
+        String wildcardQueueName = "presigned-wildcard-notification-queue";
+        String postQueueUrl = createQueue(postQueueName);
+        String putQueueUrl = createQueue(putQueueName);
+        String wildcardQueueUrl = createQueue(wildcardQueueName);
+
+        try {
+            given()
+                .contentType("application/xml")
+                .queryParam("notification", "")
+                .body("""
+                    <NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <QueueConfiguration>
+                            <Id>post-notification</Id>
+                            <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
+                            <Event>s3:ObjectCreated:Post</Event>
+                        </QueueConfiguration>
+                        <QueueConfiguration>
+                            <Id>put-notification</Id>
+                            <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
+                            <Event>s3:ObjectCreated:Put</Event>
+                        </QueueConfiguration>
+                        <QueueConfiguration>
+                            <Id>wildcard-notification</Id>
+                            <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
+                            <Event>s3:ObjectCreated:*</Event>
+                        </QueueConfiguration>
+                    </NotificationConfiguration>
+                    """.formatted(postQueueName, putQueueName, wildcardQueueName))
+            .when()
+                .put("/" + BUCKET)
+            .then()
+                .statusCode(200);
+
+            given()
+                .multiPart("key", "uploads/notified.txt")
+                .multiPart("file", "notified.txt", "notified".getBytes(StandardCharsets.UTF_8), "text/plain")
+            .when()
+                .post("/" + BUCKET)
+            .then()
+                .statusCode(204);
+
+            assertQueueContainsPostNotification(postQueueUrl);
+            assertQueueContainsPostNotification(wildcardQueueUrl);
+
+            String putQueueResponse = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", putQueueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+            assertThat(putQueueResponse, not(containsString("<Message>")));
+        } finally {
+            given()
+                .contentType("application/xml")
+                .queryParam("notification", "")
+                .body("<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>")
+                .put("/" + BUCKET);
+
+            deleteQueue(postQueueUrl);
+            deleteQueue(putQueueUrl);
+            deleteQueue(wildcardQueueUrl);
+        }
+    }
+
+    private String createQueue(String queueName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+    }
+
+    private void assertQueueContainsPostNotification(String queueUrl) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
+                containsString("\"eventName\":\"ObjectCreated:Post\""));
+    }
+
+    private void deleteQueue(String queueUrl) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", queueUrl)
+            .post("/");
     }
 
     @Test
@@ -515,6 +623,7 @@ class S3PresignedPostIntegrationTest {
     void cleanupBucket() {
         // Delete all objects
         given().delete("/" + BUCKET + "/uploads/test-file.txt");
+        given().delete("/" + BUCKET + "/uploads/notified.txt");
         given().delete("/" + BUCKET + "/uploads/binary-data.bin");
         given().delete("/" + BUCKET + "/uploads/no-policy.txt");
         given().delete("/" + BUCKET + "/uploads/typed-file.json");
@@ -563,5 +672,52 @@ class S3PresignedPostIntegrationTest {
                   ]
                 }
                 """.formatted(expiration, bucket, keyPrefix, contentTypePrefix, minSize, maxSize);
+    }
+
+    @Test
+    @Order(110)
+    void presignedPostReturnsVersionIdOnAVersionedBucket() {
+        given()
+        .when()
+            .put("/" + VERSIONED_BUCKET)
+        .then()
+            .statusCode(200);
+
+        given()
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?versioning")
+        .then()
+            .statusCode(200);
+
+        String key = "uploads/versioned.txt";
+        String contentType = "text/plain";
+        String policy = buildPolicy(VERSIONED_BUCKET, key, contentType, 0, 10485760);
+        String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
+
+        String versionId =
+            given()
+                .multiPart("key", key)
+                .multiPart("Content-Type", contentType)
+                .multiPart("policy", policyBase64)
+                .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+                .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+                .multiPart("file", "versioned.txt",
+                        "Hello from a versioned presigned POST!".getBytes(StandardCharsets.UTF_8), contentType)
+            .when()
+                .post("/" + VERSIONED_BUCKET)
+            .then()
+                .statusCode(204)
+                .extract()
+                .header("x-amz-version-id");
+
+        assertThat(versionId, is(notNullValue()));
+
+        given()
+        .when()
+            .head("/" + VERSIONED_BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("x-amz-version-id", is(versionId));
     }
 }

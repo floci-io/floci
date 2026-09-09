@@ -612,11 +612,12 @@ describe('DynamoDB — Phase 9: Reserved words', () => {
   });
 
   it('reserved word aliased via ExpressionAttributeNames passes', async () => {
-    // Using #st alias for the reserved word 'status'
+    // Using #st alias for the reserved word 'status'. The alias must be referenced
+    // by the expression: AWS rejects ExpressionAttributeNames entries left unused.
     await ddb.send(new PutItemCommand({
       TableName: table,
       Item: { pk: s('rw-ok'), sk: s('s'), status: s('active') },
-      ConditionExpression: 'attribute_not_exists(pk)',
+      ConditionExpression: 'attribute_not_exists(#st)',
       ExpressionAttributeNames: { '#st': 'status' },
     }));
 
@@ -707,14 +708,32 @@ describe('DynamoDB — Phase 10: Legacy API', () => {
   it('QueryFilter (legacy) filters query results', async () => {
     const resp = await ddb.send(new QueryCommand({
       TableName: table,
-      KeyConditionExpression: 'pk = :pk',
-      ExpressionAttributeValues: { ':pk': s('p1') },
+      KeyConditions: {
+        pk: { ComparisonOperator: 'EQ', AttributeValueList: [s('p1')] },
+      },
       QueryFilter: {
         name: { ComparisonOperator: 'EQ', AttributeValueList: [s('Item-0')] },
       },
     }));
     expect(resp.Count).toBe(1);
     expect(resp.Items![0].name.S).toBe('Item-0');
+  });
+
+  it('QueryFilter and KeyConditionExpression are mutually exclusive', async () => {
+    const err = await ddb.send(new QueryCommand({
+      TableName: table,
+      KeyConditionExpression: 'pk = :pk',
+      ExpressionAttributeValues: { ':pk': s('p1') },
+      QueryFilter: {
+        name: { ComparisonOperator: 'EQ', AttributeValueList: [s('Item-0')] },
+      },
+    })).catch(e => e);
+
+    expect(err.name).toBe('ValidationException');
+    expect(err.message).toBe(
+      'Can not use both expression and non-expression parameters in the same request: '
+      + 'Non-expression parameters: {QueryFilter} Expression parameters: {KeyConditionExpression}',
+    );
   });
 
   it('ScanFilter (legacy) filters scan results', async () => {

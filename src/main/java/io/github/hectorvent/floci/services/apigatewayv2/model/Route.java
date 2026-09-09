@@ -10,6 +10,7 @@ public class Route {
     private String routeKey;
     private String authorizationType; // NONE, AWS_IAM, CUSTOM, JWT
     private String authorizerId;
+    private java.util.List<String> authorizationScopes;
     private String target; // integrations/{integrationId}
     private String routeResponseSelectionExpression;
 
@@ -26,6 +27,9 @@ public class Route {
 
     public String getAuthorizerId() { return authorizerId; }
     public void setAuthorizerId(String authorizerId) { this.authorizerId = authorizerId; }
+
+    public java.util.List<String> getAuthorizationScopes() { return authorizationScopes; }
+    public void setAuthorizationScopes(java.util.List<String> authorizationScopes) { this.authorizationScopes = authorizationScopes; }
 
     public String getTarget() { return target; }
     public void setTarget(String target) { this.target = target; }

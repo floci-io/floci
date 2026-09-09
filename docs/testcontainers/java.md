@@ -6,8 +6,8 @@ Two artifact lines are published to keep in sync with the Testcontainers major v
 
 | Testcontainers version | Spring Boot | Artifact version |
 |---|---|---|
-| 1.x | 3.x | `1.4.0` |
-| 2.x | 4.x | `2.5.0` |
+| 1.x | 3.x | `1.14.0` |
+| 2.x | 4.x | `2.15.0` |
 
 ## Installation
 
@@ -17,7 +17,7 @@ Two artifact lines are published to keep in sync with the Testcontainers major v
     <dependency>
         <groupId>io.floci</groupId>
         <artifactId>testcontainers-floci</artifactId>
-        <version>1.4.0</version>
+        <version>1.14.0</version>
         <scope>test</scope>
     </dependency>
     ```
@@ -25,7 +25,7 @@ Two artifact lines are published to keep in sync with the Testcontainers major v
 === "Gradle"
 
     ```groovy
-    testImplementation 'io.floci:testcontainers-floci:1.4.0'
+    testImplementation 'io.floci:testcontainers-floci:1.14.0'
     ```
 
 ## Basic usage — JUnit 5
@@ -146,7 +146,7 @@ Add the Spring Boot companion artifact for zero-config auto-wiring. The `@Servic
     <dependency>
         <groupId>io.floci</groupId>
         <artifactId>spring-boot-testcontainers-floci</artifactId>
-        <version>1.4.0</version>
+        <version>1.14.0</version>
         <scope>test</scope>
     </dependency>
     ```
@@ -154,7 +154,7 @@ Add the Spring Boot companion artifact for zero-config auto-wiring. The `@Servic
 === "Gradle"
 
     ```groovy
-    testImplementation 'io.floci:spring-boot-testcontainers-floci:1.4.0'
+    testImplementation 'io.floci:spring-boot-testcontainers-floci:1.14.0'
     ```
 
 ```java

@@ -9,6 +9,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -1004,5 +1006,130 @@ class SchedulerIntegrationTest {
             .put("/tags/" + TAGGED_GROUP_ARN)
         .then()
             .statusCode(405);
+    }
+
+    @Test
+    @Order(39)
+    void createScheduleWithMalformedEcsParameterListsReturns400() {
+        // CapacityProviderStrategy is a list of objects and Subnets a list of strings. An element of
+        // the wrong shape is a malformed body, which AWS answers with 400 SerializationException
+        // rather than with a server error.
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/batch",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EcsParameters": {
+                            "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1",
+                            "CapacityProviderStrategy": ["FARGATE"]
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/ecs-scalar-capacity-provider")
+        .then()
+            .statusCode(400);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/batch",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EcsParameters": {
+                            "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1",
+                            "NetworkConfiguration": {
+                                "awsvpcConfiguration": {"Subnets": [{"Id": "subnet-a"}]}
+                            }
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/ecs-object-subnet")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(40)
+    void createScheduleWithAScalarSubnetReturnsSerializationException() {
+        // Jackson converts a number or a boolean to a String rather than refusing it, so a
+        // scalar element reaches the store unless the conversion is checked before it runs.
+        // AWS answers 400 SerializationException, measured through the Scheduler API.
+        for (String element : new String[]{"123", "true"}) {
+            given()
+                .contentType("application/json")
+                .body("""
+                    {
+                        "ScheduleExpression": "rate(1 hour)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                            "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/batch",
+                            "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                            "EcsParameters": {
+                                "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1",
+                                "NetworkConfiguration": {
+                                    "awsvpcConfiguration": {"Subnets": [%s]}
+                                }
+                            }
+                        }
+                    }
+                    """.formatted(element))
+            .when()
+                .post("/schedules/ecs-scalar-subnet-" + element)
+            .then()
+                .statusCode(400)
+                .body("__type", containsString("SerializationException"));
+        }
+    }
+
+    @Test
+    @Order(41)
+    void createScheduleWithANonListEcsParameterReturnsSerializationException() {
+        // Every EcsParameters list field answers 400 SerializationException "Expected list or null"
+        // on AWS when it holds a scalar, measured through the Scheduler API for all six.
+        record ListField(String path, String body) { }
+        var fields = List.of(
+                new ListField("CapacityProviderStrategy", "\"CapacityProviderStrategy\": \"FARGATE\""),
+                new ListField("PlacementConstraints", "\"PlacementConstraints\": \"distinctInstance\""),
+                new ListField("PlacementStrategy", "\"PlacementStrategy\": \"spread\""),
+                new ListField("Tags", "\"Tags\": \"owner\""),
+                new ListField("Subnets",
+                        "\"NetworkConfiguration\": {\"awsvpcConfiguration\": {\"Subnets\": \"subnet-a\"}}"),
+                new ListField("SecurityGroups",
+                        "\"NetworkConfiguration\": {\"awsvpcConfiguration\": {\"SecurityGroups\": \"sg-a\"}}"));
+
+        for (ListField field : fields) {
+            given()
+                .contentType("application/json")
+                .body("""
+                    {
+                        "ScheduleExpression": "rate(1 hour)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                            "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/batch",
+                            "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                            "EcsParameters": {
+                                "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1",
+                                %s
+                            }
+                        }
+                    }
+                    """.formatted(field.body()))
+            .when()
+                .post("/schedules/ecs-non-list-" + field.path())
+            .then()
+                .statusCode(400)
+                .body("__type", containsString("SerializationException"));
+        }
     }
 }

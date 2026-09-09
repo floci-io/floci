@@ -26,6 +26,9 @@ public class Domain {
     @JsonProperty("EngineVersion")
     private String engineVersion;
 
+    @JsonProperty("AccessPolicies")
+    private String accessPolicies;
+
     @JsonProperty("Processing")
     private boolean processing = false;
 
@@ -61,6 +64,9 @@ public class Domain {
 
     @JsonProperty("ContainerId")
     private String containerId;
+
+    @JsonProperty("HostPort")
+    private Integer hostPort;
 
     @JsonIgnore
     private String accountId;
@@ -104,6 +110,14 @@ public class Domain {
 
     public void setEngineVersion(String engineVersion) {
         this.engineVersion = engineVersion;
+    }
+
+    public String getAccessPolicies() {
+        return accessPolicies;
+    }
+
+    public void setAccessPolicies(String accessPolicies) {
+        this.accessPolicies = accessPolicies;
     }
 
     public boolean isProcessing() {
@@ -200,6 +214,14 @@ public class Domain {
 
     public void setContainerId(String containerId) {
         this.containerId = containerId;
+    }
+
+    public Integer getHostPort() {
+        return hostPort;
+    }
+
+    public void setHostPort(Integer hostPort) {
+        this.hostPort = hostPort;
     }
 
     public String getVolumeId() {

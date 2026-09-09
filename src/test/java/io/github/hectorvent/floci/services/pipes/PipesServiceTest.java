@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
@@ -20,13 +23,17 @@ import static org.mockito.Mockito.when;
 
 class PipesServiceTest {
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private AccountAwareStorageBackend<Pipe> storage;
     private PipesService pipesService;
 
     @BeforeEach
     void setUp() {
+        storage = AccountAwareStorageBackend.inMemory("000000000000");
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
-        when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+        Mockito.doReturn(storage).when(storageFactory)
+                .create(Mockito.anyString(), Mockito.anyString(), Mockito.any());
 
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
 
@@ -172,6 +179,94 @@ class PipesServiceTest {
         assertEquals(PipeState.STOPPED, updated.getCurrentState());
     }
 
+    /**
+     * The UpdatePipe contract: a property the caller omits keeps the value the pipe holds. It is
+     * the contract the CloudFormation update path relies on, and restorePipe is what reads an
+     * omitted property as a value to clear.
+     */
+    @Test
+    void updatePipeLeavesAnOmittedPropertyAlone() {
+        pipesService.createPipe("partial-update-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:source",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/original-role",
+                "the original description", DesiredState.RUNNING,
+                "arn:aws:lambda:us-east-1:000000000000:function:original-enrichment",
+                null, null, null, null, "us-east-1");
+
+        Pipe updated = pipesService.updatePipe("partial-update-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:new-target",
+                null, null, null, null, null, null, null, "us-east-1");
+
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:new-target", updated.getTarget());
+        assertEquals("arn:aws:iam::000000000000:role/original-role", updated.getRoleArn());
+        assertEquals("the original description", updated.getDescription());
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:original-enrichment",
+                updated.getEnrichment());
+        assertEquals(DesiredState.RUNNING, updated.getDesiredState());
+        assertEquals(PipeState.RUNNING, updated.getCurrentState());
+    }
+
+    /**
+     * restorePipe is handed a whole configuration, so an omitted property is one the pipe must
+     * stop carrying. The desired state is the exception: currentState is read off it, so a null
+     * leaves both as they are instead of contradicting each other.
+     */
+    @Test
+    void restorePipeClearsAnOmittedPropertyAndKeepsTheDesiredState() {
+        pipesService.createPipe("restore-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:source",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/original-role",
+                "the original description", DesiredState.STOPPED,
+                "arn:aws:lambda:us-east-1:000000000000:function:original-enrichment",
+                null, null, null, null, "us-east-1");
+
+        Pipe restored = pipesService.restorePipe("restore-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/original-role",
+                null, null, null, null, null, null, "us-east-1");
+
+        assertNull(restored.getDescription());
+        assertNull(restored.getEnrichment());
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:target", restored.getTarget());
+        assertEquals("arn:aws:iam::000000000000:role/original-role", restored.getRoleArn());
+        assertEquals(DesiredState.STOPPED, restored.getDesiredState());
+        assertEquals(PipeState.STOPPED, restored.getCurrentState());
+    }
+
+    /**
+     * A restore puts back a configuration that was accepted when it was written, so it is not run
+     * through the source validation again. A persisted pipe can predate a rule added since, and a
+     * CloudFormation rollback that re-validated its snapshot would fail on the very pipe it is
+     * putting back. The pipe is seeded straight into storage, as one written before the Kafka
+     * TopicName check existed would be.
+     */
+    @Test
+    void restorePipeDoesNotRevalidateAnAlreadyAcceptedConfiguration() {
+        JsonNode legacyParameters = sourceParameters("""
+                {"SelfManagedKafkaParameters":{"BatchSize":10}}""");
+        Pipe legacy = new Pipe();
+        legacy.setName("legacy-pipe");
+        legacy.setArn("arn:aws:pipes:us-east-1:000000000000:pipe/legacy-pipe");
+        legacy.setSource("smk://broker:9092");
+        legacy.setTarget("arn:aws:sqs:us-east-1:000000000000:target");
+        legacy.setRoleArn("arn:aws:iam::000000000000:role/role");
+        legacy.setDesiredState(DesiredState.RUNNING);
+        legacy.setCurrentState(PipeState.RUNNING);
+        legacy.setSourceParameters(legacyParameters);
+        storage.put("us-east-1::legacy-pipe", legacy);
+
+        Pipe restored = pipesService.restorePipe("legacy-pipe",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/role",
+                null, null, null, legacyParameters, null, null, "us-east-1");
+
+        assertEquals(legacyParameters, restored.getSourceParameters());
+        assertEquals(legacyParameters,
+                pipesService.describePipe("legacy-pipe", "us-east-1").getSourceParameters());
+    }
+
     @Test
     void deletePipe() {
         pipesService.createPipe("del-pipe",
@@ -297,5 +392,160 @@ class PipesServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 pipesService.describePipe("region-pipe", "eu-west-1"));
         assertEquals("NotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void createPipeAcceptsParallelizationFactorOnKinesisSource() {
+        Pipe pipe = pipesService.createPipe("kinesis-pf-pipe",
+                "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/role",
+                null, null, null,
+                sourceParameters("""
+                        {"KinesisStreamParameters":{"StartingPosition":"TRIM_HORIZON","ParallelizationFactor":4}}"""),
+                null, null, null, "us-east-1");
+
+        assertEquals(4, pipe.getSourceParameters()
+                .path("KinesisStreamParameters").path("ParallelizationFactor").asInt());
+    }
+
+    @Test
+    void createPipeAcceptsParallelizationFactorOnDynamoDbStreamSource() {
+        Pipe pipe = pipesService.createPipe("ddb-pf-pipe",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/orders/stream/2024-01-01T00:00:00.000",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/role",
+                null, null, null,
+                sourceParameters("""
+                        {"DynamoDBStreamParameters":{"StartingPosition":"LATEST","ParallelizationFactor":10}}"""),
+                null, null, null, "us-east-1");
+
+        assertEquals(10, pipe.getSourceParameters()
+                .path("DynamoDBStreamParameters").path("ParallelizationFactor").asInt());
+    }
+
+    @Test
+    void createPipeRejectsParallelizationFactorAboveMaximum() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("pf-too-high",
+                        "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"ParallelizationFactor":11}}"""),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("must be between 1 and 10"), ex.getMessage());
+    }
+
+    @Test
+    void createPipeRejectsParallelizationFactorBelowMinimum() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("pf-too-low",
+                        "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"ParallelizationFactor":0}}"""),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("must be between 1 and 10"), ex.getMessage());
+    }
+
+    @Test
+    void createPipeRejectsFractionalParallelizationFactor() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("pf-fractional",
+                        "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"ParallelizationFactor":2.5}}"""),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("must be an integer"), ex.getMessage());
+    }
+
+    @Test
+    void createPipeRejectsParallelizationFactorWiderThanAnInt() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("pf-oversized",
+                        "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"ParallelizationFactor":18446744073709551621}}"""),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("18446744073709551621"), ex.getMessage());
+    }
+
+    @Test
+    void createPipeRejectsNonNumericParallelizationFactor() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("pf-non-numeric",
+                        "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"ParallelizationFactor":"4"}}"""),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("must be a numeric value"), ex.getMessage());
+    }
+
+    @Test
+    void createPipeRejectsParallelizationFactorOnSqsSource() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("pf-wrong-source",
+                        "arn:aws:sqs:us-east-1:000000000000:source",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"ParallelizationFactor":4}}"""),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("only supported for Kinesis stream sources"), ex.getMessage());
+    }
+
+    @Test
+    void updatePipeRejectsInvalidParallelizationFactor() {
+        pipesService.createPipe("pf-update-pipe",
+                "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/role",
+                null, null, null,
+                sourceParameters("""
+                        {"KinesisStreamParameters":{"ParallelizationFactor":2}}"""),
+                null, null, null, "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.updatePipe("pf-update-pipe", null, null, null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"ParallelizationFactor":99}}"""),
+                        null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("must be between 1 and 10"), ex.getMessage());
+    }
+
+    private static JsonNode sourceParameters(String json) {
+        try {
+            return MAPPER.readTree(json);
+        } catch (Exception e) {
+            throw new IllegalStateException("invalid test JSON: " + json, e);
+        }
     }
 }

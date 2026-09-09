@@ -21,23 +21,88 @@ public class CloudControlJsonHandler {
         this.mapper = mapper;
     }
 
-    public Response handle(String action, JsonNode request, String region) {
+    public Response handle(String action, JsonNode request, String region, String accountId) {
         return switch (action) {
-            case "ListResources" -> listResources(request, region);
+            case "ListResources" -> listResources(request, region, accountId);
+            case "GetResource" -> getResource(request, region, accountId);
+            case "CreateResource" -> progressResponse(
+                    service.createResource(region, accountId, required(request, "TypeName"),
+                            request.path("DesiredState").asText(null)));
+            case "DeleteResource" -> progressResponse(
+                    service.deleteResource(region, accountId, required(request, "TypeName"), required(request, "Identifier")));
+            case "GetResourceRequestStatus" -> progressResponse(
+                    service.requestStatus(accountId, requestToken(request)));
             default -> throw new AwsException("UnsupportedOperation",
                     "Operation " + action + " is not supported.", 400);
         };
     }
 
-    private Response listResources(JsonNode request, String region) {
-        String typeName = request.path("TypeName").asText(null);
-        if (typeName == null || typeName.isBlank()) {
-            throw new AwsException("ValidationException", "TypeName is required.", 400);
+    private Response getResource(JsonNode request, String region, String accountId) {
+        String typeName = required(request, "TypeName");
+        String identifier = required(request, "Identifier");
+        CloudControlService.ResourceDescription resource = service.getResource(region, accountId, typeName, identifier);
+        ObjectNode response = mapper.createObjectNode();
+        response.put("TypeName", typeName);
+        ObjectNode desc = response.putObject("ResourceDescription");
+        desc.put("Identifier", resource.identifier());
+        desc.put("Properties", resource.properties());
+        return Response.ok(response).build();
+    }
+
+    private Response progressResponse(CloudControlService.ProgressEvent event) {
+        ObjectNode response = mapper.createObjectNode();
+        ObjectNode pe = response.putObject("ProgressEvent");
+        pe.put("TypeName", event.typeName());
+        pe.put("Identifier", event.identifier());
+        pe.put("RequestToken", event.requestToken());
+        pe.put("Operation", event.operation());
+        pe.put("OperationStatus", event.operationStatus());
+        if (event.statusMessage() != null) {
+            pe.put("StatusMessage", event.statusMessage());
         }
+        if (event.resourceModel() != null) {
+            pe.put("ResourceModel", event.resourceModel());
+        }
+        return Response.ok(response).build();
+    }
+
+    /**
+     * Compatibility entry point for direct callers that do not have request context.
+     */
+    public Response handle(String action, JsonNode request, String region) {
+        return handle(action, request, region, "000000000000");
+    }
+
+    /**
+     * InvalidRequestException is the code Cloud Control declares for a malformed request, so it is
+     * what an SDK maps onto a typed exception. ValidationException is not in the service model.
+     */
+    private String required(JsonNode request, String field) {
+        String value = request.path(field).asText(null);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("InvalidRequestException", field + " is required.", 400);
+        }
+        return value;
+    }
+
+    /**
+     * GetResourceRequestStatus declares only RequestTokenNotFoundException, so an absent token
+     * reports that rather than the InvalidRequestException the other operations declare.
+     */
+    private String requestToken(JsonNode request) {
+        String value = request.path("RequestToken").asText(null);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("RequestTokenNotFoundException", "RequestToken is required.", 404);
+        }
+        return value;
+    }
+
+    private Response listResources(JsonNode request, String region, String accountId) {
+        String typeName = required(request, "TypeName");
         ObjectNode response = mapper.createObjectNode();
         response.put("TypeName", typeName);
         ArrayNode resources = response.putArray("ResourceDescriptions");
-        for (CloudControlService.ResourceDescription resource : service.listResources(region, typeName)) {
+        for (CloudControlService.ResourceDescription resource : service.listResources(region, accountId, typeName)) {
             ObjectNode node = mapper.createObjectNode();
             node.put("Identifier", resource.identifier());
             node.put("Properties", resource.properties());

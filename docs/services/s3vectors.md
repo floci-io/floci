@@ -34,3 +34,20 @@ aws s3vectors query-vectors --vector-bucket-name my-vectors --index-name embeddi
   --query-vector '{"float32":[0.1,0.2,0.3,0.4]}' --top-k 1 \
   --endpoint-url http://localhost:4566
 ```
+
+## Metadata filters
+
+`QueryVectors` supports metadata filters with `$eq`, `$ne`, `$gt`, `$gte`,
+`$lt`, `$lte`, `$in`, `$nin`, and `$exists` field predicates. `$and` and `$or`
+recursively combine filters, while multiple clauses in the same object are
+implicitly combined with AND. A scalar field value is shorthand for `$eq`.
+
+```bash
+aws s3vectors query-vectors --vector-bucket-name my-vectors --index-name embeddings \
+  --query-vector '{"float32":[0.1,0.2,0.3,0.4]}' --top-k 5 \
+  --filter '{"$and":[{"tenant":"tenant-a"},{"year":{"$gte":2024}}]}' \
+  --endpoint-url http://localhost:4566
+```
+
+Filters are evaluated before similarity ranking and `topK` truncation, so a
+nearer vector that does not match the filter cannot consume a result slot.

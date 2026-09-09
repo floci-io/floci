@@ -5,6 +5,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -20,17 +23,19 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
-public class AmazonMqService {
+public class AmazonMqService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(AmazonMqService.class);
     private static final String ENGINE_RABBITMQ = "RABBITMQ";
@@ -71,16 +76,29 @@ public class AmazonMqService {
         if (name == null || name.isBlank()) {
             throw new AwsException("BadRequestException", "BrokerName is required", 400);
         }
-        if (!ENGINE_RABBITMQ.equals(params.engineType())) {
+        // EngineType is case-insensitive on real AWS, and the mixed-case spelling is the
+        // one the AWS docs, the console and the aws_mq_broker registry examples all use --
+        // so an exact match rejects the form virtually every Terraform module is written
+        // with. Distinguish the unsupported engine from an unrecognised one so the two
+        // failures are not reported identically.
+        if (!ENGINE_RABBITMQ.equalsIgnoreCase(params.engineType())) {
             throw new AwsException("BadRequestException",
-                    "Only RABBITMQ EngineType is supported", 400);
+                    "EngineType " + params.engineType() + " is not supported; only RabbitMQ is emulated",
+                    400);
         }
         String deploymentMode = params.deploymentMode() == null
                 ? DEPLOYMENT_SINGLE_INSTANCE : params.deploymentMode();
-        if (!DEPLOYMENT_SINGLE_INSTANCE.equals(deploymentMode)) {
+        // DeploymentMode has the same problem as EngineType above: the wire enum is upper case,
+        // but callers spell it however their tooling does, and the real API matches without
+        // regard to case. An exact compare rejected "single_instance" -- the one mode this
+        // emulator does support -- as unsupported.
+        if (!DEPLOYMENT_SINGLE_INSTANCE.equalsIgnoreCase(deploymentMode)) {
             throw new AwsException("BadRequestException",
                     "Only SINGLE_INSTANCE DeploymentMode is supported", 400);
         }
+        // Store the canonical wire casing, not the caller's, so DescribeBroker reads back the
+        // enum value the SDKs expect however the request happened to be spelled.
+        deploymentMode = DEPLOYMENT_SINGLE_INSTANCE;
         // RabbitMQ brokers require exactly one user at creation; that user becomes the
         // broker's RabbitMQ administrator (seeded into the container). This mirrors AWS,
         // which rejects CreateBroker for RabbitMQ unless exactly one user is supplied.
@@ -152,6 +170,29 @@ public class AmazonMqService {
 
     public List<Broker> listBrokers() {
         return storage.scan(k -> true);
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Broker broker : storage.scan(k -> true)) {
+            String arn = broker.getBrokerArn();
+            if (arn == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "mq:broker", "mq",
+                    parsed.region(), parsed.accountId(),
+                    broker.getCreated() != null ? broker.getCreated() : Instant.now(),
+                    broker.getTags() != null ? broker.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("mq:broker", "mq", true));
     }
 
     public void deleteBroker(String brokerId) {

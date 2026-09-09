@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
@@ -60,6 +61,7 @@ class EcsContainerManagerPortMappingsTest {
     private ContainerBuilder.Builder builder;
     private ContainerLifecycleManager lifecycleManager;
     private ContainerDetector containerDetector;
+    private RegionResolver regionResolver;
     private EcsContainerManager manager;
 
     @BeforeEach
@@ -79,14 +81,17 @@ class EcsContainerManagerPortMappingsTest {
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         containerDetector = mock(ContainerDetector.class);
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        RegionResolver regionResolver = mock(RegionResolver.class);
+        regionResolver = mock(RegionResolver.class);
         LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
         SsmService ssmService = mock(SsmService.class);
         SecretsManagerService secretsManagerService = mock(SecretsManagerService.class);
+        EcrRegistryManager ecrRegistryManager = mock(EcrRegistryManager.class);
+        when(ecrRegistryManager.rewriteImageUri(anyString())).thenAnswer(inv -> inv.getArgument(0));
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService);
+                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService,
+                ecrRegistryManager);
     }
 
     private void startWith(List<PortMapping> portMappings) {
@@ -108,6 +113,32 @@ class EcsContainerManagerPortMappingsTest {
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
         manager.startTask(task, taskDef, List.of(), "us-east-1");
+    }
+
+    @Test
+    void startTaskLabelsContainerWithResourceIdentity() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(app));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        manager.startTask(task, taskDef, List.of(), "us-east-1");
+
+        verify(builder).withLabels(Map.of(
+                "io.floci", "aws",
+                "io.floci.service", "ecs",
+                "io.floci.resource-id", "abc123",
+                "io.floci.account", "000000000000",
+                "io.floci.region", "us-east-1"));
     }
 
     @Test

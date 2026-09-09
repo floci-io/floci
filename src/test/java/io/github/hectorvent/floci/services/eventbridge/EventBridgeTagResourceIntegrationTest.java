@@ -214,7 +214,8 @@ class EventBridgeTagResourceIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404);
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
@@ -232,7 +233,8 @@ class EventBridgeTagResourceIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404);
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
@@ -511,4 +513,3 @@ class EventBridgeTagResourceIntegrationTest {
             .statusCode(200);
     }
 }
-

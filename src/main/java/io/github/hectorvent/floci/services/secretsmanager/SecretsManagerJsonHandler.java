@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.secretsmanager;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -48,8 +49,8 @@ public class SecretsManagerJsonHandler {
             case "GetResourcePolicy" -> handleGetResourcePolicy(request, region);
             case "GetRandomPassword" -> handleGetRandomPassword(request, region);
             case "BatchGetSecretValue" -> handleBatchGetSecretValue(request, region);
-            case "DeleteResourcePolicy" -> Response.ok(objectMapper.createObjectNode()).build();
-            case "PutResourcePolicy" -> Response.ok(objectMapper.createObjectNode()).build();
+            case "DeleteResourcePolicy" -> handleDeleteResourcePolicy(request, region);
+            case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
             case "UpdateSecretVersionStage" -> handleUpdateSecretVersionStage(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
@@ -302,6 +303,9 @@ public class SecretsManagerJsonHandler {
         if (secret.getDeletedDate() != null) {
             response.put("DeletedDate", secret.getDeletedDate().toEpochMilli() / 1000.0);
         }
+        if (secret.getOwningService() != null) {
+            response.put("OwningService", secret.getOwningService());
+        }
 
         ArrayNode tagsArray = objectMapper.createArrayNode();
         if (secret.getTags() != null) {
@@ -403,6 +407,9 @@ public class SecretsManagerJsonHandler {
             if (secret.getLastAccessedDate() != null) {
                 node.put("LastAccessedDate", secret.getLastAccessedDate().toEpochMilli() / 1000.0);
             }
+            if (secret.getOwningService() != null) {
+                node.put("OwningService", secret.getOwningService());
+            }
             ArrayNode tagsArray = objectMapper.createArrayNode();
             if (secret.getTags() != null) {
                 for (Secret.Tag tag : secret.getTags()) {
@@ -479,7 +486,11 @@ public class SecretsManagerJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ARN", secret.getArn());
         response.put("Name", secret.getName());
-        response.put("VersionId", clientRequestToken);
+        // A service-managed secret is rotated in place by its owning service, staging no version
+        // for the request token, so report the version that exists rather than one that would
+        // resolve to nothing.
+        boolean serviceManaged = secret.getOwningService() != null && secret.getCurrentVersionId() != null;
+        response.put("VersionId", serviceManaged ? secret.getCurrentVersionId() : clientRequestToken);
         return Response.ok(response).build();
     }
 
@@ -528,7 +539,55 @@ public class SecretsManagerJsonHandler {
 
     private Response handleGetResourcePolicy(JsonNode request, String region) {
         String secretId = request.path("SecretId").asText();
-        Secret secret = service.describeSecret(secretId, region);
+        Secret secret = service.getResourcePolicy(secretId, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ARN", secret.getArn());
+        response.put("Name", secret.getName());
+        // AWS omits ResourcePolicy entirely when no policy is attached; the terraform provider
+        // reads the absent field as "no policy" rather than as an error.
+        if (secret.getResourcePolicy() != null) {
+            response.put("ResourcePolicy", secret.getResourcePolicy());
+        }
+        return Response.ok(response).build();
+    }
+
+    // BlockPublicPolicy is accepted but not enforced: the emulator does no public-policy
+    // analysis, so PublicPolicyException is never raised.
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String secretId = request.path("SecretId").asText();
+        String resourcePolicy = request.hasNonNull("ResourcePolicy") ? request.get("ResourcePolicy").asText() : null;
+        if (resourcePolicy == null || resourcePolicy.isBlank()) {
+            return Response.status(400)
+                    .entity(new AwsErrorResponse("InvalidParameterException",
+                            "Invalid parameter: ResourcePolicy must not be null or empty."))
+                    .build();
+        }
+
+        JsonNode parsedPolicy;
+        try {
+            parsedPolicy = objectMapper.readTree(resourcePolicy);
+        } catch (JsonProcessingException e) {
+            parsedPolicy = null;
+        }
+        if (parsedPolicy == null || !parsedPolicy.isObject()) {
+            return Response.status(400)
+                    .entity(new AwsErrorResponse("MalformedPolicyDocumentException",
+                            "The resource policy is not a valid JSON policy document."))
+                    .build();
+        }
+
+        Secret secret = service.putResourcePolicy(secretId, resourcePolicy, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        // The terraform provider uses the returned ARN as the aws_secretsmanager_secret_policy
+        // resource id, so an empty response breaks its create outright.
+        response.put("ARN", secret.getArn());
+        response.put("Name", secret.getName());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteResourcePolicy(JsonNode request, String region) {
+        String secretId = request.path("SecretId").asText();
+        Secret secret = service.deleteResourcePolicy(secretId, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ARN", secret.getArn());
         response.put("Name", secret.getName());

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecr;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
@@ -28,6 +29,8 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -52,7 +55,9 @@ class EcrServiceTest {
         when(registryManager.getProxyEndpoint()).thenReturn("http://localhost:5000");
         when(registryManager.internalRepoName(anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> inv.getArgument(0) + "/" + inv.getArgument(1) + "/" + inv.getArgument(2));
-        // ensureStarted() is a no-op on the mock — no Docker calls in any test below.
+        // The mock never talks to Docker; report the backing registry as available so the
+        // data-plane operations run. Registry-unavailable behaviour has its own tests below.
+        when(registryManager.tryEnsureStarted()).thenReturn(true);
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
@@ -77,7 +82,6 @@ class EcrServiceTest {
         assertTrue(repo.getRepositoryArn().startsWith("arn:aws:ecr:us-east-1:000000000000:repository/"));
         assertTrue(repo.getRepositoryUri().contains("localhost:"));
         assertEquals("MUTABLE", repo.getImageTagMutability());
-        Mockito.verify(registryManager).ensureStarted();
     }
 
     @Test
@@ -111,6 +115,66 @@ class EcrServiceTest {
         assertTrue(repo.isScanOnPush());
         assertEquals("dev", repo.getTags().get("env"));
         assertEquals("platform", repo.getTags().get("team"));
+    }
+
+    // ------------------------------------------------------------
+    // Registry unavailable (Floci inside Docker with no Docker daemon)
+    // ------------------------------------------------------------
+
+    @Test
+    void createRepository_succeedsAsMetadataWhenRegistryIsUnavailable() {
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        Repository repo = service.createRepository(REPO, null, "IMMUTABLE", true, null, null,
+                Map.of("Project", "choudoufu"), REGION);
+
+        assertEquals(REPO, repo.getRepositoryName());
+        assertEquals(ACCOUNT, repo.getRegistryId());
+        assertEquals("arn:aws:ecr:" + REGION + ":" + ACCOUNT + ":repository/" + REPO,
+                repo.getRepositoryArn());
+        assertTrue(repo.getRepositoryUri().endsWith("/" + REPO), repo.getRepositoryUri());
+        assertEquals("IMMUTABLE", repo.getImageTagMutability());
+        assertEquals("choudoufu", repo.getTags().get("Project"));
+    }
+
+    @Test
+    void repositoryMetadataCrudWorksWhenRegistryIsUnavailable() {
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        service.createRepository(REPO, null, null, null, null, null, Map.of("env", "dev"), REGION);
+
+        assertEquals(1, service.describeRepositories(List.of(REPO), null, REGION).size());
+        assertEquals("dev", service.listTagsForResource(REPO, null, REGION).get("env"));
+
+        service.tagResource(REPO, null, Map.of("team", "platform"), REGION);
+        assertEquals("platform", service.listTagsForResource(REPO, null, REGION).get("team"));
+
+        service.deleteRepository(REPO, null, false, REGION);
+        assertThrows(AwsException.class,
+                () -> service.describeRepositories(List.of(REPO), null, REGION));
+    }
+
+    @Test
+    void dataPlaneOperationsFailWithServerExceptionWhenRegistryIsUnavailable() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        AwsException auth = assertThrows(AwsException.class, () -> service.getAuthorizationToken());
+        assertEquals("ServerException", auth.getErrorCode());
+        assertEquals(500, auth.getHttpStatus());
+        assertTrue(auth.getMessage().contains("Docker"), auth.getMessage());
+
+        assertEquals("ServerException",
+                assertThrows(AwsException.class, () -> service.listImages(REPO, null, REGION)).getErrorCode());
+        assertEquals("ServerException",
+                assertThrows(AwsException.class,
+                        () -> service.describeImages(REPO, null, null, REGION)).getErrorCode());
+        assertEquals("ServerException",
+                assertThrows(AwsException.class,
+                        () -> service.batchGetImage(REPO, List.of(), null, null, REGION)).getErrorCode());
+        assertEquals("ServerException",
+                assertThrows(AwsException.class,
+                        () -> service.batchDeleteImage(REPO, List.of(), null, REGION)).getErrorCode());
     }
 
     // ------------------------------------------------------------
@@ -161,6 +225,57 @@ class EcrServiceTest {
         assertEquals("RepositoryNotFoundException", ex.getErrorCode());
     }
 
+    @Test
+    void deleteRepository_forceRemovesRepositoryStorageAndPrunesFinalRepositoryStorage() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+
+        service.deleteRepository(REPO, null, true, REGION);
+
+        verify(registryManager).deleteRepositoryStorage(ACCOUNT, REGION, REPO);
+        verify(registryManager).pruneStorage();
+    }
+
+    @Test
+    void deleteRepository_keepsSharedRegistryStorageForRemainingRepositories() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+        service.createRepository("other", null, null, null, null, null, null, REGION);
+
+        service.deleteRepository(REPO, null, true, REGION);
+
+        verify(registryManager, never()).pruneStorage();
+    }
+
+    @Test
+    void deleteRepository_forceRetainsMetadataWhenRegistryCleanupFails() {
+        Mockito.doThrow(new IllegalStateException("registry unavailable"))
+                .when(registryManager).deleteRepositoryStorage(ACCOUNT, REGION, REPO);
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.deleteRepository(REPO, null, true, REGION));
+
+        assertEquals("ServerException", ex.getErrorCode());
+        assertEquals(REPO, service.describeRepositories(List.of(REPO), null, REGION).getFirst().getRepositoryName());
+        verify(registryManager, never()).pruneStorage();
+    }
+
+    @Test
+    void deleteRepository_keepsSharedStorageForRepositoriesOwnedByAnotherAccount() {
+        AccountAwareStorageBackend<Repository> repositories = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        EcrService accountAwareService = new EcrService(
+                repositories,
+                new InMemoryStorage<>(),
+                registryManager,
+                Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
+        accountAwareService.createRepository(REPO, null, null, null, null, null, null, REGION);
+        repositories.putForAccount("111111111111", REGION + "::111111111111::other", new Repository());
+
+        accountAwareService.deleteRepository(REPO, null, true, REGION);
+
+        verify(registryManager, never()).pruneStorage();
+    }
+
     // ------------------------------------------------------------
     // GetAuthorizationToken
     // ------------------------------------------------------------
@@ -173,7 +288,7 @@ class EcrServiceTest {
         assertNotNull(data.getExpiresAt());
         String decoded = new String(Base64.getDecoder().decode(data.getAuthorizationToken()));
         assertTrue(decoded.startsWith("AWS:"), "decoded token should start with AWS: but was: " + decoded);
-        Mockito.verify(registryManager).ensureStarted();
+        Mockito.verify(registryManager).tryEnsureStarted();
     }
 
     @Test

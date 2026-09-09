@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.apigatewayv2.websocket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
@@ -45,6 +47,7 @@ public class WebSocketHandler {
     private final WebSocketIntegrationInvoker integrationInvoker;
     private final WebSocketAuthorizerService authorizerService;
     private final RegionResolver regionResolver;
+    private final String baseHostname;
     private final ObjectMapper objectMapper;
     private final io.vertx.core.Vertx vertx;
 
@@ -56,6 +59,7 @@ public class WebSocketHandler {
                             WebSocketIntegrationInvoker integrationInvoker,
                             WebSocketAuthorizerService authorizerService,
                             RegionResolver regionResolver,
+                            EmulatorConfig config,
                             ObjectMapper objectMapper,
                             io.vertx.core.Vertx vertx) {
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -65,6 +69,7 @@ public class WebSocketHandler {
         this.integrationInvoker = integrationInvoker;
         this.authorizerService = authorizerService;
         this.regionResolver = regionResolver;
+        this.baseHostname = config.hostname().orElse("localhost");
         this.objectMapper = objectMapper;
         this.vertx = vertx;
     }
@@ -74,8 +79,68 @@ public class WebSocketHandler {
      * This runs before JAX-RS routing and intercepts WebSocket upgrade requests.
      */
     void init(@Observes Router router) {
+        // Path form: ws://localhost:4566/ws/{apiId}/{stage}
         router.route("/ws/*").handler(this::handleWebSocketUpgrade);
-        LOG.debug("Registered WebSocket handler on /ws/*");
+        // AWS-style subdomain host form: ws://{apiId}.execute-api.{region}.localhost:4566/{stage}
+        // The connect URL is a single stage segment; a host+Upgrade check inside the handler
+        // keeps this route transparent to every other request (issue #1871).
+        router.route("/:stage").handler(this::handleSubdomainWebSocketUpgrade);
+        LOG.debug("Registered WebSocket handler on /ws/* and execute-api subdomain hosts");
+    }
+
+    /**
+     * Handle a WebSocket upgrade addressed with the AWS-style execute-api subdomain host,
+     * {@code ws://{apiId}.execute-api.{region}.localhost:4566/{stage}} (also the regionless
+     * built-in suffixes, e.g. {@code …execute-api.localhost.floci.io}). The apiId comes from the
+     * host and the stage from the single path segment. The region is taken from the host when it
+     * carries one, else the default; a cross-region apiId lookup then resolves an API created
+     * outside that region (issue #1871). Host parsing is shared with
+     * {@link io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter} so the
+     * filter and this handler agree on the host grammar. Any request that is not a WebSocket
+     * upgrade on an execute-api host is passed through untouched so JAX-RS (and that filter, which
+     * routes {@code @connections}) handle it.
+     */
+    private void handleSubdomainWebSocketUpgrade(RoutingContext ctx) {
+        String host = resolveRequestHost(ctx);
+        String apiId = ApiGatewayExecuteApiHostFilter.extractApiId(host, baseHostname);
+        if (apiId == null) {
+            ctx.next();
+            return;
+        }
+
+        String upgrade = ctx.request().getHeader("Upgrade");
+        if (upgrade == null || !"websocket".equalsIgnoreCase(upgrade)) {
+            // Non-WebSocket traffic on the execute-api host (e.g. @connections) — defer to JAX-RS.
+            ctx.next();
+            return;
+        }
+
+        String stageName = ctx.pathParam("stage");
+        if (stageName == null || stageName.isEmpty()) {
+            ctx.response().setStatusCode(403).end();
+            return;
+        }
+
+        String hostRegion = regionResolver.resolveRegionFromHost(host);
+        String preferredRegion = hostRegion != null ? hostRegion : regionResolver.getDefaultRegion();
+        // Cross-region apiId scan: resolves an API created outside the preferred region, and is
+        // the fallback for the regionless built-in suffixes that carry no region label.
+        String region = apiGatewayV2Service.resolveApiRegion(preferredRegion, apiId);
+
+        processUpgrade(ctx, apiId, stageName, region);
+    }
+
+    /**
+     * Resolve the request authority: the {@code Host} header (HTTP/1.1), falling back to the
+     * URI authority ({@code :authority}) for HTTP/2.
+     */
+    private static String resolveRequestHost(RoutingContext ctx) {
+        String host = ctx.request().getHeader("Host");
+        if (host != null) {
+            return host;
+        }
+        io.vertx.core.net.HostAndPort authority = ctx.request().authority();
+        return authority != null ? authority.host() : null;
     }
 
     /**
@@ -99,9 +164,17 @@ public class WebSocketHandler {
         // stageName may contain additional path segments — take only the first segment
         String stageName = segments[1].contains("/") ? segments[1].split("/")[0] : segments[1];
 
-        // Resolve region from the request Authorization header
+        // Resolve region from the request Authorization header, or the execute-api host.
         String region = resolveRegionFromVertxRequest(ctx);
+        processUpgrade(ctx, apiId, stageName, region);
+    }
 
+    /**
+     * Validate the API and stage, run the $connect lifecycle, and complete the upgrade.
+     * Shared by the path form ({@code /ws/{apiId}/{stage}}) and the AWS-style execute-api
+     * subdomain host route.
+     */
+    private void processUpgrade(RoutingContext ctx, String apiId, String stageName, String region) {
         // Validate the API exists and is a WEBSOCKET protocol API
         Api api;
         try {
@@ -680,12 +753,15 @@ public class WebSocketHandler {
      */
     private String resolveRegionFromVertxRequest(RoutingContext ctx) {
         String authHeader = ctx.request().getHeader("Authorization");
-        if (authHeader == null || authHeader.isEmpty()) {
-            return regionResolver.getDefaultRegion();
+        if (authHeader != null && !authHeader.isEmpty()) {
+            // Use a simple JAX-RS HttpHeaders adapter to delegate to RegionResolver
+            jakarta.ws.rs.core.HttpHeaders headers = new SimpleHttpHeaders(authHeader);
+            return regionResolver.resolveRegion(headers);
         }
-        // Use a simple JAX-RS HttpHeaders adapter to delegate to RegionResolver
-        jakarta.ws.rs.core.HttpHeaders headers = new SimpleHttpHeaders(authHeader);
-        return regionResolver.resolveRegion(headers);
+        // A WebSocket handshake carries no SigV4 Authorization header, so fall back to the
+        // region embedded in an execute-api subdomain host, else the configured default.
+        String region = regionResolver.resolveRegionFromHost(resolveRequestHost(ctx));
+        return region != null ? region : regionResolver.getDefaultRegion();
     }
 
     /**

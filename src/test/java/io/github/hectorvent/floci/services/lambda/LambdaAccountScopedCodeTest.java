@@ -1,0 +1,299 @@
+package io.github.hectorvent.floci.services.lambda;
+
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
+import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.ByteArrayOutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Base64;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Two accounts owning a same-named function in the same region must not share
+ * on-disk extracted code or a PublishVersion counter. Cross-account invoke
+ * resolves a function by the ARN's own account ({@code LambdaService.resolveInvokeTarget}),
+ * so a collision here silently serves one account's code under the other's ARN.
+ */
+class LambdaAccountScopedCodeTest {
+
+    private static final String REGION = "us-east-1";
+    private static final String ACCOUNT_A = "111111111111";
+    private static final String ACCOUNT_B = "222222222222";
+
+    @Test
+    void sameFunctionNameInTwoAccountsKeepsItsOwnCodeOnDisk(@TempDir Path baseDir) throws Exception {
+        CodeStore sharedCodeStore = new CodeStore(baseDir);
+        LambdaService svcA = serviceFor(ACCOUNT_A, sharedCodeStore);
+        LambdaService svcB = serviceFor(ACCOUNT_B, sharedCodeStore);
+
+        LambdaFunction a = svcA.createFunction(REGION, zipRequest("shared-fn", "module.exports.handler = 'A';"));
+        LambdaFunction b = svcB.createFunction(REGION, zipRequest("shared-fn", "module.exports.handler = 'B';"));
+
+        assertNotEquals(a.getCodeLocalPath(), b.getCodeLocalPath(),
+                "each account's function must extract to its own directory");
+        assertEquals("module.exports.handler = 'A';",
+                Files.readString(Path.of(a.getCodeLocalPath()).resolve("index.js")),
+                "account A's code must survive account B's create");
+        assertEquals("module.exports.handler = 'B';",
+                Files.readString(Path.of(b.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void deletingOneAccountsFunctionLeavesTheOthersCodeIntact(@TempDir Path baseDir) throws Exception {
+        CodeStore sharedCodeStore = new CodeStore(baseDir);
+        LambdaService svcA = serviceFor(ACCOUNT_A, sharedCodeStore);
+        LambdaService svcB = serviceFor(ACCOUNT_B, sharedCodeStore);
+
+        LambdaFunction a = svcA.createFunction(REGION, zipRequest("shared-fn", "A"));
+        svcB.createFunction(REGION, zipRequest("shared-fn", "B"));
+
+        svcB.deleteFunction(REGION, "shared-fn");
+
+        assertTrue(sharedCodeStore.exists(ACCOUNT_A, REGION, "shared-fn"),
+                "deleting B's function must not delete A's code");
+        assertEquals("A", Files.readString(Path.of(a.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void sameFunctionNameInTwoRegionsKeepsItsOwnCodeOnDisk(@TempDir Path baseDir) throws Exception {
+        CodeStore sharedCodeStore = new CodeStore(baseDir);
+        LambdaService service = serviceFor(ACCOUNT_A, sharedCodeStore);
+
+        LambdaFunction east = service.createFunction(REGION, zipRequest("regional-fn", "east"));
+        LambdaFunction west = service.createFunction("eu-west-1", zipRequest("regional-fn", "west"));
+
+        assertNotEquals(east.getCodeLocalPath(), west.getCodeLocalPath());
+        assertEquals("east", Files.readString(Path.of(east.getCodeLocalPath()).resolve("index.js")));
+        assertEquals("west", Files.readString(Path.of(west.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void updateAndDeleteInOneRegionLeaveTheOtherRegionCodeIntact(@TempDir Path baseDir) throws Exception {
+        CodeStore sharedCodeStore = new CodeStore(baseDir);
+        LambdaService service = serviceFor(ACCOUNT_A, sharedCodeStore);
+        service.createFunction(REGION, zipRequest("regional-fn", "east-v1"));
+        LambdaFunction west = service.createFunction("eu-west-1", zipRequest("regional-fn", "west-v1"));
+
+        service.updateFunctionCode(REGION, "regional-fn", Map.of("ZipFile", zipBase64("index.js", "east-v2")));
+
+        assertEquals("west-v1", Files.readString(Path.of(west.getCodeLocalPath()).resolve("index.js")));
+        service.deleteFunction(REGION, "regional-fn");
+        assertTrue(sharedCodeStore.exists(ACCOUNT_A, "eu-west-1", "regional-fn"));
+        assertEquals("west-v1", Files.readString(Path.of(west.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void regionScopedCodeSurvivesAStoreRestart(@TempDir Path baseDir) throws Exception {
+        LambdaService first = serviceFor(ACCOUNT_A, new CodeStore(baseDir));
+        LambdaFunction created = first.createFunction("ap-southeast-2", zipRequest("restart-fn", "persisted"));
+
+        CodeStore afterRestart = new CodeStore(baseDir);
+        assertTrue(afterRestart.exists(ACCOUNT_A, "ap-southeast-2", "restart-fn"));
+        assertEquals("persisted", Files.readString(Path.of(created.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void concurrentExtractionInTwoRegionsDoesNotOverwriteCode(@TempDir Path baseDir) throws Exception {
+        CodeStore sharedCodeStore = new CodeStore(baseDir);
+        LambdaService service = serviceFor(ACCOUNT_A, sharedCodeStore);
+
+        CompletableFuture<LambdaFunction> east = CompletableFuture.supplyAsync(() -> createUnchecked(
+                service, REGION, "concurrent-fn", "east"));
+        CompletableFuture<LambdaFunction> west = CompletableFuture.supplyAsync(() -> createUnchecked(
+                service, "eu-west-1", "concurrent-fn", "west"));
+
+        LambdaFunction eastFunction = east.join();
+        LambdaFunction westFunction = west.join();
+        assertEquals("east", Files.readString(Path.of(eastFunction.getCodeLocalPath()).resolve("index.js")));
+        assertEquals("west", Files.readString(Path.of(westFunction.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void publishVersionCounterKeyCarriesTheOwningAccount() {
+        LambdaFunction a = functionOwnedBy(ACCOUNT_A);
+        LambdaFunction b = functionOwnedBy(ACCOUNT_B);
+
+        assertNotEquals(LambdaService.versionCounterKey(REGION, a), LambdaService.versionCounterKey(REGION, b),
+                "same-named functions in different accounts must number versions independently");
+        assertTrue(LambdaService.versionCounterKey(REGION, a).contains(ACCOUNT_A));
+    }
+
+    @Test
+    void publishVersionAdoptsACounterPersistedUnderThePreAccountKey(@TempDir Path baseDir) throws Exception {
+        // The counter map is persisted, and its whole point is that a restart must not re-issue
+        // an already-used version number. Re-keying it must therefore carry the old value
+        // forward rather than restart numbering from 1 over existing snapshots.
+        LambdaService svc = serviceFor(ACCOUNT_A, new CodeStore(baseDir));
+        svc.createFunction(REGION, zipRequest("legacy-fn", "A"));
+        svc.versionCounters().put(REGION + "::legacy-fn", 3);
+
+        LambdaFunction published = svc.publishVersion(REGION, "legacy-fn", null);
+
+        assertEquals("4", published.getVersion());
+        assertNull(svc.versionCounters().get(REGION + "::legacy-fn"),
+                "the migrated legacy entry must not linger and be adopted twice");
+    }
+
+    @Test
+    void updateFunctionCodeRemovesAPreAccountScopedLegacyDirectory(@TempDir Path baseDir) throws Exception {
+        // A function created before account-scoping left its code at baseDir/<functionName>.
+        // Updating its code after the upgrade re-extracts to the new account-scoped path but
+        // must also reclaim the old directory, or it lingers on disk forever.
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaService svc = serviceFor(ACCOUNT_A, codeStore);
+        svc.createFunction(REGION, zipRequest("legacy-fn", "A"));
+        Path legacyPath = codeStore.getLegacyCodePath("legacy-fn");
+        Files.createDirectories(legacyPath);
+        Files.writeString(legacyPath.resolve("index.js"), "stale");
+
+        svc.updateFunctionCode(REGION, "legacy-fn",
+                Map.of("ZipFile", zipBase64("index.js", "B")));
+
+        assertFalse(Files.exists(legacyPath), "the pre-account-scoped directory must be reclaimed on update");
+    }
+
+    @Test
+    void aPublishedVersionsCodeSurvivesLatestMigratingOffTheLegacyPath(
+            @TempDir Path baseDir) throws Exception {
+        // publishVersion used to snapshot codeLocalPath verbatim (it had to, or a
+        // version-qualified invoke launched a container with no code - see #1987). If $LATEST was
+        // still on the legacy path at publish time, that version's snapshot became the ONLY thing
+        // keeping the legacy directory alive once $LATEST itself migrated, and the unused-check
+        // reclaimed it out from under the version's own future invokes.
+        //
+        // A version now copies the code into a directory of its own (#2958), so it no longer
+        // depends on the legacy directory surviving. The guarantee this test protects is unchanged
+        // and now stronger: whatever happens to the directory $LATEST was using, the version keeps
+        // the code it was published from.
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaService svc = serviceFor(ACCOUNT_A, codeStore);
+        svc.createFunction(REGION, zipRequest("legacy-version-fn", "v1"));
+
+        Path legacyPath = codeStore.getLegacyCodePath("legacy-version-fn");
+        Files.createDirectories(legacyPath);
+        Files.writeString(legacyPath.resolve("index.js"), "v1");
+        LambdaFunction latest = svc.getFunction(REGION, "legacy-version-fn");
+        latest.setCodeLocalPath(legacyPath.toAbsolutePath().normalize().toString());
+
+        LambdaFunction version = svc.publishVersion(REGION, "legacy-version-fn", null);
+        Path versionPath = Path.of(version.getCodeLocalPath());
+        assertNotEquals(legacyPath.toAbsolutePath().normalize().toString(), version.getCodeLocalPath(),
+                "the published version must own its code rather than reference the legacy directory");
+        assertEquals("v1", Files.readString(versionPath.resolve("index.js")).trim());
+
+        svc.updateFunctionCode(REGION, "legacy-version-fn", Map.of("ZipFile", zipBase64("index.js", "v2")));
+
+        assertTrue(Files.isDirectory(versionPath),
+                "the published version's own code must survive $LATEST migrating off the legacy path");
+        assertEquals("v1", Files.readString(versionPath.resolve("index.js")).trim(),
+                "the version must still hold the code it was published from");
+    }
+
+    @Test
+    void updateFunctionCodeDoesNotDeleteALegacyDirectoryStillLiveForAnotherAccount(@TempDir Path baseDir) throws Exception {
+        // Before account-scoping, two accounts' same-named functions shared the exact same
+        // on-disk directory. If account B's function was never updated since the migration, its
+        // $LATEST still points at that shared legacy directory. Account A updating its own code
+        // must not delete it out from under B.
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaFunctionStore sharedStore = new LambdaFunctionStore(AccountAwareStorageBackend.inMemory(ACCOUNT_A));
+        LambdaService svcA = new LambdaService(sharedStore, new WarmPool(), codeStore, new ZipExtractor(),
+                new RegionResolver(REGION, ACCOUNT_A));
+        svcA.createFunction(REGION, zipRequest("shared-fn", "A"));
+
+        Path legacyPath = codeStore.getLegacyCodePath("shared-fn");
+        Files.createDirectories(legacyPath);
+        Files.writeString(legacyPath.resolve("index.js"), "B-legacy");
+        LambdaFunction bFn = new LambdaFunction();
+        bFn.setFunctionName("shared-fn");
+        bFn.setAccountId(ACCOUNT_B);
+        bFn.setVersion("$LATEST");
+        bFn.setCodeLocalPath(legacyPath.toAbsolutePath().normalize().toString());
+        sharedStore.saveForAccount(ACCOUNT_B, REGION, bFn);
+
+        svcA.updateFunctionCode(REGION, "shared-fn", Map.of("ZipFile", zipBase64("index.js", "A-v2")));
+
+        assertTrue(Files.exists(legacyPath),
+                "a legacy directory another account's $LATEST still points at must survive this update");
+    }
+
+    @Test
+    void deleteFunctionDoesNotDeleteALegacyDirectoryStillLiveForAnotherAccount(@TempDir Path baseDir) throws Exception {
+        CodeStore codeStore = new CodeStore(baseDir);
+        LambdaFunctionStore sharedStore = new LambdaFunctionStore(AccountAwareStorageBackend.inMemory(ACCOUNT_A));
+        LambdaService svcA = new LambdaService(sharedStore, new WarmPool(), codeStore, new ZipExtractor(),
+                new RegionResolver(REGION, ACCOUNT_A));
+        svcA.createFunction(REGION, zipRequest("shared-fn", "A"));
+
+        Path legacyPath = codeStore.getLegacyCodePath("shared-fn");
+        Files.createDirectories(legacyPath);
+        Files.writeString(legacyPath.resolve("index.js"), "B-legacy");
+        LambdaFunction bFn = new LambdaFunction();
+        bFn.setFunctionName("shared-fn");
+        bFn.setAccountId(ACCOUNT_B);
+        bFn.setVersion("$LATEST");
+        bFn.setCodeLocalPath(legacyPath.toAbsolutePath().normalize().toString());
+        sharedStore.saveForAccount(ACCOUNT_B, REGION, bFn);
+
+        svcA.deleteFunction(REGION, "shared-fn");
+
+        assertTrue(Files.exists(legacyPath),
+                "a legacy directory another account's $LATEST still points at must survive this delete");
+    }
+
+    private LambdaFunction functionOwnedBy(String accountId) {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setAccountId(accountId);
+        fn.setFunctionName("shared-fn");
+        return fn;
+    }
+
+    private LambdaFunction createUnchecked(LambdaService service, String region, String name, String source) {
+        try {
+            return service.createFunction(region, zipRequest(name, source));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private LambdaService serviceFor(String accountId, CodeStore codeStore) {
+        return new LambdaService(
+                new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>()),
+                new WarmPool(),
+                codeStore,
+                new ZipExtractor(),
+                new RegionResolver(REGION, accountId));
+    }
+
+    private Map<String, Object> zipRequest(String name, String handlerSource) throws Exception {
+        return new java.util.HashMap<>(Map.of(
+                "FunctionName", name,
+                "Runtime", "nodejs20.x",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "Handler", "index.handler",
+                "Code", Map.of("ZipFile", zipBase64("index.js", handlerSource))
+        ));
+    }
+
+    private String zipBase64(String entryName, String content) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(out)) {
+            zip.putNextEntry(new ZipEntry(entryName));
+            zip.write(content.getBytes());
+            zip.closeEntry();
+        }
+        return Base64.getEncoder().encodeToString(out.toByteArray());
+    }
+}

@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -27,6 +28,15 @@ public class SigV4Validator {
     private static final Logger LOG = Logger.getLogger(SigV4Validator.class);
     private static final DateTimeFormatter DATETIME_FMT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+
+    /**
+     * Well-known local-dev credential pair used pervasively by default AWS SDK clients
+     * (AwsBasicCredentials.create("test", "test")) against this emulator, mirrored from the
+     * identical fallback in S3Service/PreSignedUrlFilter. Deliberately not a fallback for any
+     * other unregistered access key -- only this exact, already-public pair is honored.
+     */
+    private static final String LEGACY_ACCESS_KEY_ID = "test";
+    private static final String LEGACY_SECRET_KEY = "test";
 
     private final IamService iamService;
 
@@ -77,7 +87,7 @@ public class SigV4Validator {
                 return false;
             }
 
-            if (expectedUsername != null && user != null && !expectedUsername.equals(user)) {
+            if (expectedUsername != null && !expectedUsername.equals(user)) {
                 LOG.debugv("IAM token user mismatch: expected={0}, got={1}",
                         expectedUsername, user);
                 return false;
@@ -101,7 +111,17 @@ public class SigV4Validator {
             String service = credParts[3];
             String credentialScope = date + "/" + region + "/" + service + "/aws4_request";
 
-            String secretKey = iamService.findSecretKey(accessKeyId).orElse(accessKeyId);
+            String secretKey;
+            if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
+                secretKey = LEGACY_SECRET_KEY;
+            } else {
+                Optional<String> registeredSecretKey = iamService.findSecretKey(accessKeyId);
+                if (registeredSecretKey.isEmpty()) {
+                    LOG.debugv("IAM token references unregistered access key={0}", sanitizeForLog(accessKeyId));
+                    return false;
+                }
+                secretKey = registeredSecretKey.get();
+            }
 
             String canonicalQueryString = Arrays.stream(rawPairs)
                     .filter(p -> !rawParamName(p).equals("X-Amz-Signature"))
@@ -126,7 +146,7 @@ public class SigV4Validator {
                     expectedSignature.getBytes(StandardCharsets.UTF_8),
                     signature.getBytes(StandardCharsets.UTF_8));
             if (!valid) {
-                LOG.debugv("IAM token signature mismatch for accessKey={0}", accessKeyId);
+                LOG.debugv("IAM token signature mismatch for accessKey={0}", sanitizeForLog(accessKeyId));
             }
             return valid;
 
@@ -153,6 +173,14 @@ public class SigV4Validator {
 
     private static String urlDecode(String value) {
         return URLDecoder.decode(value, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Strips control characters (CR, LF, etc.) from an attacker-controlled value before it is
+     * interpolated into a log line, preventing log injection / forged multi-line log entries.
+     */
+    private static String sanitizeForLog(String value) {
+        return value == null ? null : value.replaceAll("\\p{Cntrl}", "");
     }
 
     private static byte[] deriveSigningKey(String secretKey, String date, String region,

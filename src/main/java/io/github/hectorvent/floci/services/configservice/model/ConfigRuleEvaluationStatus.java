@@ -12,5 +12,8 @@ public record ConfigRuleEvaluationStatus(
         @JsonProperty("ConfigRuleName") String configRuleName,
         @JsonProperty("ConfigRuleArn") String configRuleArn,
         @JsonProperty("ConfigRuleId") String configRuleId,
-        @JsonProperty("FirstEvaluationStarted") Boolean firstEvaluationStarted) {
+        @JsonProperty("FirstEvaluationStarted") Boolean firstEvaluationStarted,
+        @JsonProperty("FirstActivatedTime") Long firstActivatedTime,
+        @JsonProperty("LastSuccessfulInvocationTime") Long lastSuccessfulInvocationTime,
+        @JsonProperty("LastSuccessfulEvaluationTime") Long lastSuccessfulEvaluationTime) {
 }

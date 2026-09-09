@@ -3,6 +3,7 @@
     "includes": [
       {"pattern": "META-INF/services/java.security.Provider"},
       {"pattern": "ec2/.*\\.yaml"},
+      {"pattern": "iam/.*\\.yaml"},
       {"pattern": "org/apache/velocity/runtime/defaults/velocity.properties"}
     ]
   },

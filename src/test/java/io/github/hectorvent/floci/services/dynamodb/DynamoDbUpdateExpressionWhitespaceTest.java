@@ -159,6 +159,36 @@ class DynamoDbUpdateExpressionWhitespaceTest {
             .body("Attributes.c.N", equalTo("6"));
     }
 
+    /**
+     * Regression test for #2509: a space between a function name and its own opening
+     * parenthesis (e.g. {@code "list_append ("} rather than {@code "list_append("}) is
+     * accepted by real AWS and is exactly what PynamoDB always emits, but
+     * {@code applySetClause}/{@code evaluateSetExpr} gated on a literal
+     * {@code startsWith(functionName + "(")} check, so the spaced form fell through to the
+     * "plain attribute reference" branch and silently failed to resolve - the SET was a
+     * no-op with no error. Distinct from #1640 above: this whitespace sits between the
+     * function name and its own parenthesis, not between clause keywords or a function's
+     * arguments, so #1640's tokenizer-level normalization didn't reach it.
+     */
+    @Test
+    void spaceBeforeFunctionParenthesisIsAccepted() {
+        createAndSeed("UpdWsFuncSpace", """
+            {"pk":{"S":"x"},"l":{"L":[{"S":"one"}]},"m":{"S":"present"}}""");
+        given().header("X-Amz-Target", "DynamoDB_20120810.UpdateItem").contentType(CT).body("""
+            {"TableName":"UpdWsFuncSpace","Key":{"pk":{"S":"x"}},
+             "UpdateExpression":"SET #l = list_append (#l, :more), #m = if_not_exists (#missing, :fallback)",
+             "ReturnValues":"ALL_NEW",
+             "ExpressionAttributeNames":{"#l":"l","#m":"m","#missing":"missing"},
+             "ExpressionAttributeValues":{":more":{"L":[{"S":"two"}]},":fallback":{"S":"unused"}}}
+            """)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Attributes.l.L.size()", equalTo(2))
+            .body("Attributes.l.L[0].S", equalTo("one"))
+            .body("Attributes.l.L[1].S", equalTo("two"))
+            .body("Attributes.m.S", equalTo("unused"));
+    }
+
     @Test
     void invalidLeadingKeywordIsStillRejected() {
         createAndSeed("UpdWsBad");

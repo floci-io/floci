@@ -28,9 +28,13 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -66,8 +70,10 @@ public class LambdaController {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
             LambdaFunction fn = lambdaService.createFunction(region, request);
+            Map<String, Object> configuration = buildFunctionConfiguration(fn);
+            unqualifyArn(configuration);
             return Response.status(201)
-                    .entity(buildFunctionConfiguration(fn))
+                    .entity(configuration)
                     .build();
         } catch (AwsException e) {
             throw e;
@@ -82,9 +88,10 @@ public class LambdaController {
     @Path("/functions/{functionName}")
     public Response getFunction(@Context HttpHeaders headers,
                                 @Context UriInfo uriInfo,
-                                @PathParam("functionName") String functionName) {
+                                @PathParam("functionName") String functionName,
+                                @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaFunction fn = lambdaService.getFunction(region, functionName);
+        LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
 
         ObjectNode root = objectMapper.createObjectNode();
         root.set("Configuration", objectMapper.valueToTree(buildFunctionConfiguration(fn)));
@@ -102,6 +109,17 @@ public class LambdaController {
                     .build().toString();
             code.put("Location", location);
             code.put("RepositoryType", "S3");
+        }
+
+        // GetFunction carries the function's tags alongside Configuration and Code. Clients read
+        // them from here rather than calling ListTags, so omitting the field makes a tagged
+        // function read back untagged and diff on every plan. Unlike IAM, Lambda has no
+        // list-subset rule to gate this on — ListFunctions returns FunctionConfiguration, which
+        // has no Tags field at all.
+        Map<String, String> tags = fn.getTags();
+        if (tags != null && !tags.isEmpty()) {
+            ObjectNode tagsNode = root.putObject("Tags");
+            tags.forEach(tagsNode::put);
         }
 
         return Response.ok(root).build();
@@ -128,9 +146,10 @@ public class LambdaController {
     @GET
     @Path("/functions/{functionName}/configuration")
     public Response getFunctionConfiguration(@Context HttpHeaders headers,
-                                              @PathParam("functionName") String functionName) {
+                                              @PathParam("functionName") String functionName,
+                                              @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        LambdaFunction fn = lambdaService.getFunction(region, functionName);
+        LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
         return Response.ok(buildFunctionConfiguration(fn)).build();
     }
 
@@ -179,9 +198,10 @@ public class LambdaController {
     @DELETE
     @Path("/functions/{functionName}")
     public Response deleteFunction(@Context HttpHeaders headers,
-                                   @PathParam("functionName") String functionName) {
+                                   @PathParam("functionName") String functionName,
+                                   @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        lambdaService.deleteFunction(region, functionName);
+        lambdaService.deleteFunction(region, functionName, qualifier);
         return Response.noContent().build();
     }
 
@@ -321,14 +341,28 @@ public class LambdaController {
         return Response.status(202).entity(buildEsmResponse(esm)).build();
     }
 
-    private Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
+    Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("UUID", esm.getUuid());
         node.put("FunctionArn", esm.getFunctionArn());
-        node.put("EventSourceArn", esm.getEventSourceArn());
+        if (esm.getEventSourceArn() != null) {
+            node.put("EventSourceArn", esm.getEventSourceArn());
+        }
         node.put("BatchSize", esm.getBatchSize());
+        if (esm.getMaximumBatchingWindowInSeconds() != null) {
+            node.put("MaximumBatchingWindowInSeconds", esm.getMaximumBatchingWindowInSeconds());
+        }
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
+        // Omitted rather than nulled when unset, so a mapping created without a starting position
+        // reads back the way AWS returns it - and so Terraform sees the configured value on refresh
+        // instead of treating the field as unset and forcing a replacement on every plan.
+        if (esm.getStartingPosition() != null) {
+            node.put("StartingPosition", esm.getStartingPosition());
+        }
+        if (esm.getStartingPositionTimestamp() != null) {
+            node.put("StartingPositionTimestamp", (double) esm.getStartingPositionTimestamp() / 1000.0);
+        }
         ArrayNode responseTypes = node.putArray("FunctionResponseTypes");
 
         if (esm.getBisectBatchOnFunctionError() != null) {
@@ -341,6 +375,19 @@ public class LambdaController {
             onFailure.put("Destination", esm.getDestinationConfig().getOnFailure().getDestination());
         }
 
+        if (esm.getSelfManagedEventSource() != null) {
+            node.set("SelfManagedEventSource", objectMapper.valueToTree(esm.getSelfManagedEventSource()));
+        }
+
+        if (esm.getTopics() != null && !esm.getTopics().isEmpty()) {
+            ArrayNode topicsNode = node.putArray("Topics");
+            esm.getTopics().forEach(topicsNode::add);
+        }
+
+        if (esm.getSourceAccessConfigurations() != null && !esm.getSourceAccessConfigurations().isEmpty()) {
+            node.set("SourceAccessConfigurations", objectMapper.valueToTree(esm.getSourceAccessConfigurations()));
+        }
+
         if (esm.getFunctionResponseTypes() != null) {
             esm.getFunctionResponseTypes().forEach(responseTypes::add);
         }
@@ -351,6 +398,15 @@ public class LambdaController {
         if (maxConcurrency != null) {
             ObjectNode scaling = node.putObject("ScalingConfig");
             scaling.put("MaximumConcurrency", maxConcurrency.intValue());
+        }
+        // Only emit FilterCriteria when filters are configured: AWS omits the field
+        // entirely (rather than returning null or an empty object) when no filter is set.
+        if (esm.getFilterCriteria() != null && !esm.getFilterCriteria().getFilters().isEmpty()) {
+            ObjectNode filterCriteria = node.putObject("FilterCriteria");
+            ArrayNode filters = filterCriteria.putArray("Filters");
+            for (EventSourceMapping.Filter filter : esm.getFilterCriteria().getFilters()) {
+                filters.addObject().put("Pattern", filter.getPattern());
+            }
         }
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);
@@ -366,16 +422,50 @@ public class LambdaController {
                                    String body) {
         String region = regionResolver.resolveRegion(headers);
         String description = null;
+        String codeSha256 = null;
         if (body != null && !body.isBlank()) {
+            Map<String, Object> req;
             try {
                 @SuppressWarnings("unchecked")
-                Map<String, Object> req = objectMapper.readValue(body, Map.class);
-                description = (String) req.get("Description");
-            } catch (Exception ignored) {}
+                Map<String, Object> parsed = objectMapper.readValue(body, Map.class);
+                req = parsed;
+            } catch (Exception e) {
+                // Swallowing this would treat a malformed body as an empty one, so a request whose
+                // CodeSha256 could not be read would publish instead of failing its precondition.
+                throw new AwsException("InvalidParameterValueException",
+                        "Could not parse request body: " + e.getMessage(), 400);
+            }
+            if (req == null) {
+                // A literal "null" body parses cleanly to a null map, so it never reaches the catch
+                // above. Checked here rather than inside the try, where this exception would be
+                // caught by that same catch and rewrapped as a parse failure it is not.
+                throw new AwsException("InvalidParameterValueException",
+                        "Request body must be a JSON object", 400);
+            }
+            description = stringField(req, "Description");
+            codeSha256 = stringField(req, "CodeSha256");
         }
-        LambdaFunction version = lambdaService.publishVersion(region, functionName, description);
+        LambdaFunction version = lambdaService.publishVersion(region, functionName, description, codeSha256);
         return Response.status(201).entity(buildFunctionConfiguration(version)).build();
     }
+
+    /**
+     * Reads a string field, rejecting a value of the wrong JSON type rather than letting a cast
+     * failure be swallowed. A {@code CodeSha256} that arrives as a number or an object is a
+     * malformed precondition, and treating it as absent would publish without checking anything.
+     */
+    private static String stringField(Map<String, Object> req, String name) {
+        Object value = req.get(name);
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof String text)) {
+            throw new AwsException("InvalidParameterValueException",
+                    name + " must be a string", 400);
+        }
+        return text;
+    }
+
 
     @GET
     @Path("/functions/{functionName}/versions")
@@ -479,12 +569,13 @@ public class LambdaController {
     @Path("/functions/{functionName}/policy")
     public Response addPermission(@Context HttpHeaders headers,
                                   @PathParam("functionName") String functionName,
+                                  @QueryParam("Qualifier") String qualifier,
                                   String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
-            Map<String, Object> statement = lambdaService.addPermission(region, functionName, request);
+            Map<String, Object> statement = lambdaService.addPermission(region, functionName, qualifier, request);
             String statementJson = objectMapper.writeValueAsString(statement);
             ObjectNode root = objectMapper.createObjectNode();
             root.put("Statement", statementJson);
@@ -499,10 +590,11 @@ public class LambdaController {
     @GET
     @Path("/functions/{functionName}/policy")
     public Response getPolicy(@Context HttpHeaders headers,
-                              @PathParam("functionName") String functionName) {
+                              @PathParam("functionName") String functionName,
+                              @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            Map<String, Object> data = lambdaService.getPolicy(region, functionName);
+            Map<String, Object> data = lambdaService.getPolicy(region, functionName, qualifier);
             @SuppressWarnings("unchecked")
             Map<String, Object> policy = (Map<String, Object>) data.get("policy");
             String policyJson = objectMapper.writeValueAsString(policy);
@@ -521,9 +613,10 @@ public class LambdaController {
     @Path("/functions/{functionName}/policy/{statementId}")
     public Response removePermission(@Context HttpHeaders headers,
                                      @PathParam("functionName") String functionName,
-                                     @PathParam("statementId") String statementId) {
+                                     @PathParam("statementId") String statementId,
+                                     @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        lambdaService.removePermission(region, functionName, statementId);
+        lambdaService.removePermission(region, functionName, qualifier, statementId);
         return Response.noContent().build();
     }
 
@@ -556,6 +649,18 @@ public class LambdaController {
         java.util.Map<String, Double> result = new java.util.HashMap<>();
         raw.forEach((k, v) -> result.put(k, ((Number) v).doubleValue()));
         return result;
+    }
+
+    /**
+     * CreateFunction reports the version it published but keeps the unqualified ARN, unlike
+     * UpdateFunctionCode and PublishVersion which both answer with the qualified form. Measured
+     * against the live service; the reference does not distinguish them.
+     */
+    private static void unqualifyArn(Map<String, Object> configuration) {
+        if (configuration.get("FunctionArn") instanceof String arn
+                && !"$LATEST".equals(configuration.get("Version"))) {
+            configuration.put("FunctionArn", arn.substring(0, arn.lastIndexOf(':')));
+        }
     }
 
     private Map<String, Object> buildFunctionConfiguration(LambdaFunction fn) {
@@ -623,15 +728,125 @@ public class LambdaController {
             node.put("KMSKeyArn", fn.getKmsKeyArn());
         }
 
-        // Environment — always present (SDK expects it even when empty)
-        ObjectNode envNode = node.putObject("Environment");
+        if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
+            ArrayNode fileSystems = node.putArray("FileSystemConfigs");
+            fn.getFileSystemConfigs().forEach(fileSystem -> fileSystems.addObject()
+                    .put("Arn", fileSystem.getArn())
+                    .put("LocalMountPath", fileSystem.getLocalMountPath()));
+        }
+
+        // Environment — omitted entirely when no variables are set, as AWS does. An empty
+        // object is not the same answer as absence: the Terraform provider reads one back as
+        // an `environment {}` block in state, so a function declared without variables plans a
+        // removal on every run. Same rule as Layers, KMSKeyArn and VpcConfig above.
         if (fn.getEnvironment() != null && !fn.getEnvironment().isEmpty()) {
-            ObjectNode vars = envNode.putObject("Variables");
+            ObjectNode vars = node.putObject("Environment").putObject("Variables");
             fn.getEnvironment().forEach(vars::put);
         }
+
+        putVpcConfig(node, fn);
+        putSnapStart(node, fn);
+        putLoggingConfig(node, fn);
+        putRuntimeVersionConfig(node, fn);
 
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);
         return result;
+    }
+
+    /**
+     * VpcConfigResponse, not VpcConfig: the response shape adds VpcId, which the request shape
+     * has no member for. Emitted only while the function is actually attached to a VPC — AWS
+     * omits the block entirely once the last subnet and security group are removed.
+     */
+    private void putVpcConfig(ObjectNode node, LambdaFunction fn) {
+        Map<String, Object> vpcConfig = fn.getVpcConfig();
+        List<String> subnetIds = stringList(vpcConfig, "SubnetIds");
+        List<String> securityGroupIds = stringList(vpcConfig, "SecurityGroupIds");
+        if (subnetIds.isEmpty() && securityGroupIds.isEmpty()) {
+            return;
+        }
+        ObjectNode vpcNode = node.putObject("VpcConfig");
+        ArrayNode subnetNode = vpcNode.putArray("SubnetIds");
+        subnetIds.forEach(subnetNode::add);
+        ArrayNode securityGroupNode = vpcNode.putArray("SecurityGroupIds");
+        securityGroupIds.forEach(securityGroupNode::add);
+        if (fn.getVpcId() != null) {
+            vpcNode.put("VpcId", fn.getVpcId());
+        }
+        vpcNode.put("Ipv6AllowedForDualStack",
+                Boolean.TRUE.equals(vpcConfig.get("Ipv6AllowedForDualStack")));
+    }
+
+    /**
+     * SnapStartResponse, not SnapStart: the response adds OptimizationStatus, which the request
+     * shape has no member for. AWS only reports {@code On} for a published version whose snapshot
+     * has been optimized; {@code $LATEST} is always {@code Off} even with ApplyOn set.
+     */
+    private void putSnapStart(ObjectNode node, LambdaFunction fn) {
+        String applyOn = fn.getSnapStartApplyOn() != null ? fn.getSnapStartApplyOn() : "None";
+        boolean optimized = "PublishedVersions".equals(applyOn) && !"$LATEST".equals(fn.getVersion());
+        node.putObject("SnapStart")
+                .put("ApplyOn", applyOn)
+                .put("OptimizationStatus", optimized ? "On" : "Off");
+    }
+
+    /**
+     * Always present, as on AWS: an unset LoggingConfig still reads back as Text plus the default
+     * {@code /aws/lambda/<name>} log group. The two log levels are JSON-format-only.
+     */
+    private void putLoggingConfig(ObjectNode node, LambdaFunction fn) {
+        String logFormat = fn.getLogFormat() != null ? fn.getLogFormat() : "Text";
+        ObjectNode logging = node.putObject("LoggingConfig");
+        logging.put("LogFormat", logFormat);
+        if ("JSON".equals(logFormat)) {
+            logging.put("ApplicationLogLevel",
+                    fn.getApplicationLogLevel() != null ? fn.getApplicationLogLevel() : "INFO");
+            logging.put("SystemLogLevel",
+                    fn.getSystemLogLevel() != null ? fn.getSystemLogLevel() : "INFO");
+        }
+        logging.put("LogGroup", fn.getLogGroup() != null && !fn.getLogGroup().isBlank()
+                ? fn.getLogGroup()
+                : "/aws/lambda/" + fn.getFunctionName());
+    }
+
+    /** Managed-runtime only: AWS omits it for container images, which pin their own runtime. */
+    private void putRuntimeVersionConfig(ObjectNode node, LambdaFunction fn) {
+        if ("Image".equals(fn.getPackageType()) || fn.getRuntime() == null || fn.getRuntime().isBlank()) {
+            return;
+        }
+        node.putObject("RuntimeVersionConfig")
+                .put("RuntimeVersionArn", runtimeVersionArn(fn));
+    }
+
+    private static String runtimeVersionArn(LambdaFunction fn) {
+        String region = "us-east-1";
+        String[] arnParts = fn.getFunctionArn() != null ? fn.getFunctionArn().split(":") : new String[0];
+        if (arnParts.length > 3 && !arnParts[3].isBlank()) {
+            region = arnParts[3];
+        }
+        return "arn:aws:lambda:" + region + "::runtime:" + runtimeVersionId(fn.getRuntime());
+    }
+
+    /**
+     * AWS identifies a runtime version by a 64-hex digest. Derived from the runtime name so the
+     * same runtime keeps the same id across restarts — a value that churned would show up as a
+     * perpetual diff in anything that records it.
+     */
+    private static String runtimeVersionId(String runtime) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(runtime.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    private static List<String> stringList(Map<String, Object> config, String key) {
+        if (config == null || !(config.get(key) instanceof List<?> values)) {
+            return List.of();
+        }
+        return values.stream().filter(java.util.Objects::nonNull).map(Object::toString).toList();
     }
 }

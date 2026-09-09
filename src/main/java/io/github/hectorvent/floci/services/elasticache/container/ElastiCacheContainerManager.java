@@ -53,6 +53,7 @@ public class ElastiCacheContainerManager {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Map<String, ElastiCacheContainerHandle> activeContainers = new ConcurrentHashMap<>();
+    private volatile boolean dockerUnavailableLogged;
 
     @Inject
     public ElastiCacheContainerManager(ContainerBuilder containerBuilder,
@@ -69,22 +70,87 @@ public class ElastiCacheContainerManager {
         this.regionResolver = regionResolver;
     }
 
+    /**
+     * Attempts {@link #start} and reports the backend as unavailable instead of propagating the
+     * failure, when the cause is that no Docker daemon is reachable from Floci: Floci running
+     * inside Docker without a mounted socket, or a stopped daemon on the host. A failure raised
+     * while the daemon <em>is</em> reachable is a genuine container problem and still propagates,
+     * so nothing changes for a Floci that can start Valkey containers.
+     *
+     * @return the container handle, or {@code null} when no Docker daemon is reachable and no
+     *         container was created
+     */
+    public ElastiCacheContainerHandle tryStart(String groupId, String image) {
+        try {
+            ElastiCacheContainerHandle handle = start(groupId, image);
+            dockerUnavailableLogged = false;
+            return handle;
+        } catch (RuntimeException e) {
+            if (isDockerReachable()) {
+                throw e;
+            }
+            boolean partial = activeContainers.containsKey(groupId);
+            stopByGroupId(groupId);
+            if (partial) {
+                throw e;
+            }
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). ElastiCache metadata "
+                        + "operations keep working and replication groups still reach 'available', "
+                        + "but they have no backing Valkey container until a daemon becomes "
+                        + "reachable.", e.getMessage());
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons.
+     */
+    public boolean isDockerReachable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
+    }
+
     public ElastiCacheContainerHandle start(String groupId, String image) {
+        return start(groupId, image, List.of());
+    }
+
+    /**
+     * Starts a backend container for the given resource id, appending {@code extraServerFlags}
+     * to the Valkey server command line (via the image's {@code VALKEY_EXTRA_FLAGS} hook).
+     * Cluster-mode nodes use this to pass {@code --cluster-enabled} and announce settings.
+     */
+    public ElastiCacheContainerHandle start(String groupId, String image, List<String> extraServerFlags) {
         LOG.infov("Starting ElastiCache backend container for group: {0}", groupId);
 
-        String containerName = ContainerStorageHelper.resourceName(config, "valkey", null, groupId);
+        String containerName = containerName(groupId);
 
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);
+
+        StringBuilder serverFlags = new StringBuilder("--loglevel verbose");
+        for (String flag : extraServerFlags) {
+            serverFlags.append(' ').append(flag);
+        }
 
         // Build container spec. Only publish the backend port to the host in
         // native mode — in Docker mode the JVM reaches the container via its
         // network IP, no host binding needed.
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
-                .withEnv("VALKEY_EXTRA_FLAGS", "--loglevel verbose")
+                .withEnv("VALKEY_EXTRA_FLAGS", serverFlags.toString())
                 .withDockerNetwork(config.services().elasticache().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "elasticache", groupId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
@@ -102,6 +168,13 @@ public class ElastiCacheContainerManager {
 
         ElastiCacheContainerHandle handle = new ElastiCacheContainerHandle(
                 info.containerId(), groupId, endpoint.host(), endpoint.port());
+        try {
+            handle.setNetworkIp(lifecycleManager.resolveContainerNetworkIp(
+                    info.containerId(), config.services().elasticache().dockerNetwork().orElse(null)));
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not resolve network IP for ElastiCache container {0}: {1}",
+                    info.containerId(), e.getMessage());
+        }
         activeContainers.put(groupId, handle);
 
         // Attach log streaming
@@ -182,6 +255,28 @@ public class ElastiCacheContainerManager {
         }
         activeContainers.remove(handle.getGroupId());
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+    }
+
+    /**
+     * Stops and removes the backend container for a group by id, if one exists.
+     * Used by the service's provisioning rollback: {@link #start} registers the container in
+     * {@code activeContainers} <em>before</em> {@link #waitForBackendReady}, so a readiness
+     * timeout throws without ever returning the handle to the caller. In that case rollback
+     * can't go through {@link #stop} (it has no handle), so it cleans up by id instead. Falls
+     * back to the deterministic container name to catch a container that failed before it was
+     * registered. Idempotent — a no-op when nothing is running for the id.
+     */
+    public void stopByGroupId(String groupId) {
+        ElastiCacheContainerHandle handle = activeContainers.get(groupId);
+        if (handle != null) {
+            stop(handle);
+            return;
+        }
+        lifecycleManager.removeIfExists(containerName(groupId));
+    }
+
+    private String containerName(String groupId) {
+        return ContainerStorageHelper.resourceName(config, "valkey", null, groupId);
     }
 
     public void stopAll() {

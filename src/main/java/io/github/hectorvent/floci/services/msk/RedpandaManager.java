@@ -43,6 +43,7 @@ public class RedpandaManager {
     private final RegionResolver regionResolver;
     private final PortAllocator portAllocator;
     private final Map<String, Closeable> logStreams = new ConcurrentHashMap<>();
+    private volatile boolean dockerUnavailableLogged;
 
     @Inject
     public RedpandaManager(ContainerBuilder containerBuilder,
@@ -59,6 +60,49 @@ public class RedpandaManager {
         this.config = config;
         this.regionResolver = regionResolver;
         this.portAllocator = portAllocator;
+    }
+
+    /**
+     * Attempts {@link #startContainer} and reports the broker as unavailable instead of
+     * propagating the failure, when the cause is that no Docker daemon is reachable from Floci:
+     * Floci running inside Docker without a mounted socket, or a stopped daemon on the host. A
+     * failure raised while the daemon <em>is</em> reachable is a genuine container problem and
+     * still propagates, so nothing changes for a Floci that can start Redpanda containers.
+     *
+     * @return {@code true} when the container started, {@code false} when no Docker daemon is
+     *         reachable
+     */
+    public boolean tryStartContainer(MskCluster cluster) {
+        try {
+            startContainer(cluster);
+            dockerUnavailableLogged = false;
+            return true;
+        } catch (RuntimeException e) {
+            if (isDockerReachable()) {
+                throw e;
+            }
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). MSK metadata operations "
+                        + "keep working and clusters still reach ACTIVE, but they have no backing "
+                        + "Kafka broker until a daemon becomes reachable.", e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons.
+     */
+    public boolean isDockerReachable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
     }
 
     public void startContainer(MskCluster cluster) {
@@ -103,7 +147,10 @@ public class RedpandaManager {
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withDockerNetwork(config.services().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "msk", cluster.getClusterName(), regionResolver.getAccountId(),
+                        regionResolver.getDefaultRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);

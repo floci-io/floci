@@ -170,6 +170,22 @@ class ScheduleInvokerTest {
     }
 
     @Test
+    void lambdaTargetPreservesArnAccount() {
+        String arn = "arn:aws:lambda:ap-south-1:100000000012:function:cross-account-function";
+        Target target = new Target();
+        target.setArn(arn);
+        target.setInput("{\"detail\":{\"job\":\"workflow-recovery\"}}");
+
+        invoker.invoke(target, "ap-south-1");
+
+        verify(lambdaService).invokeArn(
+                eq(arn),
+                org.mockito.AdditionalMatchers.aryEq(
+                        "{\"detail\":{\"job\":\"workflow-recovery\"}}".getBytes()),
+                eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.Event));
+    }
+
+    @Test
     void directSnsTopicArnStillDelivers() {
         Target target = new Target();
         target.setArn(TOPIC_ARN);

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.amazonmq.model.Broker;
@@ -26,7 +27,7 @@ class AmazonMqServiceTest {
     void setUp() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
@@ -72,6 +73,20 @@ class AmazonMqServiceTest {
         CreateBrokerParams activeMq = new CreateBrokerParams("legacy", "ACTIVEMQ", null,
                 "SINGLE_INSTANCE", "mq.t3.micro", false, false, null, null);
         assertThrows(AwsException.class, () -> service.createBroker(activeMq));
+    }
+
+    @Test
+    void createBrokerAcceptsDeploymentModeCasing() {
+        // DeploymentMode is matched case-insensitively for the same reason EngineType is: the
+        // wire enum is upper case but callers spell it however their tooling does, and
+        // "single_instance" names the one mode this emulator supports rather than one to
+        // reject. The canonical wire casing is stored so DescribeBroker reads back the enum
+        // value the SDKs expect, whatever casing the request used.
+        CreateBrokerParams mixedCase = new CreateBrokerParams("orders", "RABBITMQ", null,
+                "single_instance", "mq.t3.micro", false, false,
+                List.of(new MqUser("admin", "AdminPass123", true, null)), null);
+        Broker broker = service.createBroker(mixedCase);
+        assertEquals("SINGLE_INSTANCE", broker.getDeploymentMode());
     }
 
     @Test
@@ -173,7 +188,7 @@ class AmazonMqServiceTest {
     private AmazonMqService realModeServiceWithFailingManager() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenReturn(AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);

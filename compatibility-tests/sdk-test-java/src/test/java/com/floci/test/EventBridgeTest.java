@@ -3,6 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.eventbridge.model.*;
+import software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
 
@@ -331,16 +332,30 @@ class EventBridgeTest {
     @Order(91)
     void deleteRule() {
         eb.deleteRule(DeleteRuleRequest.builder().name(ruleName).build());
+        assertThatCode(() -> eb.deleteRule(DeleteRuleRequest.builder().name(ruleName).build()))
+                .doesNotThrowAnyException();
         assertThatThrownBy(() ->
                 eb.describeRule(DescribeRuleRequest.builder().name(ruleName).build()))
-                .isInstanceOf(software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundException.class);
+                .isInstanceOf(ResourceNotFoundException.class)
+                .satisfies(error -> assertThat(((ResourceNotFoundException) error).statusCode())
+                        .isEqualTo(400));
     }
 
     @Test
     @Order(92)
     void deleteEventBus() {
         eb.deleteEventBus(DeleteEventBusRequest.builder().name(busName).build());
+        assertThatCode(() -> eb.deleteEventBus(DeleteEventBusRequest.builder().name(busName).build()))
+                .doesNotThrowAnyException();
         ListEventBusesResponse response = eb.listEventBuses(ListEventBusesRequest.builder().build());
         assertThat(response.eventBuses()).extracting(EventBus::name).doesNotContain(busName);
+
+        assertThatThrownBy(() -> eb.deleteRule(DeleteRuleRequest.builder()
+                .name("missing-rule")
+                .eventBusName(busName)
+                .build()))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .satisfies(error -> assertThat(((ResourceNotFoundException) error).statusCode())
+                        .isEqualTo(400));
     }
 }

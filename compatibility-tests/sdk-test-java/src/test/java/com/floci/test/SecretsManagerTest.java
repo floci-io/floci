@@ -19,17 +19,23 @@ import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueR
 import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueResponse;
 import software.amazon.awssdk.services.secretsmanager.model.CreateSecretRequest;
 import software.amazon.awssdk.services.secretsmanager.model.CreateSecretResponse;
+import software.amazon.awssdk.services.secretsmanager.model.DeleteResourcePolicyRequest;
+import software.amazon.awssdk.services.secretsmanager.model.DeleteResourcePolicyResponse;
 import software.amazon.awssdk.services.secretsmanager.model.DeleteSecretRequest;
 import software.amazon.awssdk.services.secretsmanager.model.DescribeSecretRequest;
 import software.amazon.awssdk.services.secretsmanager.model.DescribeSecretResponse;
 import software.amazon.awssdk.services.secretsmanager.model.GetRandomPasswordRequest;
 import software.amazon.awssdk.services.secretsmanager.model.GetRandomPasswordResponse;
+import software.amazon.awssdk.services.secretsmanager.model.GetResourcePolicyRequest;
+import software.amazon.awssdk.services.secretsmanager.model.GetResourcePolicyResponse;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretVersionIdsRequest;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretVersionIdsResponse;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretsRequest;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretsResponse;
+import software.amazon.awssdk.services.secretsmanager.model.PutResourcePolicyRequest;
+import software.amazon.awssdk.services.secretsmanager.model.PutResourcePolicyResponse;
 import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueRequest;
 import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueResponse;
 import software.amazon.awssdk.services.secretsmanager.model.RotateSecretRequest;
@@ -458,5 +464,44 @@ class SecretsManagerTest {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Resource policy round trip (PutResourcePolicy / GetResourcePolicy /
+    // DeleteResourcePolicy)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    @Order(21)
+    @DisplayName("resource policy round trip: put returns ARN/Name, get returns the policy, delete clears it")
+    void resourcePolicyRoundTrip() {
+        Assumptions.assumeTrue(secretArn != null, "CreateSecret must succeed first");
+
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"*\"}]}";
+
+        PutResourcePolicyResponse put = sm.putResourcePolicy(PutResourcePolicyRequest.builder()
+                .secretId(secretArn)
+                .resourcePolicy(policy)
+                .build());
+        // The terraform provider uses this ARN as the aws_secretsmanager_secret_policy id.
+        assertThat(put.arn()).isEqualTo(secretArn);
+        assertThat(put.name()).isEqualTo(secretName);
+
+        GetResourcePolicyResponse got = sm.getResourcePolicy(GetResourcePolicyRequest.builder()
+                .secretId(secretArn)
+                .build());
+        assertThat(got.arn()).isEqualTo(secretArn);
+        assertThat(got.resourcePolicy()).isEqualTo(policy);
+
+        DeleteResourcePolicyResponse deleted = sm.deleteResourcePolicy(DeleteResourcePolicyRequest.builder()
+                .secretId(secretArn)
+                .build());
+        assertThat(deleted.arn()).isEqualTo(secretArn);
+        assertThat(deleted.name()).isEqualTo(secretName);
+
+        assertThat(sm.getResourcePolicy(GetResourcePolicyRequest.builder()
+                .secretId(secretArn)
+                .build()).resourcePolicy()).isNull();
     }
 }

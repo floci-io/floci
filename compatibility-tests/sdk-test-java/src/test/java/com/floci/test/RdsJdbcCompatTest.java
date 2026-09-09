@@ -15,9 +15,9 @@ import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.CreateDbInstanceRequest;
 import software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse;
 import software.amazon.awssdk.services.rds.model.DBInstance;
+import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.DeleteDbInstanceRequest;
 import software.amazon.awssdk.services.rds.model.DescribeDbInstancesRequest;
-import software.amazon.awssdk.services.rds.model.DescribeDbInstancesResponse;
 import software.amazon.awssdk.services.rds.model.GenerateAuthenticationTokenRequest;
 import software.amazon.awssdk.services.rds.model.ModifyDbInstanceRequest;
 
@@ -306,10 +306,13 @@ class RdsJdbcCompatTest {
                 .build());
         instanceCreated = false;
 
-        DescribeDbInstancesResponse afterDelete = rds.describeDBInstances(DescribeDbInstancesRequest.builder()
-                .dbInstanceIdentifier(instanceId)
-                .build());
-        assertThat(afterDelete.dbInstances()).isEmpty();
+        // Real AWS faults DBInstanceNotFound when describing a deleted instance by
+        // identifier — this is what lets the DBInstanceDeleted waiter complete.
+        String deletedId = instanceId;
+        assertThatThrownBy(() -> rds.describeDBInstances(DescribeDbInstancesRequest.builder()
+                .dbInstanceIdentifier(deletedId)
+                .build()))
+                .isInstanceOf(DbInstanceNotFoundException.class);
 
         String replacementId = TestFixtures.uniqueName("rds-pg");
         CreateDbInstanceResponse replacement = rds.createDBInstance(CreateDbInstanceRequest.builder()

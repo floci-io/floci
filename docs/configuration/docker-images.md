@@ -4,23 +4,25 @@ Floci publishes images to [Docker Hub (`floci/floci`)](https://hub.docker.com/r/
 
 Every image tag combines two independent choices: **what's inside** (variant) and **how stable it is** (channel).
 
-## Axis 1 — Variant (what's inside)
+## Axis 1: Variant (what's inside)
 
 | Variant | Contents | When to use |
 |---|---|---|
-| **Standard** | Floci native binary only | General use — CI, local dev, Testcontainers **(recommended)** |
+| **Standard** | Floci native binary only | General use: CI, local dev, Testcontainers **(recommended)** |
 | **Compat** | Floci + Python 3 + AWS CLI + boto3 | Workflows that need AWS tooling available inside the container |
 
-The compat image is built on top of the standard image — startup time and memory footprint are identical. Only the image size increases.
+The compat image runs the same native binary as the standard image, so startup time and memory footprint are identical. Only the image size increases.
 
-## Axis 2 — Channel (how stable)
+The standard image is built on Red Hat UBI 9 micro. Besides Floci it contains only bash and coreutils. There is no package manager, curl, grep or sed inside. Pick the compat image when you need tools inside the container.
+
+## Axis 2: Channel (how stable)
 
 | Channel | Source | Published |
 |---|---|---|
-| **Release** | Tagged version (e.g. `1.5.11`) | On every release |
-| **Nightly** | Tip of `main` | Every night at 22:00 CT |
+| **Release** | Tagged version (e.g. `x.y.z`) | 1st and 3rd Tuesday of each month |
+| **Nightly** | Tip of `main` | Every night at 23:00 CT |
 
-Release images are stable and recommended for most use cases. Nightly images track active development and may include unreleased changes.
+Release images are stable and recommended for most use cases. Between trains, `nightly` carries every merged fix from the following morning. Nightly images track active development and may include unreleased changes.
 
 ## Full Tag Matrix
 
@@ -33,7 +35,7 @@ Combining both axes gives the complete set of published tags:
 | **Nightly (floating)** | `nightly` | `nightly-compat` |
 | **Nightly (dated)** | `nightly-mmddyyyy` | `nightly-mmddyyyy-compat` |
 
-Dated nightly tags (e.g. `nightly-05022026`) are fixed and never move — use them for reproducible builds from `main`.
+Dated nightly tags (e.g. `nightly-05022026`) name one night's build of `main`. A same-day rerun of the nightly workflow republishes that day's tag, so for a build you can rely on not changing, pin a release version.
 
 !!! warning
     Nightly images may include unreleased or experimental changes. Use release tags in production-like environments.
@@ -41,16 +43,16 @@ Dated nightly tags (e.g. `nightly-05022026`) are fixed and never move — use th
 ## Quick Reference
 
 ```yaml title="docker-compose.yml"
-# Standard release — recommended
+# Standard release : recommended
 image: floci/floci:latest
 
-# Compat release — includes AWS CLI and boto3
+# Compat release : includes AWS CLI and boto3
 image: floci/floci:latest-compat
 
-# Pinned release — reproducible builds
-image: floci/floci:1.5.11
+# Pinned release : reproducible builds
+image: floci/floci:x.y.z
 
-# Nightly — track main
+# Nightly : track main
 image: floci/floci:nightly
 ```
 
@@ -119,13 +121,13 @@ ghcr.io/example/floci@sha256:...
 
 ## What's in the Compat Image
 
-The compat image installs the following on top of the standard image:
+The compat image adds the following to the standard image contents:
 
 - Python 3 + pip
 - [AWS CLI](https://pypi.org/project/awscli/) (via pip)
 - [boto3](https://pypi.org/project/boto3/) (via pip)
 
-The AWS CLI is pre-configured to talk to the local Floci endpoint — no `--endpoint-url` flag is needed in hook scripts:
+The AWS CLI is pre-configured to talk to the local Floci endpoint, so no `--endpoint-url` flag is needed in hook scripts:
 
 ```sh
 #!/bin/sh

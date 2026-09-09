@@ -17,11 +17,16 @@ public final class AwsNamespaces {
     public static final String S3_CONTROL = "http://awss3control.amazonaws.com/doc/2018-08-20/";
     public static final String SES = "http://ses.amazonaws.com/doc/2010-12-01/";
     public static final String EC2    = "http://ec2.amazonaws.com/doc/2016-11-15/";
+    /** Classic (v1) Elastic Load Balancing. Shares an endpoint host with {@link #ELB_V2},
+     *  but is a different API: requests declaring {@code Version=2012-06-01} must be answered
+     *  in this namespace, never in the 2015-12-01 one. */
+    public static final String ELB_CLASSIC = "http://elasticloadbalancing.amazonaws.com/doc/2012-06-01/";
     public static final String ELB_V2      = "https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/";
     public static final String AUTOSCALING = "https://autoscaling.amazonaws.com/doc/2011-01-01/";
     public static final String ELASTIC_BEANSTALK = "https://elasticbeanstalk.amazonaws.com/docs/2010-12-01/";
     public static final String ROUTE53     = "https://route53.amazonaws.com/doc/2013-04-01/";
     public static final String CLOUDFRONT  = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
+    public static final String REDSHIFT    = "http://redshift.amazonaws.com/doc/2012-12-01/";
 
     private AwsNamespaces() {}
 }

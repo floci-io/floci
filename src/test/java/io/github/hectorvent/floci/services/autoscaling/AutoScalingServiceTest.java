@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
+import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfigurationBlockDeviceMapping;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.doThrow;
@@ -98,7 +100,7 @@ class AutoScalingServiceTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         service.ec2Service = ec2Service;
         LaunchTemplate version = new LaunchTemplate();
-        version.setImageId(null);
+        version.getData().setImageId(null);
         when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-no-image", null, List.of("1")))
                 .thenReturn(List.of(version));
 
@@ -205,6 +207,55 @@ class AutoScalingServiceTest {
     }
 
     @Test
+    void createLaunchConfigurationDefaultsInstanceMonitoringToEnabled() {
+        var lc = service.createLaunchConfiguration(REGION, "lc-default-monitoring", null,
+                "ami-12345678", "t3.micro", null, List.of(), null, null, null);
+
+        assertEquals(Boolean.TRUE, lc.getInstanceMonitoringEnabled());
+        assertEquals(List.of(), lc.getBlockDeviceMappings());
+        assertEquals(Boolean.TRUE,
+                service.describeLaunchConfigurations(REGION, List.of("lc-default-monitoring"))
+                        .getFirst().getInstanceMonitoringEnabled());
+    }
+
+    @Test
+    void createLaunchConfigurationKeepsAnExplicitInstanceMonitoringOverride() {
+        var lc = service.createLaunchConfiguration(REGION, "lc-monitoring-off", null,
+                "ami-12345678", "t3.micro", null, List.of(), null, null, null, Boolean.FALSE, List.of());
+
+        assertEquals(Boolean.FALSE, lc.getInstanceMonitoringEnabled());
+        assertEquals(Boolean.FALSE,
+                service.describeLaunchConfigurations(REGION, List.of("lc-monitoring-off"))
+                        .getFirst().getInstanceMonitoringEnabled());
+    }
+
+    @Test
+    void createLaunchConfigurationRoundTripsBlockDeviceMappings() {
+        var ebs = new LaunchConfigurationBlockDeviceMapping.Ebs();
+        ebs.setVolumeSize(100);
+        ebs.setVolumeType("gp3");
+        ebs.setIops(3000);
+        ebs.setThroughput(125);
+        ebs.setDeleteOnTermination(true);
+        var mapping = new LaunchConfigurationBlockDeviceMapping();
+        mapping.setDeviceName("/dev/xvda");
+        mapping.setEbs(ebs);
+
+        service.createLaunchConfiguration(REGION, "lc-with-root-device", null,
+                "ami-12345678", "t3.micro", null, List.of(), null, null, null, null, List.of(mapping));
+
+        var stored = service.describeLaunchConfigurations(REGION, List.of("lc-with-root-device"))
+                .getFirst().getBlockDeviceMappings();
+        assertEquals(1, stored.size());
+        assertEquals("/dev/xvda", stored.getFirst().getDeviceName());
+        assertEquals(100, stored.getFirst().getEbs().getVolumeSize());
+        assertEquals("gp3", stored.getFirst().getEbs().getVolumeType());
+        assertEquals(3000, stored.getFirst().getEbs().getIops());
+        assertEquals(125, stored.getFirst().getEbs().getThroughput());
+        assertEquals(Boolean.TRUE, stored.getFirst().getEbs().getDeleteOnTermination());
+    }
+
+    @Test
     void createAutoScalingGroupRejectsUnresolvedLaunchTemplateBeforeMutation() {
         Ec2Service ec2Service = mock(Ec2Service.class);
         service.ec2Service = ec2Service;
@@ -242,7 +293,7 @@ class AutoScalingServiceTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         service.ec2Service = ec2Service;
         LaunchTemplate version = new LaunchTemplate();
-        version.setImageId("");
+        version.getData().setImageId("");
         when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-no-image", null, List.of("2")))
                 .thenReturn(List.of(version));
 
@@ -636,6 +687,137 @@ class AutoScalingServiceTest {
                 java.util.Map.of(), java.util.Map.of());
     }
 
+    @Test
+    void putLifecycleHookRejectsNameOutsideModeledPattern() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                "bad name!", "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteLifecycleHookRejectsNameOutsideModeledPattern() {
+        assertThrows(AwsException.class,
+                () -> service.deleteLifecycleHook(REGION, "test-asg", "bad name!"));
+    }
+
+    @Test
+    void completeLifecycleActionRejectsNameOutsideModeledPattern() {
+        assertThrows(AwsException.class,
+                () -> service.completeLifecycleAction(REGION, "test-asg", "bad name!",
+                        "i-0123456789abcdef0", "CONTINUE", "12345678-1234-1234-1234-123456789012"));
+    }
+
+    @Test
+    void completeLifecycleActionRejectsTokenOfWrongLength() {
+        service.putLifecycleHook(REGION, "test-asg", "hook-1", "autoscaling:EC2_INSTANCE_LAUNCHING",
+                null, null, null, null, null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.completeLifecycleAction(REGION, "test-asg", "hook-1",
+                        "i-0123456789abcdef0", "CONTINUE", "not-a-uuid"));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
+    @Test
+    void completeLifecycleActionAllowsNullTokenWhenInstanceIdIdentifiesTheAction() {
+        service.putLifecycleHook(REGION, "test-asg", "hook-1", "autoscaling:EC2_INSTANCE_LAUNCHING",
+                null, null, null, null, null);
+
+        assertDoesNotThrow(() -> service.completeLifecycleAction(REGION, "test-asg", "hook-1",
+                "i-0123456789abcdef0", "CONTINUE", null));
+    }
+
+    @Test
+    void deleteLifecycleHookByNameRejectsNameOutsideModeledPattern() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.deleteLifecycleHookByName(REGION, "bad name!"));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteLifecycleHookByNameIsIdempotentOnNullPhysicalId() {
+        assertDoesNotThrow(() -> service.deleteLifecycleHookByName(REGION, null));
+    }
+
+    @Test
+    void putLifecycleHookRejectsNullNameWithNotNullMessage() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                null, "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertTrue(ex.getMessage().contains("must not be null"));
+    }
+
+    @Test
+    void putLifecycleHookRejectsOverlongNameWithLengthMessage() {
+        String tooLong = "h".repeat(256);
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                tooLong, "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertTrue(ex.getMessage().contains("length less than or equal to 255"),
+                "expected a length-specific message, got: " + ex.getMessage());
+    }
+
+    @Test
+    void putLifecycleHookRejectsBadCharsWithPatternMessage() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.putLifecycleHook(REGION, "test-asg",
+                "bad name!", "autoscaling:EC2_INSTANCE_LAUNCHING", null, null, null, null, null));
+        assertTrue(ex.getMessage().contains("regular expression pattern"));
+    }
+
+    @Test
+    void setInstanceProtectionValidatesEmptyInstanceIdsBeforeGroupLookup() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.setInstanceProtection(REGION, "no-such-group", List.of(), true));
+        assertEquals("ValidationError", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("At least one instance ID is required"),
+                "a doubly-bad request (unknown group + empty list) must surface the missing-parameter "
+                        + "error, not 'Group not found'; got: " + ex.getMessage());
+    }
+
+    @Test
+    void setInstanceProtectionReportsAllMissingInstanceIds() {
+        AsgInstance instance = new AsgInstance();
+        instance.setInstanceId("i-real");
+        instance.setLifecycleState("InService");
+        instance.setHealthStatus("Healthy");
+        service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getInstances().add(instance);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.setInstanceProtection(REGION, "test-asg",
+                        List.of("i-missing-1", "i-missing-2"), true));
+        assertTrue(ex.getMessage().contains("i-missing-1") && ex.getMessage().contains("i-missing-2"),
+                "expected both missing IDs in the message, got: " + ex.getMessage());
+    }
+
+    @Test
+    void setInstanceProtectionUsesSetContainmentAgainstDuplicateStoredInstanceIds() {
+        AsgInstance dup1 = new AsgInstance();
+        dup1.setInstanceId("i-dup");
+        dup1.setLifecycleState("InService");
+        dup1.setHealthStatus("Healthy");
+        AsgInstance dup2 = new AsgInstance();
+        dup2.setInstanceId("i-dup");
+        dup2.setLifecycleState("InService");
+        dup2.setHealthStatus("Healthy");
+        var instances = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getInstances();
+        instances.add(dup1);
+        instances.add(dup2);
+
+        assertDoesNotThrow(() -> service.setInstanceProtection(REGION, "test-asg", List.of("i-dup"), true));
+        assertTrue(instances.stream().allMatch(AsgInstance::isProtectedFromScaleIn));
+    }
+
+    @Test
+    void setInstanceHealthAcceptsShouldRespectGracePeriodFlag() {
+        AsgInstance instance = new AsgInstance();
+        instance.setInstanceId("i-health");
+        instance.setLifecycleState("InService");
+        instance.setHealthStatus("Healthy");
+        service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getInstances().add(instance);
+
+        assertDoesNotThrow(() -> service.setInstanceHealth(REGION, "i-health", "Unhealthy", true));
+        assertEquals("Unhealthy", service.describeAutoScalingInstances(REGION, List.of("i-health"))
+                .getFirst().getHealthStatus());
+    }
+
     private static final class AutoScalingGroupFixture {
         private static void addInstance(AutoScalingService service, String region, String name, String instanceId,
                 String lifecycleState, String launchTemplateId, String launchTemplateVersion) {
@@ -650,5 +832,119 @@ class AutoScalingServiceTest {
                     .getInstances()
                     .add(instance);
         }
+    }
+
+    // The AWS provider calls SuspendProcesses/ResumeProcesses unconditionally around ASG
+    // creation whenever wait_for_capacity_timeout is non-zero (the default), so an
+    // unimplemented SuspendProcesses fails ASG creation outright - found crossing
+    // terraform-aws-modules/terraform-aws-eks against floci.
+    @Test
+    void suspendProcessesRecordsNamedProcessesAndResumeClearsThem() {
+        service.suspendProcesses(REGION, "test-asg", List.of("Launch", "Terminate"));
+
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of("Launch", "Terminate"), group.getSuspendedProcesses());
+
+        service.resumeProcesses(REGION, "test-asg", List.of("Launch"));
+        group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of("Terminate"), group.getSuspendedProcesses());
+
+        service.resumeProcesses(REGION, "test-asg", List.of());
+        group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of(), group.getSuspendedProcesses());
+    }
+
+    @Test
+    void suspendProcessesWithNoNamesSuspendsEveryScalingProcess() {
+        service.suspendProcesses(REGION, "test-asg", List.of());
+
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertTrue(group.getSuspendedProcesses().contains("Launch"));
+        assertTrue(group.getSuspendedProcesses().contains("Terminate"));
+        assertTrue(group.getSuspendedProcesses().contains("HealthCheck"));
+    }
+
+    @Test
+    void attachTrafficSourcesRecordsIdentifierAndTypeAndDetachRemovesIt() {
+        service.attachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:aws:elasticloadbalancing:...:tg/ex", "elbv2")));
+
+        assertEquals(Map.of("arn:aws:elasticloadbalancing:...:tg/ex", "elbv2"),
+                service.describeTrafficSources(REGION, "test-asg", null));
+
+        service.detachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:aws:elasticloadbalancing:...:tg/ex", null)));
+
+        assertEquals(Map.of(), service.describeTrafficSources(REGION, "test-asg", null));
+    }
+
+    @Test
+    void describeTrafficSourcesFiltersByType() {
+        service.attachTrafficSources(REGION, "test-asg", List.of(
+                new AutoScalingService.TrafficSourceIdentifier("arn:elbv2-source", "elbv2"),
+                new AutoScalingService.TrafficSourceIdentifier("arn:lattice-source", "vpc-lattice")));
+
+        assertEquals(Map.of("arn:elbv2-source", "elbv2"),
+                service.describeTrafficSources(REGION, "test-asg", "elbv2"));
+    }
+
+    @Test
+    void putScheduledUpdateGroupActionRecordsScheduleAndDeleteRemovesIt() {
+        service.putScheduledUpdateGroupAction(REGION, "test-asg", "morning",
+                null, null, "0 7 * * 1-5", "Europe/Rome", 0, 1, 1);
+
+        var actions = service.describeScheduledActions(REGION, "test-asg", List.of());
+        assertEquals(1, actions.size());
+        assertEquals("morning", actions.getFirst().getScheduledActionName());
+        assertEquals("0 7 * * 1-5", actions.getFirst().getRecurrence());
+        assertEquals("Europe/Rome", actions.getFirst().getTimeZone());
+        assertEquals(0, actions.getFirst().getMinSize());
+        assertEquals(1, actions.getFirst().getMaxSize());
+        assertEquals(1, actions.getFirst().getDesiredCapacity());
+        assertNotNull(actions.getFirst().getScheduledActionArn());
+
+        service.deleteScheduledAction(REGION, "test-asg", "morning");
+        assertEquals(List.of(), service.describeScheduledActions(REGION, "test-asg", List.of()));
+    }
+
+    @Test
+    void putWarmPoolReplacesConfigurationAndMapsTheClearSentinel() {
+        service.putWarmPool(REGION, "test-asg", 2, 1, "Running", true);
+
+        var pool = service.describeWarmPool(REGION, "test-asg");
+        assertEquals(2, pool.getMaxGroupPreparedCapacity());
+        assertEquals(1, pool.getMinSize());
+        assertEquals("Running", pool.getPoolState());
+        assertTrue(pool.isReuseOnScaleIn());
+
+        // A Put that omits fields resets them to the wire model's documented defaults,
+        // and -1 is the documented sentinel for clearing MaxGroupPreparedCapacity.
+        service.putWarmPool(REGION, "test-asg", -1, null, null, null);
+        pool = service.describeWarmPool(REGION, "test-asg");
+        assertNull(pool.getMaxGroupPreparedCapacity());
+        assertEquals(0, pool.getMinSize());
+        assertEquals("Stopped", pool.getPoolState());
+        assertFalse(pool.isReuseOnScaleIn());
+
+        service.deleteWarmPool(REGION, "test-asg", false);
+        assertNull(service.describeWarmPool(REGION, "test-asg"));
+    }
+
+    @Test
+    void deleteAutoScalingGroupAlsoRemovesItsScheduledActionsAndWarmPool() {
+        service.putScheduledUpdateGroupAction(REGION, "test-asg", "morning",
+                null, null, "0 7 * * 1-5", null, 0, 1, 1);
+        service.putWarmPool(REGION, "test-asg", null, 1, "Stopped", false);
+        service.createAutoScalingGroup("eu-west-1", "test-asg", null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("eu-west-1a"), List.of("subnet-12345678"), List.of(), List.of(),
+                "EC2", 0, List.of("Default"), Map.of(), Map.of());
+        service.putScheduledUpdateGroupAction("eu-west-1", "test-asg", "morning",
+                null, null, "0 7 * * 1-5", null, 0, 1, 1);
+
+        service.deleteAutoScalingGroup(REGION, "test-asg", true);
+
+        assertEquals(List.of(), service.describeScheduledActions(REGION, "test-asg", List.of()));
+        assertThrows(AwsException.class, () -> service.describeWarmPool(REGION, "test-asg"));
+        assertEquals(1, service.describeScheduledActions("eu-west-1", "test-asg", List.of()).size());
     }
 }

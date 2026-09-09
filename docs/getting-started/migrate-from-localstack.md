@@ -144,14 +144,15 @@ If you wait on `/_localstack/init` or `/_localstack/health` in CI or scripts, no
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>localstack</artifactId>
+      <version>1.21.4</version>
       <scope>test</scope>
     </dependency>
 
     <!-- After -->
     <dependency>
-      <groupId>io.github.hectorvent</groupId>
-      <artifactId>floci-testcontainers</artifactId>
-      <version>LATEST</version>
+      <groupId>io.floci</groupId>
+      <artifactId>testcontainers-floci</artifactId>
+      <version>1.14.0</version>
       <scope>test</scope>
     </dependency>
     ```

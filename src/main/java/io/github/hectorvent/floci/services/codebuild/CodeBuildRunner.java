@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -116,17 +117,18 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     public void startBuild(String region, Build build, Project project, String buildspecOverride) {
+        String executionId = build.getArn();
         AtomicBoolean stopFlag = new AtomicBoolean(false);
-        stopFlags.put(build.getId(), stopFlag);
-        Thread.ofVirtual().start(() -> runBuild(region, build, project, buildspecOverride, stopFlag));
+        stopFlags.put(executionId, stopFlag);
+        Thread.ofVirtual().start(() -> runBuild(region, build, project, buildspecOverride, stopFlag, executionId));
     }
 
-    public void stopBuild(String buildId) {
-        AtomicBoolean flag = stopFlags.get(buildId);
+    public void stopBuild(String executionId) {
+        AtomicBoolean flag = stopFlags.get(executionId);
         if (flag != null) {
             flag.set(true);
         }
-        String containerId = runningContainers.get(buildId);
+        String containerId = runningContainers.get(executionId);
         if (containerId != null) {
             try {
                 dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
@@ -137,7 +139,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     private void runBuild(String region, Build build, Project project,
-                          String buildspecOverride, AtomicBoolean stopFlag) {
+                          String buildspecOverride, AtomicBoolean stopFlag, String executionId) {
         String buildId = build.getId();
         Path workspace = null;
         String containerId = null;
@@ -220,11 +222,13 @@ public class CodeBuildRunner implements ContainerTeardown {
                     .withHostDockerInternalOnLinux()
                     .withPrivileged(privileged)
                     .withLogRotation()
+                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                            "codebuild", buildId, regionResolver.getAccountId(), region))
                     .build();
 
             ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
             containerId = info.containerId();
-            runningContainers.put(buildId, containerId);
+            runningContainers.put(executionId, containerId);
 
             logHandle = logStreamer.attach(containerId, logGroup, logStream, region, "codebuild:" + buildId);
 
@@ -368,12 +372,11 @@ public class CodeBuildRunner implements ContainerTeardown {
                 build.getPhases().add(completedPhase);
             }
         } finally {
-            stopFlags.remove(buildId);
-            if (logHandle != null) {
+            stopFlags.remove(executionId);
+            if (containerId != null && runningContainers.remove(executionId, containerId)) {
+                lifecycleManager.stopAndRemove(containerId, logHandle);
+            } else if (logHandle != null) {
                 try { logHandle.close(); } catch (Exception ignored) {}
-            }
-            if (containerId != null && runningContainers.remove(buildId, containerId)) {
-                lifecycleManager.stopAndRemove(containerId, null);
             }
             if (workspace != null) {
                 deleteDirectory(workspace);

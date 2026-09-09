@@ -77,6 +77,14 @@ public class DynamoDbStreamService {
         String key = streamKey(region, tableName);
         StreamDescription existing = streams.get(key);
         if (existing != null && "ENABLED".equals(existing.getStreamStatus())) {
+            // Re-enabling a live stream with a different view type retargets it. The records this
+            // stream emits are built from the description's view type, so leaving it untouched
+            // would keep producing the old shape while the table reports the requested one.
+            if (viewType != null && !viewType.equals(existing.getStreamViewType())) {
+                existing.setStreamViewType(viewType);
+                LOG.infov("Stream view type for table {0} in region {1} is now {2}",
+                        tableName, region, viewType);
+            }
             return existing;
         }
 

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.rum.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -27,6 +28,14 @@ public class AppMonitor {
     private JsonNode dataStorage;
     private JsonNode customEvents;
     private JsonNode deobfuscationConfiguration;
+
+    // The account that created this monitor, captured so Resource Explorer 2 can report the true
+    // owning account in the reconstructed ARN. RUM's GetAppMonitor response has no ARN or account
+    // field, so this is @JsonIgnore'd to keep it out of the API body; it is likewise not persisted,
+    // so getResources() recovers the owner from the account-scoped storage key for monitors
+    // reloaded from disk.
+    @JsonIgnore
+    private String ownerAccountId;
 
     public AppMonitor() {
     }
@@ -162,6 +171,16 @@ public class AppMonitor {
 
     public void setDeobfuscationConfiguration(JsonNode deobfuscationConfiguration) {
         this.deobfuscationConfiguration = copy(deobfuscationConfiguration);
+    }
+
+    @JsonIgnore
+    public String getOwnerAccountId() {
+        return ownerAccountId;
+    }
+
+    @JsonIgnore
+    public void setOwnerAccountId(String ownerAccountId) {
+        this.ownerAccountId = ownerAccountId;
     }
 
     private static JsonNode copy(JsonNode value) {

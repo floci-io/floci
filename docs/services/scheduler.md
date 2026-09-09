@@ -29,7 +29,8 @@ background dispatcher fires schedule targets on time. Supported expressions:
   (default UTC) and `ActionAfterCompletion=DELETE`.
 - `rate(N unit)` — repeating fire (`minutes`, `hours`, `days`, `weeks`).
 - `cron(minute hour day-of-month month day-of-week year)` — AWS 6-field cron;
-  honors `ScheduleExpressionTimezone`.
+  honors `ScheduleExpressionTimezone`. Day-of-week is `1-7` or `SUN-SAT`, so
+  `2` is Monday and `cron(30 2 ? * 2#1 *)` is the first Monday of the month.
 
 `State=DISABLED` schedules and schedules outside their `StartDate`/`EndDate`
 window are skipped. The dispatcher ticks every

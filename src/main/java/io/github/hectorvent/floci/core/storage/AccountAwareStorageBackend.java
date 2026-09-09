@@ -4,7 +4,9 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -29,6 +31,9 @@ import java.util.stream.Collectors;
  */
 public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> {
 
+    /** A stored value together with its owning AWS account and account-relative key. */
+    public record AccountEntry<T>(String accountId, String key, T value) {}
+
     private final StorageBackend<String, V> delegate;
     private final Instance<RequestContext> requestContextInstance;
     private final String defaultAccountId;
@@ -39,6 +44,14 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         this.delegate = delegate;
         this.requestContextInstance = requestContextInstance;
         this.defaultAccountId = defaultAccountId;
+    }
+
+    /**
+     * In-memory account-aware store with no request context (uses {@code defaultAccountId}).
+     * Useful for unit tests and for callers that need an explicit {@link AccountAwareStorageBackend}.
+     */
+    public static <V> AccountAwareStorageBackend<V> inMemory(String defaultAccountId) {
+        return new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccountId);
     }
 
     @Override
@@ -53,13 +66,23 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         if (result.isPresent()) {
             return result;
         }
-        // Backward-compat: try un-prefixed key (pre-multi-account data) and migrate on read.
-        result = delegate.get(key);
-        if (result.isPresent()) {
-            delegate.put(prefixedKey, result.get());
-            delegate.delete(key);
+        // Backward-compat: try un-prefixed key (pre-multi-account data) and migrate on read. The
+        // migration is a write (put then delete), so it runs under the same monitor the explicit-account
+        // migrators hold, or two readers resolving the same legacy key from different account contexts
+        // would each copy it into their own partition and the two copies would then diverge. The hit
+        // path above stays outside the monitor, so only a miss pays for it.
+        synchronized (this) {
+            Optional<V> migratedByAnotherReader = delegate.get(prefixedKey);
+            if (migratedByAnotherReader.isPresent()) {
+                return migratedByAnotherReader;
+            }
+            result = delegate.get(key);
+            if (result.isPresent()) {
+                delegate.put(prefixedKey, result.get());
+                delegate.delete(key);
+            }
+            return result;
         }
-        return result;
     }
 
     @Override
@@ -105,6 +128,42 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     /**
+     * Returns every stored entry with its raw delegate key intact.
+     *
+     * <p>Startup migrations use this form when the key itself is part of a resource's identity.
+     * Keeping the account prefix prevents a value stored under a corrupt or foreign key from
+     * being re-keyed solely from mutable fields in the value.
+     */
+    public Map<String, V> scanAllAccountsWithRawKeys() {
+        Map<String, V> result = new LinkedHashMap<>();
+        for (String rawKey : delegate.keys()) {
+            delegate.get(rawKey).ifPresent(value -> result.put(rawKey, value));
+        }
+        return result;
+    }
+
+    /**
+     * Returns entries across every account while preserving the account that owns each logical key.
+     * The filter receives the account-relative key. Keys without a 12-digit ASCII account prefix,
+     * including legacy keys that contain slashes, are returned unchanged under the configured
+     * default account. Unlike {@link #get}, this scan does not migrate legacy entries.
+     */
+    public List<AccountEntry<V>> scanAllAccountEntries(Predicate<String> keyFilter) {
+        List<AccountEntry<V>> result = new ArrayList<>();
+        for (String rawKey : delegate.keys()) {
+            boolean hasAccountPrefix = hasAccountPrefix(rawKey);
+            String accountId = hasAccountPrefix ? rawKey.substring(0, 12) : defaultAccountId;
+            String logicalKey = hasAccountPrefix ? rawKey.substring(13) : rawKey;
+            if (!keyFilter.test(logicalKey)) {
+                continue;
+            }
+            delegate.get(rawKey).ifPresent(value ->
+                    result.add(new AccountEntry<>(accountId, logicalKey, value)));
+        }
+        return result;
+    }
+
+    /**
      * Returns all entries across every account as a map of logical-key (account prefix stripped)
      * to value. Entries without a slash-prefixed account segment are skipped.
      */
@@ -121,8 +180,136 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return result;
     }
 
+    /**
+     * Returns all entries across every account, keyed by the raw {@code accountId/logicalKey}
+     * storage key rather than the stripped logical key {@link #scanAllAccountsAsMap()} returns,
+     * so entries sharing a logical key across accounts stay distinguishable.
+     *
+     * <p>A key with no account segment (pre-multi-account data) is attributed to
+     * {@code defaultAccountId} rather than skipped, and migrated in place — unlike {@link #get}'s
+     * per-key migration, this bulk scan has no caller-supplied key to migrate later, so it acts
+     * immediately: already-prefixed keys load first so a legacy key can never win a collision
+     * against one already written under its proper prefix, and a superseded legacy key is
+     * deleted rather than left to collide again on a later restart.
+     */
+    public Map<String, V> scanAllAccountsRaw() {
+        Map<String, V> result = new LinkedHashMap<>();
+        List<String> legacyKeys = new ArrayList<>();
+        for (String rawKey : delegate.keys()) {
+            if (rawKey.indexOf('/') < 0) {
+                legacyKeys.add(rawKey);
+                continue;
+            }
+            delegate.get(rawKey).ifPresent(v -> result.put(rawKey, v));
+        }
+        for (String rawKey : legacyKeys) {
+            String effectiveKey = defaultAccountId + "/" + rawKey;
+            if (result.containsKey(effectiveKey)) {
+                delegate.delete(rawKey);
+                continue;
+            }
+            delegate.get(rawKey).ifPresent(v -> {
+                delegate.put(effectiveKey, v);
+                delegate.delete(rawKey);
+                result.put(effectiveKey, v);
+            });
+        }
+        return result;
+    }
+
     public Optional<V> getForAccount(String accountId, String key) {
         return delegate.get(accountId + "/" + key);
+    }
+
+    /**
+     * Returns an explicitly scoped entry, or safely migrates a matching legacy unscoped entry.
+     *
+     * <p>The caller-supplied predicate must establish that the legacy value belongs to the
+     * destination account. This opt-in path avoids {@link #get(String)}'s request-context fallback,
+     * which cannot validate ownership before migrating old data.
+     */
+    public synchronized Optional<V> getForAccountMigratingLegacy(
+            String accountId, String key, Predicate<V> legacyOwner) {
+        Optional<V> scoped = getForAccount(accountId, key);
+        if (scoped.isPresent()) {
+            return scoped;
+        }
+        Optional<V> legacy = delegate.get(key).filter(legacyOwner);
+        if (legacy.isEmpty()) {
+            return Optional.empty();
+        }
+        delegate.put(accountId + "/" + key, legacy.get());
+        delegate.delete(key);
+        return legacy;
+    }
+
+    /**
+     * Returns an explicitly scoped entry, or safely migrates one of several older key shapes.
+     *
+     * <p>This is intended for resources whose logical key gained another scope component after
+     * account isolation was already deployed. Both account-prefixed legacy keys and older
+     * unprefixed keys are considered, but only when {@code legacyOwner} proves that the stored
+     * value belongs to the requested destination scope. The destination is written before the
+     * source is removed so a failed write cannot orphan the legacy value.
+     */
+    public synchronized Optional<V> getForAccountMigratingLegacyKeys(
+            String accountId, String key, List<String> legacyKeys,
+            Predicate<V> legacyOwner) {
+        return getForAccountMigratingLegacyKeys(
+                accountId, key, legacyKeys, legacyOwner, true);
+    }
+
+    /**
+     * Variant of {@link #getForAccountMigratingLegacyKeys(String, String, List, Predicate)} that
+     * can exclude unprefixed legacy keys when the value cannot prove account ownership.
+     */
+    public synchronized Optional<V> getForAccountMigratingLegacyKeys(
+            String accountId, String key, List<String> legacyKeys,
+            Predicate<V> legacyOwner, boolean includeUnscopedLegacyKeys) {
+        String destinationKey = accountId + "/" + key;
+        Set<String> candidates = new LinkedHashSet<>();
+        if (includeUnscopedLegacyKeys) {
+            candidates.add(key);
+        }
+        if (legacyKeys != null) {
+            for (String legacyKey : legacyKeys) {
+                if (legacyKey == null || legacyKey.isBlank()) {
+                    continue;
+                }
+                candidates.add(accountId + "/" + legacyKey);
+                if (includeUnscopedLegacyKeys) {
+                    candidates.add(legacyKey);
+                }
+            }
+        }
+        candidates.remove(destinationKey);
+
+        Optional<V> scoped = delegate.get(destinationKey);
+        if (scoped.isPresent()) {
+            if (scoped.filter(legacyOwner).isEmpty()) {
+                // A value under the destination key that does not belong to the requested
+                // scope is corrupt. Preserve both it and every legacy candidate so the
+                // caller fails closed without deleting the recoverable owned value.
+                return Optional.empty();
+            }
+            for (String candidateKey : candidates) {
+                if (delegate.get(candidateKey).filter(legacyOwner).isPresent()) {
+                    delegate.delete(candidateKey);
+                }
+            }
+            return scoped;
+        }
+
+        for (String candidateKey : candidates) {
+            Optional<V> legacy = delegate.get(candidateKey).filter(legacyOwner);
+            if (legacy.isEmpty()) {
+                continue;
+            }
+            delegate.put(destinationKey, legacy.get());
+            delegate.delete(candidateKey);
+            return legacy;
+        }
+        return Optional.empty();
     }
 
     public void putForAccount(String accountId, String key, V value) {
@@ -138,6 +325,13 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return delegate.scan(k -> k.startsWith(prefix) && keyFilter.test(k.substring(prefix.length())));
     }
 
+    /** Returns unprefixed pre-account values that satisfy an ownership predicate. */
+    public List<V> scanUnscopedLegacy(Predicate<V> legacyOwner) {
+        return delegate.scan(k -> !k.contains("/")).stream()
+                .filter(legacyOwner)
+                .toList();
+    }
+
     public Set<String> keysForAccount(String accountId) {
         String prefix = accountId + "/";
         return delegate.keys().stream()
@@ -146,7 +340,60 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                 .collect(Collectors.toUnmodifiableSet());
     }
 
+    /** A value together with the account partition that owns it, as recovered by {@link #findAnyAccountEntry}. */
+    public record OwnedEntry<V>(String account, V value) {}
+
+    /**
+     * Resolves a logical key across every account's partition, modelling a globally-unique
+     * namespace — as S3 bucket names are in AWS, where a bucket lives in one account but is
+     * legitimately reachable cross-account. Tries the current caller's partition first (via
+     * {@link #get}, which also covers pre-multi-account un-prefixed data), then falls back to any
+     * other account that owns the key. Returns the first match, or empty if no account has it.
+     *
+     * <p>Unlike {@link #get}, a cross-account hit is <em>not</em> migrated into the caller's
+     * partition: the entry legitimately belongs to its owning account and must stay there.
+     */
+    public Optional<V> findAnyAccount(String key) {
+        return findAnyAccountEntry(key).map(OwnedEntry::value);
+    }
+
+    /**
+     * Like {@link #findAnyAccount}, but also reports the owning account so a cross-account
+     * <em>mutation</em> can write the value back to its owner's partition (via
+     * {@link #putForAccount}) instead of forking a phantom copy into the caller's partition.
+     * The caller's own hit is owned by the current account context; a scanned hit's owner is
+     * the account segment of its raw key (or {@code defaultAccountId} for pre-multi-account,
+     * un-prefixed data).
+     */
+    public Optional<OwnedEntry<V>> findAnyAccountEntry(String key) {
+        Optional<V> own = get(key);
+        if (own.isPresent()) {
+            return Optional.of(new OwnedEntry<>(prefix(), own.get()));
+        }
+        String suffix = "/" + key;
+        for (String rawKey : delegate.keys()) {
+            if (rawKey.equals(key)) {
+                Optional<V> value = delegate.get(rawKey);
+                if (value.isPresent()) {
+                    return Optional.of(new OwnedEntry<>(defaultAccountId, value.get()));
+                }
+            } else if (rawKey.endsWith(suffix)) {
+                Optional<V> value = delegate.get(rawKey);
+                if (value.isPresent()) {
+                    String account = rawKey.substring(0, rawKey.length() - suffix.length());
+                    return Optional.of(new OwnedEntry<>(account, value.get()));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     // ---
+
+    /** Returns the account ID that keys are currently being prefixed with. */
+    public String accountId() {
+        return prefix();
+    }
 
     private String prefix() {
         if (requestContextInstance != null) {
@@ -164,5 +411,18 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     private String prefixed(String key) {
         return prefix() + "/" + key;
+    }
+
+    private static boolean hasAccountPrefix(String key) {
+        if (key.length() < 13 || key.charAt(12) != '/') {
+            return false;
+        }
+        for (int i = 0; i < 12; i++) {
+            char character = key.charAt(i);
+            if (character < '0' || character > '9') {
+                return false;
+            }
+        }
+        return true;
     }
 }

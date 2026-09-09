@@ -5,12 +5,17 @@ import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
+import com.github.dockerjava.api.command.ListVolumesCmd;
+import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.RemoveVolumeCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
+import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,8 +23,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -39,11 +47,58 @@ class ContainerLifecycleManagerVolumeTest {
     @Mock
     private PortAllocator portAllocator;
 
+    @Mock
+    private EmulatorConfig config;
+
     private ContainerLifecycleManager manager;
 
     @BeforeEach
     void setUp() {
-        manager = new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, portAllocator);
+        manager = new ContainerLifecycleManager(
+                dockerClient, imageCacheService, containerDetector, portAllocator, config);
+    }
+
+    @Test
+    void stopAndRemoveStopsContainerBeforeClosingItsLogStream() {
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        List<String> operations = new ArrayList<>();
+        doAnswer(invocation -> {
+            operations.add("stop");
+            return null;
+        }).when(stop).exec();
+        doAnswer(invocation -> {
+            operations.add("remove");
+            return null;
+        }).when(remove).exec();
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+
+        manager.stopAndRemove("container-id", () -> operations.add("logs"));
+
+        assertEquals(List.of("stop", "remove", "logs"), operations);
+    }
+
+    @Test
+    void stopAndRemoveForceRemovesAndFinalizesLogStreamWhenContainerStopFails() {
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        List<String> operations = new ArrayList<>();
+        doThrow(new RuntimeException("Docker daemon unavailable")).when(stop).exec();
+        doAnswer(invocation -> {
+            operations.add("remove");
+            return null;
+        }).when(remove).exec();
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+
+        manager.stopAndRemove("container-id", () -> operations.add("logs"));
+
+        assertEquals(List.of("remove", "logs"), operations);
     }
 
     @Test
@@ -107,6 +162,122 @@ class ContainerLifecycleManagerVolumeTest {
         when(cmd.exec()).thenThrow(new DockerException("Connection refused", 500));
 
         assertFalse(manager.volumeExists("some-volume"));
+    }
+
+    @Test
+    void strictContainerCleanupPropagatesRemovalFailure() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.stopAndRemoveStrict("container-id", null));
+
+        assertEquals("Failed to remove container container-id", exception.getMessage());
+    }
+
+    @Test
+    void strictContainerCleanupAcceptsSuccessfulForcedRemovalAfterStopFailure() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(stop.exec()).thenThrow(new DockerException("stop failed", 500));
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+
+        assertDoesNotThrow(() -> manager.stopAndRemoveStrict("container-id", null));
+
+        verify(remove).exec();
+    }
+
+    @Test
+    void strictStaleContainerCleanupPropagatesRemovalFailure() {
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("stale-name")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.removeIfExistsStrict("stale-name"));
+
+        assertEquals("Failed to remove stale container stale-name", exception.getMessage());
+    }
+
+    @Test
+    void strictStaleContainerCleanupAcceptsMissingContainer() {
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("stale-name")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new NotFoundException("missing"));
+
+        assertDoesNotThrow(() -> manager.removeIfExistsStrict("stale-name"));
+    }
+
+    @Test
+    void strictVolumeCleanupPropagatesRemovalFailure() {
+        RemoveVolumeCmd remove = mock(RemoveVolumeCmd.class);
+        when(dockerClient.removeVolumeCmd("volume-id")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new DockerException("remove failed", 500));
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.removeVolumeStrict("volume-id"));
+
+        assertEquals("Failed to remove volume volume-id", exception.getMessage());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsAuthoritativeSnapshot() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        InspectVolumeResponse first = mock(InspectVolumeResponse.class);
+        InspectVolumeResponse second = mock(InspectVolumeResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(java.util.List.of(first, second));
+        when(first.getName()).thenReturn("floci-code-first");
+        when(second.getName()).thenReturn("shared-data");
+
+        assertEquals(Optional.of(Set.of("floci-code-first", "shared-data")),
+                manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesDistinguishesEmptyInventory() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(java.util.List.of());
+
+        assertEquals(Optional.of(Set.of()), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalForNullResponse() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(null);
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalForNullVolumeList() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(null);
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
+    }
+
+    @Test
+    void tryListVolumeNamesReturnsEmptyOptionalOnDockerFailure() {
+        ListVolumesCmd cmd = mock(ListVolumesCmd.class);
+        when(dockerClient.listVolumesCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenThrow(new DockerException("Connection refused", 500));
+
+        assertEquals(Optional.empty(), manager.tryListVolumeNames());
     }
 
     @Test
@@ -217,5 +388,41 @@ class ContainerLifecycleManagerVolumeTest {
 
         verify(dockerClient, times(2)).createContainerCmd("busybox:stable");
     }
-}
 
+    @Test
+    void ensureSharedVolume_startsHelperThroughTheTranslatingStartContainer() {
+        // github.com/floci-io/floci/issues/2243 (follow-up, PR #2797 review): the shared-volume
+        // init helper is a third container-start call site, distinct from createAndStart /
+        // startCreated and from adopt(). A failure here is caught as a plain RuntimeException by
+        // ensureSharedVolume's computeIfAbsent and only logged (never rethrown to the caller), so
+        // whether the logged message is the misleading raw "Disk quota exceeded" or the translated
+        // one depends entirely on whether this call site goes through startContainer(). Verifying
+        // startContainer("helper-id") is actually invoked (via a spy) is the only way to pin that
+        // routing, since the swallowed exception itself is not observable from ensureSharedVolume.
+        ContainerLifecycleManager spyManager = spy(manager);
+        doNothing().when(spyManager).startContainer("helper-id");
+
+        InspectVolumeCmd ivc = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("shared")).thenReturn(ivc);
+        when(ivc.exec()).thenReturn(mock(InspectVolumeResponse.class));
+
+        CreateContainerCmd ccc = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(ccc);
+        CreateContainerResponse resp = mock(CreateContainerResponse.class);
+        when(resp.getId()).thenReturn("helper-id");
+        when(ccc.exec()).thenReturn(resp);
+
+        WaitContainerCmd wcc = mock(WaitContainerCmd.class);
+        when(dockerClient.waitContainerCmd("helper-id")).thenReturn(wcc);
+        WaitContainerResultCallback wcb = mock(WaitContainerResultCallback.class);
+        when(wcc.exec(any(WaitContainerResultCallback.class))).thenReturn(wcb);
+        when(wcb.awaitStatusCode(anyLong(), any())).thenReturn(0);
+        when(dockerClient.removeContainerCmd("helper-id")).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+
+        spyManager.ensureSharedVolume("shared", OptionalInt.of(1001), OptionalInt.of(1001),
+                Optional.of("2775"), "busybox:stable");
+
+        verify(spyManager).startContainer("helper-id");
+        verify(dockerClient, never()).startContainerCmd("helper-id");
+    }
+}

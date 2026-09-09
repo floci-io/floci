@@ -4,11 +4,14 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.Ports;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -50,6 +53,35 @@ class CurrentContainerNetworkResolverTest {
                 new TestResolver(dockerClient, containerDetector, "floci-container");
 
         assertTrue(resolver.resolveNetworkName().isEmpty());
+    }
+
+    @Test
+    void resolvePublishedPort_retriesUntilSuccessfulAndCachesResult() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+
+        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
+        InspectContainerResponse inspect = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
+        Ports ports = new Ports();
+        ports.getBindings().put(ExposedPort.tcp(7000), new Ports.Binding[] {null});
+        when(dockerClient.inspectContainerCmd("floci-container")).thenReturn(inspectCmd);
+        when(inspectCmd.exec()).thenReturn(inspect);
+        when(inspect.getNetworkSettings().getPorts()).thenReturn(ports);
+
+        CurrentContainerNetworkResolver resolver =
+                new TestResolver(dockerClient, containerDetector, "floci-container");
+
+        assertTrue(resolver.resolvePublishedPort(7000).isEmpty());
+
+        ports.getBindings().put(ExposedPort.tcp(7000), new Ports.Binding[] {
+                null,
+                Ports.Binding.bindPort(49173)
+        });
+        assertEquals(OptionalInt.of(49173), resolver.resolvePublishedPort(7000));
+
+        ports.getBindings().put(ExposedPort.tcp(7000), new Ports.Binding[] {Ports.Binding.bindPort(49174)});
+        assertEquals(OptionalInt.of(49173), resolver.resolvePublishedPort(7000));
     }
 
     private static Map<String, ContainerNetwork> networks(String firstName, String firstIp,

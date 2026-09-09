@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
@@ -21,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Verifies the wire-accurate empty-list responses for the read-only Glue actions on resources
- * the emulator does not model (GetJobs, GetCrawlers, ListDataQualityRulesets, GetSecurityConfigurations).
+ * the emulator does not model (ListDataQualityRulesets, GetSecurityConfigurations).
  * Each must return HTTP 200, an empty list under its result key, and omit NextToken.
  */
 class GlueJsonHandlerEmptyListTest {
@@ -42,16 +43,6 @@ class GlueJsonHandlerEmptyListTest {
         GlueService glueService = new GlueService(
                 storageFactory, schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(storageFactory));
         handler = new GlueJsonHandler(glueService, schemaRegistryService, mapper);
-    }
-
-    @Test
-    void getJobsReturnsEmptyJobsList() throws Exception {
-        assertEmptyList("GetJobs", "Jobs");
-    }
-
-    @Test
-    void getCrawlersReturnsEmptyCrawlersList() throws Exception {
-        assertEmptyList("GetCrawlers", "Crawlers");
     }
 
     @Test
@@ -83,10 +74,10 @@ class GlueJsonHandlerEmptyListTest {
         }
 
         @Override
-        public <V> StorageBackend<String, V> create(String serviceName,
+        public <V> AccountAwareStorageBackend<V> create(String serviceName,
                                                      String fileName,
                                                      TypeReference<Map<String, V>> typeReference) {
-            return new InMemoryStorage<>();
+            return AccountAwareStorageBackend.inMemory("000000000000");
         }
     }
 }

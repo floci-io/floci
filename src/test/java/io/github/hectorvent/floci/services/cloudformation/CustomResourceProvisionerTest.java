@@ -42,15 +42,16 @@ class CustomResourceProvisionerTest {
     @BeforeEach
     void setUp() {
         lambdaService = mock(LambdaService.class);
-        store = new CustomResourceResponseStore();
+        store = new CustomResourceResponseStore(new ProviderFrameworkDetector(lambdaService));
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.baseUrl()).thenReturn("http://floci:4566");
 
-        provisioner = new CloudFormationResourceProvisioner(
-                null, null, null, null, lambdaService, null, null, null, null, null,
-                null, null, null, null, null, null, mapper, store, endpoint, null, null, null, null, null, null, null, null, null, null, null, null,
-                null,
-                new io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry(java.util.List.of()));
+        provisioner = CfnProvisionerFixture.builder()
+                .lambda(lambdaService)
+                .objectMapper(mapper)
+                .customResourceResponseStore(store)
+                .reachableEndpoint(endpoint)
+                .build();
     }
 
     private CloudFormationTemplateEngine engine() {
@@ -160,6 +161,47 @@ class CustomResourceProvisionerTest {
 
         assertEquals("CREATE_FAILED", r.getStatus());
         assertTrue(r.getStatusReason().contains("boom"));
+    }
+
+    @Test
+    void updateWithUnchangedResolvedPropertiesSkipsHandlerInvocation() {
+        stubHandler("phys-123", Map.of("Greeting", "hello"));
+
+        // Initial Create — stashes the resolved ResourceProperties on the resource.
+        StackResource created = provisioner.provision("MyCr", "Custom::Test", props(),
+                engine(), "us-east-1", "000000000000", "my-stack");
+        assertEquals("phys-123", created.getPhysicalId());
+
+        // "Update" with byte-identical resolved properties: real CloudFormation would not send
+        // any request to the custom resource at all (UserGuide/template-custom-resources-sns.md:
+        // "During a stack update, if no changes are made to a custom resource, CloudFormation
+        // will not send any requests to it.").
+        StackResource updated = provisioner.provision("MyCr", "Custom::Test", props(),
+                engine(), "us-east-1", "000000000000", "my-stack",
+                created.getPhysicalId(), created.getAttributes());
+
+        verify(lambdaService, times(1)).invoke(any(), eq(SERVICE_TOKEN), any(),
+                eq(InvocationType.RequestResponse));
+        assertEquals("CREATE_COMPLETE", updated.getStatus());
+        assertEquals("phys-123", updated.getPhysicalId());
+        assertEquals("hello", updated.getAttributes().get("Greeting"));
+    }
+
+    @Test
+    void updateWithChangedResolvedPropertiesStillInvokesHandler() {
+        stubHandler("phys-123", Map.of("Greeting", "hello"));
+
+        StackResource created = provisioner.provision("MyCr", "Custom::Test", props(),
+                engine(), "us-east-1", "000000000000", "my-stack");
+
+        ObjectNode changedProps = props();
+        changedProps.put("Message", "bye");
+        provisioner.provision("MyCr", "Custom::Test", changedProps,
+                engine(), "us-east-1", "000000000000", "my-stack",
+                created.getPhysicalId(), created.getAttributes());
+
+        verify(lambdaService, times(2)).invoke(any(), eq(SERVICE_TOKEN), any(),
+                eq(InvocationType.RequestResponse));
     }
 
     @Test

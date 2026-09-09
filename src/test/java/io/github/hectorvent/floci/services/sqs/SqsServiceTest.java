@@ -7,9 +7,12 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -23,11 +26,13 @@ import static org.mockito.Mockito.verify;
 class SqsServiceTest {
 
     private SqsService sqsService;
+    private MutableClock clock;
     private static final String BASE_URL = "http://localhost:4566";
 
     @BeforeEach
     void setUp() {
-        sqsService = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL);
+        clock = new MutableClock();
+        sqsService = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock);
     }
 
     @Test
@@ -446,6 +451,26 @@ class SqsServiceTest {
     }
 
     @Test
+    void fifoDelayedMessageDoesNotBlockVisibleMessageInSameGroup() {
+        // Issue #2104: only in-flight messages lock a FIFO message group. A
+        // newly sent, still-delayed message must not make an already-visible
+        // message in the same group unreceivable.
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delay-group-lock.fifo",
+                Map.of("ContentBasedDeduplication", "true", "DelaySeconds", "1"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "A", 0, "group1", null, region);
+
+        try { Thread.sleep(1100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        sqsService.sendMessage(queue.getQueueUrl(), "B", 0, "group1", null, region);
+
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 0, 0, region);
+        assertEquals(1, received.size(),
+                "The already-visible message must be returned despite a delayed message in its group");
+        assertEquals("A", received.get(0).getBody());
+    }
+
+    @Test
     void fifoQueueIgnoresPerMessageDelaySeconds() {
         // AWS SQS FIFO queues only support queue-level DelaySeconds; any
         // per-message value is ignored. Here the queue default is 0 and the
@@ -850,17 +875,132 @@ class SqsServiceTest {
         }
 
         String taskHandle = sqsService.startMessageMoveTask(dlqArn, destArn, 1, "us-east-1");
-        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+        assertEquals(1, sqsService.cancelMessageMoveTask(taskHandle, "us-east-1"));
 
-        // Give the worker a moment to observe the cancel and write the terminal status.
+        awaitMoveTaskStatus(dlqArn, taskHandle, "CANCELLED");
+    }
+
+    @Test
+    void completedMessageMoveTasks_areBoundedToRecentSummaries() throws Exception {
+        sqsService.createQueue("terminal-cap-dlq", null, "us-east-1");
+        String dlqArn = queueArn("terminal-cap-dlq");
+        sqsService.createQueue("terminal-cap-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("terminal-cap-destination", null, "us-east-1");
+        String destinationArn = queueArn("terminal-cap-destination");
+
+        List<String> taskHandles = new ArrayList<>();
+        for (int i = 0; i < 11; i++) {
+            String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, 0, "us-east-1");
+            taskHandles.add(taskHandle);
+            for (int attempt = 0; attempt < 50; attempt++) {
+                if (sqsService.listMessageMoveTasks(dlqArn, "us-east-1").stream()
+                        .anyMatch(task -> task.taskHandle().equals(taskHandle) && "COMPLETED".equals(task.status()))) {
+                    break;
+                }
+                Thread.sleep(10);
+            }
+            assertTrue(sqsService.listMessageMoveTasks(dlqArn, "us-east-1").stream()
+                    .anyMatch(task -> task.taskHandle().equals(taskHandle) && "COMPLETED".equals(task.status())));
+            if (i < 10) {
+                clock.advance(Duration.ofSeconds(2));
+            }
+        }
+
+        List<SqsService.MoveTask> recentTasks = sqsService.listMessageMoveTasks(dlqArn, "us-east-1");
+        assertEquals(10, recentTasks.size());
+        assertFalse(recentTasks.stream().anyMatch(task -> task.taskHandle().equals(taskHandles.getFirst())));
+
+        clock.advance(Duration.ofHours(1).plusMillis(1));
+        assertTrue(sqsService.listMessageMoveTasks(dlqArn, "us-east-1").isEmpty());
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.cancelMessageMoveTask(taskHandles.getLast(), "us-east-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void completedMessageMoveTasks_areBoundedPerSourceQueue() throws Exception {
+        sqsService.createQueue("per-source-dlq-a", null, "us-east-1");
+        String sourceArnA = queueArn("per-source-dlq-a");
+        sqsService.createQueue("per-source-source-a",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + sourceArnA + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("per-source-destination-a", null, "us-east-1");
+        String destinationArnA = queueArn("per-source-destination-a");
+
+        sqsService.createQueue("per-source-dlq-b", null, "us-east-1");
+        String sourceArnB = queueArn("per-source-dlq-b");
+        sqsService.createQueue("per-source-source-b",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + sourceArnB + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("per-source-destination-b", null, "us-east-1");
+        String destinationArnB = queueArn("per-source-destination-b");
+
+        for (int i = 0; i < 10; i++) {
+            String taskHandle = sqsService.startMessageMoveTask(sourceArnA, destinationArnA, 0, "us-east-1");
+            awaitMoveTaskStatus(sourceArnA, taskHandle, "COMPLETED");
+            clock.advance(Duration.ofSeconds(2));
+        }
+        String taskHandleB = sqsService.startMessageMoveTask(sourceArnB, destinationArnB, 0, "us-east-1");
+        awaitMoveTaskStatus(sourceArnB, taskHandleB, "COMPLETED");
+
+        assertEquals(10, sqsService.listMessageMoveTasks(sourceArnA, "us-east-1").size());
+        assertEquals(1, sqsService.listMessageMoveTasks(sourceArnB, "us-east-1").size());
+    }
+
+    @Test
+    void cancelledMessageMoveTasks_areBoundedAndAllowTheNextTask() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-cap-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-cap-dlq");
+        sqsService.createQueue("cancel-cap-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-cap-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-cap-destination");
         for (int i = 0; i < 50; i++) {
-            var status = sqsService.listMessageMoveTasks(dlqArn, "us-east-1").get(0).status();
-            if ("CANCELLED".equals(status)) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        List<String> taskHandles = new ArrayList<>();
+        for (int i = 0; i < 11; i++) {
+            String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, "us-east-1");
+            taskHandles.add(taskHandle);
+            sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+            awaitMoveTaskStatus(dlqArn, taskHandle, "CANCELLED");
+            if (i < 10) {
+                clock.advance(Duration.ofSeconds(2));
+            }
+        }
+
+        List<SqsService.MoveTask> recentTasks = sqsService.listMessageMoveTasks(dlqArn, "us-east-1");
+        assertEquals(10, recentTasks.size());
+        assertFalse(recentTasks.stream().anyMatch(task -> task.taskHandle().equals(taskHandles.getFirst())));
+
+        clock.advance(Duration.ofSeconds(2));
+        String nextTask = sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, "us-east-1");
+        sqsService.cancelMessageMoveTask(nextTask, "us-east-1");
+        awaitMoveTaskStatus(dlqArn, nextTask, "CANCELLED");
+
+        clock.advance(Duration.ofHours(1).plusMillis(1));
+        assertTrue(sqsService.listMessageMoveTasks(dlqArn, "us-east-1").isEmpty());
+    }
+
+    private void awaitMoveTaskStatus(String sourceArn, String taskHandle, String expectedStatus) throws Exception {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            boolean reachedStatus = sqsService.listMessageMoveTasks(sourceArn, "us-east-1").stream()
+                    .anyMatch(task -> task.taskHandle().equals(taskHandle)
+                            && expectedStatus.equals(task.status()));
+            if (reachedStatus) {
                 return;
             }
-            Thread.sleep(50);
+            Thread.sleep(10);
         }
-        fail("Move task did not transition to CANCELLED within timeout");
+        fail("Move task did not transition to " + expectedStatus + " within timeout");
     }
 
     @Test
@@ -1044,5 +1184,99 @@ class SqsServiceTest {
                 "The delivery to the live receiver must be the first receive (ApproximateReceiveCount = 1)");
         assertTrue(staleResult.get().isEmpty(),
                 "The pre-delete long poll must not consume the recreated queue's delivery");
+    }
+
+
+    // --- ReceiveMessage falls back to the queue's ReceiveMessageWaitTimeSeconds ---
+
+    @Test
+    void receiveMessageWithoutWaitTimeUsesQueueReceiveMessageWaitTimeSeconds() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-default-longpoll",
+                Map.of("ReceiveMessageWaitTimeSeconds", "1"), region);
+
+        long start = System.nanoTime();
+        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, null, region);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertTrue(result.isEmpty());
+        assertTrue(elapsedMs >= 900,
+                "A receive that omits WaitTimeSeconds must long poll for the queue's ReceiveMessageWaitTimeSeconds, but returned after " + elapsedMs + "ms");
+    }
+
+    @Test
+    void explicitWaitTimeOverridesQueueReceiveMessageWaitTimeSeconds() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-longpoll-override",
+                Map.of("ReceiveMessageWaitTimeSeconds", "20"), region);
+
+        long start = System.nanoTime();
+        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertTrue(result.isEmpty());
+        assertTrue(elapsedMs < 1000,
+                "WaitTimeSeconds=0 in the request must override the queue attribute, but returned after " + elapsedMs + "ms");
+    }
+
+    @Test
+    void receiveMessageWithoutWaitTimeReturnsImmediatelyWhenQueueDoesNotLongPoll() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-no-longpoll", null, region);
+        assertEquals("0", queue.getAttributes().get("ReceiveMessageWaitTimeSeconds"));
+
+        long start = System.nanoTime();
+        List<Message> result = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, null, region);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertTrue(result.isEmpty());
+        assertTrue(elapsedMs < 1000,
+                "A queue without ReceiveMessageWaitTimeSeconds must short poll, but returned after " + elapsedMs + "ms");
+    }
+
+    @Test
+    void receiveMessageRejectsWaitTimeOutsideAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-longpoll-range",
+                Map.of("ReceiveMessageWaitTimeSeconds", "20"), region);
+        String queueUrl = queue.getQueueUrl();
+
+        for (int invalid : new int[]{-1, 21}) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> sqsService.receiveMessage(queueUrl, 1, 30, invalid, region));
+            assertEquals("InvalidParameterValue", ex.getErrorCode());
+            assertTrue(ex.getMessage().contains("WaitTimeSeconds"),
+                    "The error must name the offending parameter, got: " + ex.getMessage());
+        }
+
+        sqsService.sendMessage(queueUrl, "in-range", 0, region);
+        List<Message> result = sqsService.receiveMessage(queueUrl, 1, 30, 20, region);
+        assertEquals(1, result.size(), "WaitTimeSeconds=20 is the AWS maximum and must be accepted");
+    }
+
+    @Test
+    void queueDefaultLongPollReturnsAsSoonAsAMessageArrives() throws InterruptedException {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("queue-longpoll-wakeup", null, region);
+        String queueUrl = queue.getQueueUrl();
+        sqsService.setQueueAttributes(queueUrl, Map.of("ReceiveMessageWaitTimeSeconds", "20"), region);
+
+        final var pollerEntered = new CountDownLatch(1);
+        final var result = new AtomicReference<List<Message>>();
+        Thread poller = new Thread(() -> {
+            pollerEntered.countDown();
+            result.set(sqsService.receiveMessage(queueUrl, 1, 30, null, region));
+        });
+        poller.start();
+        assertTrue(pollerEntered.await(5, TimeUnit.SECONDS));
+        Thread.sleep(300);
+
+        sqsService.sendMessage(queueUrl, "wake-up", 0, region);
+        poller.join(3000);
+
+        assertFalse(poller.isAlive(),
+                "A long poll driven by the queue attribute must return as soon as a message arrives");
+        assertEquals(1, result.get().size());
+        assertEquals("wake-up", result.get().get(0).getBody());
     }
 }

@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.Matchers.*;
 
 /**
@@ -540,5 +541,77 @@ class SqsJsonProtocolTest {
             .statusCode(200)
             .body("Messages", hasSize(1))
             .body("Messages[0].Body", equalTo("hello from signed json"));
+    }
+
+
+    @Test
+    void receiveMessageWithoutWaitTimeSecondsHonoursQueueReceiveMessageWaitTimeSeconds() {
+        String createBody = "{\"QueueName\":\"json-long-poll-attr-queue\","
+                + "\"Attributes\":{\"ReceiveMessageWaitTimeSeconds\":\"1\"}}";
+        String longPollQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body(createBody)
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        try {
+            long start = System.nanoTime();
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + longPollQueueUrl + "\"}")
+            .when().post("/").then().statusCode(200)
+                .body("$", not(hasKey("Messages")));
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+            assertTrue(elapsedMs >= 900,
+                    "Omitting WaitTimeSeconds must long poll for the queue's ReceiveMessageWaitTimeSeconds, but returned after " + elapsedMs + "ms");
+
+            start = System.nanoTime();
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + longPollQueueUrl + "\",\"WaitTimeSeconds\":0}")
+            .when().post("/").then().statusCode(200)
+                .body("$", not(hasKey("Messages")));
+            elapsedMs = (System.nanoTime() - start) / 1_000_000;
+            assertTrue(elapsedMs < 1000,
+                    "WaitTimeSeconds=0 must override the queue attribute, but returned after " + elapsedMs + "ms");
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + longPollQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void receiveMessageRejectsInvalidWaitTimeSeconds() {
+        String rangeQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-wait-time-range-queue\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        try {
+            for (String invalid : new String[]{"-1", "21", "1.5", "\"abc\""}) {
+                given()
+                    .contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                    .body("{\"QueueUrl\":\"" + rangeQueueUrl + "\",\"WaitTimeSeconds\":" + invalid + "}")
+                .when().post("/").then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidParameterValue"))
+                    .body("message", containsString("WaitTimeSeconds"));
+            }
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + rangeQueueUrl + "\"}")
+            .when().post("/");
+        }
     }
 }

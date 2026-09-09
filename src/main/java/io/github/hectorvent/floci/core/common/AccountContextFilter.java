@@ -17,14 +17,21 @@ import java.util.Optional;
  * downstream filters (e.g. IAM enforcement) can rely on the context being set.
  *
  * <p>Account resolution precedence: a 12-digit access key ID is used directly as
- * the account; otherwise temporary credentials (e.g. assumed-role {@code ASIA...}
- * keys) are looked up in the session store via {@link SessionAccountLookup}; if
+ * the account; otherwise IAM and temporary credentials (e.g. assumed-role {@code ASIA...}
+ * keys) are looked up via {@link SessionAccountLookup}; if
  * neither matches, the configured default account applies.
  */
 @Provider
 @ApplicationScoped
 @Priority(Priorities.AUTHENTICATION - 100)
 public class AccountContextFilter implements ContainerRequestFilter {
+
+    /**
+     * Set by a {@code @PreMatching} Host filter that resolved the request to a resource owned by
+     * one account (a Cognito custom domain). Such requests carry no AWS credential, so the
+     * owner's account is used instead of the default one.
+     */
+    public static final String PINNED_ACCOUNT_PROPERTY = AccountContextFilter.class.getName() + ".accountId";
 
     private final AccountResolver accountResolver;
     private final RegionResolver regionResolver;
@@ -44,6 +51,12 @@ public class AccountContextFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext ctx) {
+        Object pinnedAccount = ctx.getProperty(PINNED_ACCOUNT_PROPERTY);
+        if (pinnedAccount != null) {
+            requestContext.setAccountId(pinnedAccount.toString());
+            requestContext.setRegion(regionResolver.resolveRegionFromAuth(null));
+            return;
+        }
         String auth = ctx.getHeaderString("Authorization");
         if (auth != null && !auth.isEmpty()) {
             String akid = accountResolver.extractAccessKeyId(auth);
@@ -66,13 +79,13 @@ public class AccountContextFilter implements ContainerRequestFilter {
     /**
      * Applies the account-resolution precedence. A 12-digit AKID is already reflected in
      * {@code resolvedDefault} (the account or default returned by {@link AccountResolver});
-     * for any other key shape, a live session lookup takes precedence before falling back.
+     * for any other key shape, an IAM or live-session lookup takes precedence before falling back.
      */
     private String resolveAccount(String akid, String resolvedDefault) {
         if (akid != null && !akid.matches("\\d{12}")) {
-            Optional<String> sessionAccount = sessionAccountLookup.resolveAccountId(akid);
-            if (sessionAccount.isPresent()) {
-                return sessionAccount.get();
+            Optional<String> credentialAccount = sessionAccountLookup.resolveAccountId(akid);
+            if (credentialAccount.isPresent()) {
+                return credentialAccount.get();
             }
         }
         return resolvedDefault;

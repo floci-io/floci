@@ -44,6 +44,8 @@ just test-awscli
 | [`compat-opentofu`](compat-opentofu/)   | OpenTofu   | `./run.sh` |
 | [`compat-terraform`](compat-terraform/) | Terraform  | `./run.sh` |
 
+The Terraform suite uses the standard `hashicorp/aws` provider against Floci's local endpoint. It validates `init`, `validate`, `plan`, `apply`, resource reads, and `destroy` without creating resources in a real AWS account. See the [Terraform with Floci guide](../docs/getting-started/terraform.md) for a copy-paste setup.
+
 ## Prerequisites
 
 - **Floci running** on `http://localhost:4566` (or set `FLOCI_ENDPOINT`)
@@ -93,12 +95,32 @@ just test-typescript
 just test-awscli
 ```
 
+### IaC tools
+
+The Terraform, OpenTofu, and CDK suites aren't part of `just test-all` — run them individually by name:
+
+```bash
+# Terraform
+compat-terraform/run.sh
+
+# OpenTofu
+compat-opentofu/run.sh
+
+# AWS CDK
+compat-cdk/run.sh
+```
+
 Bats-based suites keep their normal console output and also write JUnit XML reports:
 
 - `sdk-test-awscli/test-results/junit.xml`
 - `compat-cdk/test-results/junit.xml`
-- `compat-terraform/test-results/junit.xml`
-- `compat-opentofu/test-results/junit.xml`
+- `compat-terraform/test-results/junit-<bats file>.xml`
+- `compat-opentofu/test-results/junit-<bats file>.xml`
+
+The Terraform and OpenTofu suites run each `test/*.bats` file in its own process
+concurrently, so they write one report per file rather than a single `junit.xml`.
+Every consumer globs the directory, so nothing downstream changes. Set
+`BATS_PARALLEL_FILES=0` to run the files one at a time when isolating a failure.
 
 ## Configuration
 

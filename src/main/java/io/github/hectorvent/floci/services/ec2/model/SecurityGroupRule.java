@@ -19,6 +19,9 @@ public class SecurityGroupRule {
     private Integer toPort;
     private String cidrIpv4;
     private String cidrIpv6;
+    /** Set instead of a CIDR when the rule's source is a managed prefix list. */
+    private String prefixListId;
+    private ReferencedSecurityGroup referencedGroupInfo;
     private String description;
     private List<Tag> tags = new ArrayList<>();
 
@@ -50,6 +53,14 @@ public class SecurityGroupRule {
 
     public String getCidrIpv6() { return cidrIpv6; }
     public void setCidrIpv6(String cidrIpv6) { this.cidrIpv6 = cidrIpv6; }
+
+    public String getPrefixListId() { return prefixListId; }
+    public void setPrefixListId(String prefixListId) { this.prefixListId = prefixListId; }
+
+    public ReferencedSecurityGroup getReferencedGroupInfo() { return referencedGroupInfo; }
+    public void setReferencedGroupInfo(ReferencedSecurityGroup referencedGroupInfo) {
+        this.referencedGroupInfo = referencedGroupInfo;
+    }
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }

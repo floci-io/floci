@@ -24,9 +24,13 @@ public class LambdaLayerVersion {
     private long codeSizeBytes;
     private String codeSha256;
     private String codeLocalPath;
+    private boolean archiveStored;
 
     public LambdaLayerVersion() {
     }
+
+    public boolean isArchiveStored() { return archiveStored; }
+    public void setArchiveStored(boolean archiveStored) { this.archiveStored = archiveStored; }
 
     public String getLayerName() { return layerName; }
     public void setLayerName(String layerName) { this.layerName = layerName; }

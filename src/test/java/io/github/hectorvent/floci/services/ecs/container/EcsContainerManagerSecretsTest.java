@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
@@ -64,9 +65,12 @@ class EcsContainerManagerSecretsTest {
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
         ssmService = mock(SsmService.class);
         secretsManagerService = mock(SecretsManagerService.class);
+        EcrRegistryManager ecrRegistryManager = mock(EcrRegistryManager.class);
+        when(ecrRegistryManager.rewriteImageUri(anyString())).thenAnswer(inv -> inv.getArgument(0));
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService);
+                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService,
+                ecrRegistryManager);
     }
 
     @Test

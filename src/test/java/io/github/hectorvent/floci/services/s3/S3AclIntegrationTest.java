@@ -17,6 +17,7 @@ class S3AclIntegrationTest {
     private static final String BUCKET = "acl-test-bucket";
     private static final String ALL_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AllUsers";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
+    private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static String multipartUploadId;
 
     @Test
@@ -373,5 +374,31 @@ class S3AclIntegrationTest {
             .statusCode(200)
             .body(not(containsString(ALL_USERS_GROUP_URI)))
             .body(containsString("<Permission>FULL_CONTROL</Permission>"));
+    }
+
+    // Regression coverage for floci-3wz: PutBucketAcl rejected the "log-delivery-write" canned
+    // ACL, the standard value Terraform's aws_s3_bucket_acl / access-logging modules send to grant
+    // the S3 log-delivery service group permission to write access logs into a bucket.
+
+    @Test
+    @Order(17)
+    void putBucketAclAppliesLogDeliveryWriteCannedAcl() {
+        given()
+            .header("x-amz-acl", "log-delivery-write")
+        .when()
+            .put("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "?acl")
+        .then()
+            .statusCode(200)
+            .body(containsString(LOG_DELIVERY_GROUP_URI))
+            .body(containsString("<Permission>WRITE</Permission>"))
+            .body(containsString("<Permission>READ_ACP</Permission>"))
+            .body(containsString("<Permission>FULL_CONTROL</Permission>"))
+            .body(not(containsString(ALL_USERS_GROUP_URI)));
     }
 }

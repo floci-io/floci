@@ -255,6 +255,25 @@ class IamIntegrationTest {
     }
 
     @Test
+    @Order(18)
+    void getApiGatewayPushToCloudWatchLogsPolicy() {
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn",
+                    "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName",
+                    equalTo("AmazonAPIGatewayPushToCloudWatchLogs"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Arn",
+                    equalTo("arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"));
+    }
+
+    @Test
     @Order(9)
     void stsGetCallerIdentityFallsBackForUnseededFlociAccessKey() {
         given()
@@ -439,7 +458,7 @@ class IamIntegrationTest {
 
     @Test
     @Order(53)
-    void listSamlProvidersReturnsEmptyList() {
+    void listSamlProvidersReturnsWireCompatibleResult() {
         given()
             .formParam("Action", "ListSAMLProviders")
             .header("Authorization",
@@ -449,11 +468,29 @@ class IamIntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("ListSAMLProvidersResponse.ListSAMLProvidersResult.SAMLProviderList", isEmptyOrNullString());
+            .body("ListSAMLProvidersResponse.ListSAMLProvidersResult.SAMLProviderList", notNullValue());
     }
 
     @Test
     @Order(54)
+    void getSamlProviderDoesNotCrossAccountBoundaries() {
+        String providerName = "cross-account-saml-" + System.nanoTime();
+        String metadata = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"https://idp.example.test/"
+                + providerName + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\"><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>Y2VydA==</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+        String ownerAuth = "AWS4-HMAC-SHA256 Credential=111111111111/20260227/us-east-1/iam/aws4_request";
+        String otherAccountAuth = "AWS4-HMAC-SHA256 Credential=222222222222/20260227/us-east-1/iam/aws4_request";
+        given().formParam("Action", "CreateSAMLProvider").formParam("Name", providerName)
+                .formParam("SAMLMetadataDocument", metadata).header("Authorization", ownerAuth)
+                .when().post("/").then().statusCode(200);
+
+        given().formParam("Action", "GetSAMLProvider")
+                .formParam("SAMLProviderArn", "arn:aws:iam::111111111111:saml-provider/" + providerName)
+                .header("Authorization", otherAccountAuth)
+                .when().post("/").then().statusCode(404).body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+    }
+
+    @Test
+    @Order(55)
     void listOpenIdConnectProvidersReturnsEmptyList() {
         given()
             .formParam("Action", "ListOpenIDConnectProviders")
@@ -689,6 +726,7 @@ class IamIntegrationTest {
             .body("CreatePolicyResponse.CreatePolicyResult.Policy.PolicyName", equalTo("TestPolicy"))
             .body("CreatePolicyResponse.CreatePolicyResult.Policy.PolicyId", startsWith("ANPA"))
             .body("CreatePolicyResponse.CreatePolicyResult.Policy.DefaultVersionId", equalTo("v1"))
+            .body("CreatePolicyResponse.CreatePolicyResult.Policy.Description", equalTo("Test managed policy"))
         .extract()
             .path("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
     }
@@ -705,7 +743,8 @@ class IamIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName", equalTo("TestPolicy"));
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName", equalTo("TestPolicy"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Description", equalTo("Test managed policy"));
     }
 
     @Test
@@ -1054,4 +1093,96 @@ class IamIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
             .body("ErrorResponse.Error.Message", not(containsString("null")));
     }
+
+    @Test
+    @Order(74)
+    void listPoliciesOmitsDescription() {
+        // AWS's own Policy model documents this explicitly: Description "is included in the
+        // response to the GetPolicy operation. It is not included in the response to the
+        // ListPolicies operation." Unlike GetPolicy/CreatePolicy (which do include it), no
+        // member returned by ListPolicies should ever carry a Description element — checking
+        // the raw response for the tag at all, rather than a specific policy's value, is what
+        // actually pins the shared-helper regression this guards against: folding the element
+        // back into policyXml() unconditionally would reintroduce it for every member, not just
+        // the one this test happens to create.
+        given()
+            .formParam("Action", "CreatePolicy")
+            .formParam("PolicyName", "ListPoliciesOmitCheckPolicy")
+            .formParam("Path", "/")
+            .formParam("PolicyDocument", POLICY_DOCUMENT)
+            .formParam("Description", "Should not appear in ListPolicies")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Asserting only the negative would pass vacuously if ListPolicies ever returned no
+        // members at all (a pagination bug, a scope-filter regression); the positive assertion
+        // proves the created policy is actually present before the absence check means anything.
+        // Matching the element itself, not the bare word "Description", also avoids colliding
+        // with a future policy name/path containing that substring.
+        given()
+            .formParam("Action", "ListPolicies")
+            .formParam("Scope", "Local")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ListPoliciesOmitCheckPolicy"))
+            .body(not(containsString("<Description>")));
+    }
+
+    @Test
+    void simulatePrincipalPolicyReadsEveryContextKeyValue() {
+        // A ForAnyValue: condition is satisfied only by the SECOND supplied context value,
+        // so a handler that reads only ContextKeyValues.member.1 returns implicitDeny.
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", "multi-context-user")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260904/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "PutUserPolicy")
+            .formParam("UserName", "multi-context-user")
+            .formParam("PolicyName", "AllowAliceLeadingKeys")
+            .formParam("PolicyDocument", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*",
+                   "Condition":{"ForAnyValue:StringEquals":{"dynamodb:LeadingKeys":["USER_alice"]}}}
+                ]}""")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260904/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "SimulatePrincipalPolicy")
+            .formParam("PolicySourceArn", "arn:aws:iam::000000000000:user/multi-context-user")
+            .formParam("ActionNames.member.1", "dynamodb:GetItem")
+            .formParam("ResourceArns.member.1", "*")
+            .formParam("ContextEntries.member.1.ContextKeyName", "dynamodb:LeadingKeys")
+            .formParam("ContextEntries.member.1.ContextKeyValues.member.1", "USER_bob")
+            .formParam("ContextEntries.member.1.ContextKeyValues.member.2", "USER_alice")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260904/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SimulatePrincipalPolicyResponse.SimulatePrincipalPolicyResult.EvaluationResults"
+                            + ".member.find { it.EvalActionName == 'dynamodb:GetItem' }.EvalDecision",
+                    equalTo("allowed"));
+    }
 }
+

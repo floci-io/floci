@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.InitLifecycleState;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -18,6 +19,7 @@ import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
@@ -58,6 +60,10 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.ServicesConfig servicesConfig;
     @Mock private EmulatorConfig.Ec2ServiceConfig ec2ServiceConfig;
     @Mock private EmulatorConfig.ElbV2ServiceConfig elbv2ServiceConfig;
+    @Mock private EmulatorConfig.ElbServiceConfig elbServiceConfig;
+    @Mock private IamService iamService;
+    @Mock private EmulatorConfig.ElastiCacheServiceConfig elastiCacheServiceConfig;
+    @Mock private ElastiCacheService elastiCacheService;
     @Mock private ElastiCacheContainerManager elastiCacheContainerManager;
     @Mock private ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager;
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
@@ -69,8 +75,10 @@ class EmulatorLifecycleTest {
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
     @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
+    @Mock private io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager flinkContainerManager;
     @Mock private RdsService rdsService;
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
+    @Mock private io.github.hectorvent.floci.services.elb.ElbClassicService elbClassicService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
@@ -83,6 +91,7 @@ class EmulatorLifecycleTest {
     @Mock private PersistentPathValidator persistentPathValidator;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
     @Mock private io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker schemaCreationWorker;
+    @Mock private io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService stepFunctionsService;
     @Mock private jakarta.enterprise.inject.Instance<io.github.hectorvent.floci.core.common.ContainerTeardown> containerTeardowns;
 
     private EmulatorLifecycle emulatorLifecycle;
@@ -94,19 +103,25 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(ec2ServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elbv2()).thenReturn(elbv2ServiceConfig);
         Mockito.lenient().when(elbv2ServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.elasticache()).thenReturn(elastiCacheServiceConfig);
+        Mockito.lenient().when(elastiCacheServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.elb()).thenReturn(elbServiceConfig);
+        Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.tls()).thenReturn(tlsConfig);
         Mockito.lenient().when(tlsConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(config.port()).thenReturn(4566);
 
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
+                iamService, elastiCacheService,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, rdsService, elbV2Service,
+                rabbitMqManager, flinkContainerManager, rdsService, elbV2Service, elbClassicService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
-                schemaCreationWorker, containerTeardowns, persistentPathValidator);
+                schemaCreationWorker, stepFunctionsService, containerTeardowns, persistentPathValidator);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(java.util.Collections.emptyIterator());
     }
@@ -126,10 +141,12 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(initializationHooksRunner, storageFactory, initLifecycleState, rdsService);
+        var inOrder = Mockito.inOrder(initializationHooksRunner, storageFactory, initLifecycleState,
+                iamService, rdsService);
         inOrder.verify(initializationHooksRunner).run(InitializationHook.BOOT);
         inOrder.verify(initLifecycleState).markBootCompleted();
         inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(iamService).sweepOrphanedLambdaExecutionRoleSessions();
         inOrder.verify(rdsService).restorePersistedRuntime();
     }
 
@@ -161,6 +178,64 @@ class EmulatorLifecycleTest {
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
         Mockito.verify(elbV2Service, Mockito.never()).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should restore ElastiCache persisted runtime after loading storage when elasticache is enabled")
+    void shouldRestoreElastiCachePersistedRuntimeAfterStorageLoad() {
+        stubStorageConfig();
+        when(elastiCacheServiceConfig.enabled()).thenReturn(true);
+        when(elastiCacheService.restorePersistedRuntime())
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, elastiCacheService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(elastiCacheService).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should not restore ElastiCache persisted runtime when elasticache is disabled")
+    void shouldNotRestoreElastiCachePersistedRuntimeWhenDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        Mockito.verify(elastiCacheService, Mockito.never()).restorePersistedRuntime();
+    }
+
+    @Test
+    @DisplayName("Should rehydrate AppSync schemas after orphan recovery on startup")
+    void shouldRehydrateAppSyncSchemasAfterOrphanRecovery() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, schemaCreationWorker);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(schemaCreationWorker).recoverOrphans();
+        inOrder.verify(schemaCreationWorker).rehydrateSchemas();
+    }
+
+    @Test
+    @DisplayName("Should abort abandoned Step Functions executions after loading storage")
+    void shouldAbortAbandonedStepFunctionsExecutionsAfterStorageLoad() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        var inOrder = Mockito.inOrder(storageFactory, stepFunctionsService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(stepFunctionsService).abortAbandonedExecutions();
     }
 
     @Test
@@ -231,6 +306,22 @@ class EmulatorLifecycleTest {
 
         verify(initializationHooksRunner).run(InitializationHook.START);
         verify(initLifecycleState).markStartCompleted();
+    }
+
+    @Test
+    @DisplayName("onHttpStart on a non-default floci.port (non-TLS) triggers hook execution (#2437)")
+    void onHttpStart_nonTls_triggersHooksOnCustomPort() throws IOException, InterruptedException {
+        Mockito.lenient().when(config.port()).thenReturn(4577);
+        when(tlsConfig.enabled()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(true);
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4577)));
+
+        verify(initializationHooksRunner).run(InitializationHook.START);
+        verify(initializationHooksRunner).run(InitializationHook.READY);
+        verify(initLifecycleState).markStartCompleted();
+        verify(initLifecycleState).markReadyCompleted();
     }
 
     @Test

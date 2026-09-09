@@ -36,8 +36,18 @@ public class PortAllocator {
                 return p;
             }
         }
+        // This exception usually reaches an operator second-hand — a custom resource reports
+        // FAILED and CloudFormation rolls the stack back, so what they see is a CFN error and
+        // this text buried in floci's own log. It has to carry its own diagnosis: which pool
+        // ran dry, how wide it was, and the property that widens it. Otherwise the only way to
+        // learn the knob exists is to find this class in the source (issue #2206).
         throw new IllegalStateException(
-                "No free ports in range " + basePort + "-" + maxPort);
+                "Lambda Runtime API port pool exhausted: no free ports in range "
+                        + basePort + "-" + maxPort + " (" + (maxPort - basePort + 1)
+                        + " ports, all in use). One port is held per running Lambda container, "
+                        + "so this is the concurrent-execution ceiling. Widen it with "
+                        + "floci.services.lambda.runtime-api-base-port / "
+                        + "floci.services.lambda.runtime-api-max-port.");
     }
 
     public void release(int port) {

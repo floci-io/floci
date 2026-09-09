@@ -43,6 +43,26 @@ class RegionResolverTest {
     }
 
     @Test
+    void resolveRegionFromAuthOrNullReturnsCredentialRegion() {
+        assertEquals("eu-west-1", resolver.resolveRegionFromAuthOrNull(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260215/eu-west-1/iotdata/aws4_request, " +
+                "SignedHeaders=host, Signature=abc123"));
+    }
+
+    @Test
+    void resolveRegionFromAuthOrNullIsNullWhereResolveReturnsDefault() {
+        assertNull(resolver.resolveRegionFromAuthOrNull("Bearer some-token"));
+        assertEquals("us-east-1", resolver.resolveRegionFromAuth("Bearer some-token"));
+    }
+
+    @Test
+    void resolveRegionFromAuthOrNullIsNullForAbsentOrBlank() {
+        assertNull(resolver.resolveRegionFromAuthOrNull(null));
+        assertNull(resolver.resolveRegionFromAuthOrNull(""));
+        assertNull(resolver.resolveRegionFromAuthOrNull(" "));
+    }
+
+    @Test
     void fallsBackToDefaultWhenEmptyAuthHeader() {
         HttpHeaders headers = stubHeaders("");
         assertEquals("us-east-1", resolver.resolveRegion(headers));
@@ -105,6 +125,51 @@ class RegionResolverTest {
     @Test
     void resolveRegionFromPresignedCredential_malformedTooFewParts_returnsDefault() {
         assertEquals("us-east-1", resolver.resolveRegionFromPresignedCredential("only-two/parts"));
+    }
+
+    // --- resolveRegionFromHost(String host) tests (issue #1871) ---
+
+    @Test
+    void resolveRegionFromHost_regionBearingHost_returnsRegion() {
+        assertEquals("ap-northeast-2",
+                resolver.resolveRegionFromHost("abc123.execute-api.ap-northeast-2.localhost:4566"));
+        assertEquals("us-west-2",
+                resolver.resolveRegionFromHost("abc123.execute-api.us-west-2.localhost"));
+        assertEquals("eu-west-1",
+                resolver.resolveRegionFromHost("abc123.execute-api.eu-west-1.amazonaws.com"));
+        assertEquals("us-gov-east-1",
+                resolver.resolveRegionFromHost("abc123.execute-api.us-gov-east-1.amazonaws.com"));
+    }
+
+    @Test
+    void resolveRegionFromHost_normalizesUppercaseRegionToLowercase() {
+        // Hostnames are case-insensitive; the region must be lowercased so the region-scoped
+        // API lookup does not 403 on a casing mismatch (PR review P1).
+        assertEquals("us-east-1",
+                resolver.resolveRegionFromHost("abc123.execute-api.US-EAST-1.localhost:4566"));
+    }
+
+    @Test
+    void resolveRegionFromHost_builtinDnsSuffixes_returnNull() {
+        // Floci's built-in execute-api suffixes carry NO region label. The old pattern parsed
+        // "localhost" as the region and broke the lookup — these must return null so the caller
+        // falls back (default region / cross-region apiId scan) instead. (PR #2188 review.)
+        assertNull(resolver.resolveRegionFromHost("abc123.execute-api.localhost:4566"));
+        assertNull(resolver.resolveRegionFromHost("abc123.execute-api.localhost.floci.io:4566"));
+        assertNull(resolver.resolveRegionFromHost("abc123.execute-api.localhost.localstack.cloud:4566"));
+    }
+
+    @Test
+    void resolveRegionFromHost_nonExecuteApiHost_returnsNull() {
+        assertNull(resolver.resolveRegionFromHost("localhost:4566"));
+        assertNull(resolver.resolveRegionFromHost("my-bucket.localhost:4566"));
+        assertNull(resolver.resolveRegionFromHost("abc123.lambda-url.us-east-1.localhost"));
+    }
+
+    @Test
+    void resolveRegionFromHost_nullOrEmpty_returnsNull() {
+        assertNull(resolver.resolveRegionFromHost(null));
+        assertNull(resolver.resolveRegionFromHost(""));
     }
 
     private static HttpHeaders stubHeaders(String authorizationValue) {

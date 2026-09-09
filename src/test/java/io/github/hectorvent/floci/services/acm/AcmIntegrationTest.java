@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -9,8 +10,21 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.cert.CertPathValidator;
+import java.security.cert.CertificateFactory;
+import java.security.cert.PKIXParameters;
+import java.security.cert.TrustAnchor;
+import java.security.cert.X509Certificate;
+import java.security.interfaces.ECPublicKey;
+import java.security.interfaces.RSAPublicKey;
+import java.util.List;
+import java.util.Set;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -19,6 +33,7 @@ class AcmIntegrationTest {
 
     private static final String ACM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static String createdCertificateArn;
+    private static String ecCertificateArn;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -107,7 +122,7 @@ class AcmIntegrationTest {
     @Test
     @Order(5)
     void requestCertificateWithKeyAlgorithm() {
-        given()
+        ecCertificateArn = given()
             .header("X-Amz-Target", "CertificateManager.RequestCertificate")
             .contentType(ACM_CONTENT_TYPE)
             .body("""
@@ -120,7 +135,8 @@ class AcmIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("CertificateArn", startsWith("arn:aws:acm:"));
+            .body("CertificateArn", startsWith("arn:aws:acm:"))
+            .extract().jsonPath().getString("CertificateArn");
     }
 
     @Test
@@ -224,10 +240,12 @@ class AcmIntegrationTest {
             .body("Certificate.Type", equalTo("AMAZON_ISSUED"))
             .body("Certificate.Serial", notNullValue())
             .body("Certificate.Subject", startsWith("CN="))
-            .body("Certificate.Issuer", notNullValue())
+            .body("Certificate.Issuer", equalTo("CN=Floci Local CA"))
             .body("Certificate.KeyAlgorithm", equalTo("RSA-2048"))
             .body("Certificate.NotBefore", notNullValue())
-            .body("Certificate.NotAfter", notNullValue());
+            .body("Certificate.NotAfter", notNullValue())
+            .body("Certificate.DomainValidationOptions.ValidationStatus", everyItem(equalTo("SUCCESS")))
+            .body("Certificate.DomainValidationOptions.ResourceRecord.Type", everyItem(equalTo("CNAME")));
     }
 
     @Test
@@ -252,21 +270,14 @@ class AcmIntegrationTest {
 
     @Test
     @Order(12)
-    void getCertificate() {
-        given()
-            .header("X-Amz-Target", "CertificateManager.GetCertificate")
-            .contentType(ACM_CONTENT_TYPE)
-            .body("""
-                {
-                    "CertificateArn": "%s"
-                }
-                """.formatted(createdCertificateArn))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("Certificate", startsWith("-----BEGIN CERTIFICATE-----"))
-            .body("CertificateChain", startsWith("-----BEGIN CERTIFICATE-----"));
+    void getCertificate() throws Exception {
+        var response = getCertificatePems(createdCertificateArn);
+
+        X509Certificate leaf = assertLeafChainsToLocalCa(response.getString("Certificate"),
+                response.getString("CertificateChain"));
+        assertEquals("RSA", leaf.getPublicKey().getAlgorithm());
+        assertEquals(2048, ((RSAPublicKey) leaf.getPublicKey()).getModulus().bitLength(),
+                "RSA_2048 is the default KeyAlgorithm");
     }
 
     // ==================== User Story 2: ListCertificates ====================
@@ -322,6 +333,41 @@ class AcmIntegrationTest {
         .then()
             .statusCode(200)
             .body("CertificateSummaryList", notNullValue());
+    }
+
+    @Test
+    @Order(16)
+    void privateCertificateChainsToTheSameCa() throws Exception {
+        String arn = given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "DomainName": "internal.example.com",
+                    "CertificateAuthorityArn": "arn:aws:acm-pca:us-east-1:000000000000:certificate-authority/11111111-2222-3333-4444-555555555555"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("CertificateArn");
+
+        var response = getCertificatePems(arn);
+
+        assertLeafChainsToLocalCa(response.getString("Certificate"), response.getString("CertificateChain"));
+    }
+
+    @Test
+    @Order(17)
+    void ecCertificateKeepsItsKeyAlgorithmAndChainsToTheSameCa() throws Exception {
+        var response = getCertificatePems(ecCertificateArn);
+
+        X509Certificate leaf = assertLeafChainsToLocalCa(response.getString("Certificate"),
+                response.getString("CertificateChain"));
+        assertEquals("EC", leaf.getPublicKey().getAlgorithm(), "the requested KeyAlgorithm is honoured");
+        assertEquals(256, ((ECPublicKey) leaf.getPublicKey()).getParams().getCurve().getField().getFieldSize(),
+                "EC_prime256v1 is a P-256 key");
     }
 
     // ==================== User Story 5: Tagging ====================
@@ -537,6 +583,150 @@ class AcmIntegrationTest {
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    @Test
+    @Order(40)
+    void updateCertificateOptions() {
+        given()
+            .header("X-Amz-Target", "CertificateManager.UpdateCertificateOptions")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s",
+                    "Options": {"Export": "ENABLED"}
+                }
+                """.formatted(createdCertificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s"}
+                """.formatted(createdCertificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate.Options.Export", equalTo("ENABLED"));
+    }
+
+    @Test
+    @Order(41)
+    void updateCertificateOptionsRequiresOptions() {
+        given()
+            .header("X-Amz-Target", "CertificateManager.UpdateCertificateOptions")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s"}
+                """.formatted(createdCertificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(42)
+    void revokeCertificate() {
+        String certificateArn = given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"DomainName": "revocable.example.com"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("CertificateArn");
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.UpdateCertificateOptions")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s", "Options": {"Export": "ENABLED"}}
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.RevokeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s", "RevocationReason": "KEY_COMPROMISE"}
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CertificateArn", equalTo(certificateArn));
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s"}
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate.Status", equalTo("REVOKED"));
+    }
+
+    @Test
+    @Order(43)
+    void renewPrivateCertificate() {
+        String certificateArn = given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "DomainName": "renewable-private.example.com",
+                    "CertificateAuthorityArn": "arn:aws:acm-pca:us-east-1:000000000000:certificate-authority/test"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("CertificateArn");
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.RenewCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "%s"}
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(equalTo("{}"));
+    }
+
+    @Test
+    @Order(44)
+    void renewCertificateNotFound() {
+        given()
+            .header("X-Amz-Target", "CertificateManager.RenewCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"CertificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/nonexistent"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     // ==================== Unsupported Operation ====================
 
     @Test
@@ -550,5 +740,49 @@ class AcmIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("UnsupportedOperation"));
+    }
+
+    private static JsonPath getCertificatePems(String certificateArn) {
+        return given()
+            .header("X-Amz-Target", "CertificateManager.GetCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s"
+                }
+                """.formatted(certificateArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath();
+    }
+
+    /**
+     * Certificate is a TLS server leaf, CertificateChain is exactly the local CA served at
+     * /_floci/ca.pem, and the pair builds a PKIX path with that CA as the only trust anchor: what a
+     * client that pins Certificate plus CertificateChain does, so a signature check alone is not enough.
+     */
+    private static X509Certificate assertLeafChainsToLocalCa(String leafPem, String chainPem) throws Exception {
+        CertificateFactory factory = CertificateFactory.getInstance("X.509");
+        X509Certificate leaf = parse(factory, leafPem);
+        X509Certificate chain = parse(factory, chainPem);
+        String servedCa = given().when().get("/_floci/ca.pem").then().statusCode(200).extract().asString();
+
+        assertEquals(servedCa.strip(), chainPem.strip(), "CertificateChain must be the local CA PEM");
+        assertEquals(chain.getSubjectX500Principal(), leaf.getIssuerX500Principal());
+        assertEquals(-1, leaf.getBasicConstraints(), "a leaf, not a CA");
+        assertEquals(List.of("1.3.6.1.5.5.7.3.1", "1.3.6.1.5.5.7.3.2"), leaf.getExtendedKeyUsage(),
+                "serverAuth and clientAuth, as DescribeCertificate advertises");
+
+        PKIXParameters params = new PKIXParameters(Set.of(new TrustAnchor(chain, null)));
+        params.setRevocationEnabled(false);
+        CertPathValidator.getInstance("PKIX").validate(factory.generateCertPath(List.of(leaf)), params);
+        return leaf;
+    }
+
+    private static X509Certificate parse(CertificateFactory factory, String pem) throws Exception {
+        return (X509Certificate) factory.generateCertificate(
+                new ByteArrayInputStream(pem.getBytes(StandardCharsets.US_ASCII)));
     }
 }

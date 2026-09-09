@@ -13,6 +13,7 @@ public class DbCluster {
 
     private String dbClusterIdentifier;
     private DatabaseEngine engine;
+    private String engineIdentifier;
     private String engineVersion;
     private String masterUsername;
     private String masterPassword;
@@ -30,12 +31,21 @@ public class DbCluster {
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
     private String dbClusterResourceId;
     private String dbClusterArn;
+    private String masterUserSecretArn;
+    private String masterUserSecretStatus;
+    private String masterUserSecretKmsKeyId;
     private Instant createdAt;
     private int proxyPort;
     private Map<String, String> tags = new LinkedHashMap<>();
 
     private String dockerVolumeName;
     private String volumeId;
+    private String containerStorageResourceId;
+
+    // Aurora Serverless v2 scaling (ACUs). Null when the cluster is not Serverless v2.
+    private Double serverlessV2MinCapacity;
+    private Double serverlessV2MaxCapacity;
+    private Integer serverlessV2SecondsUntilAutoPause;
 
     // Transient — not persisted
     private transient String containerId;
@@ -70,6 +80,9 @@ public class DbCluster {
 
     public DatabaseEngine getEngine() { return engine; }
     public void setEngine(DatabaseEngine engine) { this.engine = engine; }
+
+    public String getEngineIdentifier() { return engineIdentifier; }
+    public void setEngineIdentifier(String engineIdentifier) { this.engineIdentifier = engineIdentifier; }
 
     public String getEngineVersion() { return engineVersion; }
     public void setEngineVersion(String engineVersion) { this.engineVersion = engineVersion; }
@@ -128,6 +141,17 @@ public class DbCluster {
     public String getDbClusterArn() { return dbClusterArn; }
     public void setDbClusterArn(String dbClusterArn) { this.dbClusterArn = dbClusterArn; }
 
+    public String getMasterUserSecretArn() { return masterUserSecretArn; }
+    public void setMasterUserSecretArn(String masterUserSecretArn) { this.masterUserSecretArn = masterUserSecretArn; }
+
+    public String getMasterUserSecretStatus() { return masterUserSecretStatus; }
+    public void setMasterUserSecretStatus(String masterUserSecretStatus) { this.masterUserSecretStatus = masterUserSecretStatus; }
+
+    public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
+    public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) {
+        this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId;
+    }
+
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 
@@ -143,6 +167,11 @@ public class DbCluster {
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
 
+    public String getContainerStorageResourceId() { return containerStorageResourceId; }
+    public void setContainerStorageResourceId(String containerStorageResourceId) {
+        this.containerStorageResourceId = containerStorageResourceId;
+    }
+
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }
 
@@ -151,4 +180,15 @@ public class DbCluster {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public Double getServerlessV2MinCapacity() { return serverlessV2MinCapacity; }
+    public void setServerlessV2MinCapacity(Double serverlessV2MinCapacity) { this.serverlessV2MinCapacity = serverlessV2MinCapacity; }
+
+    public Double getServerlessV2MaxCapacity() { return serverlessV2MaxCapacity; }
+    public void setServerlessV2MaxCapacity(Double serverlessV2MaxCapacity) { this.serverlessV2MaxCapacity = serverlessV2MaxCapacity; }
+
+    public Integer getServerlessV2SecondsUntilAutoPause() { return serverlessV2SecondsUntilAutoPause; }
+    public void setServerlessV2SecondsUntilAutoPause(Integer serverlessV2SecondsUntilAutoPause) {
+        this.serverlessV2SecondsUntilAutoPause = serverlessV2SecondsUntilAutoPause;
+    }
 }

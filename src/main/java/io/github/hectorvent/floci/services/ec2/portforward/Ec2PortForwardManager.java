@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -73,6 +74,11 @@ public class Ec2PortForwardManager {
         this.lifecycleManager = lifecycleManager;
         this.portAllocator = portAllocator;
         this.config = config;
+    }
+
+    @PreDestroy
+    void stop() {
+        executor.shutdownNow();
     }
 
     /**

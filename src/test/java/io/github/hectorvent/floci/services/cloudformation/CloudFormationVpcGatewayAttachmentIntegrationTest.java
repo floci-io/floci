@@ -57,16 +57,7 @@ class CloudFormationVpcGatewayAttachmentIntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
 
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -98,9 +89,58 @@ class CloudFormationVpcGatewayAttachmentIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Gateway (and with it the attachment) is gone after stack deletion.
-        String afterDelete = describeIgw(igwId).then().statusCode(200).extract().asString();
+        // Gateway (and with it the attachment) is gone after stack deletion. CloudFormationService
+        // runs deleteStack on a background executor and the HTTP call returns as soon as the work is
+        // queued, so poll rather than reading straight back: asserting immediately is a race that
+        // only passes while the executor happens to win.
+        String afterDelete = awaitIgwDetached(igwId, vpcId);
         assertThat(afterDelete, not(containsString(vpcId)));
+    }
+
+    /** Polls DescribeStacks until the stack reports {@code status}; provisioning is asynchronous. */
+    private static void awaitStackStatus(String stackName, String status) {
+        String xml = "";
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            xml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+            if (xml.contains("<StackStatus>" + status + "</StackStatus>")) {
+                return;
+            }
+            sleepBriefly();
+        }
+        throw new AssertionError("stack " + stackName + " never reached " + status + ": " + xml);
+    }
+
+    /** Polls the gateway until it no longer reports the attachment, returning the last response. */
+    private static String awaitIgwDetached(String igwId, String vpcId) {
+        String xml = "";
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            xml = describeIgw(igwId).then().statusCode(200).extract().asString();
+            if (!xml.contains(vpcId)) {
+                return xml;
+            }
+            sleepBriefly();
+        }
+        return xml;
+    }
+
+    private static void sleepBriefly() {
+        try {
+            Thread.sleep(50);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted while awaiting an asynchronous stack operation", e);
+        }
     }
 
     private static io.restassured.response.Response describeIgw(String igwId) {

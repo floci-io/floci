@@ -54,8 +54,19 @@ class SesV2IntegrationTest {
             .body("IdentityType", equalTo("DOMAIN"))
             .body("VerifiedForSendingStatus", equalTo(false))
             .body("DkimAttributes.SigningEnabled", equalTo(true))
-            .body("DkimAttributes.Status", equalTo("PENDING"))
+            // CreateEmailIdentity reports NOT_STARTED (SES hasn't begun tracking the CNAMEs yet).
+            .body("DkimAttributes.Status", equalTo("NOT_STARTED"))
             .body("DkimAttributes.Tokens", not(empty()));
+
+        // A subsequent GetEmailIdentity transitions the DKIM status to PENDING, matching AWS.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2example.com")
+        .then()
+            .statusCode(200)
+            .body("DkimAttributes.Status", equalTo("PENDING"));
     }
 
     @Test
@@ -199,6 +210,64 @@ class SesV2IntegrationTest {
             .body("DkimAttributes.SigningEnabled", equalTo(true))
             .body("DkimAttributes.Status", equalTo("SUCCESS"))
             .body("DkimAttributes.Tokens", not(empty()));
+
+        // DKIM verification status tracks DNS detection independently of the signing flag: disabling
+        // DKIM keeps Status=SUCCESS while the CNAMEs remain published.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SigningEnabled": false}
+                """)
+        .when()
+            .put("/v2/email/identities/v2dkim-success.floci.test/dkim")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2dkim-success.floci.test")
+        .then()
+            .statusCode(200)
+            .body("DkimAttributes.SigningEnabled", equalTo(false))
+            .body("DkimAttributes.Status", equalTo("SUCCESS"));
+
+        // Re-enable so the key-rotation assertion below starts from the signing-enabled state.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SigningEnabled": true}
+                """)
+        .when()
+            .put("/v2/email/identities/v2dkim-success.floci.test/dkim")
+        .then()
+            .statusCode(200);
+
+        // Rotating the DKIM key must not revoke the identity's sending verification (matching AWS):
+        // VerificationStatus stays SUCCESS, but DKIM re-pends until the new tokens' records are detected.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SigningAttributesOrigin":"AWS_SES","SigningAttributes":{"NextSigningKeyLength":"RSA_1024_BIT"}}
+                """)
+        .when()
+            .put("/v2/email/identities/v2dkim-success.floci.test/dkim/signing")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2dkim-success.floci.test")
+        .then()
+            .statusCode(200)
+            .body("VerificationStatus", equalTo("SUCCESS"))
+            .body("DkimAttributes.Status", equalTo("PENDING"));
     }
 
     @Test
@@ -519,7 +588,9 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DkimAttributes.SigningEnabled", equalTo(true))
-            .body("DkimAttributes.Status", equalTo("SUCCESS"));
+            // example.com is not a DKIM-verified domain identity, so the enabled flag is set but the
+            // DKIM verification status stays NOT_STARTED (status tracks DNS detection, not the flag).
+            .body("DkimAttributes.Status", equalTo("NOT_STARTED"));
     }
 
     @Test

@@ -54,7 +54,7 @@ public class StorageFactory {
      * @param fileName      the JSON file name for persistent storage
      * @param typeReference Jackson type reference for deserialization
      */
-    public synchronized <V> StorageBackend<String, V> create(String serviceName, String fileName,
+    public synchronized <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                  TypeReference<Map<String, V>> typeReference) {
         String mode = resolveMode(serviceName);
         long flushInterval = resolveFlushInterval(serviceName);
@@ -68,7 +68,7 @@ public class StorageFactory {
         if (existing != null) {
             LOG.debugv("Reusing existing {0} storage for service {1} (file: {2})", mode, serviceName, filePath);
             @SuppressWarnings("unchecked")
-            StorageBackend<String, V> typed = (StorageBackend<String, V>) existing;
+            AccountAwareStorageBackend<V> typed = (AccountAwareStorageBackend<V>) existing;
             return typed;
         }
 

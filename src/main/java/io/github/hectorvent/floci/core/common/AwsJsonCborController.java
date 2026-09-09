@@ -1,9 +1,14 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.DecimalNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import com.fasterxml.jackson.dataformat.cbor.CBORGenerator;
+import com.google.gson.JsonParseException;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
@@ -19,8 +24,13 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Generic dispatcher for all AWS services that use the application/cbor protocol,
@@ -71,18 +81,40 @@ public class AwsJsonCborController {
 
 
     /**
-     * Serializes a JsonNode to CBOR bytes, encoding timestamp shapes with CBOR tag 1
-     * (epoch seconds, RFC 8949 section 3.4.2) as required by the smithy-rpc-v2-cbor
-     * protocol specification.
+     * Serializes a JsonNode to CBOR bytes for the smithy-rpc-v2-cbor protocol, encoding
+     * timestamp shapes with CBOR tag 1 as plain epoch seconds (RFC 8949 section 3.4.2,
+     * unmodified) — this protocol uses RFC 8949's own native tag(1) convention, unlike
+     * the older, separate {@code application/x-amz-cbor-1.1} dialect (see
+     * {@link #nodeToLegacyCbor}), which encodes tag(1) as epoch milliseconds instead.
+     * These are two genuinely different wire conventions sharing the same CBOR tag
+     * mechanism, not one protocol with an inconsistency — see floci-io/floci#2368's
+     * resolution for the investigation that distinguished them (CloudWatch Metrics, on
+     * this protocol, needs the value unscaled; Kinesis, on the legacy dialect, needs it
+     * scaled to milliseconds).
      * <p>
      * Package-private so the timestamp-tagging behaviour can be unit-tested directly
      * without booting Quarkus.
      */
     static byte[] nodeToSmithyCbor(JsonNode node) throws Exception {
+        return writeCbor(node, false);
+    }
+
+    /**
+     * Serializes a JsonNode to CBOR bytes for the legacy {@code application/x-amz-cbor-1.1}
+     * dialect (routed through {@link #handleCborRequest}) — encodes timestamp shapes as
+     * CBOR tag(1) epoch <em>milliseconds</em>, AWS's convention for this specific,
+     * pre-Smithy dialect. See {@link #nodeToSmithyCbor} for how this differs from the
+     * newer smithy-rpc-v2-cbor protocol, and {@link #writeCborTimestamp} for why.
+     */
+    static byte[] nodeToLegacyCbor(JsonNode node) throws Exception {
+        return writeCbor(node, true);
+    }
+
+    private static byte[] writeCbor(JsonNode node, boolean legacyDialect) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         CBORFactory factory = (CBORFactory) CBOR_MAPPER.getFactory();
         try (CBORGenerator gen = factory.createGenerator(out)) {
-            writeNodeToCbor(gen, node, false);
+            writeNodeToCbor(gen, node, false, legacyDialect);
         }
         return out.toByteArray();
     }
@@ -93,16 +125,18 @@ public class AwsJsonCborController {
      * up the Smithy shape): when set and the node is a number, it is emitted as a CBOR
      * tag(1) timestamp. The flag is set by {@link #isTimestampField(String)} for matching
      * object fields and is propagated into array elements, so both scalar timestamps and
-     * elements of timestamp lists are tagged.
+     * elements of timestamp lists are tagged. {@code legacyDialect} selects which of the
+     * two wire conventions tag(1) uses - see {@link #nodeToSmithyCbor}/{@link #nodeToLegacyCbor}.
      */
-    private static void writeNodeToCbor(CBORGenerator gen, JsonNode node, boolean numberIsTimestamp) throws Exception {
+    private static void writeNodeToCbor(CBORGenerator gen, JsonNode node, boolean numberIsTimestamp,
+            boolean legacyDialect) throws Exception {
         if (node.isObject()) {
             gen.writeStartObject();
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> entry = fields.next();
                 gen.writeFieldName(entry.getKey());
-                writeNodeToCbor(gen, entry.getValue(), isTimestampField(entry.getKey()));
+                writeNodeToCbor(gen, entry.getValue(), isTimestampField(entry.getKey()), legacyDialect);
             }
             gen.writeEndObject();
         } else if (node.isArray()) {
@@ -110,11 +144,11 @@ public class AwsJsonCborController {
             for (JsonNode item : node) {
                 // Propagate the timestamp context so every element of a timestamp list
                 // (e.g. CloudWatch GetMetricData MetricDataResults[].Timestamps) is tagged.
-                writeNodeToCbor(gen, item, numberIsTimestamp);
+                writeNodeToCbor(gen, item, numberIsTimestamp, legacyDialect);
             }
             gen.writeEndArray();
         } else if (numberIsTimestamp && node.isNumber()) {
-            writeCborTimestamp(gen, node);
+            writeCborTimestamp(gen, node, legacyDialect);
         } else if (node.isTextual()) {
             gen.writeString(node.textValue());
         } else if (node.isDouble() || node.isFloat()) {
@@ -148,18 +182,95 @@ public class AwsJsonCborController {
     }
 
     /**
-     * Writes a numeric node as a CBOR tag(1) epoch-seconds timestamp, preserving
-     * integer-ness. Integral epoch seconds are emitted as a tag(1) integer and
-     * fractional values as a tag(1) float; both are spec-valid (RFC 8949 section 3.4.2)
-     * and accepted by AWS SDK decoders.
+     * Writes a numeric node as a CBOR tag(1) timestamp. On the legacy
+     * {@code application/x-amz-cbor-1.1} dialect, converts from this codebase's internal
+     * convention (fractional epoch seconds, matching the plain-JSON protocol) to epoch
+     * milliseconds - AWS's convention for tag(1) on that specific, pre-Smithy dialect.
+     * See floci-io/floci#2368: without this conversion, an unmodified AWS SDK for Java v2
+     * Kinesis client (which uses this legacy dialect by default) decodes every timestamp
+     * 1000x too small, and an {@code AT_TIMESTAMP} shard iterator built from a corrupted
+     * request-side timestamp never matches any real record. On smithy-rpc-v2-cbor,
+     * RFC 8949's own tag(1) convention (plain epoch seconds) already applies unmodified -
+     * no conversion needed, or correct, there.
+     * <p>
+     * {@code BigDecimal} (not double arithmetic) preserves millisecond precision exactly
+     * and avoids reintroducing the same class of float-precision defect fixed on the
+     * read side of this exact value by #2173/#2359 — {@link JsonNode#decimalValue()}
+     * already handles both integral and floating-point nodes correctly.
      */
-    private static void writeCborTimestamp(CBORGenerator gen, JsonNode node) throws Exception {
+    private static void writeCborTimestamp(CBORGenerator gen, JsonNode node, boolean legacyDialect) throws Exception {
         gen.writeTag(1);
-        if (node.isIntegralNumber()) {
-            gen.writeNumber(node.longValue());
-        } else {
-            gen.writeNumber(node.doubleValue());
+        if (!legacyDialect) {
+            if (node.isIntegralNumber()) {
+                gen.writeNumber(node.longValue());
+            } else {
+                gen.writeNumber(node.doubleValue());
+            }
+            return;
         }
+        BigDecimal epochSeconds = node.decimalValue();
+        long epochMillis = epochSeconds.movePointRight(3).setScale(0, RoundingMode.HALF_UP).longValueExact();
+        gen.writeNumber(epochMillis);
+    }
+
+    /**
+     * Converts every timestamp-shaped field's value in a CBOR request/response decoded
+     * off the legacy {@code application/x-amz-cbor-1.1} dialect from epoch milliseconds
+     * (that dialect's tag(1) wire representation) back to this codebase's internal
+     * convention of fractional epoch seconds — the inverse of {@link #writeCborTimestamp}
+     * for that same dialect. See floci-io/floci#2368, and {@link #nodeToSmithyCbor} for
+     * why this must NOT be applied to smithy-rpc-v2-cbor traffic (its tag(1) is already
+     * plain epoch seconds, unscaled).
+     * <p>
+     * Jackson's CBOR module does not preserve tag information into the decoded
+     * {@link JsonNode} tree ({@link #bodyToJson} uses a plain {@code readTree}), so by
+     * the time a request reaches this method the CBOR tag(1) marker is already gone and
+     * a decoded timestamp's raw numeric value is indistinguishable from any other number.
+     * This reuses the same schema-less field-name heuristic ({@link #isTimestampField})
+     * {@link #writeNodeToCbor} already relies on for the identical reason on the response
+     * side, so every service handler continues to see the one convention it already
+     * expects regardless of which wire protocol (legacy CBOR or plain JSON) actually
+     * carried the request — no handler needs to change.
+     * <p>
+     * Mutates the given tree in place (both {@link ObjectNode} and {@link ArrayNode} are
+     * mutable) and returns it, purely for convenient chaining at the call site.
+     */
+    static JsonNode normalizeLegacyCborTimestampsFromMillis(JsonNode node) {
+        normalizeLegacyCborTimestampsFromMillis(node, false);
+        return node;
+    }
+
+    private static void normalizeLegacyCborTimestampsFromMillis(JsonNode node, boolean isTimestamp) {
+        if (node.isObject()) {
+            ObjectNode object = (ObjectNode) node;
+            Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                boolean fieldIsTimestamp = isTimestampField(entry.getKey());
+                JsonNode value = entry.getValue();
+                if (fieldIsTimestamp && value.isNumber()) {
+                    object.set(entry.getKey(), millisToSeconds(value));
+                } else {
+                    normalizeLegacyCborTimestampsFromMillis(value, fieldIsTimestamp);
+                }
+            }
+        } else if (node.isArray()) {
+            ArrayNode array = (ArrayNode) node;
+            for (int i = 0; i < array.size(); i++) {
+                JsonNode item = array.get(i);
+                if (isTimestamp && item.isNumber()) {
+                    array.set(i, millisToSeconds(item));
+                } else {
+                    normalizeLegacyCborTimestampsFromMillis(item, isTimestamp);
+                }
+            }
+        }
+    }
+
+    /** Exact millis-to-seconds conversion (see {@link #normalizeLegacyCborTimestampsFromMillis}). */
+    private static JsonNode millisToSeconds(JsonNode millisNode) {
+        BigDecimal epochMillis = millisNode.decimalValue();
+        return DecimalNode.valueOf(epochMillis.movePointLeft(3));
     }
 
     /**
@@ -182,9 +293,7 @@ public class AwsJsonCborController {
         LOG.debugv("Smithy RPC v2 CBOR: service={0}, operation={1}", serviceId, operation);
 
         try {
-            JsonNode request = (body != null && body.length > 0)
-                    ? CBOR_MAPPER.readTree(body)
-                    : objectMapper.createObjectNode();
+            JsonNode request = bodyToJson(httpHeaders, body);
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = dispatchCbor(serviceId, operation, request, region);
@@ -204,15 +313,64 @@ public class AwsJsonCborController {
                     .build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
+        } catch (JacksonException e) {
+           return cborErrorResponse(new AwsException("SerializationException", e.getMessage(), 400),
+                    "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing Smithy CBOR request: " + serviceId + "." + operation, e);
             return Response.status(500).build();
         }
     }
 
+    JsonNode bodyToJson(HttpHeaders httpHeaders, byte[] body) throws IOException {
+        return bodyToJson(httpHeaders, body, false);
+    }
+
+    /**
+     * {@code legacyDialect} selects whether a decoded numeric timestamp field is
+     * interpreted as the legacy {@code application/x-amz-cbor-1.1} dialect's epoch
+     * milliseconds ({@link #normalizeLegacyCborTimestampsFromMillis}) or left as-is
+     * (smithy-rpc-v2-cbor's own plain epoch seconds, already correct unmodified) — see
+     * {@link #nodeToSmithyCbor} for why these differ.
+     */
+    private JsonNode bodyToJson(HttpHeaders httpHeaders, byte[] body, boolean legacyDialect) throws IOException {
+        JsonNode request;
+        if (body != null && body.length > 0) {
+            if( httpHeaders.getRequestHeader("Content-encoding") != null && isGZipped(httpHeaders.getRequestHeader("Content-encoding"))) {
+                body = decodeBody(body);
+            }
+            JsonNode decoded = CBOR_MAPPER.readTree(body);
+            request = legacyDialect ? normalizeLegacyCborTimestampsFromMillis(decoded) : decoded;
+        } else {
+            request = objectMapper.createObjectNode();
+        }
+        return request;
+    }
+
+    private boolean isGZipped(List<String> contentEncodingHeaders) {
+        if (contentEncodingHeaders == null) {
+            return false;
+        }
+        for (String header : contentEncodingHeaders) {
+            if (header != null && header.toLowerCase(java.util.Locale.ROOT).contains("gzip")) {
+                return true;
+            }
+        }
+        return false;
+
+    }
+
     /**
      * Handles AWS services that migrated to the smithy-rpc-v2-cbor protocol at root path.
      * Fallback handler for X-Amz-Target based routing with CBOR body.
+     * <p>
+     * Confirmed (via a real wire capture, floci-io/floci#2368) that Kinesis reaches this
+     * handler using the older, separate {@code application/x-amz-cbor-1.1} dialect, whose
+     * tag(1) timestamps are epoch milliseconds rather than smithy-rpc-v2-cbor's plain
+     * epoch seconds — see {@link #nodeToLegacyCbor}/{@link #bodyToJson}'s {@code
+     * legacyDialect} parameter, applied here for that reason. Not reconfirmed for every
+     * other service dispatched below; none currently has test coverage asserting an
+     * exact numeric timestamp value over this specific path.
      */
     @POST
     @Consumes({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
@@ -240,9 +398,7 @@ public class AwsJsonCborController {
         LOG.debugv("{0} CBOR action: {1}", serviceKey, action);
 
         try {
-            JsonNode request = (body != null && body.length > 0)
-                    ? CBOR_MAPPER.readTree(body)
-                    : objectMapper.createObjectNode();
+            JsonNode request = bodyToJson(httpHeaders, body, true);
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = switch (serviceKey) {
@@ -266,7 +422,7 @@ public class AwsJsonCborController {
             JsonNode responseNode = delegated.getEntity() instanceof JsonNode
                     ? (JsonNode) delegated.getEntity()
                     : objectMapper.valueToTree(delegated.getEntity());
-            byte[] cborBytes = nodeToSmithyCbor(responseNode);
+            byte[] cborBytes = nodeToLegacyCbor(responseNode);
             String responseContentType = responseContentType(httpHeaders);
             return Response.status(delegated.getStatus())
                     .header("smithy-protocol", "rpc-v2-cbor")
@@ -275,9 +431,34 @@ public class AwsJsonCborController {
                     .build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
+        } catch (JacksonException e) {
+            return cborErrorResponse(new AwsException("SerializationException", e.getMessage(), 400),
+                    "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing CBOR request: " + serviceKey + "." + action, e);
             return Response.status(500).build();
+        }
+    }
+
+    private byte[] decodeBody(byte[] compressed) {
+        int buffSize = 64 * 1024;
+        byte[] buffer = new byte[buffSize]; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
+        int totalRead = 0;
+        int maxRead = 10 * 1024 * 1024; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed))) {
+            int read;
+            while ((read = gis.read(buffer)) != -1) {
+                totalRead += read;
+                if (totalRead > maxRead) {
+                    throw new AwsException("PayloadTooLargeException", "Payload Too Large", 413);
+                }
+                baos.write(buffer, 0, read);
+            }
+
+            return baos.toByteArray();
+        } catch (IOException e) {
+            throw new AwsException("InvalidRequestException", "Failed to decode request body", 400);
         }
     }
 

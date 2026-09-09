@@ -77,6 +77,9 @@ class LambdaLayerIntegrationTest {
             .body("CompatibleArchitectures", hasItem("x86_64"))
             .body("Content.CodeSize", greaterThan(0))
             .body("Content.CodeSha256", not(emptyString()))
+            .body("Content.Location", containsString("awslambda-us-east-1-tasks/layers/"))
+            .body("Content.Location", endsWith("/" + LAYER_NAME
+                    + "/1?X-Amz-Credential=000000000000%2F00010101%2Fus-east-1%2Fs3%2Faws4_request"))
             .body("CreatedDate", not(emptyString()));
     }
 
@@ -293,6 +296,66 @@ class LambdaLayerIntegrationTest {
             .statusCode(204);
     }
 
+    // ── Stored layer archive in Floci's S3 ────────────────────────────────────
+
+    @Test
+    @Order(17)
+    void layerArchive_version2_isDownloadableFromTasksBucket() {
+        // Publish stores the archive in Floci's S3; the kubernetes executor's init
+        // container downloads it from exactly this path. Version 2 is still present here.
+        given()
+        .when()
+            .get("/awslambda-us-east-1-tasks/layers/000000000000/" + LAYER_NAME + "/2")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(18)
+    void layerArchive_version1_isDeletedWithTheVersion() {
+        // Version 1 was deleted at @Order(13); its stored archive must be gone too.
+        given()
+        .when()
+            .get("/awslambda-us-east-1-tasks/layers/000000000000/" + LAYER_NAME + "/1")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(19)
+    void contentLocation_ofNonDefaultAccountLayer_isFetchable() throws Exception {
+        // The Location URL is fetched unsigned, so it must carry the owning account in
+        // X-Amz-Credential. Without it the download resolves the default account's
+        // bucket namespace and 404s for a layer published under another account.
+        String location = given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=000000000001/20260215/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=abc")
+            .contentType("application/json")
+            .body("""
+                { "Content": { "ZipFile": "%s" } }
+                """.formatted(layerZipBase64()))
+        .when()
+            .post("/2018-10-31/layers/" + LAYER_NAME + "-alt/versions")
+        .then()
+            .statusCode(201)
+            .body("Content.Location", containsString("/layers/000000000001/"))
+            .body("Content.Location", containsString("X-Amz-Credential=000000000001%2F"))
+            .extract().path("Content.Location");
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(location)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=000000000001/20260215/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=abc")
+        .when()
+            .delete("/2018-10-31/layers/" + LAYER_NAME + "-alt/versions/1")
+        .then()
+            .statusCode(204);
+    }
+
     // ── PublishLayerVersion validation ────────────────────────────────────────
 
     @Test
@@ -309,6 +372,98 @@ class LambdaLayerIntegrationTest {
             .post("/2018-10-31/layers/" + LAYER_NAME + "/versions")
         .then()
             .statusCode(400);
+    }
+
+    // ── Attach-time layer validation on CreateFunction/UpdateFunctionConfiguration ────────────
+    // Real AWS rejects an unresolvable Layers ARN eagerly, at attach time, with
+    // InvalidParameterValueException - previously Floci accepted any ARN unconditionally and the
+    // failure only ever surfaced as a silent warning log when the container tried to launch.
+
+    @Test
+    @Order(17)
+    void createFunction_withNonExistentLayer_returns400() throws Exception {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "layer-validation-create-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Code": { "ZipFile": "%s" },
+                    "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:no-such-layer:1"]
+                }
+                """.formatted(functionZipBase64()))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        // The function must not have been created at all - not partially, not with the layer
+        // dropped.
+        given()
+        .when()
+            .get("/2015-03-31/functions/layer-validation-create-fn")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(18)
+    void updateFunctionConfiguration_withNonExistentLayer_returns400AndLeavesLayersUnchanged() throws Exception {
+        String fnName = "layer-validation-update-fn";
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Description": "original description",
+                    "Code": { "ZipFile": "%s" },
+                    "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:%s:2"]
+                }
+                """.formatted(fnName, functionZipBase64(), LAYER_NAME))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(201);
+
+        // Description is bundled into the SAME rejected request as the bad layer - this is
+        // the regression check for validating Layers before any field mutation: if Layers
+        // were checked where it's applied (after Description is already set on the live
+        // stored object), this update would be rejected but Description would already have
+        // silently changed.
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Description": "should not be applied",
+                    "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:no-such-layer:1"]
+                }
+                """)
+        .when()
+            .put("/2015-03-31/functions/" + fnName + "/configuration")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + fnName)
+        .then()
+            .body("Configuration.Description", equalTo("original description"))
+            .statusCode(200)
+            .body("Configuration.Layers", hasSize(1))
+            .body("Configuration.Layers[0].Arn", containsString(":layer:" + LAYER_NAME + ":2"));
+
+        given()
+        .when()
+            .delete("/2015-03-31/functions/" + fnName)
+        .then()
+            .statusCode(204);
     }
 
     // ── cleanup ──────────────────────────────────────────────────────────────

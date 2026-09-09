@@ -11,6 +11,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * State machine version APIs — the Terraform AWS provider calls ListStateMachineVersions after
@@ -58,19 +59,25 @@ class StepFunctionsVersionsIntegrationTest {
     }
 
     @Test
-    void listVersionsAreReturnedNewestFirst() {
+    void publishIsIdempotentPerRevisionAndVersionsAreReturnedNewestFirst() {
         String name = "ver-order-" + System.currentTimeMillis();
         String arn = call("CreateStateMachine",
                 "{\"name\":\"" + name + "\",\"definition\":\"" + DEF + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}")
                 .then().statusCode(200).extract().jsonPath().getString("stateMachineArn");
 
-        // Publish three versions (1, 2, 3). AWS lists them newest first, and the Terraform provider
-        // reads the version ARN off this list, so the order must be descending — even though the three
-        // publishes land within the same (second-resolution) creationDate, the version-number tie-break
-        // keeps 3 ahead of 2 ahead of 1.
-        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
-        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
-        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
+        // Re-publishing the same revision is idempotent and returns the existing version.
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200).body("stateMachineVersionArn", is(arn + ":1"));
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200).body("stateMachineVersionArn", is(arn + ":1"));
+
+        // Each update creates a new revision, so publishing those revisions advances the version.
+        call("UpdateStateMachine", "{\"stateMachineArn\":\"" + arn
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r2\",\"publish\":true}")
+                .then().statusCode(200).body("stateMachineVersionArn", is(arn + ":2"));
+        call("UpdateStateMachine", "{\"stateMachineArn\":\"" + arn
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r3\",\"publish\":true}")
+                .then().statusCode(200).body("stateMachineVersionArn", is(arn + ":3"));
 
         call("ListStateMachineVersions", "{\"stateMachineArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -91,10 +98,139 @@ class StepFunctionsVersionsIntegrationTest {
     @Test
     void createWithPublishReturnsVersionArn() {
         String name = "ver-pub-" + System.currentTimeMillis();
-        call("CreateStateMachine",
-                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\",\"publish\":true}")
+        String arn = call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\","
+                        + "\"publish\":true,\"versionDescription\":\"initial release\"}")
                 .then().statusCode(200)
                 .body("stateMachineVersionArn", not(emptyOrNullString()))
-                .body("stateMachineVersionArn", containsString(":1"));
+                .body("stateMachineVersionArn", containsString(":1"))
+                .extract().jsonPath().getString("stateMachineArn");
+
+        call("ListStateMachineVersions", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("stateMachineVersions.size()", is(1))
+                .body("stateMachineVersions[0].stateMachineVersionArn", is(arn + ":1"));
+        call("DescribeStateMachine", "{\"stateMachineArn\":\"" + arn + ":1\"}")
+                .then().statusCode(200)
+                .body("description", is("initial release"));
+    }
+
+    @Test
+    void createWithoutPublishReturnsExplicitNullVersionArn() {
+        String name = "ver-unpublished-" + System.currentTimeMillis();
+        Response response = call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}")
+                .then().statusCode(200)
+                .extract().response();
+
+        assertTrue(response.asString().contains("\"stateMachineVersionArn\":null"));
+    }
+
+    @Test
+    void createIsIdempotentForAwsContractFieldsAndIgnoresRoleAndTags() {
+        String name = "ver-create-idempotent-" + System.currentTimeMillis();
+        String originalRequest = "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/original\","
+                + "\"tags\":[{\"key\":\"owner\",\"value\":\"original\"}],"
+                + "\"publish\":true,\"versionDescription\":\"initial release\"}";
+        String arn = call("CreateStateMachine", originalRequest)
+                .then().statusCode(200)
+                .body("stateMachineVersionArn", containsString(":1"))
+                .extract().jsonPath().getString("stateMachineArn");
+
+        call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/ignored\","
+                        + "\"tags\":[{\"key\":\"owner\",\"value\":\"ignored\"}],"
+                        + "\"publish\":true,\"versionDescription\":\"initial release\"}")
+                .then().statusCode(200)
+                .body("stateMachineArn", is(arn))
+                .body("stateMachineVersionArn", is(arn + ":1"));
+
+        call("DescribeStateMachine", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("roleArn", is("arn:aws:iam::000000000000:role/original"));
+        call("ListTagsForResource", "{\"resourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("tags.size()", is(1))
+                .body("tags[0].key", is("owner"))
+                .body("tags[0].value", is("original"));
+
+        call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/original\","
+                        + "\"publish\":true,\"versionDescription\":\"different\"}")
+                .then().statusCode(400)
+                .body(containsString("StateMachineAlreadyExists"));
+        call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/original\","
+                        + "\"tracingConfiguration\":{\"enabled\":true},"
+                        + "\"publish\":true,\"versionDescription\":\"initial release\"}")
+                .then().statusCode(400)
+                .body(containsString("StateMachineAlreadyExists"));
+        call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/original\"}")
+                .then().statusCode(400)
+                .body(containsString("StateMachineAlreadyExists"));
+    }
+
+    @Test
+    void publishHonorsRevisionAndDescriptionContract() {
+        String name = "ver-revision-" + System.currentTimeMillis();
+        String arn = call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("stateMachineArn");
+        String revision = call(
+                "DescribeStateMachine",
+                "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("revisionId");
+
+        call("PublishStateMachineVersion",
+                "{\"stateMachineArn\":\"" + arn + "\",\"revisionId\":\""
+                        + revision + "\",\"description\":\"first revision\"}")
+                .then().statusCode(200)
+                .body("stateMachineVersionArn", is(arn + ":1"));
+        call("PublishStateMachineVersion",
+                "{\"stateMachineArn\":\"" + arn + "\",\"revisionId\":\""
+                        + revision + "\",\"description\":\"ignored replay\"}")
+                .then().statusCode(200)
+                .body("stateMachineVersionArn", is(arn + ":1"));
+        call("DescribeStateMachine", "{\"stateMachineArn\":\"" + arn + ":1\"}")
+                .then().statusCode(200)
+                .body("description", is("first revision"));
+
+        call("PublishStateMachineVersion",
+                "{\"stateMachineArn\":\"" + arn
+                        + "\",\"revisionId\":\"00000000-0000-0000-0000-000000000000\"}")
+                .then().statusCode(409)
+                .body(containsString("ConflictException"));
+    }
+
+    @Test
+    void invalidCreatePublishOptionsAndNamesAreRejectedBeforeStorage() {
+        String name = "ver-invalid-publish-" + System.currentTimeMillis();
+        String baseRequest = "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"";
+
+        call("CreateStateMachine",
+                baseRequest + ",\"versionDescription\":\"requires publish\"}")
+                .then().statusCode(400)
+                .body(containsString("ValidationException"));
+        call("CreateStateMachine", baseRequest + "}")
+                .then().statusCode(200)
+                .body("stateMachineArn", containsString(name));
+
+        call("CreateStateMachine",
+                "{\"name\":\"invalid name\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}")
+                .then().statusCode(400)
+                .body(containsString("InvalidName"));
     }
 }

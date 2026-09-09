@@ -459,14 +459,15 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
-    void unsupportedCommandsAreIgnored() {
+    void unsupportedCommandsFailTheQueryInsteadOfBeingIgnored() {
         String group = "data-sources/connectors";
         String stream = "s-1";
         createGroupStream(service, group, stream);
         put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "kept");
         put(group, stream, BASE_MS + 2000, "TRACE", "JOB-1", "dropped");
 
-        // 'parse' / 'stats' are unsupported: ignored with a warning, while the supported stages still run.
+        // 'parse' / 'stats' are unsupported: the query must fail rather than silently apply only the
+        // stages it understands and return a result set that does not correspond to the query asked.
         String query = """
                 fields @message
                 | filter level != 'TRACE'
@@ -477,9 +478,93 @@ class CloudWatchLogsInsightsQueryTest {
         String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
 
         CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
-        assertEquals("Complete", state.status());
-        assertEquals(1, state.rows().size(), "TRACE dropped by filter; parse/stats ignored, not applied");
-        assertTrue(state.rows().get(0).get("@message").contains("kept"));
+        assertEquals("Failed", state.status());
+        assertTrue(state.rows().isEmpty(), "a failed query exposes no rows");
+        assertNotNull(state.failureReason());
+        assertTrue(state.failureReason().contains("parse"), "failure reason names the unsupported command: "
+                + state.failureReason());
+    }
+
+    @Test
+    void unsupportedFilterOperatorsFailTheQueryInsteadOfMisparsingOrDropping() {
+        String group = "search/query-operators";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "info-line");
+        put(group, stream, BASE_MS + 2000, "ERROR", "JOB-1", "error-line");
+
+        // '>=', '<=' and '=~' used to lose their comparison character to the equality scan, leaving a
+        // dead field ("level >") that silently matched nothing. None of these is supported: each one
+        // must now fail the whole query rather than silently drop the filter and return every row.
+        for (String expr : List.of("level >= 'INFO'", "level <= 'INFO'", "level =~ /INFO/", ">= 'INFO'",
+                "level > 'INFO'", "level < 'INFO'", "level like /INFO/", "level not like /INFO/",
+                "level in ['INFO']")) {
+            CloudWatchLogsService.QueryState state = startQueryFor(group, "fields @message | filter " + expr);
+            assertEquals("Failed", state.status(), "unsupported operator must fail the query: " + expr);
+            assertTrue(state.rows().isEmpty(), "a failed query exposes no rows: " + expr);
+            assertNotNull(state.failureReason(), "failure reason must be set: " + expr);
+        }
+    }
+
+    @Test
+    void startQuerySucceedsAndReportsFailureOnlyViaGetQueryResults() {
+        // A query the engine cannot evaluate must still be accepted by StartQuery (it is a valid
+        // request shape, just unsupported syntax); the failure surfaces asynchronously through
+        // GetQueryResults, exactly like a real Insights query failing partway through execution.
+        String group = "search/unsupported-syntax";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "hello");
+
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(
+                List.of(group), startSec, startSec + 86400, "filter @message like /ERROR/", null, REGION);
+        assertNotNull(queryId);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Failed", state.status());
+        assertTrue(state.rows().isEmpty());
+        assertNotNull(state.failureReason());
+    }
+
+    @Test
+    void invalidArgumentsToRecognizedCommandsFailTheQuery() {
+        // A recognized command with an argument it cannot parse must fail the query too, not just an
+        // unrecognized command or a fully-unsupported filter operator: silently keeping the default
+        // limit, or silently running with no sort/dedup, would be just as misleading to the caller.
+        String group = "search/invalid-command-arguments";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "one");
+        put(group, stream, BASE_MS + 2000, "INFO", "JOB-1", "two");
+
+        for (String query : List.of(
+                "fields @message | limit abc",
+                "fields @message | sort",
+                "fields @message | dedup")) {
+            CloudWatchLogsService.QueryState state = startQueryFor(group, query);
+            assertEquals("Failed", state.status(), "invalid command argument must fail the query: " + query);
+            assertTrue(state.rows().isEmpty(), "a failed query exposes no rows: " + query);
+            assertNotNull(state.failureReason(), "failure reason must be set: " + query);
+        }
+    }
+
+    @Test
+    void supportedFilterOperatorsStillParse() {
+        String group = "search/query-equality";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "info-line");
+        put(group, stream, BASE_MS + 2000, "ERROR", "JOB-1", "error-line");
+        putRaw(service, group, stream, BASE_MS + 3000, idLog("REQ>=42", "quoted"));
+
+        assertEquals(1, rowsFor(group, "fields @message | filter level = 'ERROR'").size());
+        assertEquals(1, rowsFor(group, "fields @message | filter level == 'ERROR'").size());
+        assertEquals(2, rowsFor(group, "fields @message | filter level != 'ERROR'").size());
+
+        // A '>=' inside the quoted value is not an operator — the real '=' still wins.
+        assertEquals("REQ>=42",
+                rowsFor(group, "fields params.id | filter params.id = 'REQ>=42'").get(0).get("params.id"));
     }
 
     @Test
@@ -593,6 +678,22 @@ class CloudWatchLogsInsightsQueryTest {
         createGroupStream(svc, group, stream);
         putRaw(svc, group, stream, BASE_MS + 2000, jobLog("INFO", "x", "JOB-1"));
         return svc;
+    }
+
+    /** Run {@code query} over the full window on the default service and return its completed rows. */
+    private List<LinkedHashMap<String, String>> rowsFor(String group, String query) {
+        long startSec = BASE_MS / 1000 - 10;
+        CloudWatchLogsService.QueryState state = service.getQueryResults(
+                service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION));
+        assertEquals("Complete", state.status());
+        return state.rows();
+    }
+
+    /** Run {@code query} over the full window on the default service and return its final state. */
+    private CloudWatchLogsService.QueryState startQueryFor(String group, String query) {
+        long startSec = BASE_MS / 1000 - 10;
+        return service.getQueryResults(
+                service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION));
     }
 
     private void createGroupStream(CloudWatchLogsService svc, String group, String stream) {

@@ -90,7 +90,6 @@ public class AmazonMqController {
         body.put("autoMinorVersionUpgrade", b.isAutoMinorVersionUpgrade());
         body.put("created", b.getCreated());
         body.put("brokerInstances", b.getBrokerInstances());
-        body.put("users", b.getUsers());
         body.put("tags", b.getTags());
         return body;
     }

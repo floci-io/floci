@@ -158,6 +158,28 @@ class ApiCorsConfigurationResponseTest {
                 .body("corsConfiguration", nullValue());
     }
 
+    @Test
+    void deleteCorsConfigurationRemovesConfiguration() {
+        String apiId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"cors-delete","protocolType":"HTTP",
+                         "corsConfiguration":{"allowOrigins":["https://example.com"]}}
+                        """)
+                .when().post("/v2/apis")
+                .then().statusCode(201)
+                .extract().path("apiId");
+
+        given()
+                .when().delete("/v2/apis/" + apiId + "/cors")
+                .then().statusCode(204);
+
+        given()
+                .when().get("/v2/apis/" + apiId)
+                .then().statusCode(200)
+                .body("$", not(hasKey("corsConfiguration")));
+    }
+
     // ──────────────────────────── JSON 1.1 path ────────────────────────────
 
     @Test

@@ -9,34 +9,63 @@ permissions:
 
 jobs:
   lint-commits:
-    name: Commits follow Conventional Commits
+    name: Title and commits follow Conventional Commits
     runs-on: ubuntu-latest
 
+    env:
+      # Conventional Commits pattern:
+      #   <type>[optional scope]: <description>
+      #
+      # Types recognised by semantic-release (commit-analyzer defaults):
+      #   feat, fix, perf, revert, docs, style, chore, refactor, test, build, ci
+      #
+      # Breaking changes are signalled by appending ! before the colon:
+      #   feat!: or feat(scope)!:
+      #
+      # References:
+      #   https://www.conventionalcommits.org/en/v1.0.0/
+      PATTERN: '^(feat|fix|perf|revert|docs|style|chore|refactor|test|build|ci)(\([-a-zA-Z0-9_.,]+\))?!?: .{1,}'
+
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # The PR title becomes the squash-merge commit message on main,
+          # which is what semantic-release actually reads - so it must be
+          # conventional even when the individual commits on the branch
+          # are just WIP history that gets squashed away.
+
+          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "ok: $PR_TITLE"
+          else
+            echo "::error::PR title does not follow Conventional Commits: $PR_TITLE"
+            echo ""
+            echo "  Got: $PR_TITLE"
+            echo ""
+            echo "  Expected format: <type>[optional scope]: <description>"
+            echo "  Examples:"
+            echo "    feat(dynamodb): add PartiQL ExecuteStatement support"
+            echo "    fix(s3): make us-east-1 bucket creation idempotent"
+            echo "    chore: release 1.5.16"
+            echo "    feat!: remove legacy endpoint"
+            echo ""
+            echo "  Valid types: feat, fix, perf, revert, docs, style, chore, refactor, test, build, ci"
+            echo "  See: https://www.conventionalcommits.org/en/v1.0.0/"
+            exit 1
+          fi
 
       - name: Validate commit messages
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Conventional Commits pattern:
-          #   <type>[optional scope]: <description>
-          #
-          # Types recognised by semantic-release (commit-analyzer defaults):
-          #   feat, fix, perf, revert, docs, style, chore, refactor, test, build, ci
-          #
-          # Breaking changes are signalled by appending ! before the colon:
-          #   feat!: or feat(scope)!:
-          #
           # Merge commits are skipped automatically via --no-merges.
-          #
-          # References:
-          #   https://www.conventionalcommits.org/en/v1.0.0/
 
-          PATTERN='^(feat|fix|perf|revert|docs|style|chore|refactor|test|build|ci)(\([-a-zA-Z0-9_.,]+\))?!?: .{1,}'
           FAILED=0
 
           while IFS= read -r msg; do

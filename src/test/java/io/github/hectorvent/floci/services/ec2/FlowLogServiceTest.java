@@ -33,7 +33,7 @@ class FlowLogServiceTest {
     @Test
     void deleteFlowLogsIsScopedToTheRequestRegion() {
         FlowLog fl = flowLogService.createFlowLog("us-east-1", "vpc-123", "VPC", "ALL",
-                "s3", "arn:aws:s3:::flow-bucket", null, 600);
+                "s3", "arn:aws:s3:::flow-bucket", null, null, 600);
 
         List<String> otherRegion = flowLogService.deleteFlowLogs("eu-west-1", List.of(fl.getFlowLogId()));
 
@@ -44,6 +44,17 @@ class FlowLogServiceTest {
 
         assertEquals(List.of(fl.getFlowLogId()), sameRegion);
         assertTrue(flowLogService.describeFlowLogs("us-east-1", List.of()).isEmpty());
+    }
+
+    @Test
+    void createFlowLogKeepsTheDeliverLogsPermissionArn() {
+        FlowLog fl = flowLogService.createFlowLog("us-east-1", "vpc-123", "VPC", "ALL",
+                "cloud-watch-logs", "arn:aws:logs:us-east-1:000000000000:log-group:flows",
+                "arn:aws:iam::000000000000:role/flow-logs-role", null, 600);
+
+        FlowLog described = flowLogService.describeFlowLogs("us-east-1", List.of(fl.getFlowLogId())).get(0);
+
+        assertEquals("arn:aws:iam::000000000000:role/flow-logs-role", described.getDeliverLogsPermissionArn());
     }
 
     @Test

@@ -90,6 +90,13 @@ final class DynamoDbNumberUtils {
     private static JsonNode normalizeAttrValue(JsonNode attr) {
         if (attr == null) return null;
 
+        // A well-formed AttributeValue has exactly one type member. Rebuilding a
+        // malformed one (e.g. {"S":"x","N":"1"}) around its "N" member would launder
+        // it into a valid value before validation can reject it — pass it through.
+        if (attr.isObject() && attr.size() != 1) {
+            return attr;
+        }
+
         if (attr.has("N")) {
             String raw = attr.get("N").asText();
             String normalized = validateAndNormalize(raw);

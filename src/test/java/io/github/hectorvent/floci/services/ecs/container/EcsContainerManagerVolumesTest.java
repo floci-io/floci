@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
@@ -53,6 +54,7 @@ class EcsContainerManagerVolumesTest {
     private ContainerBuilder.Builder builder;
     private ContainerLifecycleManager lifecycleManager;
     private LaunchedContainerAwsEnv awsEnv;
+    private EcrRegistryManager ecrRegistryManager;
     private EcsContainerManager manager;
 
     @BeforeEach
@@ -73,9 +75,12 @@ class EcsContainerManagerVolumesTest {
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
         SsmService ssmService = mock(SsmService.class);
         SecretsManagerService secretsManagerService = mock(SecretsManagerService.class);
+        ecrRegistryManager = mock(EcrRegistryManager.class);
+        when(ecrRegistryManager.rewriteImageUri(anyString())).thenAnswer(inv -> inv.getArgument(0));
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService);
+                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService,
+                ecrRegistryManager);
     }
 
     @Test
@@ -165,7 +170,7 @@ class EcsContainerManagerVolumesTest {
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
                 mock(RegionResolver.class), awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class));
+                mock(SecretsManagerService.class), ecrRegistryManager);
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
@@ -199,7 +204,7 @@ class EcsContainerManagerVolumesTest {
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
                 mock(RegionResolver.class), awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class));
+                mock(SecretsManagerService.class), ecrRegistryManager);
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");

@@ -95,6 +95,89 @@ class XmlParserTest {
         assertNull(groups.get(0).get("Nested"));
     }
 
+    // --- extractElementTree: scoped structured parsing ---
+
+    @Test
+    void extractElementTreePreservesNestedNamespaceQualifiedBlocks() {
+        var root = XmlParser.extractElementTree("""
+                <Envelope xmlns:cf="https://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <cf:Config>
+                    <cf:First><cf:Value>one</cf:Value></cf:First>
+                    <cf:Second><cf:Value><![CDATA[two]]></cf:Value></cf:Second>
+                  </cf:Config>
+                </Envelope>
+                """, "Config");
+
+        assertNotNull(root);
+        assertEquals("Config", root.name());
+        assertEquals("one", root.child("First").child("Value").text());
+        assertEquals("two", root.child("Second").child("Value").text());
+    }
+
+    @Test
+    void extractElementTreeReturnsNullForMalformedOrMissingElements() {
+        assertNull(XmlParser.extractElementTree("<Root><Target></Root>", "Target"));
+        assertNull(XmlParser.extractElementTree("<Root/>", "Target"));
+        assertNull(XmlParser.extractElementTree(null, "Target"));
+    }
+
+    // --- extractDeleteObjectEntries: batch delete Key/VersionId pairing ---
+
+    @Test
+    void extractDeleteObjectEntriesPairsKeyWithVersionId() {
+        String xml = """
+                <Delete>
+                  <Object><Key>a.txt</Key><VersionId>v1</VersionId></Object>
+                  <Object><Key>b.txt</Key><VersionId>v2</VersionId></Object>
+                </Delete>
+                """;
+
+        List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(xml);
+
+        assertEquals(2, entries.size());
+        assertEquals(new XmlParser.KeyVersion("a.txt", "v1"), entries.get(0));
+        assertEquals(new XmlParser.KeyVersion("b.txt", "v2"), entries.get(1));
+    }
+
+    @Test
+    void extractDeleteObjectEntriesVersionIdIsOptional() {
+        String xml = """
+                <Delete>
+                  <Object><Key>no-version.txt</Key></Object>
+                </Delete>
+                """;
+
+        List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(xml);
+
+        assertEquals(1, entries.size());
+        assertEquals("no-version.txt", entries.get(0).key());
+        assertNull(entries.get(0).versionId());
+    }
+
+    @Test
+    void extractDeleteObjectEntriesMixedVersionedAndUnversioned() {
+        String xml = """
+                <Delete>
+                  <Quiet>true</Quiet>
+                  <Object><Key>versioned.txt</Key><VersionId>v1</VersionId></Object>
+                  <Object><Key>plain.txt</Key></Object>
+                </Delete>
+                """;
+
+        List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(xml);
+
+        assertEquals(2, entries.size());
+        assertEquals("v1", entries.get(0).versionId());
+        assertNull(entries.get(1).versionId());
+    }
+
+    @Test
+    void extractDeleteObjectEntriesEmptyWhenNoObjects() {
+        assertTrue(XmlParser.extractDeleteObjectEntries("<Delete><Quiet>true</Quiet></Delete>").isEmpty());
+        assertTrue(XmlParser.extractDeleteObjectEntries(null).isEmpty());
+        assertTrue(XmlParser.extractDeleteObjectEntries("").isEmpty());
+    }
+
     // --- extractPairsPerGroup ---
 
     @Test
@@ -212,5 +295,26 @@ class XmlParserTest {
         assertEquals(2, filters.size());
         assertTrue(filters.get(0).isEmpty());
         assertEquals("logs/", filters.get(1).get("prefix"));
+    }
+
+    // --- rootElementName: root identification and well-formedness ---
+
+    @Test
+    void rootElementNameReturnsTheRootLocalName() {
+        assertEquals("AccelerateConfiguration", XmlParser.rootElementName(
+                "<AccelerateConfiguration><Status>Enabled</Status></AccelerateConfiguration>"));
+        assertEquals("AccelerateConfiguration", XmlParser.rootElementName(
+                "<ns:AccelerateConfiguration xmlns:ns=\"urn:x\"/>"));
+        assertEquals("Wrapper", XmlParser.rootElementName(
+                "<Wrapper><AccelerateConfiguration/></Wrapper>"));
+    }
+
+    @Test
+    void rootElementNameReturnsNullForBodiesThatDoNotParse() {
+        assertNull(XmlParser.rootElementName(null));
+        assertNull(XmlParser.rootElementName(""));
+        assertNull(XmlParser.rootElementName("garbage {} not xml"));
+        assertNull(XmlParser.rootElementName("<AccelerateConfiguration><Status>Enabled"));
+        assertNull(XmlParser.rootElementName("<AccelerateConfiguration/>trailing"));
     }
 }

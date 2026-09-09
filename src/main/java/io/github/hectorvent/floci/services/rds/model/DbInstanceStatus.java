@@ -4,5 +4,5 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
 public enum DbInstanceStatus {
-    CREATING, AVAILABLE, DELETING, REBOOTING, MODIFYING
+    CREATING, AVAILABLE, DELETING, REBOOTING, MODIFYING, FAILED
 }

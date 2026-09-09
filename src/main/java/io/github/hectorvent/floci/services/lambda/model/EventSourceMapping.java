@@ -22,13 +22,20 @@ public class EventSourceMapping {
     private String region;
     private boolean enabled = true;
     private int batchSize = 10;
+    private Integer maximumBatchingWindowInSeconds;
     private String state = "Enabled";
     private long lastModified;
+    private String startingPosition;
+    private Long startingPositionTimestamp;
     private List<String> functionResponseTypes = new ArrayList<>();
     private Map<String, String> shardSequenceNumbers = new HashMap<>();
     private ScalingConfig scalingConfig;
     private Boolean bisectBatchOnFunctionError;
     private DestinationConfig destinationConfig;
+    private FilterCriteria filterCriteria;
+    private Map<String, Object> selfManagedEventSource;
+    private List<String> topics = new ArrayList<>();
+    private List<Map<String, Object>> sourceAccessConfigurations = new ArrayList<>();
 
     public EventSourceMapping() {
     }
@@ -60,11 +67,26 @@ public class EventSourceMapping {
     public int getBatchSize() { return batchSize; }
     public void setBatchSize(int batchSize) { this.batchSize = batchSize; }
 
+    /** Seconds to accumulate an underfilled batch before invoking; {@code null} or 0 means invoke as soon as messages arrive. */
+    public Integer getMaximumBatchingWindowInSeconds() { return maximumBatchingWindowInSeconds; }
+    public void setMaximumBatchingWindowInSeconds(Integer maximumBatchingWindowInSeconds) {
+        this.maximumBatchingWindowInSeconds = maximumBatchingWindowInSeconds;
+    }
+
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
 
     public long getLastModified() { return lastModified; }
     public void setLastModified(long lastModified) { this.lastModified = lastModified; }
+
+    public String getStartingPosition() { return startingPosition; }
+    public void setStartingPosition(String startingPosition) { this.startingPosition = startingPosition; }
+
+    /** Epoch milliseconds; only ever set alongside an {@code AT_TIMESTAMP} starting position. */
+    public Long getStartingPositionTimestamp() { return startingPositionTimestamp; }
+    public void setStartingPositionTimestamp(Long startingPositionTimestamp) {
+        this.startingPositionTimestamp = startingPositionTimestamp;
+    }
 
     public List<String> getFunctionResponseTypes() { return functionResponseTypes; }
     public void setFunctionResponseTypes(List<String> functionResponseTypes) {
@@ -104,6 +126,38 @@ public class EventSourceMapping {
         this.destinationConfig = destinationConfig;
     }
 
+    public FilterCriteria getFilterCriteria() {
+        return filterCriteria;
+    }
+
+    public void setFilterCriteria(FilterCriteria filterCriteria) {
+        this.filterCriteria = filterCriteria;
+    }
+
+    public Map<String, Object> getSelfManagedEventSource() {
+        return selfManagedEventSource;
+    }
+
+    public void setSelfManagedEventSource(Map<String, Object> selfManagedEventSource) {
+        this.selfManagedEventSource = selfManagedEventSource;
+    }
+
+    public List<String> getTopics() {
+        return topics;
+    }
+
+    public void setTopics(List<String> topics) {
+        this.topics = topics != null ? topics : new ArrayList<>();
+    }
+
+    public List<Map<String, Object>> getSourceAccessConfigurations() {
+        return sourceAccessConfigurations;
+    }
+
+    public void setSourceAccessConfigurations(List<Map<String, Object>> sourceAccessConfigurations) {
+        this.sourceAccessConfigurations = sourceAccessConfigurations != null ? sourceAccessConfigurations : new ArrayList<>();
+    }
+
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class DestinationConfig {
@@ -135,6 +189,40 @@ public class EventSourceMapping {
 
         public void setDestination(String destination) {
             this.destination = destination;
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class FilterCriteria {
+        private List<Filter> filters = new ArrayList<>();
+
+        public FilterCriteria() {
+        }
+
+        public List<Filter> getFilters() {
+            return filters;
+        }
+
+        public void setFilters(List<Filter> filters) {
+            this.filters = filters != null ? filters : new ArrayList<>();
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Filter {
+        private String pattern;
+
+        public Filter() {
+        }
+
+        public String getPattern() {
+            return pattern;
+        }
+
+        public void setPattern(String pattern) {
+            this.pattern = pattern;
         }
     }
 }

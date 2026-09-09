@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.mwaa.model.CreateEnvironmentRequest;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
@@ -45,9 +46,9 @@ class MwaaServiceTest {
     void setUp() {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
-            public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return new InMemoryStorage<>();
+                return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
 
@@ -329,9 +330,9 @@ class MwaaServiceTest {
         void setUpRealMode() {
             StorageFactory storageFactory = new StorageFactory(null, null) {
                 @Override
-                public <V> StorageBackend<String, V> create(String serviceName, String fileName,
+                public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                         TypeReference<Map<String, V>> typeReference) {
-                    return new InMemoryStorage<>();
+                    return AccountAwareStorageBackend.inMemory("000000000000");
                 }
             };
 

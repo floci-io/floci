@@ -1,14 +1,18 @@
 name: Docs Action Tables
 
-# Keeps the generated "Supported Actions" tables in docs/services/*.md in sync with
-# handler source. Runs on handler changes (which can add/remove actions) and on doc or
-# tooling changes. Python-only, so it is fast and independent of the Java build job.
+# Keeps the generated tables in docs/services/*.md in sync with their sources: the
+# "Supported Actions" tables with handler source, and the CloudFormation "Supported Resource
+# Types" table with the provisioner inventory TSV. Runs on handler changes (which can add or
+# remove actions), inventory changes (which add or move resource types), and on doc or tooling
+# changes. Python-only, so it is fast and independent of the Java build job.
 
 on:
   pull_request:
     paths:
       - 'src/main/**'
-      - 'docs/services/**'
+      - 'src/test/resources/cloudformation/**'
+      - 'docs/**'
+      - 'mkdocs.yml'
       - 'tools/docs/**'
       - 'Makefile'
       - '.github/workflows/docs-actions.yml'
@@ -17,7 +21,9 @@ on:
       - main
     paths:
       - 'src/main/**'
-      - 'docs/services/**'
+      - 'src/test/resources/cloudformation/**'
+      - 'docs/**'
+      - 'mkdocs.yml'
       - 'tools/docs/**'
       - 'Makefile'
       - '.github/workflows/docs-actions.yml'
@@ -31,22 +37,25 @@ concurrency:
 
 jobs:
   action-tables:
-    name: Action tables in sync
+    name: Docs in sync
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
 
       - name: Install tooling deps
-        run: pip install -r tools/docs/requirements.txt
+        run: pip install -r tools/docs/requirements.txt -r docs/requirements.txt
 
       - name: Run action-table tests
         run: make docs-test
 
       - name: Check action tables are in sync
         run: make docs-check
+
+      - name: Build docs (strict)
+        run: mkdocs build --strict --site-dir /tmp/site

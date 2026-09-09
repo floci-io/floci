@@ -44,6 +44,9 @@ public class Cluster {
     @JsonProperty("certificateAuthority")
     private CertificateAuthority certificateAuthority;
 
+    @JsonProperty("identity")
+    private ClusterIdentity identity;
+
     @JsonProperty("platformVersion")
     private String platformVersion;
 
@@ -61,6 +64,14 @@ public class Cluster {
 
     @JsonIgnore
     private int hostPort;
+
+    /**
+     * Resolved Docker container/volume name for this cluster's k3s resources. In-memory only
+     * (never part of the AWS response shape): assigned when the container is started, or
+     * re-resolved deterministically from surviving Docker resources on restore.
+     */
+    @JsonIgnore
+    private String dockerName;
 
     public Cluster() {}
 
@@ -94,6 +105,9 @@ public class Cluster {
     public CertificateAuthority getCertificateAuthority() { return certificateAuthority; }
     public void setCertificateAuthority(CertificateAuthority certificateAuthority) { this.certificateAuthority = certificateAuthority; }
 
+    public ClusterIdentity getIdentity() { return identity; }
+    public void setIdentity(ClusterIdentity identity) { this.identity = identity; }
+
     public String getPlatformVersion() { return platformVersion; }
     public void setPlatformVersion(String platformVersion) { this.platformVersion = platformVersion; }
 
@@ -111,4 +125,7 @@ public class Cluster {
 
     public int getHostPort() { return hostPort; }
     public void setHostPort(int hostPort) { this.hostPort = hostPort; }
+
+    public String getDockerName() { return dockerName; }
+    public void setDockerName(String dockerName) { this.dockerName = dockerName; }
 }

@@ -1,0 +1,306 @@
+package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
+
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+
+/**
+ * Builds the Pod manifest for one Lambda execution environment, as a plain JSON tree (see
+ * {@link KubernetesApiClient}). Code cannot be copied into a pod before it starts (no docker-cp
+ * equivalent), so an init container downloads the deployment package (and layers) from Floci's
+ * S3 over HTTP into an emptyDir mounted at /var/task before the runtime starts.
+ */
+@ApplicationScoped
+public class LambdaPodSpecFactory {
+
+    private static final Logger LOG = Logger.getLogger(LambdaPodSpecFactory.class);
+
+    /** Label key: optional DNS-subdomain prefix (dot-separated valid segments), then a 63-char-max name. */
+    private static final java.util.regex.Pattern LABEL_KEY =
+            java.util.regex.Pattern.compile("([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?");
+    /** Label value: empty, or 63-char-max alphanumeric-bounded. */
+    private static final java.util.regex.Pattern LABEL_VALUE =
+            java.util.regex.Pattern.compile("([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?)?");
+
+    static final String MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
+    static final String MANAGED_BY_VALUE = "floci";
+    static final String SERVICE_LABEL = "floci.io/service";
+    static final String SERVICE_VALUE = "lambda";
+    static final String FUNCTION_LABEL = "floci.io/function-name";
+
+    private static final String TASK_DIR = "/var/task";
+    private static final String OPT_DIR = "/opt";
+    private static final String RUNTIME_DIR = "/var/runtime";
+    private static final int MAX_NAME_LENGTH = 63;
+
+    private final EmulatorConfig config;
+
+    @Inject
+    public LambdaPodSpecFactory(EmulatorConfig config) {
+        this.config = config;
+    }
+
+    /**
+     * @param podName          DNS-safe pod name (see {@link #podName})
+     * @param image            resolved runtime image
+     * @param env              {@code KEY=value} entries, same shape the Docker launcher builds
+     * @param codeDownloadUrl  URL of the function's deployment zip; null for Image package type
+     * @param layerDownloadUrls layer zips to unpack into /opt, in merge order
+     * @param providedRuntime  whether the runtime is provided.* (bootstrap needs an exec bit)
+     * @param handlerOrNull    function handler used as the runtime container arg (Zip functions)
+     * @param imageConfig      Image-package-type entrypoint/command/workingdir; empty lists/null when unset
+     * @param caConfigMapName  ConfigMap holding the CA bundle, mounted at /etc/floci-ca-bundle.pem when present
+     */
+    public ObjectNode buildPod(String podName,
+                        String functionName,
+                        String image,
+                        List<String> env,
+                        String codeDownloadUrl,
+                        List<String> layerDownloadUrls,
+                        boolean providedRuntime,
+                        String handlerOrNull,
+                        ImageConfig imageConfig,
+                        int memoryMb,
+                        Optional<String> caConfigMapName) {
+        var hasCode = codeDownloadUrl != null;
+        var hasLayers = !layerDownloadUrls.isEmpty();
+        var nodes = JsonNodeFactory.instance;
+
+        var volumes = nodes.arrayNode();
+        var runtimeMounts = nodes.arrayNode();
+        if (hasCode) {
+            volumes.add(emptyDirVolume(nodes, "task"));
+            runtimeMounts.add(mount(nodes, "task", TASK_DIR));
+        }
+        if (hasLayers) {
+            volumes.add(emptyDirVolume(nodes, "opt"));
+            runtimeMounts.add(mount(nodes, "opt", OPT_DIR));
+        }
+        // The provided.* base images exec /var/runtime/bootstrap with no /var/task
+        // fallback, and their /var/runtime ships empty, so masking it with an emptyDir
+        // that the init container copies bootstrap into is safe and required.
+        var needsRuntimeDir = providedRuntime && hasCode;
+        if (needsRuntimeDir) {
+            volumes.add(emptyDirVolume(nodes, "runtime"));
+            runtimeMounts.add(mount(nodes, "runtime", RUNTIME_DIR));
+        }
+        caConfigMapName.ifPresent(cm -> {
+            volumes.add(nodes.objectNode().put("name", "floci-ca")
+                    .set("configMap", nodes.objectNode().put("name", cm)));
+            runtimeMounts.add(nodes.objectNode()
+                    .put("name", "floci-ca")
+                    .put("mountPath", ContainerCaBundle.CONTAINER_PATH)
+                    .put("subPath", KubernetesPodLauncher.CA_CONFIG_MAP_KEY)
+                    .put("readOnly", true));
+        });
+
+        var resources = nodes.objectNode();
+        var memory = memoryMb + "Mi";
+        resources.set("requests", nodes.objectNode().put("memory", memory));
+        resources.set("limits", nodes.objectNode().put("memory", memory));
+
+        var runtime = nodes.objectNode()
+                .put("name", "runtime")
+                .put("image", image)
+                // Explicit IfNotPresent: the default for :latest/untagged is Always,
+                // which breaks images pre-loaded onto nodes (kind load docker-image).
+                .put("imagePullPolicy", "IfNotPresent");
+        runtime.set("env", toEnvVars(nodes, env));
+        runtime.set("volumeMounts", runtimeMounts);
+        runtime.set("resources", resources);
+
+        if (imageConfig != null && !imageConfig.entryPoint().isEmpty()) {
+            runtime.set("command", stringArray(nodes, escapeDollars(imageConfig.entryPoint())));
+        }
+        if (imageConfig != null && !imageConfig.command().isEmpty()) {
+            runtime.set("args", stringArray(nodes, escapeDollars(imageConfig.command())));
+        } else if (handlerOrNull != null && !handlerOrNull.isBlank()) {
+            runtime.set("args", stringArray(nodes, List.of(escapeDollar(handlerOrNull))));
+        }
+        if (imageConfig != null && imageConfig.workingDirectory() != null
+                && !imageConfig.workingDirectory().isBlank()) {
+            runtime.put("workingDir", imageConfig.workingDirectory());
+        }
+
+        var initContainers = nodes.arrayNode();
+        if (hasCode) {
+            var initMounts = nodes.arrayNode();
+            initMounts.add(mount(nodes, "task", TASK_DIR));
+            if (hasLayers) {
+                initMounts.add(mount(nodes, "opt", OPT_DIR));
+            }
+            if (needsRuntimeDir) {
+                initMounts.add(mount(nodes, "runtime", RUNTIME_DIR));
+            }
+            var init = nodes.objectNode()
+                    .put("name", "code-download")
+                    .put("image", config.services().lambda().kubernetes().initImage())
+                    .put("imagePullPolicy", "IfNotPresent");
+            init.set("command", stringArray(nodes,
+                    List.of("sh", "-c", initScript(codeDownloadUrl, layerDownloadUrls, providedRuntime))));
+            init.set("volumeMounts", initMounts);
+            initContainers.add(init);
+        }
+
+        var metadata = nodes.objectNode().put("name", podName);
+        var labels = nodes.objectNode();
+        podLabels(functionName).forEach(labels::put);
+        metadata.set("labels", labels);
+
+        var spec = nodes.objectNode()
+                .put("restartPolicy", "Never")
+                .put("terminationGracePeriodSeconds", 5);
+        spec.set("initContainers", initContainers);
+        spec.set("containers", nodes.arrayNode().add(runtime));
+        spec.set("volumes", volumes);
+
+        var pod = nodes.objectNode()
+                .put("apiVersion", "v1")
+                .put("kind", "Pod");
+        pod.set("metadata", metadata);
+        pod.set("spec", spec);
+        return pod;
+    }
+
+    /** Entrypoint/command/workingdir of an Image-package-type function. */
+    public record ImageConfig(List<String> entryPoint, List<String> command, String workingDirectory) {
+        public ImageConfig {
+            entryPoint = entryPoint == null ? List.of() : entryPoint;
+            command = command == null ? List.of() : command;
+        }
+    }
+
+    String initScript(String codeDownloadUrl, List<String> layerDownloadUrls, boolean providedRuntime) {
+        // Download URLs are always plain HTTP (see KubernetesFlociAddressResolver
+        // .downloadBaseUrl): busybox wget's built-in TLS cannot handshake with Floci.
+        var wget = "wget -q";
+        var script = new StringBuilder("set -e\n");
+        script.append(wget).append(" -O /tmp/code.zip '").append(codeDownloadUrl).append("'\n");
+        script.append("unzip -oq /tmp/code.zip -d ").append(TASK_DIR).append("\n");
+        for (var i = 0; i < layerDownloadUrls.size(); i++) {
+            script.append(wget).append(" -O /tmp/layer").append(i).append(".zip '")
+                    .append(layerDownloadUrls.get(i)).append("'\n");
+            script.append("unzip -oq /tmp/layer").append(i).append(".zip -d ").append(OPT_DIR).append("\n");
+        }
+        script.append("rm -f /tmp/code.zip /tmp/layer*.zip\n");
+        if (providedRuntime) {
+            // The provided.* entrypoint execs /var/runtime/bootstrap, mirroring the
+            // docker path's tar-copy into RUNTIME_DIR. busybox unzip drops unix mode
+            // bits, so the exec bit must be restored explicitly.
+            script.append("if [ -f ").append(TASK_DIR).append("/bootstrap ]; then cp ")
+                    .append(TASK_DIR).append("/bootstrap ").append(RUNTIME_DIR)
+                    .append("/bootstrap && chmod +x ").append(RUNTIME_DIR).append("/bootstrap; fi\n");
+        }
+        return script.toString();
+    }
+
+    Map<String, String> podLabels(String functionName) {
+        var labels = new LinkedHashMap<String, String>();
+        config.services().lambda().kubernetes().labels().orElse(List.of()).forEach(entry -> {
+            var eq = entry.indexOf('=');
+            var key = eq > 0 ? entry.substring(0, eq).trim() : "";
+            var value = eq > 0 ? entry.substring(eq + 1).trim() : "";
+            // Invalid entries are dropped, not sanitized: a silently rewritten label
+            // would no longer match the NetworkPolicy/selector the user wrote it for,
+            // and the API server would reject the pod at cold start otherwise.
+            if (LABEL_KEY.matcher(key).matches() && LABEL_VALUE.matcher(value).matches()) {
+                labels.put(key, value);
+            } else {
+                LOG.warnv("Ignoring invalid Lambda pod label entry ''{0}'' "
+                        + "(expected key=value with Kubernetes label syntax)", entry);
+            }
+        });
+        // Managed labels go last so user entries can never overwrite them — the
+        // orphan sweep selects on these, and an overwritten label leaks pods forever.
+        labels.put(MANAGED_BY_LABEL, MANAGED_BY_VALUE);
+        labels.put(SERVICE_LABEL, SERVICE_VALUE);
+        labels.put(FUNCTION_LABEL, sanitizeLabelValue(functionName));
+        return labels;
+    }
+
+    /** Selector matching every pod this Floci instance's Lambda executor manages. */
+    static Map<String, String> managedPodSelector() {
+        return Map.of(MANAGED_BY_LABEL, MANAGED_BY_VALUE, SERVICE_LABEL, SERVICE_VALUE);
+    }
+
+    /**
+     * DNS-1123 pod name: lowercase alphanumerics and dashes, max 63 chars. The random
+     * suffix stays intact; the function name is truncated to fit.
+     */
+    static String podName(String functionName, String shortId) {
+        var prefix = "floci-lambda-";
+        var sanitized = functionName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9-]", "-");
+        var budget = MAX_NAME_LENGTH - prefix.length() - shortId.length() - 1;
+        if (sanitized.length() > budget) {
+            sanitized = sanitized.substring(0, budget);
+        }
+        sanitized = sanitized.replaceAll("^-+|-+$", "");
+        if (sanitized.isEmpty()) {
+            sanitized = "fn";
+        }
+        return prefix + sanitized + "-" + shortId;
+    }
+
+    /** Label values allow [a-zA-Z0-9-_.], max 63 chars, alphanumeric at both ends. */
+    static String sanitizeLabelValue(String value) {
+        var sanitized = value.replaceAll("[^a-zA-Z0-9-_.]", "-");
+        if (sanitized.length() > MAX_NAME_LENGTH) {
+            sanitized = sanitized.substring(0, MAX_NAME_LENGTH);
+        }
+        sanitized = sanitized.replaceAll("^[^a-zA-Z0-9]+", "").replaceAll("[^a-zA-Z0-9]+$", "");
+        return sanitized;
+    }
+
+    private static ObjectNode emptyDirVolume(JsonNodeFactory nodes, String name) {
+        return nodes.objectNode().put("name", name).set("emptyDir", nodes.objectNode());
+    }
+
+    private static ObjectNode mount(JsonNodeFactory nodes, String name, String path) {
+        return nodes.objectNode().put("name", name).put("mountPath", path);
+    }
+
+    private static ArrayNode stringArray(JsonNodeFactory nodes, List<String> values) {
+        var array = nodes.arrayNode();
+        values.forEach(array::add);
+        return array;
+    }
+
+    private static List<String> escapeDollars(List<String> values) {
+        return values.stream().map(LambdaPodSpecFactory::escapeDollar).toList();
+    }
+
+    private static String escapeDollar(String value) {
+        // Kubernetes expands $(VAR) and collapses $$ in command/args exactly as in env
+        // values, so escape $ to deliver them byte-for-byte like the docker executor.
+        return value.replace("$", "$$");
+    }
+
+    private static ArrayNode toEnvVars(JsonNodeFactory nodes, List<String> env) {
+        var vars = nodes.arrayNode();
+        for (var entry : env) {
+            var eq = entry.indexOf('=');
+            var key = eq >= 0 ? entry.substring(0, eq) : entry;
+            var value = eq >= 0 ? entry.substring(eq + 1) : "";
+            // The API server rejects a pod whose env var has an empty name.
+            if (key.isEmpty()) {
+                LOG.warnv("Skipping env entry with an empty name in the pod spec: ''{0}''", entry);
+                continue;
+            }
+            // Kubernetes expands $(VAR) in env values and collapses $$ to $.
+            // Escaping every $ delivers values byte-for-byte like the docker executor.
+            vars.add(nodes.objectNode().put("name", key).put("value", value.replace("$", "$$")));
+        }
+        return vars;
+    }
+}

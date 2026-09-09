@@ -173,7 +173,7 @@ The most frequently set variables when running Floci as a Docker image:
 | `FLOCI_STORAGE_MODE` | `memory` | `memory`, `persistent`, `hybrid`, or `wal` |
 | `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Directory for persistent storage |
 | `FLOCI_SERVICES_DOCKER_NETWORK` | _(none)_ | Docker network for spawned containers (Lambda, ElastiCache, RDS, OpenSearch, MSK) |
-| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Verify AWS request signatures |
+| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Verify S3 presigned URL signatures |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove Lambda containers after each invocation |
 
 For the complete list of every `FLOCI_*` variable, see [Environment Variables Reference](./environment-variables.md).

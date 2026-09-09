@@ -43,7 +43,7 @@ services:
 | `DescribeDomain` | `GET /2021-01-01/opensearch/domain/{name}` | Get domain details |
 | `DescribeDomains` | `POST /2021-01-01/opensearch/domain-info` | Batch describe domains |
 | `DescribeDomainConfig` | `GET /2021-01-01/opensearch/domain/{name}/config` | Get domain configuration |
-| `UpdateDomainConfig` | `POST /2021-01-01/opensearch/domain/{name}/config` | Update cluster config, EBS options, engine version |
+| `UpdateDomainConfig` | `POST /2021-01-01/opensearch/domain/{name}/config` | Update cluster config, EBS options, engine version, access policies |
 | `DeleteDomain` | `DELETE /2021-01-01/opensearch/domain/{name}` | Delete a domain |
 | `ListDomainNames` | `GET /2021-01-01/domain` | List all domains (supports `?engineType=` filter) |
 
@@ -236,6 +236,6 @@ os_client.delete_domain(DomainName="my-search")
 
 - In mock mode, no data-plane endpoints (`/_search`, `/_index`, etc.) are served — only the management API is emulated.
 - No Elasticsearch-compatible management endpoints (`/2015-01-01/es/domain/...`).
-- `VPCOptions`, `AdvancedSecurityOptions`, `EncryptionAtRestOptions`, `NodeToNodeEncryptionOptions`, and `DomainEndpointOptions` round-trip on `CreateDomain` / `UpdateDomainConfig` / `DescribeDomain` / `DescribeDomainConfig`, but are not enforced by the running container — Floci serves the domain over plain HTTP with the security plugin disabled regardless. Round-tripping is enough for SDK clients (Terraform, CDK, Pulumi) to detect drift correctly.
+- `AccessPolicies`, `VPCOptions`, `AdvancedSecurityOptions`, `EncryptionAtRestOptions`, `NodeToNodeEncryptionOptions`, and `DomainEndpointOptions` round-trip on `CreateDomain` / `UpdateDomainConfig` / `DescribeDomain` / `DescribeDomainConfig`, but are not enforced by the running container — Floci serves the domain over plain HTTP with the security plugin disabled regardless, and `AccessPolicies` is stored verbatim without being evaluated. Round-tripping is enough for SDK clients (Terraform, CDK, Pulumi) to detect drift correctly.
 - Master passwords for `AdvancedSecurityOptions.MasterUserOptions` are accepted but never echoed back, matching AWS behavior.
 - Cross-cluster connections, VPC endpoints, packages, applications, and data sources are not supported and return `UnsupportedOperationException`.

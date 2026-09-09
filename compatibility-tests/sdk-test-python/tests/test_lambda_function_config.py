@@ -114,9 +114,16 @@ class TestFunctionConfigurationDefaults:
         finally:
             lambda_client.delete_function(FunctionName=fn)
 
-    def test_get_function_configuration_environment_always_present(
+    def test_get_function_configuration_omits_environment_when_unset(
         self, lambda_client, minimal_lambda_zip, unique_name
     ):
+        """AWS omits Environment entirely for a function with no variables.
+
+        Verified against lambda.us-east-1.amazonaws.com and
+        lambda.ap-southeast-1.amazonaws.com: a function created without
+        --environment comes back with no Environment key at all, the same way
+        Layers and VpcConfig are omitted rather than returned empty.
+        """
         fn = f"pytest-cfg-{unique_name}"
         try:
             lambda_client.create_function(
@@ -127,8 +134,9 @@ class TestFunctionConfigurationDefaults:
                 Code={"ZipFile": minimal_lambda_zip},
             )
             resp = lambda_client.get_function_configuration(FunctionName=fn)
-            assert "Environment" in resp, (
-                "Environment block must always be present in GetFunctionConfiguration response"
+            assert "Environment" not in resp, (
+                "Environment must be omitted when no variables are set; an empty "
+                "block gives Terraform a permanent `- environment {}` diff"
             )
         finally:
             lambda_client.delete_function(FunctionName=fn)
@@ -246,13 +254,17 @@ class TestUpdateFunctionConfiguration:
             assert variables.get("KEY_A") == "value-a"
             assert variables.get("KEY_B") == "value-b"
 
-            # Clear environment — block must still be present
+            # Clear environment — AWS drops the block again. Measured live:
+            # update_function_configuration(Environment={"Variables": {}}) returns
+            # no Environment key, and the following get_function_configuration
+            # agrees, so a cleared function is indistinguishable from one that
+            # never had variables.
             cleared = lambda_client.update_function_configuration(
                 FunctionName=fn,
                 Environment={"Variables": {}},
             )
-            assert "Environment" in cleared, (
-                "Environment block must be present even after clearing variables"
+            assert "Environment" not in cleared, (
+                "Environment must be omitted once variables are cleared"
             )
         finally:
             lambda_client.delete_function(FunctionName=fn)

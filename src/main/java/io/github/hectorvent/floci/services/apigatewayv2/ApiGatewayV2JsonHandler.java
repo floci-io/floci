@@ -19,11 +19,15 @@ import java.util.Map;
 public class ApiGatewayV2JsonHandler {
 
     private final ApiGatewayV2Service service;
+    private final ApiGatewayV2OpenApiImporter openApiImporter;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public ApiGatewayV2JsonHandler(ApiGatewayV2Service service, ObjectMapper objectMapper) {
+    public ApiGatewayV2JsonHandler(ApiGatewayV2Service service,
+                                   ApiGatewayV2OpenApiImporter openApiImporter,
+                                   ObjectMapper objectMapper) {
         this.service = service;
+        this.openApiImporter = openApiImporter;
         this.objectMapper = objectMapper;
     }
 
@@ -31,6 +35,8 @@ public class ApiGatewayV2JsonHandler {
         try {
             return switch (action) {
                 case "CreateApi" -> handleCreateApi(request, region);
+                case "ImportApi" -> handleImportApi(request, region);
+                case "ReimportApi" -> handleReimportApi(request, region);
                 case "GetApis" -> handleGetApis(region);
                 case "GetApi" -> handleGetApi(request, region);
                 case "UpdateApi" -> handleUpdateApi(request, region);
@@ -91,6 +97,19 @@ public class ApiGatewayV2JsonHandler {
         @SuppressWarnings("unchecked")
         Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
         Api api = service.createApi(region, map);
+        return Response.status(201).entity(toApiNode(api).toString()).build();
+    }
+
+    private Response handleImportApi(JsonNode request, String region) {
+        Api api = openApiImporter.importApi(region, request.path("Body").asText(null),
+                request.path("Basepath").asText(null), request.path("FailOnWarnings").asBoolean(false));
+        return Response.status(201).entity(toApiNode(api).toString()).build();
+    }
+
+    private Response handleReimportApi(JsonNode request, String region) {
+        String apiId = request.path("ApiId").asText();
+        Api api = openApiImporter.reimportApi(region, apiId, request.path("Body").asText(null),
+                request.path("Basepath").asText(null), request.path("FailOnWarnings").asBoolean(false));
         return Response.status(201).entity(toApiNode(api).toString()).build();
     }
 
@@ -495,6 +514,7 @@ public class ApiGatewayV2JsonHandler {
         node.put("ProtocolType", api.getProtocolType());
         node.put("ApiEndpoint", api.getApiEndpoint());
         node.put("CreatedDate", api.getCreatedDate() / 1000.0);
+        node.put("DisableExecuteApiEndpoint", api.isDisableExecuteApiEndpoint());
         if (api.getRouteSelectionExpression() != null) {
             node.put("RouteSelectionExpression", api.getRouteSelectionExpression());
         }
@@ -503,6 +523,17 @@ public class ApiGatewayV2JsonHandler {
         }
         if (api.getApiKeySelectionExpression() != null) {
             node.put("ApiKeySelectionExpression", api.getApiKeySelectionExpression());
+        }
+        if (api.getVersion() != null) {
+            node.put("Version", api.getVersion());
+        }
+        if (api.getWarnings() != null && !api.getWarnings().isEmpty()) {
+            ArrayNode warnings = node.putArray("Warnings");
+            api.getWarnings().forEach(warnings::add);
+        }
+        if (api.getImportInfo() != null && !api.getImportInfo().isEmpty()) {
+            ArrayNode importInfo = node.putArray("ImportInfo");
+            api.getImportInfo().forEach(importInfo::add);
         }
         if (api.getTags() != null && !api.getTags().isEmpty()) {
             ObjectNode tagsNode = node.putObject("Tags");
@@ -577,6 +608,10 @@ public class ApiGatewayV2JsonHandler {
         node.put("RouteKey", r.getRouteKey());
         node.put("AuthorizationType", r.getAuthorizationType());
         if (r.getAuthorizerId() != null) node.put("AuthorizerId", r.getAuthorizerId());
+        if (r.getAuthorizationScopes() != null && !r.getAuthorizationScopes().isEmpty()) {
+            ArrayNode scopes = node.putArray("AuthorizationScopes");
+            r.getAuthorizationScopes().forEach(scopes::add);
+        }
         if (r.getTarget() != null) node.put("Target", r.getTarget());
         if (r.getRouteResponseSelectionExpression() != null) {
             node.put("RouteResponseSelectionExpression", r.getRouteResponseSelectionExpression());
@@ -626,6 +661,49 @@ public class ApiGatewayV2JsonHandler {
         if (s.getStageVariables() != null) {
             ObjectNode stageVariables = node.putObject("StageVariables");
             s.getStageVariables().forEach(stageVariables::put);
+        }
+        if (s.getTags() != null && !s.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("Tags");
+            s.getTags().forEach(tags::put);
+        }
+        if (s.getDescription() != null) {
+            node.put("Description", s.getDescription());
+        }
+        if (s.getAccessLogSettings() != null) {
+            ObjectNode logs = node.putObject("AccessLogSettings");
+            if (s.getAccessLogSettings().destinationArn() != null) {
+                logs.put("DestinationArn", s.getAccessLogSettings().destinationArn());
+            }
+            if (s.getAccessLogSettings().format() != null) {
+                logs.put("Format", s.getAccessLogSettings().format());
+            }
+        }
+        if (s.getDefaultRouteSettings() != null) {
+            node.set("DefaultRouteSettings", toRouteSettingsNode(s.getDefaultRouteSettings()));
+        }
+        if (s.getRouteSettings() != null && !s.getRouteSettings().isEmpty()) {
+            ObjectNode routeSettings = node.putObject("RouteSettings");
+            s.getRouteSettings().forEach((k, v) -> routeSettings.set(k, toRouteSettingsNode(v)));
+        }
+        return node;
+    }
+
+    private ObjectNode toRouteSettingsNode(Stage.RouteSettings rs) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (rs.detailedMetricsEnabled() != null) {
+            node.put("DetailedMetricsEnabled", rs.detailedMetricsEnabled());
+        }
+        if (rs.dataTraceEnabled() != null) {
+            node.put("DataTraceEnabled", rs.dataTraceEnabled());
+        }
+        if (rs.loggingLevel() != null) {
+            node.put("LoggingLevel", rs.loggingLevel());
+        }
+        if (rs.throttlingBurstLimit() != null) {
+            node.put("ThrottlingBurstLimit", rs.throttlingBurstLimit());
+        }
+        if (rs.throttlingRateLimit() != null) {
+            node.put("ThrottlingRateLimit", rs.throttlingRateLimit());
         }
         return node;
     }
@@ -706,7 +784,8 @@ public class ApiGatewayV2JsonHandler {
             if (!key.isEmpty() && Character.isUpperCase(key.charAt(0))) {
                 key = Character.toLowerCase(key.charAt(0)) + key.substring(1);
             }
-            result.put(key, normalizeValue(entry.getValue()));
+            Object value = "tags".equals(key) ? entry.getValue() : normalizeValue(entry.getValue());
+            result.put(key, value);
         }
         return result;
     }

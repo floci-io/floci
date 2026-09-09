@@ -15,7 +15,7 @@ public class Instance {
 
     private String instanceId;
     private String imageId;
-    private InstanceState state;
+    private volatile InstanceState state;
     private String stateTransitionReason;
     private String instanceType;
     private Placement placement;
@@ -25,6 +25,9 @@ public class Instance {
     private String publicIpAddress;
     private String privateDnsName;
     private String publicDnsName;
+    // Whether this instance should be assigned a public IP — true when its subnet
+    // has MapPublicIpOnLaunch (#1984). Instances in private subnets get none.
+    private boolean associatePublicIp = false;
     private String keyName;
     private List<GroupIdentifier> securityGroups = new ArrayList<>();
     private List<InstanceNetworkInterface> networkInterfaces = new ArrayList<>();
@@ -53,6 +56,10 @@ public class Instance {
     // without model backing, a modify → plan cycle would show drift. Tracked as a known limitation.
     private boolean disableApiStop = false;
     private boolean disableApiTermination = false;
+
+    // Null for an instance persisted before metadata options were stored; reads fall back to
+    // AWS's launch defaults through effectiveMetadataOptions().
+    private LaunchTemplateData.MetadataOptions metadataOptions;
 
     // Docker backing fields (not serialised to AWS wire format)
     private String dockerContainerId;
@@ -102,6 +109,8 @@ public class Instance {
 
     public String getPublicDnsName() { return publicDnsName; }
     public void setPublicDnsName(String publicDnsName) { this.publicDnsName = publicDnsName; }
+    public boolean isAssociatePublicIp() { return associatePublicIp; }
+    public void setAssociatePublicIp(boolean associatePublicIp) { this.associatePublicIp = associatePublicIp; }
 
     public String getKeyName() { return keyName; }
     public void setKeyName(String keyName) { this.keyName = keyName; }
@@ -194,4 +203,12 @@ public class Instance {
 
     public boolean isDisableApiTermination() { return disableApiTermination; }
     public void setDisableApiTermination(boolean disableApiTermination) { this.disableApiTermination = disableApiTermination; }
+
+    public LaunchTemplateData.MetadataOptions getMetadataOptions() { return metadataOptions; }
+    public void setMetadataOptions(LaunchTemplateData.MetadataOptions metadataOptions) { this.metadataOptions = metadataOptions; }
+
+    /** The stored metadata options, or AWS's launch defaults for a record that has none. */
+    public LaunchTemplateData.MetadataOptions effectiveMetadataOptions() {
+        return metadataOptions != null ? metadataOptions : LaunchTemplateData.MetadataOptions.launchDefaults();
+    }
 }

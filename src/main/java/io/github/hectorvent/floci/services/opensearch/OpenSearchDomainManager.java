@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.opensearch;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
@@ -32,18 +34,66 @@ public class OpenSearchDomainManager {
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
     private final EmulatorConfig config;
+    private volatile boolean dockerUnavailableLogged;
+    private final RegionResolver regionResolver;
 
     @Inject
     public OpenSearchDomainManager(ContainerBuilder containerBuilder,
                                    ContainerLifecycleManager lifecycleManager,
                                    ContainerDetector containerDetector,
                                    PortAllocator portAllocator,
-                                   EmulatorConfig config) {
+                                   EmulatorConfig config,
+                                   RegionResolver regionResolver) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
         this.config = config;
+        this.regionResolver = regionResolver;
+    }
+
+    /**
+     * Attempts {@link #startDomain} and reports the backend as unavailable instead of propagating
+     * the failure, when the cause is that no Docker daemon is reachable from Floci: Floci running
+     * inside Docker without a mounted socket, or a stopped daemon on the host. A failure raised
+     * while the daemon <em>is</em> reachable is a genuine container problem and still propagates,
+     * so nothing changes for a Floci that can start OpenSearch containers.
+     *
+     * @return {@code true} when the container started, {@code false} when no Docker daemon is
+     *         reachable
+     */
+    public boolean tryStartDomain(Domain domain) {
+        try {
+            startDomain(domain);
+            dockerUnavailableLogged = false;
+            return true;
+        } catch (RuntimeException e) {
+            if (isDockerReachable()) {
+                throw e;
+            }
+            if (!dockerUnavailableLogged) {
+                dockerUnavailableLogged = true;
+                LOG.warnv("No Docker daemon is reachable from Floci ({0}). OpenSearch metadata "
+                        + "operations keep working and domains still report Processing=false, but "
+                        + "they have no backing search container until a daemon becomes reachable.",
+                        e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Probes the configured Docker endpoint, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons.
+     */
+    public boolean isDockerReachable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
     }
 
     public void startDomain(Domain domain) {
@@ -53,18 +103,42 @@ public class OpenSearchDomainManager {
         LOG.infov("Starting OpenSearch container for domain: {0} (version={1}, image={2})",
                 domain.getDomainName(), domain.getEngineVersion(), image);
 
-        int hostPort = portAllocator.allocate(
-                config.services().opensearch().proxyBasePort(),
-                config.services().opensearch().proxyMaxPort());
-
         lifecycleManager.removeIfExists(containerName);
+
+        // A restart of an existing domain has just removed the old container, so its
+        // reservation is stale; hand the port back before allocating a fresh one.
+        if (domain.getHostPort() != null) {
+            portAllocator.release(domain.getHostPort());
+            domain.setHostPort(null);
+        }
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("discovery.type", "single-node")
-                .withPortBinding(OPENSEARCH_PORT, hostPort)
                 .withDockerNetwork(config.services().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "opensearch", domain.getDomainName(), regionResolver.getAccountId(),
+                        regionResolver.getDefaultRegion()));
+
+        // Container-name DNS only resolves on a user-defined Docker network, and
+        // nothing guarantees the spawned OpenSearch container and floci itself land
+        // on one together (see withDockerNetwork's own fallback chain) — a default
+        // `docker run` leaves both on the anonymous bridge, which routes IPs
+        // between containers but does no by-name resolution. The other
+        // container-backed services (Neptune, MemoryDB, RDS) already address their
+        // backends via the container's resolved IP (EndpointInfo) rather than its
+        // Docker name; this container follows the same pattern below.
+        //
+        // Unlike those services, OpenSearch has no floci-internal proxy fronting the
+        // backend, so the Docker host-port binding is the ONLY way a client outside
+        // the Docker network (e.g. on the host, with floci itself containerized)
+        // can reach the domain. Publish it in both topologies: dropping it for the
+        // in-container case cut off host clients entirely (#2746 follow-up).
+        int hostPort = portAllocator.allocate(
+                config.services().opensearch().proxyBasePort(),
+                config.services().opensearch().proxyMaxPort());
+        specBuilder.withPortBinding(OPENSEARCH_PORT, hostPort);
 
         applyEngineEnv(specBuilder, domain.getEngineVersion());
 
@@ -86,22 +160,29 @@ public class OpenSearchDomainManager {
 
         ContainerSpec spec = specBuilder.build();
 
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
-        domain.setContainerId(info.containerId());
-
-        if (containerDetector.isRunningInContainer()) {
-            domain.setEndpoint("http://" + containerName + ":" + OPENSEARCH_PORT);
-        } else {
-            domain.setEndpoint("http://localhost:" + hostPort);
+        ContainerInfo info;
+        try {
+            info = lifecycleManager.createAndStart(spec);
+        } catch (RuntimeException e) {
+            portAllocator.release(hostPort);
+            throw e;
         }
+        domain.setContainerId(info.containerId());
+        domain.setHostPort(hostPort);
 
-        LOG.infov("OpenSearch container {0} started for domain {1} on port {2}",
-                info.containerId(), domain.getDomainName(), String.valueOf(hostPort));
+        EndpointInfo endpoint = info.getEndpoint(OPENSEARCH_PORT);
+        domain.setEndpoint("http://" + endpoint.host() + ":" + endpoint.port());
+
+        LOG.infov("OpenSearch container {0} started for domain {1} at {2} (host port {3})",
+                info.containerId(), domain.getDomainName(), endpoint, String.valueOf(hostPort));
     }
 
     public boolean isReady(Domain domain) {
-        String containerName = containerName(domain);
-        String url = "http://" + containerName + ":" + OPENSEARCH_PORT + "/_cluster/health";
+        String endpoint = domain.getEndpoint();
+        if (endpoint == null || endpoint.isBlank()) {
+            return false;
+        }
+        String url = endpoint + "/_cluster/health";
         try {
             HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
             conn.setConnectTimeout(2000);
@@ -131,6 +212,14 @@ public class OpenSearchDomainManager {
             return;
         }
         lifecycleManager.stopAndRemove(domain.getContainerId(), null);
+        // The container no longer holds the binding, so the reservation must go with
+        // it. Repeated create/delete would otherwise exhaust the configured range.
+        // The keep-running early return above deliberately keeps the reservation:
+        // the surviving container still owns the binding.
+        if (domain.getHostPort() != null) {
+            portAllocator.release(domain.getHostPort());
+            domain.setHostPort(null);
+        }
         LOG.infov("Stopped OpenSearch container for domain {0}", domain.getDomainName());
     }
 

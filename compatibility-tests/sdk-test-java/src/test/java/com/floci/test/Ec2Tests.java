@@ -7,6 +7,8 @@ import software.amazon.awssdk.services.ec2.model.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -14,6 +16,7 @@ import static org.assertj.core.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class Ec2Tests {
 
+    private static final Logger LOG = Logger.getLogger(Ec2Tests.class.getName());
     private static Ec2Client ec2;
     private static String vpcId;
     private static String subnetId;
@@ -24,6 +27,7 @@ class Ec2Tests {
     private static String rtbAssocId;
     private static String allocationId;
     private static String instanceId;
+    private static String fleetInstanceId;
 
     @BeforeAll
     static void setup() {
@@ -34,6 +38,13 @@ class Ec2Tests {
     @AfterAll
     static void cleanup() {
         if (ec2 != null) {
+            try {
+                if (fleetInstanceId != null) {
+                    ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(fleetInstanceId).build());
+                }
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to terminate CreateFleet test instance " + fleetInstanceId, e);
+            }
             try {
                 if (instanceId != null) {
                     ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(instanceId).build());
@@ -195,6 +206,67 @@ class Ec2Tests {
 
     @Test
     @Order(7)
+    @DisplayName("DescribeInstanceTypes - network compatibility metadata")
+    void describeInstanceTypeNetworkCompatibilityMetadata() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.M5_LARGE, InstanceType.fromValue("t4g.medium"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(2);
+        assertThat(resp.instanceTypes()).allSatisfy(instanceType -> {
+            assertThat(instanceType.networkInfo()).isNotNull();
+            assertThat(instanceType.networkInfo().encryptionInTransitSupported()).isNotNull();
+            assertThat(instanceType.networkInfo().defaultNetworkCardIndex()).isNotNull();
+            assertThat(instanceType.networkInfo().networkCards()).isNotEmpty();
+            assertThat(instanceType.networkInfo().ipv4AddressesPerInterface()).isNotNull();
+        });
+        assertThat(resp.instanceTypes()).allMatch(instanceType ->
+                !instanceType.networkInfo().encryptionInTransitSupported());
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeInstanceTypes - network card capacity metadata")
+    void describeInstanceTypeNetworkCardCapacityMetadata() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.M5_LARGE, InstanceType.fromValue("t4g.medium"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(2);
+        assertThat(resp.instanceTypes()).anySatisfy(instanceType -> {
+            assertThat(instanceType.instanceType()).isEqualTo(InstanceType.M5_LARGE);
+            assertThat(instanceType.networkInfo().defaultNetworkCardIndex()).isEqualTo(0);
+            assertThat(instanceType.networkInfo().ipv4AddressesPerInterface()).isEqualTo(10);
+            assertThat(instanceType.networkInfo().networkCards()).singleElement().satisfies(networkCard -> {
+                assertThat(networkCard.networkCardIndex()).isEqualTo(0);
+                assertThat(networkCard.maximumNetworkInterfaces()).isEqualTo(3);
+            });
+        });
+        assertThat(resp.instanceTypes()).anySatisfy(instanceType -> {
+            assertThat(instanceType.instanceTypeAsString()).isEqualTo("t4g.medium");
+            assertThat(instanceType.networkInfo().defaultNetworkCardIndex()).isEqualTo(0);
+            assertThat(instanceType.networkInfo().ipv4AddressesPerInterface()).isEqualTo(6);
+            assertThat(instanceType.networkInfo().networkCards()).singleElement().satisfies(networkCard -> {
+                assertThat(networkCard.networkCardIndex()).isEqualTo(0);
+                assertThat(networkCard.maximumNetworkInterfaces()).isEqualTo(3);
+            });
+        });
+
+        DescribeInstanceTypesResponse largerArmResponse = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.fromValue("m8gd.2xlarge"))
+                .build());
+        assertThat(largerArmResponse.instanceTypes()).singleElement().satisfies(instanceType -> {
+            assertThat(instanceType.networkInfo().defaultNetworkCardIndex()).isEqualTo(0);
+            assertThat(instanceType.networkInfo().ipv4AddressesPerInterface()).isEqualTo(15);
+            assertThat(instanceType.networkInfo().networkCards()).singleElement().satisfies(networkCard -> {
+                assertThat(networkCard.networkCardIndex()).isEqualTo(0);
+                assertThat(networkCard.maximumNetworkInterfaces()).isEqualTo(4);
+            });
+        });
+    }
+
+    @Test
+    @Order(7)
     @DisplayName("DescribeInstanceTypes - processor architectures")
     void describeInstanceTypeProcessorArchitectures() {
         DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
@@ -204,6 +276,58 @@ class Ec2Tests {
         assertThat(resp.instanceTypes()).hasSize(1);
         assertThat(resp.instanceTypes().get(0).processorInfo().supportedArchitecturesAsStrings())
                 .containsExactly("arm64");
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("CreateFleet - dry-run and instant on-demand launch")
+    void createFleetDryRunAndLaunch() {
+        String launchTemplateId = ec2.createLaunchTemplate(CreateLaunchTemplateRequest.builder()
+                .launchTemplateName("sdk-create-fleet")
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO)
+                        .build())
+                .build()).launchTemplate().launchTemplateId();
+
+        FleetLaunchTemplateConfigRequest config = FleetLaunchTemplateConfigRequest.builder()
+                .launchTemplateSpecification(FleetLaunchTemplateSpecificationRequest.builder()
+                        .launchTemplateId(launchTemplateId)
+                        .version("1")
+                        .build())
+                .overrides(FleetLaunchTemplateOverridesRequest.builder()
+                        .instanceType(InstanceType.T3_MICRO)
+                        .imageId("ami-0abcdef1234567890")
+                        .build())
+                .build();
+        CreateFleetRequest request = CreateFleetRequest.builder()
+                .type(FleetType.INSTANT)
+                .launchTemplateConfigs(config)
+                .targetCapacitySpecification(TargetCapacitySpecificationRequest.builder()
+                        .totalTargetCapacity(1)
+                        .defaultTargetCapacityType(DefaultTargetCapacityType.ON_DEMAND)
+                        .build())
+                .build();
+
+        try {
+            assertThatThrownBy(() -> ec2.createFleet(request.toBuilder().dryRun(true).build()))
+                    .isInstanceOf(Ec2Exception.class)
+                    .satisfies(error -> assertThat(((Ec2Exception) error).awsErrorDetails().errorCode())
+                            .isEqualTo("DryRunOperation"));
+
+            CreateFleetResponse response = ec2.createFleet(request);
+            assertThat(response.fleetId()).startsWith("fleet-");
+            assertThat(response.instances()).hasSize(1);
+            assertThat(response.instances().get(0).instanceIds()).hasSize(1);
+            fleetInstanceId = response.instances().get(0).instanceIds().get(0);
+            assertThat(response.instances().get(0).instanceType()).isEqualTo(InstanceType.T3_MICRO);
+            assertThat(response.instances().get(0).lifecycle()).isEqualTo(InstanceLifecycle.ON_DEMAND);
+        }
+        finally {
+            ec2.deleteLaunchTemplate(DeleteLaunchTemplateRequest.builder()
+                    .launchTemplateId(launchTemplateId)
+                    .build());
+        }
     }
 
     @Test
@@ -697,13 +821,29 @@ class Ec2Tests {
 
     @Test
     @Order(49)
-    @DisplayName("DescribeVpcEndpointServices - returns empty list")
+    @DisplayName("DescribeVpcEndpointServices - lists the common services with AZs")
     void describeVpcEndpointServices() {
         DescribeVpcEndpointServicesResponse resp = ec2.describeVpcEndpointServices(
                 DescribeVpcEndpointServicesRequest.builder().build());
 
-        assertThat(resp.serviceNames()).isEmpty();
-        assertThat(resp.serviceDetails()).isEmpty();
+        assertThat(resp.serviceNames()).contains("com.amazonaws.us-east-1.s3");
+        assertThat(resp.serviceDetails()).isNotEmpty();
+
+        ServiceDetail s3 = resp.serviceDetails().stream()
+                .filter(d -> d.serviceName().equals("com.amazonaws.us-east-1.s3"))
+                .findFirst()
+                .orElseThrow();
+        // S3 is the one service offering both endpoint types.
+        assertThat(s3.serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList())
+                .containsExactlyInAnyOrder("Gateway", "Interface");
+        assertThat(s3.availabilityZones()).isNotEmpty();
+
+        ServiceDetail ecr = resp.serviceDetails().stream()
+                .filter(d -> d.serviceName().equals("com.amazonaws.us-east-1.ecr.api"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(ecr.serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList())
+                .containsExactly("Interface");
     }
 
     @Test

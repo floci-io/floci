@@ -454,36 +454,8 @@ public class AppSyncController {
         return Response.noContent().build();
     }
 
-    // ──────────────────────────── Tags ────────────────────────────
-
-    @POST
-    @Path("/v1/tags/{resourceArn: .+}")
-    public Response tagResource(@PathParam("resourceArn") String resourceArn, String body) throws IOException {
-        @SuppressWarnings("unchecked")
-        Map<String, Object> request = objectMapper.readValue(body, Map.class);
-        @SuppressWarnings("unchecked")
-        Map<String, String> tags = (Map<String, String>) request.get("tags");
-        service.tagResource(resourceArn, tags);
-        return Response.noContent().build();
-    }
-
-    @DELETE
-    @Path("/v1/tags/{resourceArn: .+}")
-    public Response untagResource(@PathParam("resourceArn") String resourceArn,
-                                  @QueryParam("tagKeys") List<String> tagKeys) {
-        service.untagResource(resourceArn, tagKeys);
-        return Response.noContent().build();
-    }
-
-    @GET
-    @Path("/v1/tags/{resourceArn: .+}")
-    public Response listTagsForResource(@PathParam("resourceArn") String resourceArn) {
-        Map<String, String> tags = service.getTags(resourceArn);
-        ObjectNode root = objectMapper.createObjectNode();
-        ObjectNode tagsNode = root.putObject("tags");
-        tags.forEach(tagsNode::put);
-        return Response.ok(root).build();
-    }
+    // Tags moved to AppSyncTagHandler: MSK shares the /v1/tags/{arn} path, so it is served by
+    // the ARN-dispatching V1TagsController now.
 
     // ──────────────────────────── Environment Variables ────────────────────────────
 

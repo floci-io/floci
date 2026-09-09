@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -37,7 +38,7 @@ class AutoScalingIntegrationTest {
                 .formParam("LaunchConfigurationName", "my-lc")
                 .formParam("ImageId", "ami-12345678")
                 .formParam("InstanceType", "t3.micro")
-                .formParam("SecurityGroups.member.1", "sg-default")
+                .formParam("SecurityGroups.member.1", Ec2Service.defaultSecurityGroupId("us-east-1"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -59,6 +60,111 @@ class AutoScalingIntegrationTest {
                 .body(containsString("my-lc"))
                 .body(containsString("ami-12345678"))
                 .body(containsString("t3.micro"));
+    }
+
+    // AWS always returns InstanceMonitoring and BlockDeviceMappings from
+    // DescribeLaunchConfigurations. Omitting them made the Terraform provider read
+    // enable_monitoring as false and root_block_device as empty, which forced a
+    // replacement on every plan.
+    @Test
+    @Order(42)
+    void launchConfigurationRoundTripsMonitoringAndBlockDeviceMappings() {
+        given()
+                .formParam("Action", "CreateLaunchConfiguration")
+                .formParam("LaunchConfigurationName", "my-lc-with-root-device")
+                .formParam("ImageId", "ami-12345678")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("InstanceMonitoring.Enabled", "false")
+                .formParam("BlockDeviceMappings.member.1.DeviceName", "/dev/xvda")
+                .formParam("BlockDeviceMappings.member.1.Ebs.VolumeSize", "100")
+                .formParam("BlockDeviceMappings.member.1.Ebs.VolumeType", "gp3")
+                .formParam("BlockDeviceMappings.member.1.Ebs.Throughput", "125")
+                .formParam("BlockDeviceMappings.member.1.Ebs.DeleteOnTermination", "true")
+                .formParam("BlockDeviceMappings.member.2.DeviceName", "/dev/sdb")
+                .formParam("BlockDeviceMappings.member.2.VirtualName", "ephemeral0")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("CreateLaunchConfigurationResponse"));
+
+        given()
+                .formParam("Action", "DescribeLaunchConfigurations")
+                .formParam("LaunchConfigurationNames.member.1", "my-lc-with-root-device")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<InstanceMonitoring><Enabled>false</Enabled></InstanceMonitoring>"))
+                .body(containsString("<DeviceName>/dev/xvda</DeviceName>"))
+                .body(containsString("<VolumeSize>100</VolumeSize>"))
+                .body(containsString("<VolumeType>gp3</VolumeType>"))
+                .body(containsString("<Throughput>125</Throughput>"))
+                .body(containsString("<DeleteOnTermination>true</DeleteOnTermination>"))
+                .body(containsString("<VirtualName>ephemeral0</VirtualName>"));
+    }
+
+    @Test
+    @Order(43)
+    void launchConfigurationDefaultsMonitoringToEnabledAndMappingsToEmpty() {
+        given()
+                .formParam("Action", "CreateLaunchConfiguration")
+                .formParam("LaunchConfigurationName", "my-lc-defaults")
+                .formParam("ImageId", "ami-12345678")
+                .formParam("InstanceType", "t3.micro")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeLaunchConfigurations")
+                .formParam("LaunchConfigurationNames.member.1", "my-lc-defaults")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<InstanceMonitoring><Enabled>true</Enabled></InstanceMonitoring>"))
+                .body(containsString("<BlockDeviceMappings></BlockDeviceMappings>"));
+    }
+
+    @Test
+    @Order(44)
+    void launchConfigurationRejectsInvalidInstanceMonitoringBoolean() {
+        given()
+                .formParam("Action", "CreateLaunchConfiguration")
+                .formParam("LaunchConfigurationName", "my-lc-invalid-monitoring")
+                .formParam("ImageId", "ami-12345678")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("InstanceMonitoring.Enabled", "not-a-boolean")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("ValidationError"));
+    }
+
+    @Test
+    @Order(45)
+    void launchConfigurationRejectsAMappingWithoutADeviceName() {
+        given()
+                .formParam("Action", "CreateLaunchConfiguration")
+                .formParam("LaunchConfigurationName", "my-lc-bad-mapping")
+                .formParam("ImageId", "ami-12345678")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("BlockDeviceMappings.member.1.Ebs.VolumeSize", "100")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("ValidationError"))
+                .body(containsString("BlockDeviceMappings.member.1.DeviceName"));
     }
 
     // ── Auto Scaling Groups ───────────────────────────────────────────────────
@@ -776,8 +882,264 @@ class AutoScalingIntegrationTest {
         assertThat(overrides, not(containsString("<InstanceType>t4g.medium</InstanceType>")));
     }
 
+    // The AWS provider calls SuspendProcesses/ResumeProcesses unconditionally around ASG
+    // creation whenever wait_for_capacity_timeout is non-zero (the default), so an
+    // unimplemented SuspendProcesses fails ASG creation outright - found crossing
+    // terraform-aws-modules/terraform-aws-eks against floci.
     @Test
     @Order(31)
+    void suspendProcesses() {
+        given()
+                .formParam("Action", "SuspendProcesses")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScalingProcesses.member.1", "Launch")
+                .formParam("ScalingProcesses.member.2", "Terminate")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("SuspendProcessesResponse"));
+
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<SuspendedProcesses>"))
+                .body(containsString("<ProcessName>Launch</ProcessName>"))
+                .body(containsString("<ProcessName>Terminate</ProcessName>"));
+    }
+
+    @Test
+    @Order(32)
+    void resumeProcesses() {
+        given()
+                .formParam("Action", "ResumeProcesses")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScalingProcesses.member.1", "Launch")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("ResumeProcessesResponse"));
+
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<ProcessName>Launch</ProcessName>")))
+                .body(containsString("<ProcessName>Terminate</ProcessName>"));
+    }
+
+    // AttachTrafficSources/DetachTrafficSources/DescribeTrafficSources - the modern,
+    // unified elbv2/vpc-lattice ASG-to-load-balancer wiring API that
+    // aws_autoscaling_traffic_source_attachment uses instead of the older
+    // AttachLoadBalancerTargetGroups above. Found crossing
+    // terraform-aws-modules/terraform-aws-autoscaling's "complete" example against
+    // floci (its traffic_source_attachments block wires an ALB target group this way).
+    @Test
+    @Order(33)
+    void attachDescribeAndDetachTrafficSources() {
+        given()
+                .formParam("Action", "AttachTrafficSources")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("TrafficSources.member.1.Identifier",
+                        "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/ex-asg/abc123")
+                .formParam("TrafficSources.member.1.Type", "elbv2")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("AttachTrafficSourcesResponse"));
+
+        given()
+                .formParam("Action", "DescribeTrafficSources")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Identifier>arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/ex-asg/abc123</Identifier>"))
+                .body(containsString("<Type>elbv2</Type>"))
+                .body(containsString("<State>InService</State>"));
+
+        given()
+                .formParam("Action", "DetachTrafficSources")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("TrafficSources.member.1.Identifier",
+                        "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/ex-asg/abc123")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DetachTrafficSourcesResponse"));
+
+        given()
+                .formParam("Action", "DescribeTrafficSources")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<Identifier>")));
+    }
+
+    // PutScheduledUpdateGroupAction/DescribeScheduledActions/DeleteScheduledAction -
+    // aws_autoscaling_schedule's whole lifecycle. Found crossing
+    // terraform-aws-modules/terraform-aws-autoscaling's "complete" example.
+    @Test
+    @Order(41)
+    void putScheduledActionRejectsMalformedStartTime() {
+        given()
+                .formParam("Action", "PutScheduledUpdateGroupAction")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScheduledActionName", "bad-start")
+                .formParam("StartTime", "not-a-timestamp")
+                .formParam("DesiredCapacity", "1")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>ValidationError</Code>"));
+    }
+
+    @Test
+    @Order(34)
+    void putDescribeAndDeleteScheduledAction() {
+        given()
+                .formParam("Action", "PutScheduledUpdateGroupAction")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScheduledActionName", "morning")
+                .formParam("Recurrence", "0 7 * * 1-5")
+                .formParam("MinSize", "0")
+                .formParam("MaxSize", "1")
+                .formParam("DesiredCapacity", "1")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("PutScheduledUpdateGroupActionResponse"));
+
+        given()
+                .formParam("Action", "DescribeScheduledActions")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<ScheduledActionName>morning</ScheduledActionName>"))
+                .body(containsString("<Recurrence>0 7 * * 1-5</Recurrence>"))
+                .body(containsString("<MinSize>0</MinSize>"))
+                .body(containsString("<MaxSize>1</MaxSize>"))
+                .body(containsString("<DesiredCapacity>1</DesiredCapacity>"));
+
+        given()
+                .formParam("Action", "DeleteScheduledAction")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("ScheduledActionName", "morning")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DeleteScheduledActionResponse"));
+
+        given()
+                .formParam("Action", "DescribeScheduledActions")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<ScheduledActionName>")));
+    }
+
+    // PutWarmPool/DescribeWarmPool/DeleteWarmPool - aws_autoscaling_group's warm_pool
+    // block. Botocore's AutoScalingGroup shape documents WarmPoolConfiguration as a
+    // member of DescribeAutoScalingGroups' own response too, not just the separate
+    // DescribeWarmPool action - terraform-aws-autoscaling's warm_pool example reads
+    // it that way, so both paths are asserted here.
+    @Test
+    @Order(35)
+    void putDescribeAndDeleteWarmPool() {
+        given()
+                .formParam("Action", "PutWarmPool")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("PoolState", "Stopped")
+                .formParam("MinSize", "1")
+                .formParam("MaxGroupPreparedCapacity", "2")
+                .formParam("InstanceReusePolicy.ReuseOnScaleIn", "true")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("PutWarmPoolResponse"));
+
+        given()
+                .formParam("Action", "DescribeWarmPool")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<PoolState>Stopped</PoolState>"))
+                .body(containsString("<MinSize>1</MinSize>"))
+                .body(containsString("<MaxGroupPreparedCapacity>2</MaxGroupPreparedCapacity>"))
+                .body(containsString("<ReuseOnScaleIn>true</ReuseOnScaleIn>"));
+
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<WarmPoolConfiguration>"))
+                .body(containsString("<PoolState>Stopped</PoolState>"));
+
+        given()
+                .formParam("Action", "DeleteWarmPool")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DeleteWarmPoolResponse"));
+
+        given()
+                .formParam("Action", "DescribeWarmPool")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<WarmPoolConfiguration>")));
+    }
+
+    @Test
+    @Order(36)
     void deleteLaunchTemplateAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -794,7 +1156,7 @@ class AutoScalingIntegrationTest {
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     @Test
-    @Order(32)
+    @Order(37)
     void deleteAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -809,7 +1171,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(33)
+    @Order(38)
     void deleteMixedInstancesAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -824,7 +1186,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(34)
+    @Order(39)
     void deleteLaunchConfiguration() {
         given()
                 .formParam("Action", "DeleteLaunchConfiguration")
@@ -838,7 +1200,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(35)
+    @Order(40)
     void describeAutoScalingGroupsEmpty() {
         given()
                 .formParam("Action", "DescribeAutoScalingGroups")

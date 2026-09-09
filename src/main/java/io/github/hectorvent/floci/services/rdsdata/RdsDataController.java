@@ -56,21 +56,23 @@ public class RdsDataController {
 
     @POST
     @Path("/BatchExecute")
-    public Response batchExecuteStatement() {
-        return error(400, "BadRequestException",
-                "BatchExecuteStatement is not supported by this local RDS Data API implementation.");
+    public Response batchExecuteStatement(@Context HttpHeaders headers, String body) {
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.batchExecuteStatement(request, region)).build());
     }
 
     @POST
     @Path("/CommitTransaction")
     public Response commitTransaction(@Context HttpHeaders headers, String body) {
-        return handle(headers, body, (request, region) -> Response.ok(service.commitTransaction(request)).build());
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.commitTransaction(request, region)).build());
     }
 
     @POST
     @Path("/RollbackTransaction")
     public Response rollbackTransaction(@Context HttpHeaders headers, String body) {
-        return handle(headers, body, (request, region) -> Response.ok(service.rollbackTransaction(request)).build());
+        return handle(headers, body, (request, region) ->
+                Response.ok(service.rollbackTransaction(request, region)).build());
     }
 
     private Response handle(HttpHeaders headers, String body, Handler handler) {

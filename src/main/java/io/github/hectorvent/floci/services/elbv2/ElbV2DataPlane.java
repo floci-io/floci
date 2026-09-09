@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
@@ -27,6 +28,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -34,6 +36,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -47,6 +50,8 @@ public class ElbV2DataPlane {
     private static final List<String> HOP_BY_HOP_HEADERS = List.of(
             "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailers", "proxy-authorization", "proxy-authenticate"
     );
+    private static final String PRESERVE_HOST_HEADER_ATTRIBUTE = "routing.http.preserve_host_header.enabled";
+    private static final int MAX_LAMBDA_BODY_BYTES = 1024 * 1024;
 
     @Inject
     Vertx vertx;
@@ -61,6 +66,9 @@ public class ElbV2DataPlane {
     EmulatorConfig config;
 
     @Inject
+    TlsProxyServer tlsProxyServer;
+
+    @Inject
     LambdaService lambdaService;
 
     @Inject
@@ -70,6 +78,8 @@ public class ElbV2DataPlane {
     ObjectMapper objectMapper;
 
     private final Map<Integer, HttpServer> servers = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicBoolean releaseHandlerRegistered =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Integer, Map<String, String>> listenersByHostAndPort = new ConcurrentHashMap<>();
     private final Map<String, ListenerBinding> listenerBindings = new ConcurrentHashMap<>();
     private final Map<String, AtomicReference<List<CompiledRule>>> ruleChains = new ConcurrentHashMap<>();
@@ -78,7 +88,7 @@ public class ElbV2DataPlane {
 
     private HttpClient proxyClient;
 
-    private record ListenerBinding(int port, String host) {}
+    private record ListenerBinding(int port, String host, String loadBalancerArn) {}
 
     @PostConstruct
     void init() {
@@ -113,6 +123,7 @@ public class ElbV2DataPlane {
         listenerBindings.put(listenerArn, binding);
         listenersByHostAndPort.computeIfAbsent(binding.port(), ignored -> new ConcurrentHashMap<>())
                 .put(binding.host(), listenerArn);
+        ensureReleaseHandlerRegistered();
         servers.computeIfAbsent(binding.port(), this::startPortServer);
     }
 
@@ -128,6 +139,7 @@ public class ElbV2DataPlane {
             listenerRegions.put(listenerArn, region);
             listenersByHostAndPort.computeIfAbsent(newBinding.port(), ignored -> new ConcurrentHashMap<>())
                     .put(newBinding.host(), listenerArn);
+            ensureReleaseHandlerRegistered();
             servers.computeIfAbsent(newBinding.port(), this::startPortServer);
             return;
         }
@@ -162,7 +174,71 @@ public class ElbV2DataPlane {
         }
     }
 
+    /**
+     * Ports Floci reserves for itself, which a load balancer listener must not take.
+     *
+     * <p>The emulator's own port is always reserved. With TLS enabled the TLS proxy also binds
+     * {@code floci.tls.aws-https-port} (443 by default), because CDK's custom-resource
+     * {@code cfn-response} callback hardcodes {@code https://} and ignores the port in the
+     * ResponseURL, so it always lands on 443.
+     *
+     * <p>Without this the two raced: whichever started first won. A stack restored from
+     * persistence could hand 443 to an ALB listener, which then answered CDK's callback in plain
+     * HTTP and hung every {@code Custom::} resource - and the reverse on a fresh start. Yielding
+     * here makes the outcome deterministic and keeps the emulator's own control path working. To
+     * give 443 to load balancers instead, set {@code floci.tls.aws-https-port=0} or disable TLS.
+     */
+    // Package-private for ElbV2ReservedPortTest.
+    boolean isReservedByFloci(int port) {
+        if (port == config.port()) {
+            return true;
+        }
+        // Ask the proxy whether it actually holds the port rather than inferring it from config.
+        // Binding the AWS-HTTPS port is privileged and its failure is non-fatal, so a port the
+        // proxy never acquired must stay available to listeners instead of going unserved.
+        return tlsProxyServer.reservesPort(port);
+    }
+
+    /**
+     * Binds any registered listener whose port the proxy has just released. Yielding a port whose
+     * bind had not resolved yet is the safe default, but if that bind then fails nothing else
+     * would ever retry the listener, leaving it registered with no data plane and the port free.
+     */
+    private void bindListenersWaitingOn(int port) {
+        if (listenersByHostAndPort.containsKey(port)) {
+            servers.computeIfAbsent(port, this::startPortServer);
+        }
+    }
+
+    /**
+     * Subscribes to the proxy's released ports, once, on the first listener to need it: the data
+     * plane is only live once a listener exists, and this keeps the proxy out of the mock-mode
+     * path entirely.
+     *
+     * <p>Placement is load-bearing on both sides. It runs after the listener is in
+     * {@code listenersByHostAndPort}, so the replay of ports already given up finds it, and before
+     * {@code servers.computeIfAbsent}, because {@code onPortReleased} replays synchronously: doing
+     * this from inside the mapping function re-entered {@code computeIfAbsent} for the very key it
+     * was still computing, which a {@link ConcurrentHashMap} rejects outright.
+     */
+    private void ensureReleaseHandlerRegistered() {
+        if (releaseHandlerRegistered.compareAndSet(false, true)) {
+            tlsProxyServer.onPortReleased(this::bindListenersWaitingOn);
+        }
+    }
+
     private HttpServer startPortServer(int port) {
+        if (isReservedByFloci(port)) {
+            // Returning null leaves `servers` untouched: computeIfAbsent skips a null mapping.
+            // The emulator's own port cannot be handed over, so the two cases need different
+            // advice: freeing floci.tls.aws-https-port is only meaningful for the TLS proxy.
+            String remedy = port == config.port()
+                    ? "This is the emulator's own port, so it cannot be freed; give the listener a different port."
+                    : "Set floci.tls.aws-https-port=0 (or disable TLS) to free it.";
+            LOG.warnv("ELBv2 listener port {0} is reserved by Floci itself; the listener is "
+                    + "registered but serves no traffic. {1}", String.valueOf(port), remedy);
+            return null;
+        }
         HttpServer server = vertx.createHttpServer(new HttpServerOptions()
                 .setHost("0.0.0.0")
                 .setPort(port));
@@ -204,7 +280,7 @@ public class ElbV2DataPlane {
     private ListenerBinding binding(Listener listener, String region) {
         LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(region, listener.getLoadBalancerArn());
         String host = loadBalancer != null ? normalizeHost(loadBalancer.getDnsName()) : listener.getLoadBalancerArn();
-        return new ListenerBinding(listener.getPort(), host);
+        return new ListenerBinding(listener.getPort(), host, listener.getLoadBalancerArn());
     }
 
     private void handleRequest(io.vertx.core.http.HttpServerRequest req, int port) {
@@ -226,7 +302,7 @@ public class ElbV2DataPlane {
         List<CompiledRule> chain = ref.get();
         for (CompiledRule compiled : chain) {
             if (compiled.matches(req)) {
-                executeAction(req, compiled.action, region);
+                executeAction(req, compiled.action, region, listenerArn);
                 return;
             }
         }
@@ -262,20 +338,20 @@ public class ElbV2DataPlane {
         return normalized;
     }
 
-    private void executeAction(io.vertx.core.http.HttpServerRequest req, Action action, String region) {
+    private void executeAction(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn) {
         if (action == null) {
             req.response().setStatusCode(502).end("No action");
             return;
         }
         switch (action.getType() != null ? action.getType() : "") {
-            case "forward" -> executeForward(req, action, region);
+            case "forward" -> executeForward(req, action, region, listenerArn);
             case "redirect" -> executeRedirect(req, action);
             case "fixed-response" -> executeFixedResponse(req, action);
             default -> req.response().setStatusCode(502).end("Unsupported action type");
         }
     }
 
-    private void executeForward(io.vertx.core.http.HttpServerRequest req, Action action, String region) {
+    private void executeForward(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn) {
         String tgArn = resolveTgArn(action);
         if (tgArn == null) {
             req.response().setStatusCode(502).end("No target group");
@@ -311,31 +387,73 @@ public class ElbV2DataPlane {
         int idx = Math.abs(counter.getAndIncrement() % candidates.size());
         TargetDescription target = candidates.get(idx);
         int targetPort = ElbV2HealthChecker.effectivePort(target, tg);
-        proxyRequest(req, ElbV2TargetResolver.resolveHost(ec2Service, tg, target), targetPort);
+        proxyRequest(req, ElbV2TargetResolver.resolveHost(ec2Service, tg, target), targetPort,
+                preserveHostHeader(listenerArn, region));
+    }
+
+    private boolean preserveHostHeader(String listenerArn, String region) {
+        ListenerBinding binding = listenerBindings.get(listenerArn);
+        if (binding == null) {
+            return false;
+        }
+        LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(region, binding.loadBalancerArn());
+        return loadBalancer != null
+                && loadBalancer.getAttributes() != null
+                && Boolean.parseBoolean(loadBalancer.getAttributes().get(PRESERVE_HOST_HEADER_ATTRIBUTE));
     }
 
     private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {
-        req.bodyHandler(body -> {
-            Map<String, Object> event = buildAlbEvent(req, body);
-            // Lambda invocation is synchronous and may take seconds while a cold container
-            // boots and polls the Runtime API. The Runtime API itself runs on Vert.x event
-            // loops, so blocking the listener's event loop here would deadlock the runtime
-            // and the function would time out. Offload to a worker thread, same as WebSocket.
-            // ordered=false so independent ALB requests run in parallel on the worker pool.
-            vertx.<InvokeResult>executeBlocking(() -> {
-                byte[] payload = objectMapper.writeValueAsBytes(event);
-                return lambdaService.invoke(region, functionArn, payload, InvocationType.RequestResponse);
-            }, false).onSuccess(result -> {
-                try {
-                    writeLambdaResponse(req, result);
-                } catch (Exception e) {
-                    LOG.errorf(e, "Error writing Lambda response for %s", functionArn);
-                    req.response().setStatusCode(502).end("Lambda invocation error");
-                }
-            }).onFailure(e -> {
-                LOG.errorf(e, "Error invoking Lambda target %s", functionArn);
+        if (req.isEnded()) {
+            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer());
+            return;
+        }
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        AtomicBoolean rejected = new AtomicBoolean();
+        req.handler(chunk -> {
+            if (rejected.get()) {
+                return;
+            }
+            if (body.size() > MAX_LAMBDA_BODY_BYTES - chunk.length()) {
+                rejected.set(true);
+                req.response().setStatusCode(413).end();
+                return;
+            }
+            body.writeBytes(chunk.getBytes());
+        });
+        req.exceptionHandler(error -> {
+            if (rejected.compareAndSet(false, true)) {
+                req.response().setStatusCode(502).end("Request body error");
+            }
+        });
+        req.endHandler(ignored -> {
+            if (rejected.get()) {
+                return;
+            }
+            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer(body.toByteArray()));
+        });
+    }
+
+    private void invokeLambdaWithBody(io.vertx.core.http.HttpServerRequest req, String functionArn,
+                                      String region, Buffer body) {
+        Map<String, Object> event = buildAlbEvent(req, body);
+        // Lambda invocation is synchronous and may take seconds while a cold container
+        // boots and polls the Runtime API. The Runtime API itself runs on Vert.x event
+        // loops, so blocking the listener's event loop here would deadlock the runtime
+        // and the function would time out. Offload to a worker thread, same as WebSocket.
+        // ordered=false so independent ALB requests run in parallel on the worker pool.
+        vertx.<InvokeResult>executeBlocking(() -> {
+            byte[] payload = objectMapper.writeValueAsBytes(event);
+            return lambdaService.invoke(region, functionArn, payload, InvocationType.RequestResponse);
+        }, false).onSuccess(result -> {
+            try {
+                writeLambdaResponse(req, result);
+            } catch (Exception e) {
+                LOG.errorf(e, "Error writing Lambda response for %s", functionArn);
                 req.response().setStatusCode(502).end("Lambda invocation error");
-            });
+            }
+        }).onFailure(e -> {
+            LOG.errorf(e, "Error invoking Lambda target %s", functionArn);
+            req.response().setStatusCode(502).end("Lambda invocation error");
         });
     }
 
@@ -349,16 +467,34 @@ public class ElbV2DataPlane {
             req.response().setStatusCode(200).end();
             return;
         }
-
         Map<String, Object> lambdaResp = objectMapper.readValue(result.getPayload(),
                 new TypeReference<Map<String, Object>>() {});
+
+        Object responseBody = lambdaResp.get("body");
+        Boolean isBase64 = (Boolean) lambdaResp.get("isBase64Encoded");
+        byte[] decodedBody = null;
+        String textBody = null;
+        if (responseBody != null) {
+            if (Boolean.TRUE.equals(isBase64)) {
+                decodedBody = Base64.getDecoder().decode(String.valueOf(responseBody));
+                if (decodedBody.length > MAX_LAMBDA_BODY_BYTES) {
+                    req.response().setStatusCode(502).end();
+                    return;
+                }
+            } else {
+                textBody = String.valueOf(responseBody);
+                if (textBody.getBytes(StandardCharsets.UTF_8).length > MAX_LAMBDA_BODY_BYTES) {
+                    req.response().setStatusCode(502).end();
+                    return;
+                }
+            }
+        }
 
         int statusCode = 200;
         Object sc = lambdaResp.get("statusCode");
         if (sc != null) {
             statusCode = ((Number) sc).intValue();
         }
-
         req.response().setStatusCode(statusCode);
 
         Object headers = lambdaResp.get("headers");
@@ -379,15 +515,12 @@ public class ElbV2DataPlane {
             }
         }
 
-        Object responseBody = lambdaResp.get("body");
-        Boolean isBase64 = (Boolean) lambdaResp.get("isBase64Encoded");
         if (responseBody == null) {
             req.response().end();
-        } else if (Boolean.TRUE.equals(isBase64)) {
-            byte[] decoded = Base64.getDecoder().decode(String.valueOf(responseBody));
-            req.response().end(Buffer.buffer(decoded));
+        } else if (decodedBody != null) {
+            req.response().end(Buffer.buffer(decodedBody));
         } else {
-            req.response().end(String.valueOf(responseBody));
+            req.response().end(textBody);
         }
     }
 
@@ -460,37 +593,67 @@ public class ElbV2DataPlane {
         return tuples.get(tuples.size() - 1).getTargetGroupArn();
     }
 
-    private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port) {
-        req.bodyHandler(body -> {
-            RequestOptions opts = new RequestOptions()
-                    .setHost(host)
-                    .setPort(port)
-                    .setURI(req.uri())
-                    .setMethod(req.method());
-            proxyClient.request(opts)
-                    .onSuccess(clientReq -> {
-                        req.headers().forEach(entry -> {
+    private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port,
+                              boolean preserveHostHeader) {
+        req.pause();
+        RequestOptions opts = new RequestOptions()
+                .setHost(host)
+                .setPort(port)
+                .setURI(req.uri())
+                .setMethod(req.method());
+        proxyClient.request(opts)
+                .onSuccess(clientReq -> {
+                    req.headers().forEach(entry -> {
+                        if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
+                            clientReq.putHeader(entry.getKey(), entry.getValue());
+                        }
+                    });
+                    if (!preserveHostHeader) {
+                        clientReq.putHeader("Host", host + ":" + port);
+                    }
+                    AtomicBoolean responseStarted = new AtomicBoolean();
+                    AtomicBoolean requestFailed = new AtomicBoolean();
+                    clientReq.response().onSuccess(resp -> {
+                        if (requestFailed.get()) {
+                            return;
+                        }
+                        responseStarted.set(true);
+                        req.response().setStatusCode(resp.statusCode());
+                        resp.headers().forEach(entry -> {
                             if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                clientReq.putHeader(entry.getKey(), entry.getValue());
+                                req.response().putHeader(entry.getKey(), entry.getValue());
                             }
                         });
-                        clientReq.putHeader("Host", host + ":" + port);
-                        clientReq.send(body)
-                                .onSuccess(resp -> {
-                                    req.response().setStatusCode(resp.statusCode());
-                                    resp.headers().forEach(entry -> {
-                                        if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                            req.response().putHeader(entry.getKey(), entry.getValue());
-                                        }
-                                    });
-                                    resp.body()
-                                            .onSuccess(req.response()::end)
-                                            .onFailure(err -> req.response().setStatusCode(502).end("Body error"));
-                                })
-                                .onFailure(err -> req.response().setStatusCode(502).end("Bad gateway"));
-                    })
-                    .onFailure(err -> req.response().setStatusCode(503).end("Service unavailable"));
-        });
+                        if (resp.getHeader("Content-Length") == null) {
+                            req.response().setChunked(true);
+                        }
+                        resp.pipeTo(req.response());
+                        resp.exceptionHandler(error -> {
+                            if (req.response().headWritten()) {
+                                req.response().close();
+                            } else {
+                                req.response().setStatusCode(502).end("Body error");
+                            }
+                        });
+                    }).onFailure(error -> {
+                        vertx.runOnContext(ignored -> {
+                            if (requestFailed.compareAndSet(false, true)) {
+                                if (responseStarted.get() || req.response().headWritten()) {
+                                    req.response().close();
+                                } else {
+                                    req.response().setStatusCode(502).end("Bad gateway");
+                                }
+                            }
+                        });
+                    });
+
+                    clientReq.send(req);
+                    req.resume();
+                })
+                .onFailure(err -> {
+                    req.resume();
+                    req.response().setStatusCode(503).end("Service unavailable");
+                });
     }
 
     private void executeRedirect(io.vertx.core.http.HttpServerRequest req, Action action) {

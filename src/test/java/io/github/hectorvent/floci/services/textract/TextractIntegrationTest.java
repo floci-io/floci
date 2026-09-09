@@ -37,6 +37,21 @@ class TextractIntegrationTest {
             .body("Blocks.BlockType", hasItems("PAGE", "LINE", "WORD"));
     }
     @Test
+    void detectDocumentText_matchingMockConfig_returnsConfiguredResponse() {
+        // src/test/resources/fixtures/ai-mock-config.json maps mock-bucket/invoice.pdf.
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Textract.DetectDocumentText")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Document\":{\"S3Object\":{\"Bucket\":\"mock-bucket\",\"Name\":\"invoice.pdf\"}}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Blocks", hasSize(1))
+            .body("Blocks[0].Text", equalTo("Invoice Total: $42.00"));
+    }
+    @Test
     void detectDocumentText_blockShapesAreAwsCompatible() {
         given()
             .contentType(CONTENT_TYPE)

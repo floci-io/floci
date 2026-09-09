@@ -23,4 +23,17 @@ final class S3AclPublicAccessEvaluator {
             return false;
         }
     }
+
+    static boolean aclAllowsPublicWrite(String acl) {
+        if (acl == null || acl.isBlank()) {
+            return false;
+        }
+        try {
+            S3AclPolicy policy = S3AclPolicy.parse(acl);
+            return policy.grants().stream().anyMatch(S3AclPolicy.Grant::allowsPublicWrite);
+        } catch (S3AclPolicy.AclParseException e) {
+            LOG.debugv(e, "Failed to parse S3 ACL for public write evaluation");
+            return false;
+        }
+    }
 }

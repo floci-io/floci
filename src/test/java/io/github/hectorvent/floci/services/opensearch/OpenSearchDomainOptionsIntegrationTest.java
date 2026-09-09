@@ -30,7 +30,7 @@ class OpenSearchDomainOptionsIntegrationTest {
     @AfterEach
     void cleanup() {
         // Delete every domain we touch so test order is irrelevant.
-        for (String name : new String[]{"opts-vpc", "opts-adv", "opts-enc", "opts-endpoint", "opts-update"}) {
+        for (String name : new String[]{"opts-vpc", "opts-adv", "opts-enc", "opts-endpoint", "opts-update", "opts-access"}) {
             given().header("Authorization", AUTH_HEADER)
                 .when().delete("/2021-01-01/opensearch/domain/" + name);
         }
@@ -179,5 +179,83 @@ class OpenSearchDomainOptionsIntegrationTest {
             .then().statusCode(200)
             .body("DomainStatus.VPCOptions.SubnetIds", contains("subnet-new"))
             .body("DomainStatus.VPCOptions.SubnetIds", not(hasItem("subnet-old")));
+    }
+
+    @Test
+    void accessPoliciesRoundTrip() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"es:*\"}]}";
+        String body = "{"
+                + "\"DomainName\":\"opts-access\","
+                + "\"EngineVersion\":\"OpenSearch_2.19\","
+                + "\"AccessPolicies\":\"" + policy.replace("\"", "\\\"") + "\""
+                + "}";
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER).body(body)
+            .when().post("/2021-01-01/opensearch/domain")
+            .then().statusCode(200)
+            .body("DomainStatus.AccessPolicies", equalTo(policy));
+
+        given().header("Authorization", AUTH_HEADER)
+            .when().get("/2021-01-01/opensearch/domain/opts-access")
+            .then().statusCode(200)
+            .body("DomainStatus.AccessPolicies", equalTo(policy));
+
+        given().header("Authorization", AUTH_HEADER)
+            .when().get("/2021-01-01/opensearch/domain/opts-access/config")
+            .then().statusCode(200)
+            .body("DomainConfig.AccessPolicies.Options", equalTo(policy))
+            .body("DomainConfig.AccessPolicies.Status.State", equalTo("Active"));
+    }
+
+    @Test
+    void updateDomainConfigPersistsNewAccessPolicies() {
+        String originalPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::000000000000:root\"},\"Action\":\"es:*\"}]}";
+        String updatedPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\","
+                + "\"Principal\":\"*\",\"Action\":\"es:*\"}]}";
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"opts-access\",\"EngineVersion\":\"OpenSearch_2.19\","
+                    + "\"AccessPolicies\":\"" + originalPolicy.replace("\"", "\\\"") + "\"}")
+            .when().post("/2021-01-01/opensearch/domain")
+            .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"AccessPolicies\":\"" + updatedPolicy.replace("\"", "\\\"") + "\"}")
+            .when().post("/2021-01-01/opensearch/domain/opts-access/config")
+            .then().statusCode(200)
+            .body("DomainConfig.AccessPolicies.Options", equalTo(updatedPolicy));
+
+        given().header("Authorization", AUTH_HEADER)
+            .when().get("/2021-01-01/opensearch/domain/opts-access")
+            .then().statusCode(200)
+            .body("DomainStatus.AccessPolicies", equalTo(updatedPolicy));
+    }
+
+    @Test
+    void updateDomainConfigClearsAccessPoliciesWithEmptyString() {
+        // AccessPolicies has a documented minimum length of 0, unlike EngineVersion where a
+        // blank value means "leave untouched" - an empty string here is a real "clear the
+        // policy" request and must not be treated as absent.
+        String originalPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":\"*\",\"Action\":\"es:*\"}]}";
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"opts-access\",\"EngineVersion\":\"OpenSearch_2.19\","
+                    + "\"AccessPolicies\":\"" + originalPolicy.replace("\"", "\\\"") + "\"}")
+            .when().post("/2021-01-01/opensearch/domain")
+            .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"AccessPolicies\":\"\"}")
+            .when().post("/2021-01-01/opensearch/domain/opts-access/config")
+            .then().statusCode(200)
+            .body("DomainConfig.AccessPolicies.Options", equalTo(""));
+
+        given().header("Authorization", AUTH_HEADER)
+            .when().get("/2021-01-01/opensearch/domain/opts-access")
+            .then().statusCode(200)
+            .body("DomainStatus.AccessPolicies", equalTo(""));
     }
 }

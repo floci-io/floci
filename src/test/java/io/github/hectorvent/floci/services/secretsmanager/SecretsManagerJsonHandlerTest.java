@@ -168,6 +168,107 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void owningServiceIsReportedByDescribeAndList() {
+        service.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rds!db-1234");
+        ObjectNode described = (ObjectNode) handler
+                .handle("DescribeSecret", describeReq, REGION)
+                .getEntity();
+        ObjectNode listed = (ObjectNode) ((ObjectNode) handler
+                .handle("ListSecrets", MAPPER.createObjectNode(), REGION)
+                .getEntity())
+                .path("SecretList")
+                .path(0);
+
+        assertThat(described.get("OwningService").asText(), is("rds"));
+        assertThat(listed.get("OwningService").asText(), is("rds"));
+    }
+
+    @Test
+    void listSecretsFiltersByOwningService() {
+        service.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "ordinary-secret");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.putArray("Filters").addObject().put("Key", "owning-service").putArray("Values").add("rds");
+        ObjectNode owned = (ObjectNode) handler.handle("ListSecrets", listReq, REGION).getEntity();
+
+        assertThat(owned.get("SecretList").size(), is(1));
+        assertThat(owned.get("SecretList").get(0).get("Name").asText(), is("rds!db-1234"));
+
+        // A leading "!" negates a filter, so this selects the secrets no service owns.
+        ObjectNode negatedReq = MAPPER.createObjectNode();
+        negatedReq.putArray("Filters").addObject().put("Key", "owning-service").putArray("Values").add("!rds");
+        ObjectNode unowned = (ObjectNode) handler.handle("ListSecrets", negatedReq, REGION).getEntity();
+
+        assertThat(unowned.get("SecretList").size(), is(1));
+        assertThat(unowned.get("SecretList").get(0).get("Name").asText(), is("ordinary-secret"));
+    }
+
+    @Test
+    void ownerlessSecretsOmitOwningService() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "ordinary-secret");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "ordinary-secret");
+        ObjectNode described = (ObjectNode) handler
+                .handle("DescribeSecret", describeReq, REGION)
+                .getEntity();
+
+        assertThat(described.has("OwningService"), is(false));
+    }
+
+    @Test
+    void rotateServiceManagedSecretSucceedsOverTheWire() {
+        service.createSecret("rds!db-5678", "value", null, null, null, null, "rds", REGION);
+
+        // The call terraform's aws_secretsmanager_secret_rotation makes for a managed secret:
+        // rotation rules, no RotationLambdaARN.
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rds!db-5678");
+        rotateReq.putObject("RotationRules").put("AutomaticallyAfterDays", 7);
+        Response response = handler.handle("RotateSecret", rotateReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        assertThat(((ObjectNode) response.getEntity()).get("Name").asText(), is("rds!db-5678"));
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rds!db-5678");
+        ObjectNode described = (ObjectNode) handler
+                .handle("DescribeSecret", describeReq, REGION)
+                .getEntity();
+        assertThat(described.get("RotationEnabled").asBoolean(), is(true));
+        assertThat(described.path("RotationRules").get("AutomaticallyAfterDays").asInt(), is(7));
+        assertThat(described.has("RotationLambdaARN"), is(false));
+    }
+
+    @Test
+    void rotateServiceManagedSecretReturnsAVersionThatResolves() {
+        service.createSecret("rds!db-9012", "value", null, null, null, null, "rds", REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rds!db-9012");
+        rotateReq.putObject("RotationRules").put("AutomaticallyAfterDays", 7);
+        ObjectNode rotated = (ObjectNode) handler.handle("RotateSecret", rotateReq, REGION).getEntity();
+
+        // Nothing stages a version for the request token here, so the reported VersionId has to be
+        // one a caller can actually read back.
+        ObjectNode getReq = MAPPER.createObjectNode();
+        getReq.put("SecretId", "rds!db-9012");
+        getReq.put("VersionId", rotated.get("VersionId").asText());
+        Response response = handler.handle("GetSecretValue", getReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        assertThat(((ObjectNode) response.getEntity()).get("SecretString").asText(), is("value"));
+    }
+
+    @Test
     void listSecretsResponseIncludesKmsKeyId() {
         ObjectNode createReq = MAPPER.createObjectNode();
         createReq.put("Name", "list-kms-secret");
@@ -524,5 +625,172 @@ class SecretsManagerJsonHandlerTest {
         assertThat(body.has("RotationRules"), is(true));
         assertThat(body.get("RotationRules").get("AutomaticallyAfterDays").asInt(), is(45));
         assertThat(body.get("RotationRules").get("Duration").asText(), is("2h"));
+    }
+
+    // ─── Resource policy ─────────────────────────────────────────────────────
+
+    private static final String RESOURCE_POLICY =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"*\"}]}";
+
+    private String createSecretReturningArn(String name) {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("Name", name);
+        request.put("SecretString", "value");
+        Response response = handler.handle("CreateSecret", request, REGION);
+        assertThat(response.getStatus(), is(200));
+        return ((ObjectNode) response.getEntity()).get("ARN").asText();
+    }
+
+    @Test
+    void putResourcePolicyReturnsArnAndNameAndRoundTripsThroughGet() {
+        // Address the secret by full ARN: the terraform provider always sends secret_arn as
+        // SecretId, and uses the ARN echoed back by PutResourcePolicy as the resource id.
+        String arn = createSecretReturningArn("policy-secret");
+
+        ObjectNode put = MAPPER.createObjectNode();
+        put.put("SecretId", arn);
+        put.put("ResourcePolicy", RESOURCE_POLICY);
+        put.put("BlockPublicPolicy", true);
+        Response putResponse = handler.handle("PutResourcePolicy", put, REGION);
+        assertThat(putResponse.getStatus(), is(200));
+        ObjectNode putBody = (ObjectNode) putResponse.getEntity();
+        assertThat(putBody.get("ARN").asText(), is(arn));
+        assertThat(putBody.get("Name").asText(), is("policy-secret"));
+
+        ObjectNode get = MAPPER.createObjectNode();
+        get.put("SecretId", arn);
+        Response getResponse = handler.handle("GetResourcePolicy", get, REGION);
+        assertThat(getResponse.getStatus(), is(200));
+        ObjectNode getBody = (ObjectNode) getResponse.getEntity();
+        assertThat(getBody.get("ARN").asText(), is(arn));
+        assertThat(getBody.get("Name").asText(), is("policy-secret"));
+        assertThat(getBody.get("ResourcePolicy").asText(), is(RESOURCE_POLICY));
+    }
+
+    @Test
+    void getResourcePolicyOmitsResourcePolicyWhenNoneAttached() {
+        createSecretReturningArn("no-policy-secret");
+
+        ObjectNode get = MAPPER.createObjectNode();
+        get.put("SecretId", "no-policy-secret");
+        Response response = handler.handle("GetResourcePolicy", get, REGION);
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        // AWS omits the member entirely when no policy is attached; the terraform provider
+        // reads the absent field as "no policy", not as an error.
+        assertThat(body.has("ResourcePolicy"), is(false));
+        assertThat(body.get("Name").asText(), is("no-policy-secret"));
+    }
+
+    @Test
+    void deleteResourcePolicyClearsPolicyAndReturnsArnAndName() {
+        String arn = createSecretReturningArn("delete-policy-secret");
+
+        ObjectNode put = MAPPER.createObjectNode();
+        put.put("SecretId", arn);
+        put.put("ResourcePolicy", RESOURCE_POLICY);
+        assertThat(handler.handle("PutResourcePolicy", put, REGION).getStatus(), is(200));
+
+        ObjectNode delete = MAPPER.createObjectNode();
+        delete.put("SecretId", arn);
+        Response deleteResponse = handler.handle("DeleteResourcePolicy", delete, REGION);
+        assertThat(deleteResponse.getStatus(), is(200));
+        ObjectNode deleteBody = (ObjectNode) deleteResponse.getEntity();
+        assertThat(deleteBody.get("ARN").asText(), is(arn));
+        assertThat(deleteBody.get("Name").asText(), is("delete-policy-secret"));
+
+        ObjectNode get = MAPPER.createObjectNode();
+        get.put("SecretId", arn);
+        ObjectNode getBody = (ObjectNode) handler.handle("GetResourcePolicy", get, REGION).getEntity();
+        assertThat(getBody.has("ResourcePolicy"), is(false));
+    }
+
+    @Test
+    void deleteResourcePolicyWithoutPolicyAttachedSucceeds() {
+        String arn = createSecretReturningArn("never-had-policy-secret");
+
+        ObjectNode delete = MAPPER.createObjectNode();
+        delete.put("SecretId", arn);
+        Response response = handler.handle("DeleteResourcePolicy", delete, REGION);
+        assertThat(response.getStatus(), is(200));
+        assertThat(((ObjectNode) response.getEntity()).get("ARN").asText(), is(arn));
+    }
+
+    @Test
+    void putResourcePolicyRejectsMissingOrEmptyPolicy() {
+        String arn = createSecretReturningArn("missing-policy-secret");
+
+        ObjectNode missing = MAPPER.createObjectNode();
+        missing.put("SecretId", arn);
+        Response missingResponse = handler.handle("PutResourcePolicy", missing, REGION);
+        assertThat(missingResponse.getStatus(), is(400));
+        assertThat(((AwsErrorResponse) missingResponse.getEntity()).type(), is("InvalidParameterException"));
+
+        ObjectNode empty = MAPPER.createObjectNode();
+        empty.put("SecretId", arn);
+        empty.put("ResourcePolicy", "");
+        assertThat(handler.handle("PutResourcePolicy", empty, REGION).getStatus(), is(400));
+    }
+
+    @Test
+    void putResourcePolicyRejectsMalformedPolicyJson() {
+        String arn = createSecretReturningArn("malformed-policy-secret");
+
+        ObjectNode put = MAPPER.createObjectNode();
+        put.put("SecretId", arn);
+        put.put("ResourcePolicy", "not-a-json-policy");
+        Response response = handler.handle("PutResourcePolicy", put, REGION);
+        assertThat(response.getStatus(), is(400));
+        assertThat(((AwsErrorResponse) response.getEntity()).type(), is("MalformedPolicyDocumentException"));
+    }
+
+    @Test
+    void resourcePolicyOpsOnUnknownSecretThrowResourceNotFound() {
+        for (String action : new String[] { "GetResourcePolicy", "DeleteResourcePolicy" }) {
+            ObjectNode request = MAPPER.createObjectNode();
+            request.put("SecretId", "missing-secret");
+            io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                    io.github.hectorvent.floci.core.common.AwsException.class,
+                    () -> handler.handle(action, request, REGION));
+            assertThat(ex.getErrorCode(), is("ResourceNotFoundException"));
+        }
+
+        ObjectNode put = MAPPER.createObjectNode();
+        put.put("SecretId", "missing-secret");
+        put.put("ResourcePolicy", RESOURCE_POLICY);
+        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> handler.handle("PutResourcePolicy", put, REGION));
+        assertThat(ex.getErrorCode(), is("ResourceNotFoundException"));
+    }
+
+    @Test
+    void resourcePolicyOpsOnSecretMarkedForDeletionThrowInvalidRequest() {
+        String arn = createSecretReturningArn("pending-deletion-policy-secret");
+        ObjectNode deleteSecret = MAPPER.createObjectNode();
+        deleteSecret.put("SecretId", arn);
+        assertThat(handler.handle("DeleteSecret", deleteSecret, REGION).getStatus(), is(200));
+
+        // The message substring is a compatibility contract: the terraform provider matches
+        // "marked for deletion" on GetResourcePolicy to treat the policy as gone.
+        for (String action : new String[] { "GetResourcePolicy", "DeleteResourcePolicy" }) {
+            ObjectNode request = MAPPER.createObjectNode();
+            request.put("SecretId", arn);
+            io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                    io.github.hectorvent.floci.core.common.AwsException.class,
+                    () -> handler.handle(action, request, REGION));
+            assertThat(ex.getErrorCode(), is("InvalidRequestException"));
+            assertThat(ex.getMessage(), containsString("marked for deletion"));
+        }
+
+        ObjectNode put = MAPPER.createObjectNode();
+        put.put("SecretId", arn);
+        put.put("ResourcePolicy", RESOURCE_POLICY);
+        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> handler.handle("PutResourcePolicy", put, REGION));
+        assertThat(ex.getErrorCode(), is("InvalidRequestException"));
+        assertThat(ex.getMessage(), containsString("marked for deletion"));
     }
 }

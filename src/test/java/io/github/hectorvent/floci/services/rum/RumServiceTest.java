@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.services.rum.model.AppMonitor;
@@ -23,8 +24,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RumServiceTest {
 
     private static final String REGION = "us-east-1";
+    private static final RegionResolver REGION_RESOLVER = new RegionResolver(REGION, "000000000000");
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final RumService service = new RumService(new InMemoryStorage<>());
+    private final RumService service = new RumService(new InMemoryStorage<>(), REGION_RESOLVER);
+
+    @Test
+    void ownerAccountIsCapturedButNeverSerializedIntoTheApiBody() {
+        AppMonitor monitor = service.createAppMonitor(REGION,
+                objectMapper.createObjectNode().put("Name", "monitor").put("Domain", "example.com"));
+
+        assertEquals("000000000000", monitor.getOwnerAccountId());
+        JsonNode serialized = objectMapper.valueToTree(monitor);
+        serialized.fieldNames().forEachRemaining(field ->
+                assertTrue(!field.toLowerCase().contains("account"),
+                        "GetAppMonitor body must not expose the owner account: " + serialized));
+    }
 
     @Test
     void updateAppMonitorAtomicallyReplacesTheStoredSnapshot() throws Exception {
@@ -181,7 +195,7 @@ class RumServiceTest {
                 file, new TypeReference<Map<String, AppMonitor>>() {
                 });
         firstStore.load();
-        RumService firstService = new RumService(firstStore);
+        RumService firstService = new RumService(firstStore, REGION_RESOLVER);
         AppMonitor created = firstService.createAppMonitor(REGION, request("""
                 {
                   "Name":"persistent-monitor",
@@ -196,7 +210,7 @@ class RumServiceTest {
                 file, new TypeReference<Map<String, AppMonitor>>() {
                 });
         reloadedStore.load();
-        AppMonitor reloaded = new RumService(reloadedStore).getAppMonitor(REGION, "persistent-monitor");
+        AppMonitor reloaded = new RumService(reloadedStore, REGION_RESOLVER).getAppMonitor(REGION, "persistent-monitor");
 
         assertEquals(created.getId(), reloaded.getId());
         assertEquals(created.getCreated(), reloaded.getCreated());

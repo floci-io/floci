@@ -6,6 +6,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 @RegisterForReflection
 public enum KmsKeySpec {
@@ -18,7 +19,7 @@ public enum KmsKeySpec {
     ECC_NIST_P256(KeyType.ECC, Algorithm.ECDSA_SHA_256,"secp256r1"),
     ECC_NIST_P384(KeyType.ECC, Algorithm.ECDSA_SHA_384,"secp384r1"),
     ECC_NIST_P521(KeyType.ECC, Algorithm.ECDSA_SHA_512, "secp521r1"),
-    ECC_NIST_EDWARDS25519(KeyType.ECC, List.of(Algorithm.ED25519_SHA_512, Algorithm.ED25519_PH_SHA_512),"secp521r1"),
+    ECC_NIST_EDWARDS25519(KeyType.ED25519, List.of(Algorithm.ED25519_SHA_512, Algorithm.ED25519_PH_SHA_512)),
     ECC_SECG_P256K1(KeyType.ECC, Algorithm.ECDSA_SHA_256,"secp256k1"),
 
     HMAC_224(KeyType.HMAC, Algorithm.HMAC_SHA_224),
@@ -79,8 +80,47 @@ public enum KmsKeySpec {
     public String curveName() {
         return curveName;
     }
+
+    /**
+     * The KeyUsage values AWS KMS accepts for this key spec at CreateKey.
+     *
+     * <p>Source: CreateKey API reference, KeyUsage parameter. NIST-standard ECC
+     * pairs allow SIGN_VERIFY or KEY_AGREEMENT; ECC_SECG_P256K1 and Edwards25519
+     * are signing only; RSA allows ENCRYPT_DECRYPT or SIGN_VERIFY; symmetric is
+     * ENCRYPT_DECRYPT only; HMAC is GENERATE_VERIFY_MAC only.
+     */
+    public Set<KmsKeyUsage> allowedKeyUsages() {
+        return switch (keyType) {
+            case SYMMETRIC -> EnumSet.of(KmsKeyUsage.ENCRYPT_DECRYPT);
+            case HMAC -> EnumSet.of(KmsKeyUsage.GENERATE_VERIFY_MAC);
+            case RSA -> EnumSet.of(KmsKeyUsage.ENCRYPT_DECRYPT, KmsKeyUsage.SIGN_VERIFY);
+            case ED25519, ML_DSA -> EnumSet.of(KmsKeyUsage.SIGN_VERIFY);
+            case SM2 -> EnumSet.of(KmsKeyUsage.ENCRYPT_DECRYPT, KmsKeyUsage.SIGN_VERIFY, KmsKeyUsage.KEY_AGREEMENT);
+            case ECC -> this == ECC_SECG_P256K1
+                    ? EnumSet.of(KmsKeyUsage.SIGN_VERIFY)
+                    : EnumSet.of(KmsKeyUsage.SIGN_VERIFY, KmsKeyUsage.KEY_AGREEMENT);
+        };
+    }
+
+    /**
+     * Length in bytes of the raw key material for the specs whose material is a byte string:
+     * SYMMETRIC_DEFAULT and the HMAC family. Asymmetric specs carry a DER-encoded key pair with
+     * no single length, so they have none.
+     */
+    public int materialByteLength() {
+        return switch (this) {
+            case SYMMETRIC_DEFAULT -> 32;
+            case HMAC_224 -> 28;
+            case HMAC_256 -> 32;
+            case HMAC_384 -> 48;
+            case HMAC_512 -> 64;
+            default -> throw new AwsException("InvalidCustomerMasterKeySpecException",
+                    "Key spec " + this + " has no fixed key material length.", 400);
+        };
+    }
+
     public enum KeyType {
-        RSA, ECC, SYMMETRIC, HMAC, ML_DSA, SM2
+        RSA, ECC, ED25519, SYMMETRIC, HMAC, ML_DSA, SM2
     }
 
     private static List<Algorithm> getRsaAlgos() {
@@ -113,7 +153,7 @@ public enum KmsKeySpec {
         ED25519_SHA_512("ED25519_SHA_512","Ed25519", KmsKeyUsage.SIGN_VERIFY),
         ED25519_PH_SHA_512("ED25519_PH_SHA_512", "Ed25519", KmsKeyUsage.SIGN_VERIFY),
         SM2_DSA("SM2DSA","", KmsKeyUsage.SIGN_VERIFY),
-        ML_DSA_SHAKE_256("ML_DSA_SHAKE_256","", KmsKeyUsage.SIGN_VERIFY),
+        ML_DSA_SHAKE_256("ML_DSA_SHAKE_256", "ML-DSA", KmsKeyUsage.SIGN_VERIFY),
         HMAC_SHA_224("HMAC_SHA_224",""),
         HMAC_SHA_256("HMAC_SHA_256",""),
         HMAC_SHA_384("HMAC_SHA_384",""),

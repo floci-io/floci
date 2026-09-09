@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -16,12 +17,19 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -33,6 +41,9 @@ import java.util.concurrent.TimeUnit;
 public class RdsDataService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsDataService.class);
+
+    /** Statement keywords whose result is a write, even when a {@code RETURNING} clause also reports rows. */
+    private static final Set<String> DML_KEYWORDS = Set.of("insert", "update", "delete", "merge", "replace");
 
     private final RdsDataResourceResolver resourceResolver;
     private final SecretsManagerService secretsManagerService;
@@ -105,28 +116,24 @@ public class RdsDataService implements Resettable {
         rejectUnsupportedOptions(request);
 
         String sql = requiredText(request, "sql");
-        String resourceArn = requiredText(request, "resourceArn");
-        requiredText(request, "secretArn");
-        String transactionId = textOrNull(request, "transactionId");
+        Map<String, JsonNode> parameters = parseParameters(request);
         boolean includeMetadata = request.path("includeResultMetadata").asBoolean(false);
 
         try {
-            if (transactionId != null && !transactionId.isBlank()) {
-                TransactionContext tx = transaction(transactionId);
-                synchronized (tx) {
-                    requireActiveTransaction(transactionId, tx);
-                    validateTransactionIdentity(tx, request);
-                    tx.refresh(transactionTtl);
-                    return executeOnConnection(tx.connection, sql, includeMetadata);
-                }
-            }
+            return onTargetConnection(request, region, (connection, engine) ->
+                    executeOnConnection(connection, engine, sql, parameters, includeMetadata));
+        } catch (SQLException e) {
+            throw databaseError(e);
+        }
+    }
 
-            RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(resourceArn);
-            Credentials credentials = credentials(request, target, region);
-            String database = databaseName(request, target);
-            try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
-                return executeOnConnection(connection, sql, includeMetadata);
-            }
+    public ObjectNode batchExecuteStatement(JsonNode request, String region) {
+        String sql = requiredText(request, "sql");
+        List<Map<String, JsonNode>> parameterSets = parseParameterSets(request);
+
+        try {
+            return onTargetConnection(request, region, (connection, engine) ->
+                    batchOnConnection(connection, engine, sql, parameterSets));
         } catch (SQLException e) {
             throw databaseError(e);
         }
@@ -136,7 +143,8 @@ public class RdsDataService implements Resettable {
         cleanupExpiredTransactions();
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
-        RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(resourceArn);
+        RdsDataResourceResolver.DatabaseTarget target =
+                resourceResolver.resolve(resourceArn, region);
         Credentials credentials = credentials(request, target, region);
         String database = databaseName(request, target);
 
@@ -145,7 +153,8 @@ public class RdsDataService implements Resettable {
             connection = connectionFactory.open(target, credentials.username(), credentials.password(), database);
             connection.setAutoCommit(false);
             String transactionId = UUID.randomUUID().toString();
-            transactions.put(transactionId, new TransactionContext(transactionId, connection, target.arn(), database, transactionTtl));
+            transactions.put(transactionId, new TransactionContext(
+                    transactionId, connection, target.engine(), target.arn(), database, region, transactionTtl));
 
             ObjectNode response = objectMapper.createObjectNode();
             response.put("transactionId", transactionId);
@@ -158,14 +167,14 @@ public class RdsDataService implements Resettable {
         }
     }
 
-    public ObjectNode commitTransaction(JsonNode request) {
+    public ObjectNode commitTransaction(JsonNode request, String region) {
         String transactionId = requiredText(request, "transactionId");
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         synchronized (tx) {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn);
+            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -182,14 +191,14 @@ public class RdsDataService implements Resettable {
         return response;
     }
 
-    public ObjectNode rollbackTransaction(JsonNode request) {
+    public ObjectNode rollbackTransaction(JsonNode request, String region) {
         String transactionId = requiredText(request, "transactionId");
         String resourceArn = requiredText(request, "resourceArn");
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         synchronized (tx) {
             requireActiveTransaction(transactionId, tx);
-            validateTransactionResource(tx, resourceArn);
+            validateTransactionResource(tx, resourceArn, region);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
             }
@@ -206,40 +215,255 @@ public class RdsDataService implements Resettable {
         return response;
     }
 
-    private ObjectNode executeOnConnection(Connection connection, String sql, boolean includeMetadata) throws SQLException {
-        try (Statement statement = connection.createStatement()) {
-            boolean hasResultSet = statement.execute(sql);
-            ObjectNode response = objectMapper.createObjectNode();
-            if (hasResultSet) {
-                try (ResultSet rs = statement.getResultSet()) {
-                    ResultSetMetaData meta = rs.getMetaData();
-                    if (includeMetadata) {
-                        response.set("columnMetadata", columnMetadata(meta));
-                    }
-                    response.set("records", records(rs, meta));
-                }
-                response.put("numberOfRecordsUpdated", 0L);
-            } else {
-                int updateCount = statement.getUpdateCount();
-                response.set("records", objectMapper.createArrayNode());
-                response.put("numberOfRecordsUpdated", Math.max(updateCount, 0));
+    private ObjectNode onTargetConnection(JsonNode request, String region, ConnectionWork work)
+            throws SQLException {
+        String resourceArn = requiredText(request, "resourceArn");
+        requiredText(request, "secretArn");
+        String transactionId = textOrNull(request, "transactionId");
+
+        if (transactionId != null && !transactionId.isBlank()) {
+            TransactionContext tx = transaction(transactionId);
+            synchronized (tx) {
+                requireActiveTransaction(transactionId, tx);
+                validateTransactionIdentity(tx, request, region);
+                tx.refresh(transactionTtl);
+                return work.execute(tx.connection, tx.engine);
             }
-            return response;
+        }
+
+        RdsDataResourceResolver.DatabaseTarget target =
+                resourceResolver.resolve(resourceArn, region);
+        Credentials credentials = credentials(request, target, region);
+        String database = databaseName(request, target);
+        try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
+            return work.execute(connection, target.engine());
         }
     }
 
-    private ArrayNode columnMetadata(ResultSetMetaData meta) throws SQLException {
-        ArrayNode columns = objectMapper.createArrayNode();
-        for (int i = 1; i <= meta.getColumnCount(); i++) {
-            ObjectNode column = objectMapper.createObjectNode();
-            String name = meta.getColumnLabel(i);
-            if (name == null || name.isBlank()) {
-                name = meta.getColumnName(i);
-            }
-            column.put("name", name);
-            columns.add(column);
+    private ObjectNode executeOnConnection(Connection connection, DatabaseEngine engine, String sql,
+                                           Map<String, JsonNode> parameters, boolean includeMetadata)
+            throws SQLException {
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
+        try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
+            RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
+            return buildResponse(statement, statement.execute(), includeMetadata, engine);
         }
-        return columns;
+    }
+
+    /**
+     * Runs {@code sql} once per parameter set and reports one
+     * {@code updateResults} entry per set.
+     *
+     * <p>No parameter sets runs nothing. AWS executes the statement "as many
+     * times as the number of parameter sets provided" and points a caller who
+     * wants a single parameterless execution at one empty set ({@code [[]]}) or
+     * at {@code ExecuteStatement}, so an absent or empty {@code parameterSets}
+     * must not reach the database.
+     *
+     * <p>Engines that report generated keys execute a set at a time so each
+     * entry carries the keys that set produced: {@code getGeneratedKeys()}
+     * after {@code executeBatch()} flattens every row the whole batch generated
+     * with nothing tying a row back to the set that made it, so a set inserting
+     * more or fewer than one row would shift the keys onto the wrong entries.
+     * PostgreSQL reports no generated keys, so it keeps the batched round trip.
+     */
+    private ObjectNode batchOnConnection(Connection connection, DatabaseEngine engine, String sql,
+                                         List<Map<String, JsonNode>> parameterSets)
+            throws SQLException {
+        ArrayNode updateResults = objectMapper.createArrayNode();
+        if (parameterSets.isEmpty()) {
+            return batchResponse(updateResults);
+        }
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
+        try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
+            rejectStatementReturningRows(statement, parsed.sql());
+            if (returnsGeneratedKeys(engine)) {
+                for (Map<String, JsonNode> parameters : parameterSets) {
+                    RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
+                    statement.execute();
+                    updateResults.add(updateResult(generatedFields(statement, engine)));
+                }
+            } else {
+                for (Map<String, JsonNode> parameters : parameterSets) {
+                    RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
+                    statement.addBatch();
+                }
+                statement.executeBatch();
+                for (int set = 0; set < parameterSets.size(); set++) {
+                    updateResults.add(updateResult(objectMapper.createArrayNode()));
+                }
+            }
+        }
+        return batchResponse(updateResults);
+    }
+
+    private ObjectNode batchResponse(ArrayNode updateResults) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("updateResults", updateResults);
+        return response;
+    }
+
+    /**
+     * Rejects a batched statement whose result is rows rather than an update
+     * count. AWS takes "a DML statement" here and answers with one
+     * {@code UpdateResult} per set, which has nowhere to carry a result set.
+     * Neither engine refuses one on its own: the MySQL branch of
+     * {@link #batchOnConnection} executes each set through {@code execute()} to
+     * keep generated keys with their set, which bypasses the
+     * {@code executeBatch()} that Connector/J would have refused, and the
+     * PostgreSQL driver batches a {@code SELECT} happily.
+     *
+     * <p>The check reads the driver's description of the prepared statement,
+     * which both drivers answer without running it. A DML statement that also
+     * reports rows through a {@code RETURNING} clause is left alone — AWS points
+     * Aurora PostgreSQL callers at {@code RETURNING} because
+     * {@code generatedFields} is always empty there — so the leading keyword
+     * decides that before the description is asked for.
+     */
+    private static void rejectStatementReturningRows(PreparedStatement statement, String sql) {
+        if (isDataModifying(sql) || !returnsRows(statement)) {
+            return;
+        }
+        throw new AwsException("BadRequestException",
+                "BatchExecuteStatement does not support a SQL statement that returns a result set. "
+                        + "Use ExecuteStatement instead.", 400);
+    }
+
+    private static boolean returnsRows(PreparedStatement statement) {
+        try {
+            return statement.getMetaData() != null;
+        } catch (SQLException e) {
+            // A driver that cannot describe the statement leaves the verdict to the execution itself.
+            LOG.debugv("Could not describe RDS Data API batch statement: {0}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Whether {@code sql} opens a data-modifying statement, ignoring leading
+     * whitespace and comments. Only used to exempt DML from
+     * {@link #rejectStatementReturningRows}, so an unrecognized leading keyword
+     * counts as not modifying and the driver's description decides.
+     */
+    private static boolean isDataModifying(String sql) {
+        int len = sql.length();
+        int i = 0;
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (Character.isWhitespace(c)) {
+                i++;
+            } else if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+                int end = sql.indexOf('\n', i);
+                i = end < 0 ? len : end + 1;
+            } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                int end = sql.indexOf("*/", i + 2);
+                i = end < 0 ? len : end + 2;
+            } else {
+                break;
+            }
+        }
+        int start = i;
+        while (i < len && Character.isLetter(sql.charAt(i))) {
+            i++;
+        }
+        return DML_KEYWORDS.contains(sql.substring(start, i).toLowerCase(Locale.ROOT));
+    }
+
+    private ObjectNode updateResult(ArrayNode generatedFields) {
+        ObjectNode updateResult = objectMapper.createObjectNode();
+        updateResult.set("generatedFields", generatedFields);
+        return updateResult;
+    }
+
+    private static PreparedStatement prepare(Connection connection, DatabaseEngine engine, String sql)
+            throws SQLException {
+        if (returnsGeneratedKeys(engine)) {
+            return connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+        }
+        return connection.prepareStatement(sql);
+    }
+
+    /**
+     * Whether generated keys are requested from {@code engine}. AWS reports no
+     * {@code generatedFields} for Aurora PostgreSQL — callers read generated
+     * values with a {@code RETURNING} clause instead — so they are only asked
+     * for on the engines AWS answers them for. That also avoids the PostgreSQL
+     * driver rewriting the statement with {@code RETURNING *} to satisfy
+     * {@code RETURN_GENERATED_KEYS}.
+     */
+    private static boolean returnsGeneratedKeys(DatabaseEngine engine) {
+        return switch (engine) {
+            case MYSQL, MARIADB -> true;
+            case POSTGRES -> false;
+        };
+    }
+
+    /**
+     * Whether a backslash escapes quotes inside string literals for {@code engine}.
+     * MySQL and MariaDB honor {@code \'} by default (NO_BACKSLASH_ESCAPES disabled);
+     * PostgreSQL treats backslash literally with {@code standard_conforming_strings} on.
+     */
+    private static boolean usesBackslashEscapes(DatabaseEngine engine) {
+        return switch (engine) {
+            case MYSQL, MARIADB -> true;
+            case POSTGRES -> false;
+        };
+    }
+
+    /**
+     * The {@code ExecuteStatement} response for {@code statement}.
+     *
+     * <p>{@code records} and {@code generatedFields} are mutually exclusive on
+     * the wire, and each is omitted rather than sent empty when it does not
+     * apply. AWS answers a statement that produced a result set with
+     * {@code records} — an empty array when the query matched no rows — and no
+     * {@code generatedFields}; a statement that produced an update count gets
+     * {@code generatedFields} and no {@code records} at all. Sending
+     * {@code "records": []} for an update would make {@code hasRecords()} on
+     * the AWS SDK models report true, and read as an empty result set to any
+     * caller that tests the field for presence.
+     */
+    private ObjectNode buildResponse(Statement statement, boolean hasResultSet, boolean includeMetadata,
+                                     DatabaseEngine engine) throws SQLException {
+        ObjectNode response = objectMapper.createObjectNode();
+        if (hasResultSet) {
+            try (ResultSet rs = statement.getResultSet()) {
+                ResultSetMetaData meta = rs.getMetaData();
+                if (includeMetadata) {
+                    response.set("columnMetadata", RdsDataColumnMetadata.toColumnMetadata(objectMapper, meta));
+                }
+                response.set("records", records(rs, meta));
+            }
+            response.put("numberOfRecordsUpdated", 0L);
+        } else {
+            int updateCount = statement.getUpdateCount();
+            response.put("numberOfRecordsUpdated", Math.max(updateCount, 0));
+            response.set("generatedFields", generatedFields(statement, engine));
+        }
+        return response;
+    }
+
+    /**
+     * The keys generated by the last execution of {@code statement}, one
+     * {@code Field} per generated column of every row the driver reported.
+     */
+    private ArrayNode generatedFields(Statement statement, DatabaseEngine engine) {
+        if (!returnsGeneratedKeys(engine)) {
+            return objectMapper.createArrayNode();
+        }
+        try (ResultSet keys = statement.getGeneratedKeys()) {
+            ResultSetMetaData meta = keys.getMetaData();
+            ArrayNode fields = objectMapper.createArrayNode();
+            while (keys.next()) {
+                for (int i = 1; i <= meta.getColumnCount(); i++) {
+                    fields.add(RdsDataFieldMapper.toField(objectMapper, keys.getObject(i), meta.getColumnType(i)));
+                }
+            }
+            return fields;
+        } catch (SQLException e) {
+            LOG.debugv("Could not read generated keys for RDS Data API statement: {0}", e.getMessage());
+            return objectMapper.createArrayNode();
+        }
     }
 
     private ArrayNode records(ResultSet rs, ResultSetMetaData meta) throws SQLException {
@@ -346,21 +570,26 @@ public class RdsDataService implements Resettable {
         }
     }
 
-    private void validateTransactionIdentity(TransactionContext tx, JsonNode request) {
-        validateTransactionResource(tx, requiredText(request, "resourceArn"));
+    private void validateTransactionIdentity(
+            TransactionContext tx, JsonNode request, String region) {
+        validateTransactionResource(tx, requiredText(request, "resourceArn"), region);
         String database = textOrNull(request, "database");
         if (database != null && !database.isBlank() && !database.equals(tx.database)) {
             throw transactionNotFound(tx.id);
         }
     }
 
-    private void validateTransactionResource(TransactionContext tx, String resourceArn) {
+    private void validateTransactionResource(
+            TransactionContext tx, String resourceArn, String region) {
+        if (region == null || region.isBlank() || !region.equals(tx.region)) {
+            throw transactionNotFound(tx.id);
+        }
         if (resourceArn.equals(tx.resourceArn)) {
             return;
         }
         RdsDataResourceResolver.DatabaseTarget target;
         try {
-            target = resourceResolver.resolve(resourceArn);
+            target = resourceResolver.resolve(resourceArn, region);
         } catch (AwsException e) {
             throw transactionNotFound(tx.id);
         }
@@ -384,17 +613,55 @@ public class RdsDataService implements Resettable {
     }
 
     private static void rejectUnsupportedOptions(JsonNode request) {
-        rejectSqlParameters(request);
         rejectFormattedRecords(request);
         rejectResultSetOptions(request);
     }
 
-    private static void rejectSqlParameters(JsonNode request) {
-        JsonNode parameters = request.get("parameters");
-        if (parameters != null && (!parameters.isArray() || !parameters.isEmpty())) {
-            throw new AwsException("BadRequestException",
-                    "SqlParameter binding is not supported by this local RDS Data API implementation.", 400);
+    private static Map<String, JsonNode> parseParameters(JsonNode request) {
+        return parseParameterList(request.get("parameters"), "parameters");
+    }
+
+    private static List<Map<String, JsonNode>> parseParameterSets(JsonNode request) {
+        JsonNode parameterSets = request.get("parameterSets");
+        if (parameterSets == null || parameterSets.isNull()) {
+            return List.of();
         }
+        if (!parameterSets.isArray()) {
+            throw new AwsException("BadRequestException",
+                    "parameterSets must be an array of SqlParameter arrays.", 400);
+        }
+        List<Map<String, JsonNode>> sets = new ArrayList<>();
+        for (JsonNode parameters : parameterSets) {
+            sets.add(parseParameterList(parameters, "each entry in parameterSets"));
+        }
+        return sets;
+    }
+
+    private static Map<String, JsonNode> parseParameterList(JsonNode parameters, String field) {
+        if (parameters == null || parameters.isNull()) {
+            return Map.of();
+        }
+        if (!parameters.isArray()) {
+            throw new AwsException("BadRequestException",
+                    field + " must be an array of SqlParameter values.", 400);
+        }
+        Map<String, JsonNode> byName = new LinkedHashMap<>();
+        for (JsonNode parameter : parameters) {
+            if (parameter == null || !parameter.isObject()) {
+                throw new AwsException("BadRequestException",
+                        "Each parameter must be a SqlParameter object.", 400);
+            }
+            String name = textOrNull(parameter, "name");
+            if (name == null || name.isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "Each SqlParameter requires a name.", 400);
+            }
+            if (byName.putIfAbsent(name, parameter) != null) {
+                throw new AwsException("BadRequestException",
+                        "Duplicate parameter name :" + name + " in the parameter set.", 400);
+            }
+        }
+        return byName;
     }
 
     private static void rejectFormattedRecords(JsonNode request) {
@@ -438,15 +705,21 @@ public class RdsDataService implements Resettable {
     private static final class TransactionContext {
         private final String id;
         private final Connection connection;
+        private final DatabaseEngine engine;
         private final String resourceArn;
         private final String database;
+        private final String region;
         private volatile Instant expiresAt;
 
-        private TransactionContext(String id, Connection connection, String resourceArn, String database, Duration ttl) {
+        private TransactionContext(
+                String id, Connection connection, DatabaseEngine engine, String resourceArn,
+                String database, String region, Duration ttl) {
             this.id = id;
             this.connection = connection;
+            this.engine = engine;
             this.resourceArn = resourceArn;
             this.database = database;
+            this.region = region;
             refresh(ttl);
         }
 
@@ -456,5 +729,10 @@ public class RdsDataService implements Resettable {
     }
 
     private record Credentials(String username, String password) {
+    }
+
+    @FunctionalInterface
+    private interface ConnectionWork {
+        ObjectNode execute(Connection connection, DatabaseEngine engine) throws SQLException;
     }
 }

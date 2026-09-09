@@ -5,6 +5,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -17,20 +20,26 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
-public class SqsService implements Resettable {
+public class SqsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SqsService.class);
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
+    private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
+    private static final int MAX_TERMINAL_MOVE_TASKS = 10;
+    private static final Duration TERMINAL_MOVE_TASK_TTL = Duration.ofHours(1);
 
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;
@@ -40,7 +49,7 @@ public class SqsService implements Resettable {
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
     /** Move tasks keyed by opaque task handle. */
-    private final ConcurrentHashMap<String, MoveTask> moveTasksByHandle = new ConcurrentHashMap<>();
+    private final MoveTaskStore moveTasksByHandle;
     /** Per-task cancellation flag the move worker polls between iterations. */
     private final ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean> moveTaskCancellation =
             new ConcurrentHashMap<>();
@@ -65,16 +74,98 @@ public class SqsService implements Resettable {
                            long startedTimestampMillis, String failureReason) {
     }
 
+    private static final class MoveTaskStore {
+        private final Map<String, Entry> entries = new HashMap<>();
+        private final Clock clock;
+        private long terminalSequence;
+
+        private MoveTaskStore(Clock clock) {
+            this.clock = clock;
+        }
+
+        private synchronized MoveTask get(String taskHandle) {
+            cleanup();
+            Entry entry = entries.get(taskHandle);
+            return entry == null ? null : entry.task();
+        }
+
+        private synchronized MoveTask getCurrentOrDefault(String taskHandle, MoveTask fallback) {
+            Entry entry = entries.get(taskHandle);
+            MoveTask task = entry == null ? null : entry.task();
+            return task == null ? fallback : task;
+        }
+
+        private synchronized Collection<MoveTask> values() {
+            cleanup();
+            return entries.values().stream().map(Entry::task).toList();
+        }
+
+        private synchronized void put(String taskHandle, MoveTask task) {
+            boolean terminal = !"RUNNING".equals(task.status());
+            Long terminalAtMillis = terminal ? clock.millis() : null;
+            long sequence = terminal ? ++terminalSequence : 0;
+            entries.put(taskHandle, new Entry(task, terminalAtMillis, sequence));
+            if (terminal) {
+                cleanup();
+                evictOldestTerminalTasks();
+            }
+        }
+
+        private synchronized void clear() {
+            entries.clear();
+        }
+
+        private void cleanup() {
+            long now = clock.millis();
+            entries.entrySet().removeIf(entry -> {
+                Long terminalAtMillis = entry.getValue().terminalAtMillis();
+                return terminalAtMillis != null
+                        && now >= terminalAtMillis
+                        && now - terminalAtMillis >= TERMINAL_MOVE_TASK_TTL.toMillis();
+            });
+        }
+
+        private void evictOldestTerminalTasks() {
+            Set<String> sourceArns = entries.values().stream()
+                    .filter(Entry::terminal)
+                    .map(entry -> entry.task().sourceArn())
+                    .collect(java.util.stream.Collectors.toSet());
+            for (String sourceArn : sourceArns) {
+                List<Map.Entry<String, Entry>> terminalEntries = entries.entrySet().stream()
+                        .filter(entry -> entry.getValue().terminal()
+                                && Objects.equals(sourceArn, entry.getValue().task().sourceArn()))
+                        .sorted(Map.Entry.comparingByValue(Comparator.comparingLong(Entry::terminalSequence)))
+                        .toList();
+                int excess = terminalEntries.size() - MAX_TERMINAL_MOVE_TASKS;
+                for (int i = 0; i < excess; i++) {
+                    entries.remove(terminalEntries.get(i).getKey());
+                }
+            }
+        }
+
+        private record Entry(MoveTask task, Long terminalAtMillis, long terminalSequence) {
+            private boolean terminal() {
+                return terminalAtMillis != null;
+            }
+        }
+    }
+
     private final int defaultVisibilityTimeout;
     private final int maxMessageSize;
     private final String baseUrl;
     private final RegionResolver regionResolver;
     private final boolean clearFifoDeduplicationCacheOnPurge;
     private final SnsService snsService;
+    private final Clock clock;
+
+    public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                      SnsService snsService) {
+        this(storageFactory, config, regionResolver, snsService, Clock.systemUTC());
+    }
 
     @Inject
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                      SnsService snsService) {
+                      SnsService snsService, Clock clock) {
         this(
                 storageFactory.create("sqs", "sqs-queues.json",
                         new TypeReference<Map<String, Queue>>() {
@@ -90,7 +181,8 @@ public class SqsService implements Resettable {
                 config.effectiveBaseUrl(),
                 regionResolver,
                 config.services().sqs().clearFifoDeduplicationCacheOnPurge(),
-                snsService
+                snsService,
+                clock
         );
     }
 
@@ -101,6 +193,12 @@ public class SqsService implements Resettable {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl) {
         this(queueStore, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
                 new RegionResolver("us-east-1", "000000000000"), false, null);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl, Clock clock) {
+        this(queueStore, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
@@ -116,6 +214,15 @@ public class SqsService implements Resettable {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService) {
+        this(queueStore, messageStore, dedupStore, defaultVisibilityTimeout, maxMessageSize, baseUrl,
+                regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, Clock.systemUTC());
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, Clock clock) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -125,8 +232,15 @@ public class SqsService implements Resettable {
         this.regionResolver = regionResolver;
         this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
         this.snsService = snsService;
+        this.clock = clock;
+        this.moveTasksByHandle = new MoveTaskStore(clock);
         loadPersistedMessages();
         loadPersistedDedup();
+    }
+
+    @PreDestroy
+    void stop() {
+        moveTaskExecutor.shutdownNow();
     }
 
     public void clear() {
@@ -201,6 +315,35 @@ public class SqsService implements Resettable {
         }
     }
 
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (String key : queueStore.keys()) {
+            int sep = key.indexOf("::");
+            if (sep < 0) {
+                continue;
+            }
+            String region = key.substring(0, sep);
+            Queue queue = queueStore.get(key).orElse(null);
+            if (queue == null) {
+                continue;
+            }
+            String account = queue.getAccountId() != null ? queue.getAccountId() : regionResolver.getAccountId();
+            String arn = AwsArnUtils.Arn.of("sqs", region, account, queue.getQueueName()).toString();
+            resources.add(new ExplorerResource(
+                    arn, "sqs:queue", "sqs",
+                    region, account,
+                    queue.getCreatedTimestamp() != null ? queue.getCreatedTimestamp() : Instant.now(),
+                    queue.getTags() != null ? queue.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("sqs:queue", "sqs", true));
+    }
+
     public Queue createQueue(String queueName, Map<String, String> attributes, String region) {
         return createQueue(queueName, attributes, null, region);
     }
@@ -256,6 +399,7 @@ public class SqsService implements Resettable {
         queue.getAttributes().putIfAbsent("VisibilityTimeout", String.valueOf(defaultVisibilityTimeout));
         queue.getAttributes().putIfAbsent("MaximumMessageSize", String.valueOf(maxMessageSize));
         queue.getAttributes().putIfAbsent("DelaySeconds", "0");
+        queue.getAttributes().putIfAbsent("ReceiveMessageWaitTimeSeconds", "0");
         queue.getAttributes().putIfAbsent("MessageRetentionPeriod", "345600");
         if (queue.isFifo()) {
             if (attributes != null && attributes.containsKey("ContentBasedDeduplication") && "true".equals(attributes.get("ContentBasedDeduplication"))) {
@@ -388,7 +532,7 @@ public class SqsService implements Resettable {
                             "Reason: Message must be shorter than " + queueMaxMessageSize + " bytes.", 400);
         }
 
-        int queueDelaySeconds = parseDelaySecondsAttribute(queue.getAttributes().get("DelaySeconds"));
+        int queueDelaySeconds = parseNonNegativeSecondsAttribute(queue.getAttributes().get("DelaySeconds"));
 
         // Resolve the effective delay:
         //   - FIFO queues only support queue-level DelaySeconds per AWS SQS,
@@ -554,12 +698,7 @@ public class SqsService implements Resettable {
         return total;
     }
 
-    /**
-     * Parse the queue-level DelaySeconds attribute. Returns 0 when the
-     * attribute is null, empty, non-numeric, or negative -- the queue falls
-     * back to "no default delay" rather than failing the SendMessage call.
-     */
-    private int parseDelaySecondsAttribute(String value) {
+    private int parseNonNegativeSecondsAttribute(String value) {
         if (value == null || value.isEmpty()) {
             return 0;
         }
@@ -599,18 +738,23 @@ public class SqsService implements Resettable {
     }
 
     public List<Message> receiveMessage(String queueUrl, int maxMessages, int visibilityTimeout,
-                                        int waitTimeSeconds, String region) {
+                                        Integer waitTimeSeconds, String region) {
         String storageKey = regionKey(region, queueUrl);
-        getQueueByUrl(storageKey, queueUrl)
+        Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
 
         if (maxMessages < 1 || maxMessages > 10) {
             maxMessages = 1;
         }
+        if (waitTimeSeconds != null && (waitTimeSeconds < 0 || waitTimeSeconds > MAX_RECEIVE_WAIT_TIME_SECONDS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + waitTimeSeconds + " for parameter WaitTimeSeconds is invalid. "
+                            + "Reason: Must be >= 0 and <= " + MAX_RECEIVE_WAIT_TIME_SECONDS + ".", 400);
+        }
 
         long start = System.currentTimeMillis();
-        long maxWait = waitTimeSeconds * 1000L;
+        long maxWait = resolveWaitTimeSeconds(queue, waitTimeSeconds) * 1000L;
         Object lock = queueLocks.computeIfAbsent(storageKey, k -> new Object());
         // The queue incarnation this call polls against. DeleteQueue removes it
         // from messagesByQueue (and CreateQueue registers a fresh instance), so
@@ -649,6 +793,15 @@ public class SqsService implements Resettable {
                 return result;
             }
         }
+    }
+
+    private int resolveWaitTimeSeconds(Queue queue, Integer requestedWaitTimeSeconds) {
+        if (requestedWaitTimeSeconds != null) {
+            return requestedWaitTimeSeconds;
+        }
+        int queueWaitTimeSeconds = parseNonNegativeSecondsAttribute(
+                queue.getAttributes().get("ReceiveMessageWaitTimeSeconds"));
+        return Math.min(queueWaitTimeSeconds, MAX_RECEIVE_WAIT_TIME_SECONDS);
     }
 
     private RedrivePolicy getOrParseRedrivePolicy(Queue queue, String storageKey) {
@@ -844,7 +997,7 @@ public class SqsService implements Resettable {
         // the additional 1-second window covers the small gap between StartMessageMoveTask
         // returning and the worker flipping the task to RUNNING (so back-to-back start
         // calls that AWS would reject can't slip through).
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         for (MoveTask existing : moveTasksByHandle.values()) {
             if (!sourceArn.equals(existing.sourceArn())) {
                 continue;
@@ -879,7 +1032,7 @@ public class SqsService implements Resettable {
         moveTasksByHandle.put(taskHandle, new MoveTask(
                 taskHandle, sourceArn, destinationArn,
                 maxNumberOfMessagesPerSecond, "RUNNING",
-                0L, toMove, System.currentTimeMillis(), null));
+                0L, toMove, clock.millis(), null));
         var cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
         moveTaskCancellation.put(taskHandle, cancelled);
 
@@ -976,6 +1129,7 @@ public class SqsService implements Resettable {
                         moved, cur.approximateNumberOfMessagesToMove(),
                         cur.startedTimestampMillis(), cur.failureReason()));
             }
+            moveTaskCancellation.remove(taskHandle, cancelled);
             LOG.infov("Move task {0} {1}: moved {2} messages from {3} to {4}", taskHandle,
                     cancelled.get() ? "cancelled" : "completed", moved, sourceArn,
                     destinationArn != null ? destinationArn : "original source");
@@ -1023,7 +1177,7 @@ public class SqsService implements Resettable {
         if (flag != null) {
             flag.set(true);
         }
-        return moveTasksByHandle.getOrDefault(taskHandle, task).approximateNumberOfMessagesMoved();
+        return moveTasksByHandle.getCurrentOrDefault(taskHandle, task).approximateNumberOfMessagesMoved();
     }
 
     private boolean isDeadLetterQueue(String queueArn, String region) {

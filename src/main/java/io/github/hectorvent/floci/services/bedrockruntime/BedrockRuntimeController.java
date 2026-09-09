@@ -11,9 +11,14 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.GenericEntity;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import org.jboss.logging.Logger;
+
+import java.io.OutputStream;
+import java.util.function.Consumer;
 
 /**
  * AWS Bedrock Runtime REST JSON endpoints.
@@ -45,26 +50,11 @@ public class BedrockRuntimeController {
     @Blocking
     @Path("/{modelId:.+}/converse")
     public Response converse(@PathParam("modelId") String modelId, String body) {
-        if (modelId == null || modelId.isBlank()) {
-            throw new AwsException("ValidationException", "modelId is required.", 400);
-        }
-        JsonNode request;
-        try {
-            request = body == null || body.isBlank()
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-        } catch (Exception e) {
-            throw new AwsException("ValidationException",
-                    "Malformed request body: " + e.getMessage(), 400);
-        }
+        ObjectNode request = readRequest(modelId, body);
 
-        JsonNode messages = request.path("messages");
-        if (!messages.isArray() || messages.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "messages is required and must be a non-empty array.", 400);
-        }
+        JsonNode messages = validateMessages(request);
 
-        ObjectNode response = service.buildConverseResponse(modelId, (ObjectNode) request);
+        ObjectNode response = service.buildConverseResponse(modelId, request);
         LOG.debugv("Bedrock Converse: modelId={0}, messages={1}", modelId, messages.size());
         return Response.ok(response).build();
     }
@@ -94,11 +84,46 @@ public class BedrockRuntimeController {
     }
 
     @POST
+    @Blocking
     @Path("/{modelId:.+}/converse-stream")
     @Consumes(MediaType.WILDCARD)
-    public Response converseStream(@PathParam("modelId") String modelId) {
-        throw new AwsException("UnsupportedOperationException",
-                "ConverseStream is not supported by Floci yet. "
-                        + "Use Converse instead.", 501);
+    public Response converseStream(@PathParam("modelId") String modelId, String body) {
+        ObjectNode request = readRequest(modelId, body);
+
+        JsonNode messages = validateMessages(request);
+
+        Consumer<OutputStream> stream = service.buildConverseStreamResponse(modelId, request);
+        LOG.debugv("Bedrock Converse Stream: modelId={0}, messages={1}", modelId, messages.size());
+        return Response.ok(streaming(stream))
+                .header("Content-Type", "application/vnd.amazon.eventstream")
+                .build();
+    }
+
+    private static GenericEntity<StreamingOutput> streaming(Consumer<OutputStream> stream) {
+        return new GenericEntity<>(stream::accept, StreamingOutput.class);
+    }
+
+    private static JsonNode validateMessages(ObjectNode request) {
+        JsonNode messages = request.path("messages");
+        if (!messages.isArray() || messages.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "messages is required and must be a non-empty array.", 400);
+        }
+        return messages;
+    }
+
+    private ObjectNode readRequest(String modelId, String body) {
+        if (modelId == null || modelId.isBlank()) {
+            throw new AwsException("ValidationException", "modelId is required.", 400);
+        }
+
+        try {
+            return body == null || body.isBlank()
+                    ? objectMapper.createObjectNode()
+                    : (ObjectNode) objectMapper.readTree(body);
+        } catch (Exception e) {
+            throw new AwsException("ValidationException",
+                    "Malformed request body: " + e.getMessage(), 400);
+        }
     }
 }

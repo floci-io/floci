@@ -229,6 +229,16 @@ class EventBridgeReplayTest {
         assertThat(desc.eventLastReplayedTime()).isNotNull();
     }
 
+    @Test
+    @Order(23)
+    void missingReplayUsesTypedResourceNotFoundStatus() {
+        assertThatThrownBy(() -> eb.describeReplay(DescribeReplayRequest.builder()
+                .replayName("missing-replay").build()))
+                .isInstanceOfSatisfying(
+                        software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundException.class,
+                        error -> assertThat(error.statusCode()).isEqualTo(400));
+    }
+
     // ──────────────────────────── Cleanup ────────────────────────────
 
     @Test
@@ -238,6 +248,8 @@ class EventBridgeReplayTest {
 
         assertThatThrownBy(() ->
                 eb.describeArchive(DescribeArchiveRequest.builder().archiveName(archiveName).build()))
-                .isInstanceOf(software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundException.class);
+                .isInstanceOfSatisfying(
+                        software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundException.class,
+                        error -> assertThat(error.statusCode()).isEqualTo(400));
     }
 }

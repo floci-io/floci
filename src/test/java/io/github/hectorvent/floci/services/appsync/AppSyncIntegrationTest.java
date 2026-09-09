@@ -229,8 +229,8 @@ class AppSyncIntegrationTest {
             .post("/v1/apis/" + apiId + "/apikeys")
         .then()
             .statusCode(200)
-            .body("apiKey.id", notNullValue())
-            .body("apiKey.apiKey", startsWith("da2-"))
+            .body("apiKey.id", matchesPattern("da2-[a-z0-9]{26}"))
+            .body("apiKey", not(hasKey("apiKey")))
             .body("apiKey.description", equalTo("test-key"))
             .extract().path("apiKey.id");
     }

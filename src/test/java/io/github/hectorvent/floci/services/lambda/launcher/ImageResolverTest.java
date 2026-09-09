@@ -11,11 +11,11 @@ import static org.mockito.Mockito.*;
 
 class ImageResolverTest {
 
-    private final EmulatorConfig config = mock(EmulatorConfig.class);
+    private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final ImageResolver resolver;
 
     ImageResolverTest() {
-        when(config.ecrBaseUri()).thenReturn("public.ecr.aws");
+        when(config.services().lambda().ecrBaseUri()).thenReturn("public.ecr.aws");
         this.resolver = new ImageResolver(config);
     }
 
@@ -86,8 +86,8 @@ class ImageResolverTest {
             "provided, my.custom.host/lambda/provided:latest"
     })
     void resolvesKnownRuntimesWithHostOverride(String runtime, String expectedImage) {
-        EmulatorConfig customConfig = mock(EmulatorConfig.class);
-        when(customConfig.ecrBaseUri()).thenReturn("my.custom.host");
+        EmulatorConfig customConfig = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(customConfig.services().lambda().ecrBaseUri()).thenReturn("my.custom.host");
         ImageResolver customResolver = new ImageResolver(customConfig);
         assertEquals(expectedImage, customResolver.resolve(runtime));
     }
@@ -124,8 +124,8 @@ class ImageResolverTest {
             "provided, my.custom.host/path/lambda/provided:latest"
     })
     void resolvesKnownRuntimesWithHostAndPathOverride(String runtime, String expectedImage) {
-        EmulatorConfig customConfig = mock(EmulatorConfig.class);
-        when(customConfig.ecrBaseUri()).thenReturn("my.custom.host/path");
+        EmulatorConfig customConfig = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(customConfig.services().lambda().ecrBaseUri()).thenReturn("my.custom.host/path");
         ImageResolver customResolver = new ImageResolver(customConfig);
         assertEquals(expectedImage, customResolver.resolve(runtime));
     }

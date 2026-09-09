@@ -28,6 +28,7 @@ class AppConfigTest {
     private static String deploymentStrategyId;
     private static String configurationToken;
     private static String secondConfigurationToken;
+    private static String unchangedConfigurationToken;
     private static String intervalSessionToken;
     private static String emptyAppId;
     private static String emptyEnvId;
@@ -153,6 +154,7 @@ class AppConfigTest {
         assertThat(response.contentType()).startsWith("application/json");
         assertThat(response.versionLabel()).isEqualTo("1");
         assertThat(response.nextPollConfigurationToken()).isNotNull();
+        assertThat(response.nextPollConfigurationToken()).isNotEqualTo(configurationToken);
         secondConfigurationToken = response.nextPollConfigurationToken();
     }
 
@@ -176,6 +178,21 @@ class AppConfigTest {
 
     @Test
     @Order(11)
+    void repeatedPollWithSameVersionReturnsEmptyPayload() {
+        GetLatestConfigurationResponse response = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
+                .configurationToken(secondConfigurationToken)
+                .build());
+
+        assertThat(response.configuration().asByteArray()).isEmpty();
+        assertThat(response.contentType()).isEqualTo("application/octet-stream");
+        assertThat(response.versionLabel()).isNull();
+        assertThat(response.nextPollConfigurationToken()).isNotNull();
+        assertThat(response.nextPollConfigurationToken()).isNotEqualTo(secondConfigurationToken);
+        unchangedConfigurationToken = response.nextPollConfigurationToken();
+    }
+
+    @Test
+    @Order(12)
     void updatedDeploymentIsVisibleOnNextPollToken() {
         CreateHostedConfigurationVersionResponse versionResponse = appConfig.createHostedConfigurationVersion(
                 CreateHostedConfigurationVersionRequest.builder()
@@ -195,17 +212,19 @@ class AppConfigTest {
                 .build());
 
         GetLatestConfigurationResponse response = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
-                .configurationToken(secondConfigurationToken)
+                .configurationToken(unchangedConfigurationToken)
                 .build());
 
         assertThat(response.configuration().asString(StandardCharsets.UTF_8)).isEqualTo("{\"key\": \"value-2\"}");
         assertThat(response.versionLabel()).isEqualTo("2");
+        assertThat(response.nextPollConfigurationToken()).isNotNull();
+        assertThat(response.nextPollConfigurationToken()).isNotEqualTo(unchangedConfigurationToken);
     }
 
     @Test
-    @Order(12)
-    @DisplayName("Poll interval: requested 60s but emulator returns 15s (known deviation from AWS)")
-    void requiredMinimumPollIntervalIsAcceptedButNotEnforced() {
+    @Order(13)
+    @DisplayName("Poll interval: requested minimum is returned to the client")
+    void requiredMinimumPollIntervalIsReturned() {
         var sessionResponse = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
                 .applicationIdentifier(applicationId)
                 .environmentIdentifier(environmentId)
@@ -218,21 +237,19 @@ class AppConfigTest {
                 .configurationToken(intervalSessionToken)
                 .build());
 
-        // Emulator always returns 15s regardless of the requested interval.
-        // AWS would return the requested 60s. Pinning current emulator behavior.
-        assertThat(firstResponse.nextPollIntervalInSeconds()).isEqualTo(15);
+        assertThat(firstResponse.nextPollIntervalInSeconds()).isEqualTo(60);
         assertThat(firstResponse.nextPollConfigurationToken()).isNotNull();
 
         GetLatestConfigurationResponse secondResponse = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
                 .configurationToken(firstResponse.nextPollConfigurationToken())
                 .build());
 
-        assertThat(secondResponse.nextPollIntervalInSeconds()).isEqualTo(15);
+        assertThat(secondResponse.nextPollIntervalInSeconds()).isEqualTo(60);
         assertThat(secondResponse.nextPollConfigurationToken()).isNotNull();
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void emptyConfigurationReturnsEmptyPayload() {
         emptyAppId = appConfig.createApplication(CreateApplicationRequest.builder()
                 .name(TestFixtures.uniqueName("empty-app"))
@@ -305,5 +322,155 @@ class AppConfigTest {
                         .applicationId(tagAppId).build());
             } catch (Exception ignored) {}
         }
+    }
+
+    @Test
+    @Order(51)
+    @DisplayName("TagResource / ListTagsForResource - deploymentstrategy ARN (top-level, not nested under application/)")
+    void tagDeploymentStrategyViaSdk() {
+        // deploymentstrategy/extension/extensionassociation ARNs don't nest under application/
+        // like every other AppConfig resource tested above - a naive ARN parser can end up
+        // hardcoding the application/ prefix and rejecting these as invalid, even though AWS
+        // documents all three as taggable (see e.g. AWS::AppConfig::DeploymentStrategy's Tags
+        // property). This asserts the SDK call succeeds end-to-end, not just that some ARN shape
+        // is accepted internally.
+        String tagStrategyId = appConfig.createDeploymentStrategy(CreateDeploymentStrategyRequest.builder()
+                .name("tag-roundtrip-strategy")
+                .deploymentDurationInMinutes(0)
+                .growthFactor(100f)
+                .finalBakeTimeInMinutes(0)
+                .build()).id();
+        String arn = "arn:aws:appconfig:us-east-1:000000000000:deploymentstrategy/" + tagStrategyId;
+
+        appConfig.tagResource(TagResourceRequest.builder()
+                .resourceArn(arn)
+                .tags(java.util.Map.of("env", "prod"))
+                .build());
+
+        ListTagsForResourceResponse listed = appConfig.listTagsForResource(
+                ListTagsForResourceRequest.builder().resourceArn(arn).build());
+        assertThat(listed.tags()).isNotNull();
+    }
+
+    @Test
+    @Order(52)
+    @DisplayName("DeleteConfigurationProfile / DeleteHostedConfigurationVersion / ListDeploymentStrategies / DeleteDeploymentStrategy")
+    void deleteAndListOperationsPreviouslyReturnedNoSuchBucket() {
+        // These four operations had no route at all, so the request fell through to S3's
+        // generic path-style catch-all and returned a raw S3 NoSuchBucket 404 instead of a real
+        // AppConfig response. Exercised via the SDK (not raw HTTP) so a regression here surfaces
+        // as an SDK-level exception, matching how a real caller would hit it.
+        String delAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name("delete-ops-app")
+                .build()).id();
+        try {
+            String delProfileId = appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
+                    .applicationId(delAppId)
+                    .name("delete-ops-profile")
+                    .locationUri("hosted")
+                    .type("AWS.Freeform")
+                    .build()).id();
+
+            appConfig.createHostedConfigurationVersion(CreateHostedConfigurationVersionRequest.builder()
+                    .applicationId(delAppId)
+                    .configurationProfileId(delProfileId)
+                    .contentType("application/json")
+                    .content(SdkBytes.fromUtf8String("{\"throwaway\": true}"))
+                    .build());
+
+            appConfig.deleteHostedConfigurationVersion(DeleteHostedConfigurationVersionRequest.builder()
+                    .applicationId(delAppId)
+                    .configurationProfileId(delProfileId)
+                    .versionNumber(1)
+                    .build());
+            assertThrows(ResourceNotFoundException.class, () -> appConfig.getHostedConfigurationVersion(
+                    GetHostedConfigurationVersionRequest.builder()
+                            .applicationId(delAppId).configurationProfileId(delProfileId).versionNumber(1).build()));
+
+            appConfig.deleteConfigurationProfile(DeleteConfigurationProfileRequest.builder()
+                    .applicationId(delAppId)
+                    .configurationProfileId(delProfileId)
+                    .build());
+            assertThrows(ResourceNotFoundException.class, () -> appConfig.getConfigurationProfile(
+                    GetConfigurationProfileRequest.builder()
+                            .applicationId(delAppId).configurationProfileId(delProfileId).build()));
+
+            String delStrategyId = appConfig.createDeploymentStrategy(CreateDeploymentStrategyRequest.builder()
+                    .name("delete-ops-strategy")
+                    .deploymentDurationInMinutes(0)
+                    .growthFactor(100f)
+                    .finalBakeTimeInMinutes(0)
+                    .build()).id();
+
+            ListDeploymentStrategiesResponse listed = appConfig.listDeploymentStrategies(
+                    ListDeploymentStrategiesRequest.builder().build());
+            assertThat(listed.items())
+                    .extracting(strategy -> strategy.id())
+                    .contains("AppConfig.AllAtOnce", "AppConfig.Linear50PercentEvery30Seconds",
+                            "AppConfig.Canary10Percent20Minutes", delStrategyId);
+
+            appConfig.deleteDeploymentStrategy(DeleteDeploymentStrategyRequest.builder()
+                    .deploymentStrategyId(delStrategyId).build());
+            assertThrows(ResourceNotFoundException.class, () -> appConfig.getDeploymentStrategy(
+                    GetDeploymentStrategyRequest.builder().deploymentStrategyId(delStrategyId).build()));
+        } finally {
+            try {
+                appConfig.deleteApplication(DeleteApplicationRequest.builder()
+                        .applicationId(delAppId).build());
+            } catch (Exception e) {
+                System.err.println("Best-effort cleanup for delete-ops-app failed: " + e.getMessage());
+            }
+        }
+    }
+
+    @Test
+    @Order(53)
+    @DisplayName("DeleteConfigurationProfile rejects a profile that belongs to a different application")
+    void deleteConfigurationProfileRejectsWrongApplication() {
+        String ownerAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name("profile-owner-app").build()).id();
+        String otherAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name("profile-other-app").build()).id();
+        try {
+            String profileId = appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
+                    .applicationId(ownerAppId)
+                    .name("owned-profile")
+                    .locationUri("hosted")
+                    .type("AWS.Freeform")
+                    .build()).id();
+
+            // Addressing the owner's profile through a DIFFERENT application's path must not
+            // delete it - only "not found", never a real cross-application deletion.
+            assertThrows(ResourceNotFoundException.class, () -> appConfig.deleteConfigurationProfile(
+                    DeleteConfigurationProfileRequest.builder()
+                            .applicationId(otherAppId).configurationProfileId(profileId).build()));
+
+            assertThat(appConfig.getConfigurationProfile(GetConfigurationProfileRequest.builder()
+                    .applicationId(ownerAppId).configurationProfileId(profileId).build()).id())
+                    .isEqualTo(profileId);
+        } finally {
+            try {
+                appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(ownerAppId).build());
+            } catch (Exception e) {
+                System.err.println("Best-effort cleanup for profile-owner-app failed: " + e.getMessage());
+            }
+            try {
+                appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(otherAppId).build());
+            } catch (Exception e) {
+                System.err.println("Best-effort cleanup for profile-other-app failed: " + e.getMessage());
+            }
+        }
+    }
+
+    @Test
+    @Order(54)
+    @DisplayName("DeleteDeploymentStrategy rejects a predefined strategy")
+    void deleteDeploymentStrategyRejectsPredefined() {
+        assertThrows(software.amazon.awssdk.services.appconfig.model.BadRequestException.class, () -> appConfig.deleteDeploymentStrategy(
+                DeleteDeploymentStrategyRequest.builder().deploymentStrategyId("AppConfig.AllAtOnce").build()));
+
+        assertThat(appConfig.getDeploymentStrategy(GetDeploymentStrategyRequest.builder()
+                .deploymentStrategyId("AppConfig.AllAtOnce").build()).id())
+                .isEqualTo("AppConfig.AllAtOnce");
     }
 }

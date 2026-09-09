@@ -1,0 +1,567 @@
+package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
+import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageResolver;
+import io.github.hectorvent.floci.services.lambda.launcher.LambdaRuntimeLauncher;
+import io.github.hectorvent.floci.services.lambda.model.ContainerState;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Typed;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * Runs each Lambda execution environment as a Kubernetes pod. Mirrors
+ * {@link ContainerLauncher}'s contract: the Runtime API server is started before the
+ * pod so the runtime connects on boot, and any launch failure after the server is
+ * allocated releases its port and reaps the half-built pod.
+ *
+ * <p>Pods reach Floci over the network only (no bind mounts, no host gateway):
+ * an init container downloads the deployment package from Floci's S3, and the
+ * runtime polls the Runtime API at the address {@link KubernetesFlociAddressResolver}
+ * advertises. Hot reload is therefore unsupported here.
+ */
+@ApplicationScoped
+@Typed(KubernetesPodLauncher.class)
+public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
+
+    private static final Logger LOG = Logger.getLogger(KubernetesPodLauncher.class);
+
+    static final String CA_CONFIG_MAP_NAME = "floci-lambda-ca";
+    static final String CA_CONFIG_MAP_KEY = "ca.crt";
+
+    /**
+     * Generous enough for a node's first pull of a multi-hundred-MB runtime image;
+     * a pod that will never run (bad image, failing init) is detected much earlier
+     * via its terminal waiting/terminated states.
+     */
+    private static final int POD_STARTUP_TIMEOUT_SECONDS = 300;
+
+    /**
+     * How long a stop waits for a deleted pod to actually disappear before giving up
+     * and keeping its Runtime API port reserved. A force delete normally clears within
+     * a second; the cap only bites when the API server or kubelet is stuck.
+     */
+    private static final int POD_DELETE_TIMEOUT_SECONDS = 15;
+
+    /**
+     * Waiting-state reasons treated as fatal for the cold start. ErrImagePull is
+     * deliberately absent: it appears on the first failed pull attempt, which the
+     * kubelet retries; only the backoff state marks repeated failures.
+     */
+    private static final Set<String> TERMINAL_WAITING_REASONS = Set.of(
+            "ImagePullBackOff", "InvalidImageName", "CrashLoopBackOff",
+            "CreateContainerError", "CreateContainerConfigError", "RunContainerError");
+
+    private final KubernetesApiClient client;
+    private final EmulatorConfig config;
+    private final RuntimeApiServerFactory runtimeApiServerFactory;
+    private final ImageResolver imageResolver;
+    private final KubernetesFlociAddressResolver addressResolver;
+    private final LaunchedContainerAwsEnv awsEnv;
+    private final LambdaLayerService layerService;
+    private final LambdaPodSpecFactory podSpecFactory;
+    private final KubernetesPodLogStreamer logStreamer;
+    private final S3Service s3Service;
+
+    private final Object orphanSweepLock = new Object();
+    private volatile boolean orphansSwept = false;
+    /** Names of pods created by this process, so a retried orphan sweep never deletes them. */
+    private final Set<String> ownPodNames = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean caConfigMapApplied = new AtomicBoolean(false);
+    private final AtomicBoolean awsConfigPathWarned = new AtomicBoolean(false);
+
+    @Inject
+    public KubernetesPodLauncher(KubernetesApiClient client,
+                                 EmulatorConfig config,
+                                 RuntimeApiServerFactory runtimeApiServerFactory,
+                                 ImageResolver imageResolver,
+                                 KubernetesFlociAddressResolver addressResolver,
+                                 LaunchedContainerAwsEnv awsEnv,
+                                 LambdaLayerService layerService,
+                                 LambdaPodSpecFactory podSpecFactory,
+                                 KubernetesPodLogStreamer logStreamer,
+                                 S3Service s3Service) {
+        this.client = client;
+        this.config = config;
+        this.runtimeApiServerFactory = runtimeApiServerFactory;
+        this.imageResolver = imageResolver;
+        this.addressResolver = addressResolver;
+        this.awsEnv = awsEnv;
+        this.layerService = layerService;
+        this.podSpecFactory = podSpecFactory;
+        this.logStreamer = logStreamer;
+        this.s3Service = s3Service;
+    }
+
+    /**
+     * Resolves the API client's connection (in-cluster or kubeconfig) on the caller's
+     * thread. Called from the startup observer so a misconfigured cluster connection
+     * fails startup instead of the first cold start.
+     */
+    public void initializeClient() {
+        client.initialize();
+        // Resolve the address pods use to reach Floci now, so the most common
+        // misconfiguration (running outside the cluster without a floci-address)
+        // fails startup instead of every later cold start.
+        addressResolver.resolve();
+    }
+
+    @Override
+    public ContainerHandle launch(LambdaFunction fn) {
+        if (fn.isHotReload()) {
+            throw new RuntimeException("Hot reload requires a bind mount and is not supported by the "
+                    + "kubernetes Lambda executor. Use the docker executor for hot-reload functions.");
+        }
+        if (config.services().lambda().awsConfigPath().filter(s -> !s.isBlank()).isPresent()
+                && awsConfigPathWarned.compareAndSet(false, true)) {
+            LOG.warn("floci.services.lambda.aws-config-path is a bind mount and is ignored by the "
+                    + "kubernetes executor; pods receive placeholder credentials instead");
+        }
+
+        var namespace = namespace();
+        sweepOrphansOnce(namespace);
+        LOG.infov("Launching pod for function: {0}", fn.getFunctionName());
+
+        var runtimeApiServer = runtimeApiServerFactory.create();
+
+        // Mirrors ContainerLauncher: any failure after the runtime-api server is allocated
+        // must release its port and delete a half-created pod, or cold-start bursts leak
+        // ports until the pool is exhausted.
+        String podName = null;
+        try {
+            var imagePackage = "Image".equals(fn.getPackageType()) && fn.getImageUri() != null;
+            // No emulated-ECR rewrite here: the kubelet pulls images, and Floci's loopback
+            // registry is not reachable from cluster nodes. URIs pass through unchanged.
+            var image = imagePackage ? fn.getImageUri() : imageResolver.resolve(fn.getRuntime());
+
+            var shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+            podName = LambdaPodSpecFactory.podName(fn.getFunctionName(), shortId);
+            var region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), config.defaultRegion());
+            var cwLogGroup = "/aws/lambda/" + fn.getFunctionName();
+            var cwLogStream = logStreamer.logStreamName(shortId);
+
+            var codeDownloadUrl = imagePackage ? null : codeDownloadUrl(fn, region);
+            var layerUrls = imagePackage ? List.<String>of() : layerDownloadUrls(fn, region);
+
+            var caConfigMap = ContainerCaBundle.hostPath(config).map(bundle -> ensureCaConfigMap(namespace, bundle));
+
+            var env = new ArrayList<String>();
+            env.add("AWS_LAMBDA_RUNTIME_API=" + addressResolver.resolve() + ":" + runtimeApiServer.getPort());
+            env.add("AWS_LAMBDA_FUNCTION_NAME=" + fn.getFunctionName());
+            env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + fn.getMemorySize());
+            env.add("AWS_LAMBDA_FUNCTION_TIMEOUT=" + fn.getTimeout());
+            env.add("AWS_LAMBDA_FUNCTION_VERSION=$LATEST");
+            env.add("AWS_LAMBDA_LOG_GROUP_NAME=" + cwLogGroup);
+            env.add("AWS_LAMBDA_LOG_STREAM_NAME=" + cwLogStream);
+            if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
+                env.add("_HANDLER=" + fn.getHandler());
+            }
+            env.addAll(awsEnv.sdkBaselineEnv(region, Optional.empty(), addressResolver.flociBaseUrl(),
+                    Optional.empty(), AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId())));
+            if (fn.getEnvironment() != null) {
+                // Same all-or-nothing rule as ContainerLauncher: this launcher never has
+                // execution-role credentials, so the function's own Environment may only supply
+                // AWS credential vars when it defines the full triad — a partial set must never
+                // join the owner-account baseline and split its credential tuple.
+                boolean userDefinesFullCredentialTriad =
+                        ContainerLauncher.definesFullCredentialTriad(fn.getEnvironment());
+                fn.getEnvironment().forEach((k, v) -> {
+                    if (!ContainerLauncher.isAwsCredentialVariable(k) || userDefinesFullCredentialTriad) {
+                        env.add(k + "=" + v);
+                    }
+                });
+            }
+
+            var imageConfig = imagePackage
+                    ? new LambdaPodSpecFactory.ImageConfig(fn.getImageConfigEntryPoint(),
+                            fn.getImageConfigCommand(), fn.getImageConfigWorkingDirectory())
+                    : null;
+
+            // After the function's own variables, so a value it sets wins, as in the docker launcher.
+            var podEnv = caConfigMap.isPresent() ? ContainerCaBundle.appendEnv(env) : env;
+            var pod = podSpecFactory.buildPod(podName, fn.getFunctionName(), image, podEnv,
+                    codeDownloadUrl, layerUrls, isProvidedRuntime(fn.getRuntime()),
+                    imagePackage ? null : fn.getHandler(), imageConfig, fn.getMemorySize(), caConfigMap);
+
+            ownPodNames.add(podName);
+            client.createPod(namespace, pod);
+            LOG.infov("Created pod {0} for function {1}", podName, fn.getFunctionName());
+
+            awaitRunning(namespace, podName, fn.getFunctionName());
+
+            var handle = new ContainerHandle(podName, fn.getFunctionName(),
+                    runtimeApiServer, ContainerState.WARM, false);
+            // Log streaming is non-essential and runs after the pod is already Running,
+            // so a failure here (e.g. a missing pods/log RBAC verb) must not tear down a
+            // healthy execution environment.
+            try {
+                var logHandle = logStreamer.attach(namespace, podName, cwLogGroup, cwLogStream,
+                        region, "lambda:" + fn.getFunctionName());
+                handle.setLogStream(logHandle);
+            } catch (Exception logFailure) {
+                LOG.warnv("Log streaming for pod {0} could not start; the environment still "
+                        + "runs but its logs will not reach CloudWatch: {1}", podName,
+                        logFailure.getMessage());
+            }
+            return handle;
+        } catch (RuntimeException e) {
+            LOG.errorv(e, "Pod launch failed for function {0}; cleaning up", fn.getFunctionName());
+            boolean podGone = podName == null || deletePod(namespace, podName);
+            // Stop the server before releasing its port number, or the still-listening
+            // Vert.x server makes the port unusable for every later cold start.
+            try {
+                runtimeApiServer.stop().get(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (Exception stopFailure) {
+                LOG.debugv("Runtime API server stop failed during launch cleanup: {0}",
+                        stopFailure.getMessage());
+            }
+            // Same rule as stop(): the port number goes back to the pool only once the pod
+            // is confirmed gone. A half-created pod that later reaches Running polls
+            // AWS_LAMBDA_RUNTIME_API on this port, and a released port could by then be
+            // serving a different environment.
+            if (podGone) {
+                try {
+                    runtimeApiServerFactory.release(runtimeApiServer);
+                } catch (Exception ignore) {
+                    LOG.debugv("Runtime API port release failed during launch cleanup: {0}", ignore.getMessage());
+                }
+            } else {
+                LOG.warnv("Keeping the Runtime API port reserved for pod {0} because its delete "
+                        + "did not succeed.", podName);
+            }
+            throw e;
+        }
+    }
+
+    @Override
+    public void stop(ContainerHandle handle) {
+        LOG.infov("Stopping pod {0}", handle.getContainerId());
+        handle.setState(ContainerState.STOPPED);
+        try {
+            handle.getRuntimeApiServer().stop().get(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException | TimeoutException | CancellationException e) {
+            // CancellationException is unchecked; catch it here so a cancelled stop future
+            // cannot skip the log-stream close, pod deletion, and port release below.
+            LOG.warnv(e, "RuntimeApiServer did not close cleanly for pod {0}", handle.getContainerId());
+        }
+        if (handle.getLogStream() != null) {
+            try {
+                handle.getLogStream().close();
+            } catch (Exception e) {
+                LOG.debugv("Closing log stream for pod {0} failed: {1}",
+                        handle.getContainerId(), e.getMessage());
+            }
+        }
+        // Return the Runtime API port to the pool only once the pod is gone. If the delete
+        // did not succeed, the pod's runtime may still be polling that port, and reusing it
+        // for another cold start could hand that runtime a different function's invocation,
+        // so keep the port reserved until a later sweep reaps the pod.
+        if (deletePod(namespace(), handle.getContainerId())) {
+            try {
+                runtimeApiServerFactory.release(handle.getRuntimeApiServer());
+            } catch (Exception e) {
+                LOG.warnv("Runtime API port release failed for pod {0}: {1}",
+                        handle.getContainerId(), e.getMessage());
+            }
+        } else {
+            LOG.warnv("Keeping the Runtime API port reserved for pod {0} because its delete "
+                    + "did not succeed.", handle.getContainerId());
+        }
+    }
+
+    @Override
+    public boolean isAlive(ContainerHandle handle) {
+        try {
+            var pod = client.getPod(namespace(), handle.getContainerId()).orElse(null);
+            return pod != null
+                    && "Running".equals(pod.path("status").path("phase").asText(null))
+                    && isAbsent(pod.path("metadata").path("deletionTimestamp"));
+        } catch (Exception e) {
+            // A missing pod comes back as empty above; reaching here means the API server
+            // itself was unreachable. Unlike docker's local socket the API server is remote,
+            // so a transient blip must not read as "dead" — that would cull the whole warm
+            // pool at once. Assume alive; a genuinely dead pod fails the next invocation.
+            LOG.warnv("Liveness probe for pod {0} could not reach the API server, assuming "
+                    + "alive: {1}", handle.getContainerId(), e.getMessage());
+            return true;
+        }
+    }
+
+    private String namespace() {
+        return config.services().lambda().kubernetes().namespace();
+    }
+
+    /**
+     * Deletes pods left behind by a previous Floci process. They can never be adopted:
+     * their runtimes poll Runtime API ports that died with that process.
+     *
+     * <p>Every launch blocks here until one sweep has succeeded; a failed sweep is
+     * retried by the next launch. Launches proceed after a failed sweep and their
+     * pods carry the same labels, so a retried sweep skips every name in
+     * {@link #ownPodNames} and deletion targets the listed pod names rather than
+     * the label selector. Both are required so a retried or concurrent sweep can
+     * never kill a fresh pod of this process.
+     */
+    private void sweepOrphansOnce(String namespace) {
+        if (orphansSwept) {
+            return;
+        }
+        synchronized (orphanSweepLock) {
+            if (orphansSwept) {
+                return;
+            }
+            try {
+                var orphans = client.listPods(namespace, LambdaPodSpecFactory.managedPodSelector()).stream()
+                        .filter(pod -> !ownPodNames.contains(pod.path("metadata").path("name").asText()))
+                        .toList();
+                if (!orphans.isEmpty()) {
+                    LOG.infov("Deleting {0} orphaned Lambda pod(s) from a previous run in namespace {1}",
+                            orphans.size(), namespace);
+                    for (var orphan : orphans) {
+                        client.deletePod(namespace, orphan.path("metadata").path("name").asText());
+                    }
+                }
+                orphansSwept = true;
+            } catch (KubernetesApiException e) {
+                if (e.getStatusCode() == 401 || e.getStatusCode() == 403) {
+                    // A permission gap never heals within this process, so stop retrying
+                    // it on every cold start; the ServiceAccount simply cannot sweep.
+                    LOG.warnv("Orphaned Lambda pod sweep is not permitted in namespace {0} "
+                            + "(the ServiceAccount lacks pod list/delete); skipping it for this "
+                            + "process: {1}", namespace, e.getMessage());
+                    orphansSwept = true;
+                } else {
+                    LOG.warnv("Orphaned Lambda pod sweep failed in namespace {0} and will be "
+                            + "retried on the next launch: {1}", namespace, e.getMessage());
+                }
+            } catch (Exception e) {
+                LOG.warnv("Orphaned Lambda pod sweep failed in namespace {0} and will be retried "
+                        + "on the next launch: {1}", namespace, e.getMessage());
+            }
+        }
+    }
+
+    private String codeDownloadUrl(LambdaFunction fn, String region) {
+        var bucket = LambdaService.tasksBucketName(region);
+        var key = LambdaService.codeObjectKey(fn);
+        try {
+            s3Service.headObject(bucket, key);
+        } catch (AwsException e) {
+            throw new RuntimeException("Deployment package for function '" + fn.getFunctionName()
+                    + "' is not available at s3://" + bucket + "/" + key
+                    + " — the kubernetes executor downloads code from Floci's S3, and the copy "
+                    + "stored at deploy time is missing. Re-deploy the function code.", e);
+        }
+        var account = fn.getAccountId() != null ? fn.getAccountId() : config.defaultAccountId();
+        return downloadUrl(bucket, key, account, region);
+    }
+
+    private List<String> layerDownloadUrls(LambdaFunction fn, String functionRegion) {
+        if (fn.getLayers() == null || fn.getLayers().isEmpty()) {
+            return List.of();
+        }
+        var urls = new ArrayList<String>();
+        for (var layerArn : fn.getLayers()) {
+            var layer = layerService.resolveLayerByArn(layerArn);
+            if (layer == null) {
+                LOG.warnv("Could not resolve layer ARN {0} for function {1}", layerArn, fn.getFunctionName());
+                continue;
+            }
+            // The archive lives under the layer's own region and account (the canonical
+            // ARN assigned at publish), which may differ from the function's.
+            var arn = layer.getLayerVersionArn();
+            var layerRegion = AwsArnUtils.regionOrDefault(arn, functionRegion);
+            var account = AwsArnUtils.accountOrDefault(arn, config.defaultAccountId());
+            var bucket = LambdaService.tasksBucketName(layerRegion);
+            var key = LambdaService.layerObjectKey(account, layer.getLayerName(), layer.getVersion());
+            try {
+                s3Service.headObject(bucket, key);
+            } catch (AwsException e) {
+                throw new RuntimeException("Layer zip for '" + layerArn + "' is not available at s3://"
+                        + bucket + "/" + key + " — layers published before kubernetes executor support "
+                        + "have no stored archive. Re-publish the layer version.", e);
+            }
+            urls.add(downloadUrl(bucket, key, account, layerRegion));
+        }
+        return urls;
+    }
+
+    /**
+     * Download URL for a tasks-bucket object. The init container fetches it over plain
+     * HTTP with no SigV4 header, so an {@code X-Amz-Credential} query steers Floci's
+     * account filter to the object's owning account. Without it a function or layer
+     * owned by a non-default account resolves the default-account prefix and 404s. A
+     * 12-digit account id doubles as its own access key id (LocalStack convention).
+     */
+    private String downloadUrl(String bucket, String key, String account, String region) {
+        return addressResolver.downloadBaseUrl() + "/" + bucket + "/"
+                + LambdaService.encodeObjectPath(key)
+                + "?X-Amz-Credential=" + account + "%2F00010101%2F" + region + "%2Fs3%2Faws4_request";
+    }
+
+    private void awaitRunning(String namespace, String podName, String functionName) {
+        var timeoutSeconds = POD_STARTUP_TIMEOUT_SECONDS;
+        JsonNode pod;
+        try {
+            // A missing pod (deleted out-of-band) is terminal too, otherwise the wait
+            // would block the invocation for the full timeout.
+            pod = client.waitForPod(namespace, podName,
+                    p -> p == null || isRunning(p) || hasTerminalFailure(p), timeoutSeconds);
+        } catch (Exception e) {
+            throw new RuntimeException("Pod " + podName + " for function '" + functionName
+                    + "' did not reach Running within " + timeoutSeconds + "s: " + e.getMessage(), e);
+        }
+        if (pod == null || !isRunning(pod)) {
+            throw new RuntimeException("Pod " + podName + " for function '" + functionName
+                    + "' failed to start: " + describeFailure(pod));
+        }
+    }
+
+    private static boolean isRunning(JsonNode pod) {
+        return "Running".equals(pod.path("status").path("phase").asText(null));
+    }
+
+    private static boolean hasTerminalFailure(JsonNode pod) {
+        var phase = pod.path("status").path("phase").asText(null);
+        // Succeeded means the runtime exited before serving — terminal for a server pod.
+        if ("Failed".equals(phase) || "Succeeded".equals(phase)) {
+            return true;
+        }
+        return unschedulableReason(pod) != null || describeTerminalReason(pod) != null;
+    }
+
+    private static String unschedulableReason(JsonNode pod) {
+        for (var condition : pod.path("status").path("conditions")) {
+            // A pod the scheduler cannot place — e.g. a memory request above every node's
+            // capacity — stays Pending with no container statuses; fail the cold start
+            // instead of blocking the invoker for the full startup timeout.
+            if ("PodScheduled".equals(condition.path("type").asText(null))
+                    && "False".equals(condition.path("status").asText(null))
+                    && "Unschedulable".equals(condition.path("reason").asText(null))) {
+                return "Unschedulable: " + condition.path("message").asText("");
+            }
+        }
+        return null;
+    }
+
+    private static String describeTerminalReason(JsonNode pod) {
+        for (var statuses : List.of(pod.path("status").path("initContainerStatuses"),
+                pod.path("status").path("containerStatuses"))) {
+            for (var status : statuses) {
+                var waiting = status.path("state").path("waiting");
+                var waitingReason = waiting.path("reason").asText(null);
+                // A missing reason must never match; Set.of(...).contains(null) throws,
+                // which would abort an otherwise healthy cold start.
+                if (waitingReason != null && TERMINAL_WAITING_REASONS.contains(waitingReason)) {
+                    return status.path("name").asText() + ": " + waitingReason
+                            + " (" + waiting.path("message").asText("") + ")";
+                }
+                var exitCode = status.path("state").path("terminated").path("exitCode");
+                if (!exitCode.isMissingNode() && exitCode.asInt() != 0) {
+                    return status.path("name").asText() + ": exited with code " + exitCode.asInt();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String describeFailure(JsonNode pod) {
+        if (pod == null || pod.path("status").isMissingNode()) {
+            return "pod no longer exists";
+        }
+        var reason = describeTerminalReason(pod);
+        if (reason == null) {
+            reason = unschedulableReason(pod);
+        }
+        return reason != null ? reason : "phase=" + pod.path("status").path("phase").asText("unknown");
+    }
+
+    private static boolean isAbsent(JsonNode node) {
+        return node.isMissingNode() || node.isNull();
+    }
+
+    /**
+     * Publishes the CA bundle as a ConfigMap so pods can trust Floci's HTTPS endpoint and still
+     * reach public HTTPS. Applied once per process; the bundle is written at boot and does not
+     * change within a Floci lifetime.
+     */
+    private String ensureCaConfigMap(String namespace, Path bundle) {
+        if (caConfigMapApplied.get()) {
+            return CA_CONFIG_MAP_NAME;
+        }
+        try {
+            var pem = Files.readString(bundle);
+            var nodes = JsonNodeFactory.instance;
+            var labels = nodes.objectNode();
+            LambdaPodSpecFactory.managedPodSelector().forEach(labels::put);
+            var metadata = nodes.objectNode().put("name", CA_CONFIG_MAP_NAME);
+            metadata.set("labels", labels);
+            var configMap = nodes.objectNode().put("apiVersion", "v1").put("kind", "ConfigMap");
+            configMap.set("metadata", metadata);
+            configMap.set("data", nodes.objectNode().put(CA_CONFIG_MAP_KEY, pem));
+            client.createOrUpdateConfigMap(namespace, configMap);
+            caConfigMapApplied.set(true);
+            return CA_CONFIG_MAP_NAME;
+        } catch (Exception e) {
+            throw new RuntimeException("Could not publish the Floci CA bundle ConfigMap '" + CA_CONFIG_MAP_NAME
+                    + "' in namespace " + namespace + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Force-deletes the pod and waits for it to actually disappear. Returns whether the
+     * pod is confirmed gone: only then is it safe to reuse resources tied to it (its
+     * Runtime API port), because until the object vanishes the runtime container may
+     * still be polling that port. A rejected delete or a wait that times out returns
+     * false so the caller keeps the port reserved.
+     */
+    private boolean deletePod(String namespace, String podName) {
+        // Dropped from the own-pod set even when the delete fails: the pod is
+        // abandoned either way, and a retried orphan sweep may still collect it.
+        ownPodNames.remove(podName);
+        try {
+            client.deletePod(namespace, podName);
+            client.waitForPod(namespace, podName, pod -> pod == null, POD_DELETE_TIMEOUT_SECONDS);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Pod {0} was not confirmed deleted within {1}s: {2}",
+                    podName, POD_DELETE_TIMEOUT_SECONDS, e.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean isProvidedRuntime(String runtime) {
+        return runtime != null && runtime.startsWith("provided");
+    }
+}
