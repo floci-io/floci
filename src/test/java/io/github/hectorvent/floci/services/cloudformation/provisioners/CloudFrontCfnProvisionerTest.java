@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -188,6 +189,71 @@ class CloudFrontCfnProvisionerTest {
         verify(cloudFront, never()).updateResponseHeadersPolicy(any(), any(), any());
         assertEquals("new-id", r.getPhysicalId());
         assertEquals("new-id", r.getAttributes().get("Id"));
+    }
+
+    @Test
+    void rollingBackARecreationDeletesTheReplacementAndRestoresThePriorId() throws Exception {
+        // The engine's update rollback only deletes resources the update ADDED; a resource that
+        // already existed and merely acquired a new physical id reached the "Rollback is not
+        // implemented" arm, which deletes nothing, so the recreated policy stayed behind.
+        when(cloudFront.getResponseHeadersPolicy(ID)).thenThrow(new AwsException(
+                "NoSuchResponseHeadersPolicy", "The specified response headers policy does not exist.", 404));
+        when(cloudFront.createResponseHeadersPolicy(any()))
+                .thenAnswer(inv -> withIdentity(inv.<ResponseHeadersPolicy>getArgument(0), p -> {
+                    p.setId("new-id");
+                    p.setEtag(ETAG);
+                    p.setLastModifiedTime(MODIFIED);
+                }));
+        StackResource r = resource(RESPONSE_HEADERS_POLICY, ID, Map.of("Id", ID, "LastModifiedTime", "old-time"));
+        provisioner.provision(r, json("""
+                {"ResponseHeadersPolicyConfig": {"Name": "policy"}}
+                """), ctx(ID));
+        assertEquals("new-id", r.getPhysicalId());
+        when(cloudFront.getResponseHeadersPolicy("new-id")).thenReturn(responseHeadersPolicy("new-id", ETAG));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(cloudFront).deleteResponseHeadersPolicy("new-id", ETAG);
+        assertEquals(ID, r.getPhysicalId(), "the prior id is named again");
+        assertEquals(ID, r.getAttributes().get("Id"));
+        assertEquals("old-time", r.getAttributes().get("LastModifiedTime"));
+    }
+
+    @Test
+    void rollingBackAnInPlaceUpdateReportsNotRolledBack() {
+        // Deliberate and unchanged: an in-place update keeps the physical id, so nothing is
+        // recorded to undo, and putting the committed change back would need a configuration
+        // snapshot this provisioner does not keep. Same limitation as AWS::Cognito::UserPool.
+        StackResource r = resource(CACHE_POLICY, ID, Map.of("Id", ID));
+
+        assertFalse(provisioner.rollbackUpdate(r));
+
+        verify(cloudFront, never()).deleteCachePolicy(any(), any());
+    }
+
+    @Test
+    void aRecreationOwesCleanupForThePriorEntityAndToleratesItBeingGone() throws Exception {
+        // The recorded displaced entity is always one the service already forgot, since prior()
+        // returns the object whenever it exists. The cleanup still has to run so the record is
+        // cleared rather than left owed forever.
+        when(cloudFront.getCachePolicy(ID)).thenThrow(
+                new AwsException("NoSuchCachePolicy", "The specified cache policy does not exist.", 404));
+        when(cloudFront.createCachePolicy(any()))
+                .thenAnswer(inv -> withIdentity(inv.<CachePolicy>getArgument(0), p -> {
+                    p.setId("new-id");
+                    p.setEtag(ETAG);
+                    p.setLastModifiedTime(MODIFIED);
+                }));
+        StackResource r = resource(CACHE_POLICY, ID, Map.of("Id", ID));
+
+        provisioner.provision(r, json("""
+                {"CachePolicyConfig": {"Name": "policy"}}
+                """), ctx(ID));
+
+        assertTrue(provisioner.hasReplacementUpdate(r), "the prior entity is owed a cleanup");
+        assertEquals(ID, provisioner.updateCleanupPhysicalId(r));
+        provisioner.completeUpdate(r);
+        assertFalse(provisioner.hasReplacementUpdate(r), "the record is cleared once the cleanup ran");
     }
 
     @Test

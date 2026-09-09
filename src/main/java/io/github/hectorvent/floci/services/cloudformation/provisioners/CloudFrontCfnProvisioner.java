@@ -72,6 +72,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
             case RESPONSE_HEADERS_POLICY -> provisionResponseHeadersPolicy(r, props, ctx);
             case CACHE_POLICY -> provisionCachePolicy(r, props, ctx);
@@ -79,6 +80,51 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             case ORIGIN_ACCESS_CONTROL -> provisionOriginAccessControl(r, props, ctx);
             default -> throw new IllegalArgumentException("Unsupported resource type: " + r.getResourceType());
         }
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /**
+     * The physical id only changes here when the prior object was already gone: {@code prior}
+     * returns the entity whenever the service still knows it, so an update either mutates that
+     * entity in place under the same id or recreates a missing one under a new id. The entity
+     * {@link ReplacementCleanup} records as displaced is therefore always one that no longer
+     * exists, and the delete these hooks run for it is a no-op tolerated by its not-found code.
+     * They are still needed: without them a recorded entity would never leave the cleanup list.
+     */
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    /**
+     * Undoes a recreation when a later resource fails the stack update: the resource names the
+     * prior id again with the attributes it carried, and the object this update created is
+     * deleted. Without this the engine reached its "Rollback is not implemented" arm, which never
+     * deletes, so the replacement stayed behind.
+     *
+     * <p>An in-place update leaves the physical id unchanged, so no rollback fields are recorded
+     * and this answers false. Putting a committed in-place change back needs a configuration
+     * snapshot this provisioner does not keep, so that case still reports as not rolled back, as
+     * it does for {@code AWS::Cognito::UserPool}.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return ReplacementCleanup.rollback(resource, this::delete);
     }
 
     @Override
