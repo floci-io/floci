@@ -34,6 +34,7 @@ public class DynamoDbStreamService {
 
     public static final String SHARD_ID = "shardId-0000000001-00000000001";
     static final int MAX_RECORDS = 1000;
+    private static final String ZERO_SEQUENCE_NUMBER = "000000000000000000000";
 
     private static final DateTimeFormatter STREAM_LABEL_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
@@ -235,23 +236,29 @@ public class DynamoDbStreamService {
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
         List<DynamoDbStreamRecord> snapshot = deque != null ? new ArrayList<>(deque) : List.of();
 
-        int position = switch (iteratorType) {
-            case "TRIM_HORIZON" -> 0;
-            case "LATEST" -> snapshot.size();
-            case "AT_SEQUENCE_NUMBER" -> findSequencePosition(snapshot, sequenceNumber, false);
-            case "AFTER_SEQUENCE_NUMBER" -> findSequencePosition(snapshot, sequenceNumber, true);
+        String cursorSequence = switch (iteratorType) {
+            case "TRIM_HORIZON" -> snapshot.isEmpty() ? zeroSequence() : snapshot.get(0).getSequenceNumber();
+            case "LATEST" -> snapshot.isEmpty() ? zeroSequence() : snapshot.get(snapshot.size() - 1).getSequenceNumber();
+            case "AT_SEQUENCE_NUMBER", "AFTER_SEQUENCE_NUMBER" -> {
+                if (sequenceNumber == null || sequenceNumber.isBlank()) {
+                    throw new AwsException("ValidationException",
+                            "Sequence number is required for this iterator type", 400);
+                }
+                yield sequenceNumber;
+            }
             default -> throw new AwsException("ValidationException",
                     "Unknown iterator type: " + iteratorType, 400);
         };
 
-        return encodeIterator(streamArn, position);
+        boolean inclusive = "TRIM_HORIZON".equals(iteratorType) || "AT_SEQUENCE_NUMBER".equals(iteratorType);
+        return encodeIterator(streamArn, cursorSequence, inclusive);
     }
 
-    private int findSequencePosition(List<DynamoDbStreamRecord> records, String targetSeq, boolean after) {
+    private int findSequencePosition(List<DynamoDbStreamRecord> records, String targetSeq, boolean inclusive) {
         for (int i = 0; i < records.size(); i++) {
             String seq = records.get(i).getSequenceNumber();
             int cmp = seq.compareTo(targetSeq);
-            if (after ? cmp > 0 : cmp >= 0) {
+            if (inclusive ? cmp >= 0 : cmp > 0) {
                 return i;
             }
         }
@@ -263,26 +270,31 @@ public class DynamoDbStreamService {
     public GetRecordsResult getRecords(String shardIterator, Integer limit) {
         String[] parts = decodeIterator(shardIterator);
         String streamArn = parts[0];
-        int position;
-        try {
-            position = Integer.parseInt(parts[1]);
-        } catch (NumberFormatException e) {
-            throw new AwsException("ValidationException", "Invalid shard iterator", 400);
-        }
+        String cursorSequence = parts[1];
+        boolean inclusive = Boolean.parseBoolean(parts[2]);
 
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
         List<DynamoDbStreamRecord> snapshot = deque != null ? new ArrayList<>(deque) : List.of();
+        int position = findSequencePosition(snapshot, cursorSequence, inclusive);
+        if (!snapshot.isEmpty() && !zeroSequence().equals(cursorSequence)
+                && cursorSequence.compareTo(snapshot.get(0).getSequenceNumber()) < 0) {
+            throw new AwsException("TrimmedDataAccessException",
+                    "The requested sequence number has been trimmed", 400);
+        }
 
         int effectiveLimit = limit != null ? limit : 100;
         int end = Math.min(position + effectiveLimit, snapshot.size());
         List<DynamoDbStreamRecord> page = snapshot.subList(position, end);
 
-        String nextIterator = encodeIterator(streamArn, end);
+        String nextSequence = page.isEmpty()
+                ? cursorSequence
+                : page.get(page.size() - 1).getSequenceNumber();
+        String nextIterator = encodeIterator(streamArn, nextSequence, page.isEmpty() && inclusive);
         return new GetRecordsResult(new ArrayList<>(page), nextIterator);
     }
 
-    private String encodeIterator(String streamArn, int position) {
-        String raw = streamArn + "|" + position;
+    private String encodeIterator(String streamArn, String sequenceNumber, boolean inclusive) {
+        String raw = streamArn + "|" + sequenceNumber + "|" + inclusive;
         return Base64.getEncoder().encodeToString(raw.getBytes());
     }
 
@@ -290,13 +302,22 @@ public class DynamoDbStreamService {
         try {
             String raw = new String(Base64.getDecoder().decode(iterator));
             int lastPipe = raw.lastIndexOf('|');
-            if (lastPipe < 0) {
+            int sequencePipe = raw.lastIndexOf('|', lastPipe - 1);
+            if (sequencePipe < 0 || lastPipe < 0 || lastPipe == raw.length() - 1) {
                 throw new AwsException("ValidationException", "Invalid shard iterator", 400);
             }
-            return new String[]{raw.substring(0, lastPipe), raw.substring(lastPipe + 1)};
+            String inclusive = raw.substring(lastPipe + 1);
+            if (!"true".equals(inclusive) && !"false".equals(inclusive)) {
+                throw new AwsException("ValidationException", "Invalid shard iterator", 400);
+            }
+            return new String[]{raw.substring(0, sequencePipe), raw.substring(sequencePipe + 1, lastPipe), inclusive};
         } catch (IllegalArgumentException e) {
             throw new AwsException("ValidationException", "Invalid shard iterator", 400);
         }
+    }
+
+    private String zeroSequence() {
+        return ZERO_SEQUENCE_NUMBER;
     }
 
     private String streamKey(String region, String tableName) {
