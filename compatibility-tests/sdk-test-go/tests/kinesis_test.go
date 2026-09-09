@@ -43,11 +43,13 @@ func TestKinesis(t *testing.T) {
 	t.Run("DescribeStream", func(t *testing.T) {
 		r, err := svc.DescribeStream(ctx, &kinesis.DescribeStreamInput{StreamName: aws.String(streamName)})
 		require.NoError(t, err)
+		require.NotNil(t, r.StreamDescription)
 		assert.Equal(t, kinesistypes.StreamStatusActive, r.StreamDescription.StreamStatus)
-		if len(r.StreamDescription.Shards) > 0 {
-			shardID = aws.ToString(r.StreamDescription.Shards[0].ShardId)
-		}
+		require.NotEmpty(t, r.StreamDescription.Shards)
+		shardID = aws.ToString(r.StreamDescription.Shards[0].ShardId)
+		require.NotEmpty(t, shardID)
 		streamARN = aws.ToString(r.StreamDescription.StreamARN)
+		require.NotEmpty(t, streamARN)
 	})
 
 	t.Run("PutRecord", func(t *testing.T) {
