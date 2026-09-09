@@ -69,11 +69,12 @@ class CloudTrailLogWriterRequeueTest {
         when(mockService.trailsWithPendingRecords())
                 .thenAnswer(inv -> pending.isEmpty() ? List.of() : List.of(key));
         when(mockService.getTrail(region, trailName)).thenReturn(trail);
-        when(mockService.drainPendingRecords(key)).thenAnswer(inv -> {
-            List<ObjectNode> drained = new ArrayList<>(pending);
-            pending.clear();
-            return drained;
-        });
+        when(mockService.drainPendingRecords(eq(key), eq(CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE)))
+                .thenAnswer(inv -> {
+                    List<ObjectNode> drained = new ArrayList<>(pending);
+                    pending.clear();
+                    return drained;
+                });
         doAnswer(inv -> {
             List<ObjectNode> records = inv.getArgument(1);
             pending.addAll(records);

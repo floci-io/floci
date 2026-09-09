@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -49,6 +49,7 @@ public class CloudTrailLogWriter {
 
     private static final DateTimeFormatter PATH_DATE = DateTimeFormatter.ofPattern("yyyy/MM/dd");
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmm'Z'");
+    static final int MAX_RECORDS_PER_LOG_FILE = 1_000;
     private static final String FILENAME_RAND_ALPHABET =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -129,7 +130,7 @@ public class CloudTrailLogWriter {
             return;
         }
 
-        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key);
+        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE);
         if (records.isEmpty()) {
             return;
         }
@@ -184,16 +185,18 @@ public class CloudTrailLogWriter {
     }
 
     private byte[] serializeAndGzip(List<ObjectNode> records) {
-        ObjectNode envelope = mapper.createObjectNode();
-        ArrayNode arr = envelope.putArray("Records");
-        for (ObjectNode r : records) {
-            arr.add(r);
-        }
         try {
-            byte[] json = mapper.writeValueAsBytes(envelope);
-            ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(64, json.length / 4));
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
             try (GZIPOutputStream gz = new GZIPOutputStream(baos)) {
-                gz.write(json);
+                try (JsonGenerator generator = mapper.getFactory().createGenerator(gz)) {
+                    generator.writeStartObject();
+                    generator.writeArrayFieldStart("Records");
+                    for (ObjectNode record : records) {
+                        generator.writeTree(record);
+                    }
+                    generator.writeEndArray();
+                    generator.writeEndObject();
+                }
             }
             return baos.toByteArray();
         } catch (Exception e) {
