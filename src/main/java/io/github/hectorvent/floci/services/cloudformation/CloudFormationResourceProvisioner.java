@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
-import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
@@ -194,9 +193,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::ApiGatewayV2::Stage",
             "AWS::AutoScaling::AutoScalingGroup",
             "AWS::AutoScaling::LaunchConfiguration",
-            "AWS::Batch::ComputeEnvironment",
-            "AWS::Batch::JobDefinition",
-            "AWS::Batch::JobQueue",
             "AWS::CloudFormation::CustomResource",
             "AWS::CloudFront::Distribution",
             "AWS::DynamoDB::GlobalTable",
@@ -246,7 +242,6 @@ public class CloudFormationResourceProvisioner {
     private final CustomResourceResponseStore customResourceResponseStore;
     private final ContainerReachableEndpoint reachableEndpoint;
     private final StepFunctionsService stepFunctionsService;
-    private final BatchService batchService;
     private final Ec2Service ec2Service;
     private final RdsService rdsService;
     private final EksService eksService;
@@ -275,7 +270,6 @@ public class CloudFormationResourceProvisioner {
                                              CustomResourceResponseStore customResourceResponseStore,
                                              ContainerReachableEndpoint reachableEndpoint,
                                              StepFunctionsService stepFunctionsService,
-                                             BatchService batchService,
                                              Ec2Service ec2Service,
                                              RdsService rdsService,
                                              EksService eksService,
@@ -302,7 +296,6 @@ public class CloudFormationResourceProvisioner {
         this.customResourceResponseStore = customResourceResponseStore;
         this.reachableEndpoint = reachableEndpoint;
         this.stepFunctionsService = stepFunctionsService;
-        this.batchService = batchService;
         this.ec2Service = ec2Service;
         this.rdsService = rdsService;
         this.eksService = eksService;
@@ -391,12 +384,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
                 case "Custom::DynamoDBReplica" -> provisionDynamoDbReplica(resource, properties, engine, region);
-                case "AWS::Batch::ComputeEnvironment" ->
-                        provisionBatchComputeEnvironment(resource, properties, engine, region, stackName);
-                case "AWS::Batch::JobQueue" ->
-                        provisionBatchJobQueue(resource, properties, engine, region, stackName);
-                case "AWS::Batch::JobDefinition" ->
-                        provisionBatchJobDefinition(resource, properties, engine, region, stackName);
                 // EC2 networking. These delegate to Ec2Service so the resources actually exist
                 // (describe-subnets, ELBv2, etc. can find them) instead of being stubbed with a
                 // fake physical id. Topological ordering guarantees parents are provisioned first.
@@ -3404,158 +3391,6 @@ public class CloudFormationResourceProvisioner {
         return password;
     }
 
-
-    // ── Batch ────────────────────────────────────────────────────────────────
-
-    private void provisionBatchComputeEnvironment(StackResource r, JsonNode props,
-                                                  CloudFormationTemplateEngine engine,
-                                                  String region, String stackName) {
-        String name = resolveOptional(props, "ComputeEnvironmentName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("computeEnvironmentName", name);
-        putResolvedText(req, "type", props, "Type", engine);
-        putResolvedText(req, "state", props, "State", engine);
-        putResolvedText(req, "serviceRole", props, "ServiceRole", engine);
-        putResolvedObject(req, "computeResources", props, "ComputeResources", engine);
-        putTagsObject(req, props, engine);
-
-        ObjectNode response = batchService.createComputeEnvironment(req, region);
-        String arn = response.path("computeEnvironmentArn").asText();
-        r.setPhysicalId(arn);
-        r.getAttributes().put("Arn", arn);
-        r.getAttributes().put("ComputeEnvironmentArn", arn);
-        r.getAttributes().put("ComputeEnvironmentName", name);
-    }
-
-    private void provisionBatchJobQueue(StackResource r, JsonNode props,
-                                        CloudFormationTemplateEngine engine,
-                                        String region, String stackName) {
-        String name = resolveOptional(props, "JobQueueName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("jobQueueName", name);
-        String priority = resolveOptional(props, "Priority", engine);
-        req.put("priority", priority != null ? Integer.parseInt(priority) : 1);
-        putResolvedText(req, "state", props, "State", engine);
-        putResolvedText(req, "jobQueueType", props, "JobQueueType", engine);
-        req.set("computeEnvironmentOrder", batchComputeEnvironmentOrder(props, engine));
-        putTagsObject(req, props, engine);
-
-        ObjectNode response = batchService.createJobQueue(req, region);
-        String arn = response.path("jobQueueArn").asText();
-        r.setPhysicalId(arn);
-        r.getAttributes().put("Arn", arn);
-        r.getAttributes().put("JobQueueArn", arn);
-        r.getAttributes().put("JobQueueName", name);
-    }
-
-    private void provisionBatchJobDefinition(StackResource r, JsonNode props,
-                                             CloudFormationTemplateEngine engine,
-                                             String region, String stackName) {
-        String name = resolveOptional(props, "JobDefinitionName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("jobDefinitionName", name);
-        req.put("type", resolveOrDefault(props, "Type", engine, "container"));
-        putResolvedArray(req, "platformCapabilities", props, "PlatformCapabilities", engine);
-        if (props != null && props.has("ContainerProperties")) {
-            req.set("containerProperties", batchContainerProperties(
-                    engine.resolveNode(props.get("ContainerProperties")), engine));
-        }
-        putStringMapFromObject(req, "parameters", props, "Parameters", engine);
-        if (props != null && props.has("RetryStrategy")) {
-            req.set("retryStrategy", batchRetryStrategy(engine.resolveNode(props.get("RetryStrategy"))));
-        }
-        if (props != null && props.has("Timeout")) {
-            ObjectNode timeout = JsonNodeFactory.instance.objectNode();
-            JsonNode resolved = engine.resolveNode(props.get("Timeout"));
-            if (resolved.has("AttemptDurationSeconds")) {
-                timeout.set("attemptDurationSeconds", resolved.get("AttemptDurationSeconds"));
-            }
-            req.set("timeout", timeout);
-        }
-        putTagsObject(req, props, engine);
-
-        ObjectNode response = batchService.registerJobDefinition(req, region);
-        String arn = response.path("jobDefinitionArn").asText();
-        r.setPhysicalId(arn);
-        r.getAttributes().put("Arn", arn);
-        r.getAttributes().put("JobDefinitionArn", arn);
-        r.getAttributes().put("JobDefinitionName", name);
-        r.getAttributes().put("Revision", response.path("revision").asText());
-    }
-
-    private ArrayNode batchComputeEnvironmentOrder(JsonNode props, CloudFormationTemplateEngine engine) {
-        ArrayNode out = JsonNodeFactory.instance.arrayNode();
-        if (props == null || !props.has("ComputeEnvironmentOrder")) {
-            return out;
-        }
-        JsonNode resolved = engine.resolveNode(props.get("ComputeEnvironmentOrder"));
-        if (!resolved.isArray()) {
-            return out;
-        }
-        for (JsonNode item : resolved) {
-            ObjectNode order = out.addObject();
-            order.put("order", item.path("Order").asInt());
-            order.put("computeEnvironment", item.path("ComputeEnvironment").asText(null));
-        }
-        return out;
-    }
-
-    private ObjectNode batchContainerProperties(JsonNode resolved, CloudFormationTemplateEngine engine) {
-        ObjectNode container = JsonNodeFactory.instance.objectNode();
-        if (resolved == null || !resolved.isObject()) {
-            return container;
-        }
-        copyIfPresent(container, "image", resolved, "Image");
-        copyIfPresent(container, "command", resolved, "Command");
-        copyIfPresent(container, "jobRoleArn", resolved, "JobRoleArn");
-        copyIfPresent(container, "executionRoleArn", resolved, "ExecutionRoleArn");
-        copyIfPresent(container, "logConfiguration", resolved, "LogConfiguration");
-        copyIfPresent(container, "networkConfiguration", resolved, "NetworkConfiguration");
-        copyIfPresent(container, "ephemeralStorage", resolved, "EphemeralStorage");
-        if (resolved.has("ResourceRequirements") && resolved.get("ResourceRequirements").isArray()) {
-            ArrayNode resources = container.putArray("resourceRequirements");
-            for (JsonNode item : resolved.get("ResourceRequirements")) {
-                ObjectNode requirement = resources.addObject();
-                requirement.put("type", item.path("Type").asText(null));
-                requirement.put("value", item.path("Value").asText(null));
-            }
-        }
-        if (resolved.has("Environment") && resolved.get("Environment").isArray()) {
-            ArrayNode env = container.putArray("environment");
-            for (JsonNode item : resolved.get("Environment")) {
-                ObjectNode entry = env.addObject();
-                entry.put("name", item.path("Name").asText(null));
-                entry.put("value", item.path("Value").asText(null));
-            }
-        }
-        return container;
-    }
-
-    private ObjectNode batchRetryStrategy(JsonNode resolved) {
-        ObjectNode retry = JsonNodeFactory.instance.objectNode();
-        if (resolved == null || !resolved.isObject()) {
-            return retry;
-        }
-        if (resolved.has("Attempts")) {
-            retry.set("attempts", resolved.get("Attempts"));
-        }
-        if (resolved.has("EvaluateOnExit")) {
-            retry.set("evaluateOnExit", resolved.get("EvaluateOnExit"));
-        }
-        return retry;
-    }
 
     private void putResolvedText(ObjectNode req, String target, JsonNode props, String source,
                                  CloudFormationTemplateEngine engine) {

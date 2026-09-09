@@ -21,9 +21,9 @@ AWS::AutoScaling::LaunchConfiguration	LEGACY_SWITCH
 AWS::AutoScaling::LifecycleHook	AutoScalingLifecycleHookCfnProvisioner
 AWS::AutoScaling::ScalingPolicy	AutoScalingScalingPolicyCfnProvisioner
 AWS::Backup::BackupVault	BackupVaultCfnProvisioner
-AWS::Batch::ComputeEnvironment	LEGACY_SWITCH
-AWS::Batch::JobDefinition	LEGACY_SWITCH
-AWS::Batch::JobQueue	LEGACY_SWITCH
+AWS::Batch::ComputeEnvironment	BatchCfnProvisioner
+AWS::Batch::JobDefinition	BatchCfnProvisioner
+AWS::Batch::JobQueue	BatchCfnProvisioner
 AWS::CDK::Metadata	CdkMetadataCfnProvisioner
 AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	LEGACY_SWITCH

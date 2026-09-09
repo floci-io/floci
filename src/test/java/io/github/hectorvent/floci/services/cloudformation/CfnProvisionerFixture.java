@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.BatchCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
@@ -305,6 +306,9 @@ final class CfnProvisionerFixture {
             }
             if (eventBridgeService != null) {
                 discovered.add(new EventsCfnProvisioner(eventBridgeService));
+            }
+            if (batchService != null) {
+                discovered.add(new BatchCfnProvisioner(batchService));
             }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));
@@ -607,7 +611,6 @@ final class CfnProvisionerFixture {
                     customResourceResponseStore,
                     reachableEndpoint,
                     stepFunctionsService,
-                    batchService,
                     ec2Service,
                     rdsService,
                     eksService,
