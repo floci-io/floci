@@ -300,7 +300,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new BackupVaultCfnProvisioner(backupService));
             }
             if (eventBridgeService != null) {
-                discovered.add(new EventsCfnProvisioner(eventBridgeService, objectMapper));
+                discovered.add(new EventsCfnProvisioner(eventBridgeService));
             }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));

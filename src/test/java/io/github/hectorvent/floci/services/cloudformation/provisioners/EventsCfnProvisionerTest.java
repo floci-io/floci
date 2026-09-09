@@ -40,7 +40,7 @@ class EventsCfnProvisionerTest {
 
     private final EventBridgeService events = mock(EventBridgeService.class);
     private final ObjectMapper mapper = new ObjectMapper();
-    private final EventsCfnProvisioner provisioner = new EventsCfnProvisioner(events, mapper);
+    private final EventsCfnProvisioner provisioner = new EventsCfnProvisioner(events);
 
     private ProvisionContext ctx(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);

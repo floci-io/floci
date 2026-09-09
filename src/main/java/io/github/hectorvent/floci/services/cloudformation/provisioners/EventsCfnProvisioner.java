@@ -46,6 +46,7 @@ import java.util.regex.Pattern;
 public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(EventsCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
@@ -58,12 +59,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private static final int STATEMENT_ID_MAX_LENGTH = 64;
 
     private final EventBridgeService eventBridgeService;
-    private final ObjectMapper objectMapper;
 
     @Inject
-    public EventsCfnProvisioner(EventBridgeService eventBridgeService, ObjectMapper objectMapper) {
+    public EventsCfnProvisioner(EventBridgeService eventBridgeService) {
         this.eventBridgeService = eventBridgeService;
-        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -211,11 +210,11 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      * handed the stack resource alone, and those three are how targets are addressed.
      */
     private void snapshotTargetsBeforeUpdate(StackResource r, String ruleName, String busName, String region) {
-        ObjectNode snapshot = objectMapper.createObjectNode();
+        ObjectNode snapshot = MAPPER.createObjectNode();
         snapshot.put("ruleName", ruleName);
         snapshot.put("busName", busName);
         snapshot.put("region", region);
-        snapshot.set("targets", objectMapper.valueToTree(
+        snapshot.set("targets", MAPPER.valueToTree(
                 eventBridgeService.listTargetsByRule(ruleName, busName, region)));
         r.getAttributes().put(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR, snapshot.toString());
     }
@@ -240,7 +239,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         try {
-            restoreSnapshottedTargets(r, objectMapper.readTree(rawSnapshot));
+            restoreSnapshottedTargets(r, MAPPER.readTree(rawSnapshot));
         } catch (RuntimeException | JsonProcessingException restoreFailure) {
             if (restoreFailure != updateFailure) {
                 updateFailure.addSuppressed(restoreFailure);
@@ -273,7 +272,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             return false;
         }
         try {
-            restoreSnapshottedTargets(resource, objectMapper.readTree(rawSnapshot));
+            restoreSnapshottedTargets(resource, MAPPER.readTree(rawSnapshot));
         } catch (JsonProcessingException unreadableSnapshot) {
             throw new IllegalStateException("Could not read the rule target snapshot for "
                     + resource.getLogicalId(), unreadableSnapshot);
@@ -285,7 +284,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         String ruleName = snapshotText(snapshot, "ruleName");
         String busName = snapshotText(snapshot, "busName");
         String region = snapshot.get("region").asText();
-        List<Target> restored = objectMapper.convertValue(
+        List<Target> restored = MAPPER.convertValue(
                 snapshot.path("targets"), new TypeReference<List<Target>>() { });
         Set<String> restoredIds = restored.stream().map(Target::getId).collect(Collectors.toSet());
         List<String> added = eventBridgeService.listTargetsByRule(ruleName, busName, region).stream()
@@ -519,7 +518,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             return JsonNodeFactory.instance.nullNode();
         }
         try {
-            JsonNode parsed = objectMapper.readTree(policy);
+            JsonNode parsed = MAPPER.readTree(policy);
             return parsed != null ? parsed : JsonNodeFactory.instance.nullNode();
         } catch (Exception e) {
             throw new AwsException("InternalFailure",
@@ -530,7 +529,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private void recordEventBusManagedPolicy(StackResource resource, JsonNode policy) {
         try {
             resource.getAttributes().put(EVENT_BUS_MANAGED_POLICY_ATTR,
-                    objectMapper.writeValueAsString(policy));
+                    MAPPER.writeValueAsString(policy));
         } catch (Exception e) {
             throw new AwsException("InternalFailure",
                     "Failed to store EventBus managed-policy metadata: " + e.getMessage(), 500);
@@ -549,7 +548,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             return Set.of();
         }
         try {
-            JsonNode keys = objectMapper.readTree(value);
+            JsonNode keys = MAPPER.readTree(value);
             if (!keys.isArray()) {
                 throw new IllegalArgumentException("managed tag keys are not an array");
             }
@@ -566,7 +565,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         try {
             resource.getAttributes().put(
                     EVENT_BUS_MANAGED_TAG_KEYS_ATTR,
-                    objectMapper.writeValueAsString(new TreeSet<>(keys)));
+                    MAPPER.writeValueAsString(new TreeSet<>(keys)));
         } catch (Exception e) {
             throw new AwsException("InternalFailure",
                     "Failed to store EventBus managed-tag metadata: " + e.getMessage(), 500);
@@ -655,9 +654,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 ObjectNode policy;
                 String current = bus.getPolicy();
                 if (current != null && !current.isBlank()) {
-                    policy = (ObjectNode) objectMapper.readTree(current);
+                    policy = (ObjectNode) MAPPER.readTree(current);
                 } else {
-                    policy = objectMapper.createObjectNode();
+                    policy = MAPPER.createObjectNode();
                     policy.put("Version", "2012-10-17");
                     policy.putArray("Statement");
                 }
@@ -670,7 +669,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 }
                 statements.add(statement);
                 eventBridgeService.putPermission(busName, null, null, statementId, null,
-                        objectMapper.writeValueAsString(policy), ctx.region());
+                        MAPPER.writeValueAsString(policy), ctx.region());
             } catch (AwsException e) {
                 throw e;
             } catch (Exception e) {
@@ -691,8 +690,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             String key = c.path("Key").asText(null);
             String value = c.path("Value").asText(null);
             if (type != null && key != null && value != null) {
-                ObjectNode condition = objectMapper.createObjectNode();
-                condition.set(type, objectMapper.createObjectNode().put(key, value));
+                ObjectNode condition = MAPPER.createObjectNode();
+                condition.set(type, MAPPER.createObjectNode().put(key, value));
                 conditionJson = condition.toString();
             }
         }
