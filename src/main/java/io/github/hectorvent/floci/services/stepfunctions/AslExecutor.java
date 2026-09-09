@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
@@ -202,6 +203,7 @@ public class AslExecutor {
     private final DynamoDbService dynamoDbService;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
+    private final SnsJsonHandler snsJsonHandler;
     private final CloudFormationQueryHandler cloudFormationHandler;
     private final Ec2Service ec2Service;
     private final S3Service s3Service;
@@ -226,7 +228,8 @@ public class AslExecutor {
     @Inject
     public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
                        DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
-                       SqsJsonHandler sqsJsonHandler, CloudFormationQueryHandler cloudFormationHandler,
+                       SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                       CloudFormationQueryHandler cloudFormationHandler,
                        Ec2Service ec2Service, S3Service s3Service,
                        EcsService ecsService, EcsJsonHandler ecsJsonHandler,
                        EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
@@ -240,6 +243,7 @@ public class AslExecutor {
         this.dynamoDbService = dynamoDbService;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
+        this.snsJsonHandler = snsJsonHandler;
         this.cloudFormationHandler = cloudFormationHandler;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
@@ -983,6 +987,18 @@ public class AslExecutor {
         if (resource.equals("arn:aws:states:::aws-sdk:sqs:sendMessage")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeAwsSdkSqsSendMessage(input, region);
+        }
+
+        // SNS optimized integration
+        if (resource.equals("arn:aws:states:::sns:publish")) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeSnsPublish(input, region, "SNS.");
+        }
+
+        // AWS SDK service integration: SNS Publish
+        if (resource.equals("arn:aws:states:::aws-sdk:sns:publish")) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeSnsPublish(input, region, "Sns.");
         }
 
         // AWS SDK service integration: CloudFormation (query protocol → JSON)
@@ -1882,6 +1898,60 @@ public class AslExecutor {
             return jsonNode;
         }
         return objectMapper.createObjectNode();
+    }
+
+    /**
+     * {@code sns:publish} and {@code aws-sdk:sns:publish} share the SNS Publish API and differ only
+     * in the prefix of the error name a failure carries. A non-string {@code Message}, such as the
+     * object carrying {@code $$.Task.Token} in a {@code .waitForTaskToken} task, is serialized to
+     * its JSON text the way AWS does before the API sees it.
+     */
+    private JsonNode invokeSnsPublish(JsonNode input, String region, String errorPrefix) {
+        ObjectNode request = input != null && input.isObject()
+                ? ((ObjectNode) input.deepCopy())
+                : objectMapper.createObjectNode();
+
+        JsonNode message = request.get("Message");
+        if (message != null && !message.isTextual() && !message.isNull()) {
+            request.put("Message", message.toString());
+        }
+
+        jakarta.ws.rs.core.Response response;
+        try {
+            response = snsJsonHandler.handle("Publish", request, region);
+        } catch (AwsException e) {
+            throw new FailStateException(errorPrefix + snsExceptionName(e.getErrorCode()), e.getMessage());
+        } catch (Exception e) {
+            throw new FailStateException(errorPrefix + "InternalErrorException",
+                    e.getMessage() != null ? e.getMessage() : "SNS error");
+        }
+
+        Object entity = response.getEntity();
+        if (response.getStatus() >= 400) {
+            if (entity instanceof AwsErrorResponse err) {
+                throw new FailStateException(errorPrefix + snsExceptionName(err.type()), err.message());
+            }
+            if (entity instanceof JsonNode errorNode) {
+                String errorName = snsExceptionName(errorNode.path("__type").asText("UnknownError"));
+                String errorMessage = errorNode.path("message").asText(
+                        errorNode.path("Message").asText("SNS operation failed"));
+                throw new FailStateException(errorPrefix + errorName, errorMessage);
+            }
+            throw new FailStateException(errorPrefix + "InternalErrorException", "SNS operation failed");
+        }
+
+        if (entity instanceof JsonNode jsonNode) {
+            return jsonNode;
+        }
+        return objectMapper.createObjectNode();
+    }
+
+    /** The SDK exception class for an SNS wire error code: {@code NotFound} is {@code NotFoundException}. */
+    private static String snsExceptionName(String errorCode) {
+        if (errorCode == null || errorCode.isBlank()) {
+            return "InternalErrorException";
+        }
+        return errorCode.endsWith("Exception") ? errorCode : errorCode + "Exception";
     }
 
     private String normalizeSqsErrorCode(String errorCode, boolean awsSdkStyleErrors) {

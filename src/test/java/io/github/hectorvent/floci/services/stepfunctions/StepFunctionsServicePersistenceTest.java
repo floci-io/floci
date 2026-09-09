@@ -379,7 +379,7 @@ class StepFunctionsServicePersistenceTest {
         private final CountDownLatch completion = new CountDownLatch(1);
 
         private RestartableAslExecutor(Instance<StepFunctionsService> serviceInstance) {
-            super(null, null, null, null, null, null, null, null, null, null,
+            super(null, null, null, null, null, null, null, null, null, null, null,
                 null, null, null, new ObjectMapper(), null, serviceInstance, null, null, null);
         }
 

@@ -357,10 +357,40 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
+| `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
 
 `sendTaskSuccess` and `sendTaskFailure` resolve a token a `.waitForTaskToken` task is parked on. A
 token nobody is waiting for fails the calling task rather than reporting a delivery that never
 happened.
+
+## Publishing to SNS
+
+`arn:aws:states:::sns:publish` calls the SNS Publish API with the task's parameters and returns the
+Publish response, `{MessageId}`. `TopicArn`, `TargetArn`, `PhoneNumber`, `Message`, `Subject`,
+`MessageStructure`, `MessageAttributes`, `MessageGroupId` and `MessageDeduplicationId` are the API's
+own fields, so a FIFO topic needs a `MessageGroupId` here just as it does from the SDK. A `Message`
+given as an object rather than a string is published as its JSON text, which is how a
+`.waitForTaskToken` task hands its token to the subscriber:
+
+```json
+{
+  "Type": "Task",
+  "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+  "Parameters": {
+    "TopicArn": "arn:aws:sns:us-east-1:000000000000:myTopic",
+    "Message": {
+      "Input.$": "$.message",
+      "TaskToken.$": "$$.Task.Token"
+    }
+  },
+  "End": true
+}
+```
+
+A failure names the SDK exception class under the `SNS.` prefix, so a topic that does not exist
+fails the task with `SNS.NotFoundException` and a missing `Message` with
+`SNS.InvalidParameterException`. `arn:aws:states:::aws-sdk:sns:publish` is the same call under the
+`Sns.` prefix, as the AWS SDK integration table above shows.
 
 ## Publishing events
 

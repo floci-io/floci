@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
@@ -42,7 +43,7 @@ class AslExecutorResultPathTest {
     void setUp() {
         executor = new AslExecutor(
                 mock(LambdaExecutorService.class), mock(LambdaFunctionStore.class),
-                mock(DynamoDbService.class), mock(DynamoDbJsonHandler.class), mock(SqsJsonHandler.class),
+                mock(DynamoDbService.class), mock(DynamoDbJsonHandler.class), mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
                 mock(CloudFormationQueryHandler.class), mock(Ec2Service.class), mock(S3Service.class),
                 mock(EcsService.class), mock(EcsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
