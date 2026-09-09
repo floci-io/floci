@@ -153,14 +153,14 @@ public class RedshiftTest {
     }
 
     @Test
-    @Order(2)
-    public void testGetClusterCredentialsReturnsTemporaryCredentials() {
+    @Order(3)
+    public void testGetClusterCredentialsReturnsTemporaryCredentials() throws Exception {
         RedshiftClient client = getClient();
-        GetClusterCredentialsResponse res = client.getClusterCredentials(b -> b
+        GetClusterCredentialsResponse res = withRetry(() -> client.getClusterCredentials(b -> b
                 .clusterIdentifier("test-cluster")
                 .dbUser("analyst")
                 .dbName("dev")
-                .durationSeconds(900));
+                .durationSeconds(900)));
 
         assertNotNull(res.dbUser());
         assertTrue(res.dbUser().contains("analyst"));
@@ -170,13 +170,13 @@ public class RedshiftTest {
     }
 
     @Test
-    @Order(2)
-    public void testGetClusterCredentialsWithIamReturnsIamPrefixedUser() {
+    @Order(4)
+    public void testGetClusterCredentialsWithIamReturnsIamPrefixedUser() throws Exception {
         RedshiftClient client = getClient();
-        GetClusterCredentialsWithIamResponse res = client.getClusterCredentialsWithIAM(b -> b
+        GetClusterCredentialsWithIamResponse res = withRetry(() -> client.getClusterCredentialsWithIAM(b -> b
                 .clusterIdentifier("test-cluster")
                 .dbName("dev")
-                .durationSeconds(900));
+                .durationSeconds(900)));
 
         assertNotNull(res.dbUser());
         assertTrue(res.dbUser().startsWith("IAM"));
@@ -186,7 +186,7 @@ public class RedshiftTest {
     }
 
     @Test
-    @Order(3)
+    @Order(5)
     public void testDeleteCluster() throws Exception {
         RedshiftClient client = getClient();
         DeleteClusterResponse res = withRetry(() -> client.deleteCluster(DeleteClusterRequest.builder()
