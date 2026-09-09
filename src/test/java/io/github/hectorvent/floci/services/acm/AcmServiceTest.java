@@ -124,6 +124,77 @@ class AcmServiceTest {
     }
 
     @Test
+    void emailValidationReportsTheApprovalMailboxesAndNoDnsRecord() {
+        // Issue #3252: the CNAME under _<token>.<domain> belongs to DNS validation only; an EMAIL
+        // certificate reports instead where the approval mail went.
+        Certificate cert = newService(30).requestCertificate("probe.example.test", List.of("*.probe.example.test"),
+                ValidationMethod.EMAIL, null, KeyAlgorithm.RSA_2048, null, null, null, REGION);
+
+        assertEquals(CertificateStatus.PENDING_VALIDATION, cert.getStatus());
+        assertNull(cert.getIssuedAt());
+        assertEquals(2, cert.getDomainValidationOptions().size());
+        for (DomainValidation validation : cert.getDomainValidationOptions()) {
+            assertEquals("EMAIL", validation.validationMethod());
+            assertEquals("PENDING_VALIDATION", validation.validationStatus());
+            assertNull(validation.resourceRecord(), "no DNS record for " + validation.domainName());
+            assertEquals("probe.example.test", validation.validationDomain(),
+                    "the wildcard is validated through its base domain");
+            assertEquals(List.of("admin@probe.example.test", "administrator@probe.example.test",
+                    "hostmaster@probe.example.test", "postmaster@probe.example.test", "webmaster@probe.example.test"),
+                    validation.validationEmails());
+        }
+    }
+
+    @Test
+    void emailValidationFollowsTheConfiguredWaitLikeDnsValidation() {
+        Certificate cert = service.requestCertificate("issued.example.test", List.of(),
+                ValidationMethod.EMAIL, null, KeyAlgorithm.RSA_2048, null, null, null, REGION);
+
+        assertEquals(CertificateStatus.ISSUED, cert.getStatus());
+        DomainValidation validation = cert.getDomainValidationOptions().get(0);
+        assertEquals("SUCCESS", validation.validationStatus());
+        assertNull(validation.resourceRecord());
+        assertEquals(5, validation.validationEmails().size());
+    }
+
+    @Test
+    void dnsValidationCarriesNoValidationEmails() {
+        Certificate cert = service.requestCertificate("dns.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, null, REGION);
+
+        DomainValidation validation = cert.getDomainValidationOptions().get(0);
+        assertEquals("CNAME", validation.resourceRecord().type());
+        assertNull(validation.validationEmails());
+    }
+
+    @Test
+    void domainValidationOptionsChooseTheValidationDomain() {
+        Certificate cert = service.requestCertificate("site.sub.example.test", List.of("api.sub.example.test"),
+                ValidationMethod.EMAIL, null, KeyAlgorithm.RSA_2048, null, null, null,
+                Map.of("site.sub.example.test", "example.test"), REGION);
+
+        DomainValidation site = cert.getDomainValidationOptions().get(0);
+        assertEquals("site.sub.example.test", site.domainName());
+        assertEquals("example.test", site.validationDomain());
+        assertTrue(site.validationEmails().contains("admin@example.test"));
+        DomainValidation api = cert.getDomainValidationOptions().get(1);
+        assertEquals("api.sub.example.test", api.validationDomain(), "no option given: the domain itself");
+    }
+
+    @Test
+    void domainValidationOptionsMustNameACertificateDomainAndASuperdomain() {
+        AwsException unrelated = assertThrows(AwsException.class, () -> service.requestCertificate(
+                "site.example.test", List.of(), ValidationMethod.EMAIL, null, KeyAlgorithm.RSA_2048, null, null, null,
+                Map.of("other.example.test", "example.test"), REGION));
+        assertEquals("InvalidDomainValidationOptionsException", unrelated.getErrorCode());
+
+        AwsException notASuperdomain = assertThrows(AwsException.class, () -> service.requestCertificate(
+                "site.example.test", List.of(), ValidationMethod.EMAIL, null, KeyAlgorithm.RSA_2048, null, null, null,
+                Map.of("site.example.test", "example.net"), REGION));
+        assertEquals("InvalidDomainValidationOptionsException", notASuperdomain.getErrorCode());
+    }
+
+    @Test
     void anIdempotentReplayReturnsTheSameCertificateInsteadOfIssuingAnother() {
         Certificate first = service.requestCertificate("same.example.test", List.of(), ValidationMethod.DNS,
                 "token-1", KeyAlgorithm.RSA_2048, null, null, null, REGION);
