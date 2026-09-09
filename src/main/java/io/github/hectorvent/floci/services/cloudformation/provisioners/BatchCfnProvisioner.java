@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -129,6 +130,7 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionComputeEnvironment(StackResource r, JsonNode props, ProvisionContext ctx) {
         String name = stableName(r, ctx, props, "ComputeEnvironmentName");
+        require("AWS::Batch::ComputeEnvironment", "Type", ctx.resolveOptional(props, "Type"));
 
         String arn;
         if (reusesPriorEntity(r, ctx, name, "ComputeEnvironmentName")) {
@@ -162,6 +164,7 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
     private void provisionJobQueue(StackResource r, JsonNode props, ProvisionContext ctx) {
         String name = stableName(r, ctx, props, "JobQueueName");
         String priority = ctx.resolveOptional(props, "Priority");
+        require("AWS::Batch::JobQueue", "Priority", priority);
 
         String arn;
         if (reusesPriorEntity(r, ctx, name, "JobQueueName")) {
@@ -170,16 +173,14 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             ObjectNode update = JsonNodeFactory.instance.objectNode();
             update.put("jobQueue", ctx.priorPhysicalId());
             putResolvedText(update, "state", props, "State", ctx);
-            if (priority != null) {
-                update.put("priority", Integer.parseInt(priority));
-            }
+            update.put("priority", Integer.parseInt(priority));
             update.set("computeEnvironmentOrder", computeEnvironmentOrder(props, ctx));
             batchService.updateJobQueue(update);
             arn = ctx.priorPhysicalId();
         } else {
             ObjectNode req = JsonNodeFactory.instance.objectNode();
             req.put("jobQueueName", name);
-            req.put("priority", priority != null ? Integer.parseInt(priority) : 1);
+            req.put("priority", Integer.parseInt(priority));
             putResolvedText(req, "state", props, "State", ctx);
             putResolvedText(req, "jobQueueType", props, "JobQueueType", ctx);
             req.set("computeEnvironmentOrder", computeEnvironmentOrder(props, ctx));
@@ -196,11 +197,12 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         // No update branch: RegisterJobDefinition on an existing name records a new revision,
         // which is how AWS updates a job definition. Only the name has to stay steady.
         String name = stableName(r, ctx, props, "JobDefinitionName");
+        String type = ctx.resolveOptional(props, "Type");
+        require("AWS::Batch::JobDefinition", "Type", type);
 
         ObjectNode req = JsonNodeFactory.instance.objectNode();
         req.put("jobDefinitionName", name);
-        String type = ctx.resolveOptional(props, "Type");
-        req.put("type", type != null && !type.isBlank() ? type : "container");
+        req.put("type", type);
         putResolvedArray(req, "platformCapabilities", props, "PlatformCapabilities", ctx);
         if (props != null && props.has("ContainerProperties")) {
             req.set("containerProperties",
@@ -226,7 +228,13 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", arn);
         r.getAttributes().put("JobDefinitionArn", arn);
         r.getAttributes().put("JobDefinitionName", name);
-        r.getAttributes().put("Revision", response.path("revision").asText());
+    }
+
+    /** The schema's required properties fail the resource with the repo's ValidationError wording. */
+    private static void require(String type, String property, String value) {
+        if (value == null || value.isBlank()) {
+            throw new AwsException("ValidationError", type + " requires " + property, 400);
+        }
     }
 
     /**

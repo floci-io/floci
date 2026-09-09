@@ -14,6 +14,7 @@ import org.mockito.InOrder;
 import java.util.HashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -121,6 +122,7 @@ class BatchCfnProvisionerTest {
                 .thenReturn(mapper.createObjectNode().put("jobDefinitionArn", JD_ARN).put("revision", 1));
         ObjectNode props = mapper.createObjectNode();
         props.put("JobDefinitionName", "def");
+        props.put("Type", "container");
         props.putObject("ContainerProperties").put("Image", "busybox");
 
         StackResource r = resource("AWS::Batch::JobDefinition", "Definition");
@@ -153,6 +155,7 @@ class BatchCfnProvisionerTest {
         r.getAttributes().put("ComputeEnvironmentName", "envy");
         ObjectNode props = mapper.createObjectNode();
         props.put("ComputeEnvironmentName", "envy");
+        props.put("Type", "MANAGED");
         props.put("State", "DISABLED");
 
         provisioner.provision(r, props, updateCtx(CE_ARN));
@@ -208,7 +211,7 @@ class BatchCfnProvisionerTest {
         StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
         r.getAttributes().put("ComputeEnvironmentName", "my-stack-Compute-ab12cd");
 
-        provisioner.provision(r, mapper.createObjectNode(), updateCtx(CE_ARN));
+        provisioner.provision(r, mapper.createObjectNode().put("Type", "MANAGED"), updateCtx(CE_ARN));
 
         verify(batch).updateComputeEnvironment(any());
         verify(batch, never()).createComputeEnvironment(any(), anyString());
@@ -220,7 +223,7 @@ class BatchCfnProvisionerTest {
         // rather than create a duplicate.
         StackResource r = resource("AWS::Batch::JobQueue", "Queue");
 
-        provisioner.provision(r, mapper.createObjectNode(), updateCtx(JQ_ARN));
+        provisioner.provision(r, mapper.createObjectNode().put("Priority", "1"), updateCtx(JQ_ARN));
 
         verify(batch).updateJobQueue(any());
         verify(batch, never()).createJobQueue(any(), anyString());
@@ -235,6 +238,7 @@ class BatchCfnProvisionerTest {
         StackResource r = resource("AWS::Batch::JobDefinition", "Definition");
         r.getAttributes().put("JobDefinitionName", "def");
         ObjectNode props = mapper.createObjectNode();
+        props.put("Type", "container");
         props.putObject("ContainerProperties").put("Image", "busybox");
 
         provisioner.provision(r, props, updateCtx(JD_ARN));
@@ -242,6 +246,63 @@ class BatchCfnProvisionerTest {
         ArgumentCaptor<JsonNode> req = ArgumentCaptor.forClass(JsonNode.class);
         verify(batch).registerJobDefinition(req.capture(), anyString());
         assertEquals("def", req.getValue().path("jobDefinitionName").asText());
+    }
+
+    // ── required properties ──────────────────────────────────────────────────
+
+    @Test
+    void aJobQueueWithoutPriorityIsRejected() {
+        // Priority is the schema's only required property for this type. The switch substituted 1,
+        // so a template missing it applied cleanly here and failed on AWS.
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Batch::JobQueue", "Queue"), props, ctx()));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("Priority"));
+        verify(batch, never()).createJobQueue(any(), anyString());
+    }
+
+    @Test
+    void aComputeEnvironmentWithoutTypeIsRejected() {
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Batch::ComputeEnvironment", "Compute"),
+                mapper.createObjectNode().put("ComputeEnvironmentName", "envy"), ctx()));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("Type"));
+    }
+
+    @Test
+    void aJobDefinitionWithoutTypeIsRejected() {
+        // The switch defaulted this to "container"; the schema makes it required.
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Batch::JobDefinition", "Definition"),
+                mapper.createObjectNode().put("JobDefinitionName", "def"), ctx()));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("Type"));
+    }
+
+    @Test
+    void aJobDefinitionDoesNotAdvertiseARevisionAttribute() {
+        // Revision is not a property of AWS::Batch::JobDefinition in the registry schema and the
+        // legacy spec gives the type no attributes either, so Fn::GetAtt on it fails on AWS.
+        // Offering it here would let a template pass on floci and break on AWS.
+        when(batch.registerJobDefinition(any(), anyString()))
+                .thenReturn(mapper.createObjectNode().put("jobDefinitionArn", JD_ARN).put("revision", 1));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobDefinitionName", "def");
+        props.put("Type", "container");
+        props.putObject("ContainerProperties").put("Image", "busybox");
+
+        StackResource r = resource("AWS::Batch::JobDefinition", "Definition");
+        provisioner.provision(r, props, ctx());
+
+        assertFalse(r.getAttributes().containsKey("Revision"));
+        assertEquals(JD_ARN, r.getAttributes().get("JobDefinitionArn"));
     }
 
     // ── delete ───────────────────────────────────────────────────────────────

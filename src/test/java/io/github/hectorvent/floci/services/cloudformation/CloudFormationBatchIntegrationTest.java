@@ -190,6 +190,115 @@ class CloudFormationBatchIntegrationTest {
             .body(containsString("CREATE_COMPLETE"));
     }
 
+    /**
+     * The two defects the legacy switch carried, end to end: an update re-created rather than
+     * updating (the second create was rejected as a duplicate name), and a stack delete removed
+     * nothing at all.
+     */
+    @Test
+    void updatingAndDeletingABatchStackUpdatesInPlaceAndRemovesTheResources() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String computeName = "cfn-batch-ud-ce-" + suffix;
+        String queueName = "cfn-batch-ud-queue-" + suffix;
+        String stackName = "cfn-batch-ud-stack-" + suffix;
+
+        String template = """
+                {
+                  "Resources": {
+                    "Compute": {
+                      "Type": "AWS::Batch::ComputeEnvironment",
+                      "Properties": {
+                        "ComputeEnvironmentName": "%s",
+                        "Type": "MANAGED",
+                        "ComputeResources": {"Type": "FARGATE", "MaxvCpus": %d}
+                      }
+                    },
+                    "Queue": {
+                      "Type": "AWS::Batch::JobQueue",
+                      "Properties": {
+                        "JobQueueName": "%s",
+                        "Priority": %d,
+                        "ComputeEnvironmentOrder": [{
+                          "Order": 1,
+                          "ComputeEnvironment": {"Ref": "Compute"}
+                        }]
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "ComputeArn": {"Value": {"Fn::GetAtt": ["Compute", "ComputeEnvironmentArn"]}},
+                    "QueueArn": {"Value": {"Fn::GetAtt": ["Queue", "JobQueueArn"]}}
+                  }
+                }
+                """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(computeName, 4, queueName, 1))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The update changes only updatable properties, so the entities must be mutated, not
+        // replaced: the physical ids the outputs carry have to survive it.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(computeName, 8, queueName, 5))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("UPDATE_COMPLETE"))
+            .body(containsString("compute-environment/" + computeName))
+            .body(containsString("job-queue/" + queueName));
+
+        givenBatchJson("{\"jobQueues\":[\"%s\"]}".formatted(queueName))
+        .when()
+            .post("/v1/describejobqueues")
+        .then()
+            .statusCode(200)
+            .body("jobQueues", hasSize(1))
+            .body("jobQueues[0].priority", equalTo(5));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Both entities are gone. Under the legacy switch these describes still returned them.
+        givenBatchJson("{\"jobQueues\":[\"%s\"]}".formatted(queueName))
+        .when()
+            .post("/v1/describejobqueues")
+        .then()
+            .statusCode(200)
+            .body("jobQueues", hasSize(0));
+
+        givenBatchJson("{\"computeEnvironments\":[\"%s\"]}".formatted(computeName))
+        .when()
+            .post("/v1/describecomputeenvironments")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironments", hasSize(0));
+    }
+
     private static io.restassured.specification.RequestSpecification givenBatchJson(String body) {
         return given()
                 .header("Authorization", BATCH_AUTH)
