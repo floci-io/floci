@@ -68,7 +68,7 @@ public class Instance {
      * The container's default-bridge address, kept alongside {@code containerBridgeIp} when the
      * instance is also attached to its VPC's Docker network. IMDS identifies a caller by the
      * source address of its request, and that is whichever interface carries the container's
-     * default route — the bridge — while the address Floci reports is the VPC one. Both are
+     * default route, the bridge, while the address Floci reports is the VPC one. Both are
      * registered so metadata answers either way.
      */
     private String imdsSourceIp;

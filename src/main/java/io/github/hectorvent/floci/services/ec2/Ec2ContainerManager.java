@@ -942,7 +942,7 @@ public class Ec2ContainerManager {
      * so the source address of its IMDS requests, lives. Distinct from
      * {@link #getContainerBridgeIp}, which despite the name prefers the VPC network's address.
      *
-     * <p>Returning null has to mean one thing only — "this container has no bridge address" —
+     * <p>Returning null has to mean one thing only, "this container has no bridge address",
      * because callers act on that answer. A failed inspect is a different answer, "I could not
      * find out", so it propagates instead of being folded into the same null.
      *

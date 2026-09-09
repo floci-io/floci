@@ -696,16 +696,16 @@ State is reported settled rather than transitional, as elsewhere in this service
 
 Each VPC is backed by a real Docker network, created lazily when the first instance in that VPC
 launches. An instance's reported private IP is then an address its container actually holds, drawn
-from the subnet CIDR the caller declared — not a plausible-looking number. Instances in the same
+from the subnet CIDR the caller declared, not a plausible-looking number. Instances in the same
 VPC reach each other at those addresses; instances in different VPCs sit on different bridges.
 
 One network per **VPC**, not per subnet: subnets inside a VPC route to each other in AWS, so a
 network per subnet would manufacture a partition AWS does not have. Per-subnet addressing is kept
-anyway — the network's IPAM pool is the whole VPC CIDR and each subnet allocates static addresses
+anyway: the network's IPAM pool is the whole VPC CIDR and each subnet allocates static addresses
 out of its own slice of it.
 
 The declared CIDR is used verbatim whenever it can be. It cannot be when it is absent, malformed,
-outside RFC 1918, or already claimed on the Docker daemon — including by another Floci VPC, since
+outside RFC 1918, or already claimed on the Docker daemon, including by another Floci VPC, since
 two VPCs may legally declare the same CIDR in AWS but one daemon cannot route two identical
 ranges. Only then is an equivalent block taken from `fallback-pool`, and the substitution is
 **logged at WARN**: a reported private IP that does not mean what the caller declared is either
@@ -716,7 +716,7 @@ Limits worth knowing before reading a passing test as evidence:
 - **Security groups and NACLs are not enforced by this.** Within one Docker network every
   container reaches every other on every port.
 - **Between-VPC isolation is the daemon's, not Floci's.** It comes from Docker's own
-  `DOCKER-ISOLATION-STAGE` rules. OrbStack does not apply them — measured on OrbStack 29.4.0,
+  `DOCKER-ISOLATION-STAGE` rules. OrbStack does not apply them: measured on OrbStack 29.4.0,
   two containers on separate networks reach each other in both directions, `--internal` included.
   On such a host the VPC boundary is an addressing boundary only.
 - **On Docker Desktop for macOS and Windows container addresses do not answer from the host.**
