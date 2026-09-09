@@ -154,6 +154,19 @@ class S3MultipartServiceTest {
     }
 
     @Test
+    void completeMultipartUploadAcceptsAnUnquotedCliETag() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "cli-etag.bin", null);
+        String eTag = s3Service.uploadPart("test-bucket", "cli-etag.bin", upload.getUploadId(), 1,
+                "part1".getBytes(StandardCharsets.UTF_8));
+
+        s3Service.completeMultipartUpload("test-bucket", "cli-etag.bin", upload.getUploadId(),
+                List.of(1), Map.of(1, eTag.substring(1, eTag.length() - 1)), Map.of(), null, null);
+
+        assertEquals("part1", new String(s3Service.getObject("test-bucket", "cli-etag.bin").getData(),
+                StandardCharsets.UTF_8));
+    }
+
+    @Test
     void completeMultipartUploadRejectsDuplicateAndDecreasingPartOrder() {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "order.bin", null);
         String first = s3Service.uploadPart("test-bucket", "order.bin", upload.getUploadId(), 1,

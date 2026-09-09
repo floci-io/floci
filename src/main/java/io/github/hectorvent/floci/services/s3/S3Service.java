@@ -2496,7 +2496,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 throw new AwsException("InvalidPart",
                         "One or more of the specified parts could not be found. Part " + num + " is missing.", 400);
             }
-            if (!partETags.isEmpty() && !part.getETag().equals(partETags.get(num))) {
+            if (!partETags.isEmpty() && !etagsMatch(part.getETag(), partETags.get(num))) {
                 throw new AwsException("InvalidPart",
                         "One or more of the specified parts could not be found. Part " + num
                                 + " has an invalid ETag.", 400);
@@ -2562,6 +2562,20 @@ public class S3Service implements Resettable, ResourceProvider {
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException("MD5 algorithm not available", e);
         }
+    }
+
+    private boolean etagsMatch(String storedETag, String submittedETag) {
+        return stripSurroundingQuotes(storedETag).equals(stripSurroundingQuotes(submittedETag));
+    }
+
+    private String stripSurroundingQuotes(String eTag) {
+        if (eTag == null) {
+            return null;
+        }
+        if (eTag.length() >= 2 && eTag.startsWith("\"") && eTag.endsWith("\"")) {
+            return eTag.substring(1, eTag.length() - 1);
+        }
+        return eTag;
     }
 
     public void abortMultipartUpload(String bucket, String key, String uploadId) {
