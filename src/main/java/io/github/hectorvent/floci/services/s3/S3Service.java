@@ -33,7 +33,9 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -77,9 +79,15 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private final StorageBackend<String, Bucket> bucketStore;
     private final StorageBackend<String, S3Object> objectStore;
+    private final StorageBackend<String, ObjectAnnotation> annotationStore;
     private final Path dataRoot;
     private final boolean inMemory;
     private final ConcurrentHashMap<String, byte[]> memoryDataStore = new ConcurrentHashMap<>();
+    // Annotation payload bytes, keyed by physical key like memoryDataStore. Kept out of
+    // annotationStore for the same reason object bodies are kept out of objectStore: every
+    // backend serializes its whole map into a single document on each flush, so payloads
+    // (up to 1 MiB each, up to 1,000 per object version) must not be inline.
+    private final ConcurrentHashMap<String, byte[]> memoryAnnotationStore = new ConcurrentHashMap<>();
     // Guards disk writes/deletes against a racing legacy migration for the same path (see
     // copyLegacyFileIfPresent()). Fixed-size stripes keep memory bounded, unlike a per-path
     // map that would need reference counting to ever shrink safely.
@@ -135,6 +143,9 @@ public class S3Service implements Resettable, ResourceProvider {
                 storageFactory.create("s3", "s3-objects.json",
                         new TypeReference<Map<String, S3Object>>() {
                         }),
+                storageFactory.create("s3", "s3-annotations.json",
+                        new TypeReference<Map<String, ObjectAnnotation>>() {
+                        }),
                 storageFactory.create("s3", "s3-account-public-access-block.json",
                         new TypeReference<Map<String, String>>() {
                         }),
@@ -155,7 +166,7 @@ public class S3Service implements Resettable, ResourceProvider {
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory) {
-        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+        this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
                 null, "http://localhost:4566", new ObjectMapper(), false, null, false);
     }
@@ -165,7 +176,7 @@ public class S3Service implements Resettable, ResourceProvider {
               StorageBackend<String, S3Object> objectStore,
               AccountAwareStorageBackend<String> accountPublicAccessBlockStore,
               Path dataRoot, boolean inMemory) {
-        this(bucketStore, objectStore, accountPublicAccessBlockStore,
+        this(bucketStore, objectStore, defaultAnnotationStore(), accountPublicAccessBlockStore,
                 dataRoot, inMemory, null, null, null, null, null, null, null,
                 null, "http://localhost:4566", new ObjectMapper(), false, null, false);
     }
@@ -174,7 +185,7 @@ public class S3Service implements Resettable, ResourceProvider {
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory, boolean globalBucketNamespace) {
-        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+        this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
                 null, "http://localhost:4566", new ObjectMapper(), false, null, globalBucketNamespace);
     }
@@ -184,7 +195,7 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory,
               LambdaService lambdaService,
               RegionResolver regionResolver) {
-        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+        this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
                 regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
     }
@@ -194,7 +205,7 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory,
               LambdaInvoker lambdaInvoker,
               RegionResolver regionResolver) {
-        this(bucketStore, objectStore, defaultAccountPublicAccessBlockStore(),
+        this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
                 regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
     }
@@ -204,8 +215,14 @@ public class S3Service implements Resettable, ResourceProvider {
         return AccountAwareStorageBackend.inMemory("000000000000");
     }
 
+    /** In-memory annotation store for the package-private test constructors. */
+    private static AccountAwareStorageBackend<ObjectAnnotation> defaultAnnotationStore() {
+        return AccountAwareStorageBackend.inMemory("000000000000");
+    }
+
     private S3Service(StorageBackend<String, Bucket> bucketStore,
                       StorageBackend<String, S3Object> objectStore,
+                      AccountAwareStorageBackend<ObjectAnnotation> annotationStore,
                       AccountAwareStorageBackend<String> accountPublicAccessBlockStore,
                       Path dataRoot, boolean inMemory, SqsService sqsService, SnsService snsService,
                       LambdaService lambdaService,
@@ -217,6 +234,7 @@ public class S3Service implements Resettable, ResourceProvider {
                       boolean enforceAuth, IamService iamService, boolean globalBucketNamespace) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
+        this.annotationStore = annotationStore;
         this.accountPublicAccessBlockStore = accountPublicAccessBlockStore;
         this.dataRoot = dataRoot;
         this.inMemory = inMemory;
@@ -244,6 +262,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void clear() {
         memoryDataStore.clear();
+        memoryAnnotationStore.clear();
         memoryMultipartStore.clear();
         multipartUploads.clear();
     }
@@ -300,11 +319,15 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         bucketStore.delete(bucketName);
+        deleteAllAnnotationsForBucket(bucketName);
         if (inMemory) {
             String prefix = ownerId() + "/" + bucketName + "/";
             memoryDataStore.keySet().removeIf(k -> k.startsWith(prefix));
+            memoryAnnotationStore.keySet().removeIf(k -> k.startsWith(prefix));
         } else {
             deleteDirectory(dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(bucketName));
+            deleteDirectory(dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId())
+                    .resolve(ANNOTATION_STORAGE_ROOT).resolve(bucketName));
         }
     }
 
@@ -491,6 +514,10 @@ public class S3Service implements Resettable, ResourceProvider {
 
             // Check lock protection on the current latest before overwriting
             String latestKey = objectKey(bucketName, key);
+            // A pre-versioning object being replaced: its annotations were keyed at the plain
+            // object key and would be left unreachable by the new version. Cleanup is deferred
+            // until the replacement body is on disk, so a failed write does not drop them.
+            boolean[] dropPreVersioningAnnotations = {false};
             objectStore.get(latestKey).ifPresent(prev -> {
                 if (prev.isLatest() && !prev.isDeleteMarker() && bucket.isObjectLockEnabled()) {
                     checkLockProtection(prev, false);
@@ -498,6 +525,8 @@ public class S3Service implements Resettable, ResourceProvider {
                 if (prev.getVersionId() != null) {
                     prev.setLatest(false);
                     objectStore.put(versionedKey(bucketName, key, prev.getVersionId()), prev);
+                } else {
+                    dropPreVersioningAnnotations[0] = true;
                 }
             });
 
@@ -517,6 +546,11 @@ public class S3Service implements Resettable, ResourceProvider {
             // GET can't observe corrupted "latest" bytes paired with the old metadata.
             writeVersionedFile(bucketName, key, versionId, data);
             writeFile(bucketName, key, data);
+            // Deferred pre-versioning annotation cleanup: only after the replacement body is on
+            // disk, so a failed write keeps the old body and its annotations together.
+            if (dropPreVersioningAnnotations[0]) {
+                deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            }
             // Release the cached payload before publishing: once objectStore.put makes this
             // instance visible to other threads, a concurrent getObject can hold a reference to
             // it (copyObject reads getData() without any lock) and race this null-out otherwise.
@@ -546,6 +580,11 @@ public class S3Service implements Resettable, ResourceProvider {
             // Write the body before publishing metadata - see the comment in the versioned
             // branch above; the same ordering requirement applies here.
             writeFile(bucketName, key, data);
+            // An overwrite replaces the object's annotations (AWS drops them on overwrite).
+            // The cleanup runs only after the body write succeeds, so a failed PUT keeps the
+            // old body together with its annotations; and before the new metadata is published,
+            // so the replacement never appears annotated.
+            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
             // Release the cached payload before publishing - see the comment in the versioned
             // branch above; the same race applies here.
             object.setData(null);
@@ -1144,6 +1183,16 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
 
+        // The bucket monitor serializes this against PutObject's annotation cleanup and the
+        // annotation subresource writes, which hold the same monitor (storeObjectInternal
+        // already runs under it via storeObject).
+        synchronized (bucket) {
+            return deleteObjectLocked(bucket, bucketName, key, versionId, bypassGovernance);
+        }
+    }
+
+    private S3Object deleteObjectLocked(Bucket bucket, String bucketName, String key,
+                                        String versionId, boolean bypassGovernance) {
         if (bucket.isVersioningEnabled() && versionId == null) {
             // Check lock on current latest before placing a delete marker
             objectStore.get(objectKey(bucketName, key)).ifPresent(prev -> {
@@ -1164,6 +1213,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 if (prev.getVersionId() != null) {
                     prev.setLatest(false);
                     objectStore.put(versionedKey(bucketName, key, prev.getVersionId()), prev);
+                } else {
+                    // The marker replaces a pre-versioning object: no versioned entry ever
+                    // existed, so its annotations become unreachable and are removed here
+                    // (they are permanent, as on AWS).
+                    deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
                 }
             });
 
@@ -1181,6 +1235,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // Permanently delete a specific version (metadata + file data)
             objectStore.delete(versionedKey(bucketName, key, versionId));
             deleteVersionedFile(bucketName, key, versionId);
+            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, versionId));
             LOG.debugv("Permanently deleted version: {0}/{1} v={2}", bucketName, key, versionId);
             // Promote the next most-recent version when the deleted one was the latest
             String latestKey = objectKey(bucketName, key);
@@ -1222,6 +1277,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // Non-versioned delete
             objectStore.delete(objectKey(bucketName, key));
             deleteFile(bucketName, key);
+            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
             LOG.debugv("Deleted object: {0}/{1}", bucketName, key);
             fireNotifications(bucketName, key, "ObjectRemoved:Delete", null);
             return null;
@@ -1647,6 +1703,428 @@ public class S3Service implements Resettable, ResourceProvider {
         obj.setTags(new java.util.HashMap<>());
         objectStore.put(objectKey(bucketName, key), obj);
         LOG.debugv("Deleted tags from object: {0}/{1}", bucketName, key);
+    }
+
+    // --- Object Annotations ---
+
+    public static final int MAX_ANNOTATIONS_PER_VERSION = 1_000;
+    public static final int MAX_ANNOTATION_RESULTS = 1_000;
+    private static final int MAX_ANNOTATION_NAME_BYTES = 512;
+    private static final int MAX_ANNOTATION_PAYLOAD_BYTES = 1_048_576;
+    // '@' can never occur in a valid annotation name, so this separator cannot be produced by a
+    // name itself. Object keys CAN contain '@' and '#', which is why annotationParentKey
+    // URL-encodes the key before appending the separators.
+    private static final String ANNOTATION_SEPARATOR = "@ann@";
+    private static final String ANNOTATION_DATA_SUFFIX = ".s3ann";
+    private static final String ANNOTATION_STORAGE_ROOT = ".annotations";
+
+    /** maxAnnotationResults carries the effective limit (default applied) so callers echo the value the service enforced. */
+    public record ListObjectAnnotationsResult(List<ObjectAnnotation> annotations, boolean isTruncated,
+                                              String nextContinuationToken, int maxAnnotationResults) {}
+
+    public ObjectAnnotation putObjectAnnotation(String bucketName, String key, String annotationName,
+                                                String versionId, byte[] payload, String ifMatch,
+                                                ChecksumAlgorithm checksumAlgorithm) {
+        Bucket bucket = requireBucket(bucketName);
+        S3Object[] notificationTarget = {null};
+        ObjectAnnotation annotation;
+        synchronized (bucket) {
+            versionId = normalizeNullVersionId(versionId);
+            S3Object parent = resolveParentObject(bucketName, key, versionId);
+            // Symmetric with deleteObjectAnnotation: an annotation put must not add or replace
+            // an annotation on a retention-protected version, or the delete path's protection
+            // is circumvented by a re-put.
+            checkLockProtection(parent, false);
+            if (parent.getSseCustomerAlgorithm() != null) {
+                // AWS rejects annotations on SSE-C encrypted objects.
+                throw new AwsException("InvalidRequest",
+                        "Server-side encryption with customer-provided keys is not supported for annotations.", 400);
+            }
+            if (ifMatch != null && !eTagMatches(ifMatch, parent.getETag())) {
+                throw new S3PreconditionFailedException("If-Match");
+            }
+            validateAnnotationName(annotationName);
+            validateAnnotationPayload(payload);
+
+            String parentKey = parentStoreKey(bucketName, key, versionId, parent);
+            String storeKey = annotationStoreKey(parentKey, annotationName);
+            // Account-scoped, like every annotation write: in globalBucketNamespace mode a
+            // cross-account probe would let the caller bypass the per-version limit by reading
+            // another account's entry, while the put itself lands in the caller's partition.
+            boolean isUpdate = annotationStore.get(storeKey).isPresent();
+            // Check-then-act against concurrent annotation puts is safe: this method holds the
+            // bucket monitor, the same one storeObject's overwrite cleanup holds.
+            if (!isUpdate && countAnnotations(parentKey) >= MAX_ANNOTATIONS_PER_VERSION) {
+                throw new AwsException("AnnotationLimitExceeded",
+                        "The maximum number of annotations for this object version has been reached.", 400);
+            }
+
+            ChecksumAlgorithm algorithm = checksumAlgorithm != null ? checksumAlgorithm : ChecksumAlgorithm.CRC64NVME;
+            annotation = new ObjectAnnotation(bucketName, key, parent.getVersionId(),
+                    annotationName, payload.length, S3Object.computeETag(payload), Instant.now(),
+                    algorithm.name(), algorithm.compute(payload));
+            annotation.setServerSideEncryption(parent.getServerSideEncryption());
+
+            // Write the payload before publishing metadata, mirroring storeObjectInternal's
+            // write-before-publish ordering.
+            writeAnnotationPayload(annotation, payload);
+            annotationStore.put(storeKey, annotation);
+            LOG.debugv("Put annotation {0} on object: {1}/{2}", annotationName, bucketName, key);
+            notificationTarget[0] = parent;
+        }
+        // Fired outside the bucket monitor (the storeObject callers' pattern): a slow SQS/SNS/
+        // Lambda delivery must not block every other write and annotation op on the bucket.
+        fireNotifications(bucketName, key, "ObjectAnnotation:Put", notificationTarget[0]);
+        return annotation;
+    }
+
+    public ObjectAnnotation getObjectAnnotation(String bucketName, String key, String annotationName,
+                                                String versionId) {
+        Bucket bucket = requireBucket(bucketName);
+        synchronized (bucket) {
+            versionId = normalizeNullVersionId(versionId);
+            S3Object parent = resolveParentObject(bucketName, key, versionId);
+            validateAnnotationName(annotationName);
+            String storeKey = annotationStoreKey(parentStoreKey(bucketName, key, versionId, parent), annotationName);
+            return annotationStore.get(storeKey)
+                    .orElseThrow(() -> new AwsException("NoSuchAnnotation",
+                            "The specified annotation does not exist.", 404));
+        }
+    }
+
+    public byte[] readObjectAnnotationPayload(ObjectAnnotation annotation) {
+        byte[] payload = readAnnotationPayload(annotation);
+        if (payload == null) {
+            throw new AwsException("NoSuchAnnotation",
+                    "The specified annotation does not exist.", 404);
+        }
+        return payload;
+    }
+
+    public ListObjectAnnotationsResult listObjectAnnotations(String bucketName, String key,
+                                                             String annotationPrefix,
+                                                             Integer maxAnnotationResults,
+                                                             String continuationToken, String versionId) {
+        Bucket bucket = requireBucket(bucketName);
+        synchronized (bucket) {
+            versionId = normalizeNullVersionId(versionId);
+            S3Object parent = resolveParentObject(bucketName, key, versionId);
+            int limit = maxAnnotationResults != null ? maxAnnotationResults : MAX_ANNOTATION_RESULTS;
+            if (limit < 1 || limit > MAX_ANNOTATION_RESULTS) {
+                throw new AwsException("InvalidArgument",
+                        "max-annotation-results must be between 1 and 1000.", 400);
+            }
+            validateAnnotationPrefix(annotationPrefix);
+            String startAfter = decodeAnnotationContinuationToken(continuationToken);
+
+            String parentKey = parentStoreKey(bucketName, key, versionId, parent);
+            List<ObjectAnnotation> matches = annotationStore.scan(k -> k.startsWith(parentKey + ANNOTATION_SEPARATOR))
+                    .stream()
+                    .filter(a -> annotationPrefix == null || a.getAnnotationName().startsWith(annotationPrefix))
+                    .sorted(Comparator.comparing(ObjectAnnotation::getAnnotationName))
+                    .toList();
+            if (startAfter != null) {
+                matches = matches.stream()
+                        .filter(a -> a.getAnnotationName().compareTo(startAfter) > 0)
+                        .toList();
+            }
+            boolean truncated = matches.size() > limit;
+            List<ObjectAnnotation> page = truncated ? new ArrayList<>(matches.subList(0, limit)) : matches;
+            String nextToken = truncated ? encodeAnnotationContinuationToken(page.get(page.size() - 1).getAnnotationName()) : null;
+            return new ListObjectAnnotationsResult(page, truncated, nextToken, limit);
+        }
+    }
+
+    /** Returns the parent object's versionId (null in non-versioned buckets) for the response header. */
+    public String deleteObjectAnnotation(String bucketName, String key, String annotationName,
+                                         String versionId, String ifMatch, boolean bypassGovernance) {
+        Bucket bucket = requireBucket(bucketName);
+        S3Object[] notificationTarget = {null};
+        String parentVersionId;
+        synchronized (bucket) {
+            versionId = normalizeNullVersionId(versionId);
+            S3Object parent = resolveParentObject(bucketName, key, versionId);
+            // Deleting an annotation on a locked version follows DeleteObject's rules: governance
+            // retention needs x-amz-bypass-governance-retention, compliance and legal hold always block.
+            checkLockProtection(parent, bypassGovernance);
+            if (ifMatch != null && !eTagMatches(ifMatch, parent.getETag())) {
+                throw new S3PreconditionFailedException("If-Match");
+            }
+            validateAnnotationName(annotationName);
+            String parentKey = parentStoreKey(bucketName, key, versionId, parent);
+            String storeKey = annotationStoreKey(parentKey, annotationName);
+            // Account-scoped existence check, like the objectStore delete path: a cross-account
+            // probe would report another account's annotation, which this delete must not remove.
+            ObjectAnnotation existing = annotationStore.get(storeKey).orElse(null);
+            if (existing == null) {
+                // Deleting a nonexistent annotation is not an error (idempotent), but the parent
+                // object still had to exist and pass its precondition check above.
+                return parent.getVersionId();
+            }
+            annotationStore.delete(storeKey);
+            deleteAnnotationPayload(existing);
+            LOG.debugv("Deleted annotation {0} from object: {1}/{2}", annotationName, bucketName, key);
+            parentVersionId = parent.getVersionId();
+            notificationTarget[0] = parent;
+        }
+        // Fired outside the bucket monitor, as in putObjectAnnotation.
+        fireNotifications(bucketName, key, "ObjectAnnotation:Delete", notificationTarget[0]);
+        return parentVersionId;
+    }
+
+    /**
+     * ListObjectVersions reports pre-versioning objects with the literal VersionId {@code "null"};
+     * a version-echoing client sends it back. Treat it as a request for the pre-versioning entry
+     * at the plain object key.
+     */
+    private static String normalizeNullVersionId(String versionId) {
+        return "null".equals(versionId) ? null : versionId;
+    }
+
+    /** Removes every annotation attached to one object version (metadata + payload). */
+    private void deleteAllAnnotationsFor(String parentKey) {
+        for (ObjectAnnotation annotation : annotationStore.scan(k -> k.startsWith(parentKey + ANNOTATION_SEPARATOR))) {
+            annotationStore.delete(annotationStoreKey(parentKey, annotation.getAnnotationName()));
+            deleteAnnotationPayload(annotation);
+        }
+    }
+
+    /** Removes every annotation in a bucket (metadata + payload); used by DeleteBucket. */
+    private void deleteAllAnnotationsForBucket(String bucketName) {
+        for (ObjectAnnotation annotation : annotationStore.scan(k -> k.startsWith(bucketName + "/"))) {
+            String parentKey = parentKeyOf(annotation);
+            annotationStore.delete(annotationStoreKey(parentKey, annotation.getAnnotationName()));
+            deleteAnnotationPayload(annotation);
+        }
+    }
+
+    private int countAnnotations(String parentKey) {
+        return (int) annotationStore.scan(k -> k.startsWith(parentKey + ANNOTATION_SEPARATOR)).size();
+    }
+
+    private String annotationStoreKey(String parentKey, String annotationName) {
+        return parentKey + ANNOTATION_SEPARATOR + annotationName;
+    }
+
+    /**
+     * Resolves the annotation-store key of the object version an annotation request targets.
+     * An absent versionId means the current latest object: the latest entry's own versionId when
+     * the bucket is versioned, otherwise the plain object key. The delete-marker check lives in
+     * {@link #resolveParentObject}.
+     */
+    private String parentStoreKey(String bucketName, String key, String versionId, S3Object parent) {
+        if (versionId != null) {
+            return annotationParentKey(bucketName, key, versionId);
+        }
+        return parent.getVersionId() != null
+                ? annotationParentKey(bucketName, key, parent.getVersionId())
+                : annotationParentKey(bucketName, key, null);
+    }
+
+    /**
+     * Builds the annotation identity for one object version. Unlike the objectStore key scheme,
+     * this must be injective: {@code '@'} and {@code "#v#"} mark the separators, and an S3 object
+     * key may contain any character, so the key is URL-encoded first. Encoded keys never contain
+     * '@', '#' or bare '%', so no other object's identity can forge these separators or extend
+     * another object's scan prefix.
+     */
+    private String annotationParentKey(String bucketName, String key, String versionId) {
+        return bucketName + "/" + annotationIdentity(key, versionId);
+    }
+
+    private String annotationIdentity(String key, String versionId) {
+        String encodedKey = URLEncoder.encode(key, StandardCharsets.UTF_8);
+        return versionId != null ? encodedKey + "#v#" + versionId : encodedKey;
+    }
+
+    /** Resolves the object a subresource request targets; a delete-marker latest reads as absent. */
+    private S3Object resolveParentObject(String bucketName, String key, String versionId) {
+        S3Object object = resolveObject(versionId != null
+                        ? versionedKey(bucketName, key, versionId)
+                        : objectKey(bucketName, key))
+                .orElseThrow(() -> new AwsException("NoSuchKey",
+                        "The specified key does not exist.", 404));
+        if (object.isDeleteMarker()) {
+            throw new AwsException("NoSuchKey", "The specified key does not exist.", 404);
+        }
+        return object;
+    }
+
+    private void validateAnnotationName(String annotationName) {
+        if (annotationName == null || annotationName.isBlank()) {
+            throw new AwsException("InvalidAnnotationName",
+                    "The annotation name must not be empty or consist only of whitespace.", 400);
+        }
+        if (annotationName.getBytes(StandardCharsets.UTF_8).length > MAX_ANNOTATION_NAME_BYTES) {
+            throw new AwsException("AnnotationNameTooLong",
+                    "The annotation name exceeds the maximum length of 512 bytes.", 400);
+        }
+        for (int i = 0; i < annotationName.length(); ) {
+            int codePoint = annotationName.codePointAt(i);
+            if (!isAllowedAnnotationNameCodePoint(codePoint)) {
+                throw new AwsException("InvalidAnnotationName",
+                        "The annotation name contains invalid characters.", 400);
+            }
+            i += Character.charCount(codePoint);
+        }
+        String lowercased = annotationName.toLowerCase(Locale.ROOT);
+        if (lowercased.startsWith("aws") || lowercased.startsWith("s3")) {
+            throw new AwsException("InvalidAnnotationName",
+                    "Annotation names must not start with 'aws' or 's3'.", 400);
+        }
+    }
+
+    private static boolean isAllowedAnnotationNameCodePoint(int codePoint) {
+        return Character.isLetter(codePoint) || Character.isDigit(codePoint)
+                || codePoint == '_' || codePoint == '.' || codePoint == '-';
+    }
+
+    private void validateAnnotationPrefix(String annotationPrefix) {
+        if (annotationPrefix == null || annotationPrefix.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < annotationPrefix.length(); ) {
+            int codePoint = annotationPrefix.codePointAt(i);
+            if (!isAllowedAnnotationNameCodePoint(codePoint)) {
+                throw new AwsException("InvalidPrefix",
+                        "The annotation prefix you provided is invalid.", 400);
+            }
+            i += Character.charCount(codePoint);
+        }
+    }
+
+    private void validateAnnotationPayload(byte[] payload) {
+        if (payload == null || payload.length < 1) {
+            throw new AwsException("InvalidRequest",
+                    "The annotation payload must be between 1 byte and 1 MiB in size.", 400);
+        }
+        if (payload.length > MAX_ANNOTATION_PAYLOAD_BYTES) {
+            throw new AwsException("InvalidRequest",
+                    "The annotation payload exceeds the maximum size of 1 MiB.", 400);
+        }
+        if (!ObjectAnnotation.isValidUtf8(payload)) {
+            throw new AwsException("UnsupportedMediaType",
+                    "The annotation payload is not valid UTF-8 encoded text.", 415);
+        }
+    }
+
+    private String encodeAnnotationContinuationToken(String lastAnnotationName) {
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(lastAnnotationName.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String decodeAnnotationContinuationToken(String token) {
+        if (token == null || token.isEmpty()) {
+            return null;
+        }
+        try {
+            return new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidArgument", "The continuation token you provided is invalid.", 400);
+        }
+    }
+
+    // Annotation payload bytes live outside the annotation store, the same way object bodies
+    // live outside s3-objects.json: in memoryAnnotationStore in memory mode, .s3ann files on disk.
+
+    private String physicalAnnotationKey(String parentKey, String annotationName) {
+        return ownerId() + "/" + annotationStoreKey(parentKey, annotationName);
+    }
+
+    private Path resolveAnnotationPath(String bucketName, String key, String versionId, String annotationName) {
+        Path bucketDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId())
+                .resolve(ANNOTATION_STORAGE_ROOT).resolve(bucketName).normalize();
+        // Both directory components are SHA-256 hex of our own injective identity (the object key
+        // is URL-encoded inside it), so the path is bounded in length, filesystem-safe, and
+        // collision-free across object keys that contain '#v#', '@', or path-like characters.
+        // Cleanup is metadata-driven, so the mapping never needs to be reversed.
+        // Every path component below bucketDir is SHA-256 hex, so no traversal is possible.
+        Path parentDir = bucketDir.resolve(sha256Hex(annotationIdentity(key, versionId)));
+        return parentDir.resolve(sha256Hex(annotationName) + ANNOTATION_DATA_SUFFIX);
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 algorithm is not available", e);
+        }
+    }
+
+    private void writeAnnotationPayload(ObjectAnnotation annotation, byte[] payload) {
+        if (inMemory) {
+            memoryAnnotationStore.put(physicalAnnotationKey(
+                    parentKeyOf(annotation), annotation.getAnnotationName()), payload);
+            return;
+        }
+        Path filePath = resolveAnnotationPath(annotation.getBucketName(), annotation.getKey(),
+                annotation.getVersionId(), annotation.getAnnotationName());
+        ReentrantLock lock = diskFileLock(filePath);
+        lock.lock();
+        try {
+            atomicWrite(filePath, payload);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write S3 annotation payload file", e);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Returns the payload bytes, or {@code null} when the payload is gone while its metadata survived. */
+    private byte[] readAnnotationPayload(ObjectAnnotation annotation) {
+        if (inMemory) {
+            return memoryAnnotationStore.get(physicalAnnotationKey(
+                    parentKeyOf(annotation), annotation.getAnnotationName()));
+        }
+        Path filePath = resolveAnnotationPath(annotation.getBucketName(), annotation.getKey(),
+                annotation.getVersionId(), annotation.getAnnotationName());
+        // The same lock writeAnnotationPayload and deleteAnnotationPayload hold: without it a
+        // concurrent delete between the existence check and the read surfaces as an
+        // UncheckedIOException (HTTP 500) instead of the intended NoSuchAnnotation (404).
+        ReentrantLock lock = diskFileLock(filePath);
+        lock.lock();
+        try {
+            if (!Files.exists(filePath)) {
+                return null;
+            }
+            return Files.readAllBytes(filePath);
+        } catch (NoSuchFileException e) {
+            return null;
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read S3 annotation payload file", e);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void deleteAnnotationPayload(ObjectAnnotation annotation) {
+        if (inMemory) {
+            memoryAnnotationStore.remove(physicalAnnotationKey(
+                    parentKeyOf(annotation), annotation.getAnnotationName()));
+            return;
+        }
+        Path filePath = resolveAnnotationPath(annotation.getBucketName(), annotation.getKey(),
+                annotation.getVersionId(), annotation.getAnnotationName());
+        ReentrantLock lock = diskFileLock(filePath);
+        lock.lock();
+        try {
+            Files.deleteIfExists(filePath);
+        } catch (IOException e) {
+            LOG.errorv(e, "Failed to delete S3 annotation payload file for {0}/{1} / {2}",
+                    annotation.getBucketName(), annotation.getKey(), annotation.getAnnotationName());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private String parentKeyOf(ObjectAnnotation annotation) {
+        return annotationParentKey(annotation.getBucketName(), annotation.getKey(), annotation.getVersionId());
     }
 
     // --- Bucket Tagging ---
@@ -3479,7 +3957,9 @@ public class S3Service implements Resettable, ResourceProvider {
 
         if (config.isEventBridgeEnabled() && eventBridgeService != null) {
             try {
-                String detailType = eventName.startsWith("ObjectCreated") ? "Object Created" : "Object Deleted";
+                String detailType = eventName.startsWith("ObjectCreated") ? "Object Created"
+                        : eventName.startsWith("ObjectAnnotation") ? "Object Annotation"
+                        : "Object Deleted";
                 Map<String, Object> entry = new java.util.HashMap<>();
                 entry.put("Source", "aws.s3");
                 entry.put("DetailType", detailType);
@@ -4150,8 +4630,70 @@ public class S3Service implements Resettable, ResourceProvider {
             effectiveChecksum = null;
         }
 
-        S3Object copy = storeObject(destBucket, destKey, source.getData(), effectiveContentType, metadata,
-                effectiveChecksum, null,
+        // Annotations travel with the copy by default (x-amz-annotation-directive COPY). They are
+        // snapshotted before storeObject: a self-copy (same bucket and key) or a pre-versioning
+        // overwrite deletes the shared annotation entries as part of the overwrite, so metadata
+        // and payload must be read beforehand. The snapshot holds payload bytes in memory, the
+        // same profile as the source body copy itself.
+        boolean copyAnnotations = !"EXCLUDE".equalsIgnoreCase(effectiveOptions.getAnnotationDirective());
+        boolean selfCopy = sourceBucket.equals(destBucket);
+        Bucket sourceMonitor = requireBucket(sourceBucket);
+        List<AnnotationSnapshot> sourceAnnotations = List.of();
+        if (copyAnnotations && !selfCopy) {
+            // Cross-bucket copy: the destination overwrite cannot touch the source's annotation
+            // entries, so a monitor-guarded snapshot is enough. Holding the source monitor across
+            // storeObject here would risk a deadlock with a concurrent reverse copy.
+            synchronized (sourceMonitor) {
+                sourceAnnotations = snapshotAnnotations(source);
+            }
+        }
+
+        // A copy is written as one object, so it keeps the ETag storeObject computed (the MD5 of the
+        // whole content) instead of the source's, which for a multipart source ends in "-N". As on S3.
+        if (selfCopy) {
+            // The overwrite deletes the shared annotation entries, so snapshot, overwrite, and
+            // restore must be atomic against annotation writes: all three under the bucket
+            // monitor, which storeObject re-enters for the same bucket.
+            S3Object[] result = {null};
+            synchronized (sourceMonitor) {
+                if (copyAnnotations) {
+                    sourceAnnotations = snapshotAnnotations(source);
+                }
+                result[0] = storeObjectCopy(destBucket, destKey, source, metadata, effectiveChecksum,
+                        effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
+                        effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
+                        effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
+                if (copyAnnotations) {
+                    restoreAnnotations(sourceAnnotations, destBucket, destKey, result[0]);
+                }
+            }
+            // Fired outside the bucket monitor, matching the cross-bucket path.
+            LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
+            fireNotifications(destBucket, destKey, "ObjectCreated:Copy", result[0]);
+            return result[0];
+        }
+        S3Object copy = storeObjectCopy(destBucket, destKey, source, metadata, effectiveChecksum,
+                effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
+                effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
+                effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
+        if (copyAnnotations) {
+            restoreAnnotations(sourceAnnotations, destBucket, destKey, copy);
+        }
+        LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
+        fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);
+        return copy;
+    }
+
+    private S3Object storeObjectCopy(String destBucket, String destKey, S3Object source,
+                                     Map<String, String> metadata, S3Checksum effectiveChecksum,
+                                     String effectiveContentType, String effectiveStorageClass,
+                                     String effectiveContentEncoding, String effectiveContentDisposition,
+                                     String effectiveCacheControl, String effectiveServerSideEncryption,
+                                     String effectiveSseKmsKeyId,
+                                     CopyObjectOptions effectiveOptions, ChecksumAlgorithm copyChecksumAlgorithm,
+                                     Map<String, String> effectiveTags) {
+        return storeObject(destBucket, destKey, source.getData(), effectiveContentType,
+                metadata, effectiveChecksum, null,
                 new PutObjectOptions()
                         .withStorageClass(effectiveStorageClass)
                         .withContentEncoding(effectiveContentEncoding)
@@ -4170,11 +4712,41 @@ public class S3Service implements Resettable, ResourceProvider {
                         .withGrantWriteAcp(effectiveOptions.getGrantWriteAcp())
                         .withChecksumAlgorithm(copyChecksumAlgorithm != null ? copyChecksumAlgorithm.name() : null)
                         .withTagging(effectiveTags));
-        // A copy is written as one object, so it keeps the ETag storeObject computed (the MD5 of the
-        // whole content) instead of the source's, which for a multipart source ends in "-N". As on S3.
-        LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
-        fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);
-        return copy;
+    }
+
+    private record AnnotationSnapshot(ObjectAnnotation metadata, byte[] payload) {}
+
+    private List<AnnotationSnapshot> snapshotAnnotations(S3Object source) {
+        String sourceParentKey = annotationParentKey(source.getBucketName(), source.getKey(), source.getVersionId());
+        List<AnnotationSnapshot> snapshots = new ArrayList<>();
+        for (ObjectAnnotation annotation : annotationStore.scan(k -> k.startsWith(sourceParentKey + ANNOTATION_SEPARATOR))) {
+            byte[] payload = readAnnotationPayload(annotation);
+            if (payload != null) {
+                snapshots.add(new AnnotationSnapshot(annotation, payload));
+            }
+        }
+        return snapshots;
+    }
+
+    private void restoreAnnotations(List<AnnotationSnapshot> snapshots, String destBucket, String destKey,
+                                    S3Object copy) {
+        if (copy.getSseCustomerAlgorithm() != null) {
+            // The destination copy is SSE-C encrypted: annotations cannot live on it, the same
+            // rule a direct PutObjectAnnotation enforces.
+            return;
+        }
+        String destParentKey = annotationParentKey(destBucket, destKey, copy.getVersionId());
+        for (AnnotationSnapshot snapshot : snapshots) {
+            // The payload bytes are identical, so the source annotation's ETag and checksum are
+            // preserved; only the identity fields and lastModified are recomputed.
+            ObjectAnnotation copied = new ObjectAnnotation(destBucket, destKey, copy.getVersionId(),
+                    snapshot.metadata().getAnnotationName(), snapshot.metadata().getSize(),
+                    snapshot.metadata().getETag(), Instant.now(),
+                    snapshot.metadata().getChecksumAlgorithm(), snapshot.metadata().getChecksumValue());
+            copied.setServerSideEncryption(copy.getServerSideEncryption());
+            writeAnnotationPayload(copied, snapshot.payload());
+            annotationStore.put(annotationStoreKey(destParentKey, snapshot.metadata().getAnnotationName()), copied);
+        }
     }
 
     @Override

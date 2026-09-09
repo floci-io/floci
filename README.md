@@ -252,7 +252,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | SSM | In-process + EC2 containers | Parameter Store (version history, labels, SecureString, tagging); Run Command (SendCommand, GetCommandInvocation, direct EC2 container execution, agent polling) |
 | SQS | In-process | Standard and FIFO queues, DLQ, visibility timeout, batch operations, tagging |
 | SNS | In-process | Topics, subscriptions, SQS, Lambda and HTTP delivery, tagging |
-| S3 | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, event notifications |
+| S3 | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, object annotations, event notifications |
 | S3 Vectors | In-process | Vector buckets, indexes, put / get / list / delete vectors, cosine similarity queries |
 | DynamoDB | In-process | GSI, LSI, Query, Scan, TTL, transactions, batch operations; Streams with shard iterators and Lambda event source mapping |
 | Lambda | Real Docker | Runtime environment, execution model, warm container pool, aliases, Function URLs |

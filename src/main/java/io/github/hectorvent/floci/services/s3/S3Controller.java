@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
 import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
+import io.github.hectorvent.floci.services.s3.model.ObjectAnnotation;
 import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
 import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
@@ -751,6 +752,11 @@ public class S3Controller {
                 return Response.ok().build();
             }
 
+            if (hasQueryParam(uriInfo, "annotation")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectAnnotation", authorization);
+                return handlePutObjectAnnotation(bucket, key, body, uriInfo, httpHeaders);
+            }
+
             if (uploadId != null && partNumber != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 if (copySource != null && !copySource.isEmpty()) {
@@ -883,6 +889,17 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectTagging", authorization);
                 return handleGetObjectTagging(bucket, key);
+            }
+            if (hasQueryParam(uriInfo, "annotation")) {
+                String annotationNameParam = uriInfo.getQueryParameters().getFirst("annotationName");
+                // An empty annotationName is not a Get request for the empty name: it falls
+                // through to ListObjectAnnotations, matching the blank-name put semantics.
+                if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
+                    s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAnnotation", authorization);
+                    return handleGetObjectAnnotation(bucket, key, uriInfo, httpHeaders);
+                }
+                s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListObjectAnnotations", authorization);
+                return handleListObjectAnnotations(bucket, key, uriInfo);
             }
             if (hasQueryParam(uriInfo, "retention")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectRetention", authorization);
@@ -1105,6 +1122,19 @@ public class S3Controller {
                     return headOnlyResponse(websiteResponse);
                 }
             }
+            // HEAD honors the annotation subresource so a HEAD probe reports the same status and
+            // annotation metadata a GET would, instead of falling through to the object's headers.
+            if (hasQueryParam(uriInfo, "annotation")) {
+                String annotationNameParam = uriInfo.getQueryParameters().getFirst("annotationName");
+                // An empty annotationName is not a Get request for the empty name: it falls
+                // through to ListObjectAnnotations, matching the blank-name put semantics.
+                if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
+                    s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAnnotation", authorization);
+                    return headOnlyResponse(handleGetObjectAnnotation(bucket, key, uriInfo, httpHeaders));
+                }
+                s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListObjectAnnotations", authorization);
+                return headOnlyResponse(handleListObjectAnnotations(bucket, key, uriInfo));
+            }
             s3Service.authorizeGetObject(bucket, key, versionId, authorization);
 
             S3Object obj = s3Service.headObject(bucket, key, versionId);
@@ -1238,6 +1268,15 @@ public class S3Controller {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObjectTagging", authorization);
                 s3Service.deleteObjectTagging(bucket, key);
                 return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "annotation")) {
+                boolean bypass = "true".equalsIgnoreCase(
+                        httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+                s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObjectAnnotation", authorization);
+                if (bypass) {
+                    s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
+                }
+                return handleDeleteObjectAnnotation(bucket, key, uriInfo, httpHeaders, bypass);
             }
             if (uploadId != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:AbortMultipartUpload", authorization);
@@ -2096,6 +2135,188 @@ public class S3Controller {
         return xml.build();
     }
 
+    // --- Object Annotations ---
+
+    private Response handlePutObjectAnnotation(String bucket, String key, byte[] body,
+                                               UriInfo uriInfo, HttpHeaders httpHeaders) {
+        try {
+            // Strip aws-chunked framing when present, like the PutObject path this handler
+            // mirrors: a streaming-signed request otherwise persists its framing bytes as
+            // the annotation payload.
+            byte[] payload = decodeAwsChunked(body != null ? body : new byte[0],
+                    httpHeaders.getHeaderString("Content-Encoding"),
+                    httpHeaders.getHeaderString("x-amz-content-sha256"));
+            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            String algorithmHeader = getChecksumAlgorithm(httpHeaders);
+            ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(algorithmHeader);
+            validateChecksumHeaders(httpHeaders, payload, algorithmHeader);
+            validateContentMd5(httpHeaders, payload);
+            ObjectAnnotation annotation = s3Service.putObjectAnnotation(bucket, key, annotationName,
+                    versionId, payload, httpHeaders.getHeaderString("x-amz-object-if-match"), algorithm);
+            Response.ResponseBuilder response = Response.ok(putObjectAnnotationXml(annotation))
+                    .type(MediaType.APPLICATION_XML)
+                    .header("ETag", annotation.getETag());
+            if (annotation.getVersionId() != null) {
+                response.header("x-amz-object-version-id", annotation.getVersionId());
+            }
+            appendAnnotationChecksumHeaders(response, annotation);
+            appendAnnotationSseHeader(response, annotation);
+            emitCloudTrailEvent("PutObjectAnnotation", bucket, key, payload.length, 0L, null, null);
+            return response.build();
+        } catch (AwsException e) {
+            emitCloudTrailEvent("PutObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleGetObjectAnnotation(String bucket, String key,
+                                               UriInfo uriInfo, HttpHeaders httpHeaders) {
+        try {
+            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            ObjectAnnotation annotation = s3Service.getObjectAnnotation(bucket, key, annotationName, versionId);
+            byte[] payload = s3Service.readObjectAnnotationPayload(annotation);
+            Response.ResponseBuilder response = Response.ok((Object) payload)
+                    .type(MediaType.APPLICATION_OCTET_STREAM)
+                    .header("Content-Length", payload.length)
+                    .header("ETag", annotation.getETag())
+                    .header("Last-Modified", RFC_822.format(annotation.getLastModified()));
+            // No Accept-Ranges: range requests are not honored on annotation payloads.
+            if (annotation.getVersionId() != null) {
+                response.header("x-amz-object-version-id", annotation.getVersionId());
+            }
+            if ("ENABLED".equalsIgnoreCase(httpHeaders.getHeaderString("x-amz-checksum-mode"))) {
+                appendAnnotationChecksumHeaders(response, annotation);
+            }
+            appendAnnotationSseHeader(response, annotation);
+            emitCloudTrailEvent("GetObjectAnnotation", bucket, key, 0L, payload.length, null, null);
+            return response.build();
+        } catch (AwsException e) {
+            emitCloudTrailEvent("GetObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleListObjectAnnotations(String bucket, String key, UriInfo uriInfo) {
+        try {
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            String prefix = uriInfo.getQueryParameters().getFirst("annotation-prefix");
+            String token = uriInfo.getQueryParameters().getFirst("continuation-token");
+            String maxRaw = uriInfo.getQueryParameters().getFirst("max-annotation-results");
+            Integer max = null;
+            if (maxRaw != null && !maxRaw.isBlank()) {
+                try {
+                    max = Integer.parseInt(maxRaw);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("InvalidArgument",
+                            "max-annotation-results must be an integer.", 400);
+                }
+            }
+            S3Service.ListObjectAnnotationsResult result =
+                    s3Service.listObjectAnnotations(bucket, key, prefix, max, token, versionId);
+            XmlBuilder xml = new XmlBuilder()
+                    .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                    .start("ListObjectAnnotationsOutput", AwsNamespaces.S3)
+                    .start("Annotations");
+            for (ObjectAnnotation annotation : result.annotations()) {
+                xml.start("AnnotationEntry")
+                   .elem("AnnotationName", annotation.getAnnotationName())
+                   .elem("ChecksumAlgorithm", annotation.getChecksumAlgorithm())
+                   .elem("ETag", annotation.getETag())
+                   .elem("LastModified", ISO_FORMAT.format(annotation.getLastModified()))
+                   .elem("Size", annotation.getSize())
+                   .end("AnnotationEntry");
+            }
+            xml.end("Annotations")
+               .elem("Bucket", bucket)
+               .elem("Key", key);
+            if (prefix != null) {
+                xml.elem("AnnotationPrefix", prefix);
+            }
+            xml.elem("MaxAnnotationResults", result.maxAnnotationResults())
+               .elem("AnnotationCount", result.annotations().size())
+               .elem("IsTruncated", result.isTruncated());
+            if (token != null) {
+                xml.elem("ContinuationToken", token);
+            }
+            if (result.isTruncated()) {
+                xml.elem("NextContinuationToken", result.nextContinuationToken());
+            }
+            xml.end("ListObjectAnnotationsOutput");
+            Response.ResponseBuilder response = Response.ok(xml.build()).type(MediaType.APPLICATION_XML);
+            String versionIdOfPage = result.annotations().isEmpty()
+                    ? versionId : result.annotations().get(0).getVersionId();
+            if (versionIdOfPage != null) {
+                response.header("x-amz-object-version-id", versionIdOfPage);
+            }
+            emitCloudTrailEvent("ListObjectAnnotations", bucket, key, 0L, 0L, null, null);
+            return response.build();
+        } catch (AwsException e) {
+            emitCloudTrailEvent("ListObjectAnnotations", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleDeleteObjectAnnotation(String bucket, String key,
+                                                  UriInfo uriInfo, HttpHeaders httpHeaders,
+                                                  boolean bypassGovernance) {
+        try {
+            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            String parentVersionId = s3Service.deleteObjectAnnotation(bucket, key, annotationName, versionId,
+                    httpHeaders.getHeaderString("x-amz-object-if-match"), bypassGovernance);
+            Response.ResponseBuilder response = Response.noContent();
+            if (parentVersionId != null) {
+                response.header("x-amz-object-version-id", parentVersionId);
+            }
+            emitCloudTrailEvent("DeleteObjectAnnotation", bucket, key, 0L, 0L, null, null);
+            return response.build();
+        } catch (AwsException e) {
+            emitCloudTrailEvent("DeleteObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private String putObjectAnnotationXml(ObjectAnnotation annotation) {
+        return new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("PutObjectAnnotationOutput", AwsNamespaces.S3)
+                .elem("Key", annotation.getKey())
+                .elem("AnnotationName", annotation.getAnnotationName())
+                .end("PutObjectAnnotationOutput")
+                .build();
+    }
+
+    private void appendAnnotationChecksumHeaders(Response.ResponseBuilder response, ObjectAnnotation annotation) {
+        if (annotation.getChecksumAlgorithm() == null || annotation.getChecksumValue() == null) {
+            return;
+        }
+        response.header(ObjectAnnotation.checksumHeaderName(annotation.getChecksumAlgorithm()), annotation.getChecksumValue())
+                .header("x-amz-checksum-type", "FULL_OBJECT");
+    }
+
+    private void appendAnnotationSseHeader(Response.ResponseBuilder response, ObjectAnnotation annotation) {
+        if (annotation.getServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", annotation.getServerSideEncryption());
+        }
+    }
+
+    private void validateContentMd5(HttpHeaders httpHeaders, byte[] body) {
+        String contentMd5 = httpHeaders.getHeaderString("Content-MD5");
+        if (contentMd5 == null) {
+            return;
+        }
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("MD5").digest(body);
+            if (!contentMd5.equals(java.util.Base64.getEncoder().encodeToString(digest))) {
+                throw new AwsException("BadDigest", "The Content-MD5 you specified did not match the payload.", 400);
+            }
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 algorithm is not available", e);
+        }
+    }
+
     // --- Object Lock Configuration ---
 
     private Response handlePutObjectLockConfiguration(String bucket, byte[] body) {
@@ -2332,6 +2553,19 @@ public class S3Controller {
         Map<String, String> replacementTagging = "REPLACE".equalsIgnoreCase(taggingDirective)
                 ? (taggingHeader != null ? parseInlineTaggingHeader(taggingHeader) : Map.of())
                 : null;
+        // The AWS SDK (and real S3) marshal the copy annotation directive as
+        // x-amz-object-annotation-directive; the user guide also names x-amz-annotation-directive,
+        // so both are accepted.
+        String annotationDirective = httpHeaders.getHeaderString("x-amz-object-annotation-directive");
+        if (annotationDirective == null) {
+            annotationDirective = httpHeaders.getHeaderString("x-amz-annotation-directive");
+        }
+        if (annotationDirective != null
+                && !"COPY".equalsIgnoreCase(annotationDirective)
+                && !"EXCLUDE".equalsIgnoreCase(annotationDirective)) {
+            throw new AwsException("InvalidRequest",
+                    "x-amz-annotation-directive must be COPY or EXCLUDE.", 400);
+        }
         S3Object copy = s3Service.copyObject(sourceBucket, sourceObject.objectKey(), destBucket, destKey,
                 sourceObject.versionId(),
                 new CopyObjectOptions()
@@ -2353,6 +2587,7 @@ public class S3Controller {
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
                         .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
+                        .withAnnotationDirective(annotationDirective)
                         .withAcl(cannedAcl)
                         .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
                         .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))

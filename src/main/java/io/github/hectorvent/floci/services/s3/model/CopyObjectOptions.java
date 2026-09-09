@@ -27,6 +27,8 @@ public class CopyObjectOptions {
     private String grantReadAcp;
     private String grantWriteAcp;
     private String checksumAlgorithm;
+    // Whether annotations travel with the copy: COPY (the default) or EXCLUDE.
+    private String annotationDirective;
 
     public String getMetadataDirective() { return metadataDirective; }
     public CopyObjectOptions withMetadataDirective(String metadataDirective) { this.metadataDirective = metadataDirective; return this; }
@@ -99,4 +101,7 @@ public class CopyObjectOptions {
 
     public String getChecksumAlgorithm() { return checksumAlgorithm; }
     public CopyObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }
+
+    public String getAnnotationDirective() { return annotationDirective; }
+    public CopyObjectOptions withAnnotationDirective(String annotationDirective) { this.annotationDirective = annotationDirective; return this; }
 }

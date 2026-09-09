@@ -776,7 +776,8 @@ public class CloudTrailService {
         if (eventName == null) return true;
         return switch (eventName) {
             case "GetObject", "HeadObject", "ListObjects", "ListObjectsV2",
-                 "GetObjectAcl", "GetObjectTagging", "ListMultipartUploads" -> true;
+                 "GetObjectAcl", "GetObjectTagging", "ListMultipartUploads",
+                 "GetObjectAnnotation", "ListObjectAnnotations" -> true;
             default -> false;
         };
     }
