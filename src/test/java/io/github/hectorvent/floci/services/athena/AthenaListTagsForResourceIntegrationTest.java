@@ -142,6 +142,39 @@ class AthenaListTagsForResourceIntegrationTest {
     }
 
     @Test
+    void listTagsForResourceRejectsAnArnFromADifferentService() {
+        // Create a real workgroup so an unguarded service check would still resolve this: an
+        // ARN naming a different service (a Neptune workgroup/-shaped resource, say) but the
+        // same region and workgroup name must be rejected, not resolved to this workgroup's tags.
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "Name": "cross-service-workgroup"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.ListTagsForResource")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "ResourceARN": "arn:aws:neptune:us-east-1:000000000000:workgroup/cross-service-workgroup"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+    }
+
+    @Test
     void listTagsForResourceRejectsBlankResourceArn() {
         given()
             .header("X-Amz-Target", "AmazonAthena.ListTagsForResource")

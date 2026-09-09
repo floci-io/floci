@@ -223,7 +223,11 @@ public class AthenaService {
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidRequestException", "Invalid ResourceARN: " + resourceArn, 400);
         }
-        if (!arn.resource().startsWith("workgroup/")) {
+        // pgermosen (review, #3242): without this, an ARN naming a completely different
+        // service (e.g. a Neptune workgroup/-shaped resource that coincidentally shares this
+        // region and name) would resolve instead of being rejected the way a live account
+        // rejects a ResourceARN naming the wrong service.
+        if (!"athena".equals(arn.service()) || !arn.resource().startsWith("workgroup/")) {
             throw new AwsException("InvalidRequestException",
                     "Unsupported resource type for ListTagsForResource: " + resourceArn, 400);
         }
