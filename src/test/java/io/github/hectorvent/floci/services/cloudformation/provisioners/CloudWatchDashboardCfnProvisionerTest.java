@@ -46,6 +46,7 @@ class CloudWatchDashboardCfnProvisionerTest {
     private static final String STACK = "my-stack";
     private static final String TYPE = "AWS::CloudWatch::Dashboard";
     private static final String BODY = "{\"widgets\":[{\"type\":\"text\",\"properties\":{\"markdown\":\"hi\"}}]}";
+    private static final String OLD_BODY = "{\"widgets\":[{\"type\":\"text\",\"properties\":{\"markdown\":\"was here\"}}]}";
 
     private CloudWatchDashboardsService dashboards;
     private CloudWatchDashboardCfnProvisioner provisioner;
@@ -390,6 +391,79 @@ class CloudWatchDashboardCfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(r));
         verify(dashboards, never()).deleteDashboards(anyList(), anyString());
+    }
+
+    /**
+     * An in-place update that put the body and then failed on the tags unwinds itself. The stack
+     * keeps the resource it had before the attempt, and that object never carried the snapshot, so
+     * a rollback driven from it would skip this provisioner and leave the new body live.
+     */
+    @Test
+    void anInPlaceUpdateThatFailedOnItsTagsPutsTheBodyBack() {
+        Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
+        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
+        when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
+        doThrow(new AwsException("InternalServiceError", "boom", 500))
+                .when(dashboards).untagResource(arn("ops"), List.of("team"), REGION);
+
+        assertThrows(AwsException.class, () -> provision("""
+                {"DashboardName": "ops", "DashboardBody": "{}", "Tags": [{"Key": "env", "Value": "dev"}]}
+                """, "ops", Map.of("FlociDashboardNameMode", "explicit")));
+
+        verify(dashboards).putDashboard("ops", OLD_BODY, Map.of("team", "platform"), REGION);
+    }
+
+    /** The unwind reports the resource restored, so the stack does not call the rollback again. */
+    @Test
+    void anUnwoundInPlaceUpdateIsMarkedRestored() {
+        Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
+        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
+        when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
+        doThrow(new AwsException("InternalServiceError", "boom", 500))
+                .when(dashboards).untagResource(arn("ops"), List.of("team"), REGION);
+
+        StackResource r = resource();
+        r.setPhysicalId("ops");
+        r.getAttributes().put("FlociDashboardNameMode", "explicit");
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"DashboardName": "ops", "DashboardBody": "{}", "Tags": [{"Key": "env", "Value": "dev"}]}
+                """), new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, "ops")));
+
+        assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR),
+                "the snapshot is spent by the unwind");
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    /**
+     * An unwind that cannot put the body back keeps the snapshot and records the failure, so the
+     * stack ends in UPDATE_ROLLBACK_FAILED instead of claiming the prior dashboard is live.
+     */
+    @Test
+    void anUnwindThatCannotRestoreIsReportedAsARollbackFailure() {
+        Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
+        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
+        when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
+        doThrow(new AwsException("InternalServiceError", "boom", 500))
+                .when(dashboards).untagResource(arn("ops"), List.of("team"), REGION);
+        doThrow(new AwsException("InternalServiceError", "still down", 500))
+                .when(dashboards).putDashboard(eq("ops"), eq(OLD_BODY), anyMap(), eq(REGION));
+
+        StackResource r = resource();
+        r.setPhysicalId("ops");
+        r.getAttributes().put("FlociDashboardNameMode", "explicit");
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"DashboardName": "ops", "DashboardBody": "{}", "Tags": [{"Key": "env", "Value": "dev"}]}
+                """), new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, "ops")));
+
+        assertEquals("boom", thrown.getMessage(), "the original failure is what the stack reports");
+        assertTrue(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        assertTrue(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR),
+                "the snapshot is kept for the next attempt");
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
     }
 
     @Test

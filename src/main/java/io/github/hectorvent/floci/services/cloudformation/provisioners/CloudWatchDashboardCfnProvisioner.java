@@ -85,14 +85,40 @@ public class CloudWatchDashboardCfnProvisioner implements CfnResourceProvisioner
         if (ctx.reusesPriorEntity(name)) {
             snapshotBeforeUpdate(r, name, ctx.region());
         }
-        // PutDashboard creates or replaces the body in full, and applies the tags on create only.
-        Dashboard dashboard = dashboardsService.putDashboard(name, body, tags, ctx.region());
-        if (ctx.reusesPriorEntity(name)) {
-            reconcileTags(dashboard.getDashboardArn(), tags, ctx.region());
+        try {
+            // PutDashboard creates or replaces the body in full, and applies the tags on create only.
+            Dashboard dashboard = dashboardsService.putDashboard(name, body, tags, ctx.region());
+            if (ctx.reusesPriorEntity(name)) {
+                reconcileTags(dashboard.getDashboardArn(), tags, ctx.region());
+            }
+        } catch (RuntimeException failure) {
+            unwind(r, name, failure);
+            throw failure;
         }
         r.setPhysicalId(name);
         r.getAttributes().put(NAME_MODE_ATTR, hasExplicitName ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
         ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /**
+     * A provision that changed the dashboard and then failed undoes itself. CloudFormationService
+     * puts the resource the stack held before the attempt back in its place, and that object never
+     * carried the snapshot taken here, so it marks the resource restored and the rollback walker
+     * skips {@link #rollbackUpdate}: without this the stack reports a completed rollback while the
+     * new body, or a half-reconciled set of tags, is still live. The stack must report the original
+     * failure, so an unwind that cannot restore is attached to it and recorded as a rollback
+     * failure, which ends the stack in UPDATE_ROLLBACK_FAILED rather than claiming the prior
+     * dashboard is intact.
+     */
+    private void unwind(StackResource r, String name, RuntimeException failure) {
+        try {
+            rollbackUpdate(r);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+        } catch (RuntimeException unwindFailure) {
+            failure.addSuppressed(unwindFailure);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                    "Could not roll back the update of dashboard " + name + ": " + unwindFailure.getMessage());
+        }
     }
 
     /**
