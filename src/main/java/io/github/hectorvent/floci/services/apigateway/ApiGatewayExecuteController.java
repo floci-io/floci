@@ -57,6 +57,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
  * Executes API Gateway stage requests, routing them through the configured
@@ -1342,10 +1343,53 @@ public class ApiGatewayExecuteController {
     private Response invokeMock(String region, String httpMethod, String path, String stageName,
                                 ApiGatewayResource resource, Integration integration,
                                 HttpHeaders headers, UriInfo uriInfo, byte[] body) {
-        // Use the "200" integration response if present, else return empty 200
-        IntegrationResponse ir = integration.getIntegrationResponses().get("200");
-        if (ir == null) {
+        String requestId = UUID.randomUUID().toString();
+        String bodyStr = body != null && body.length > 0 ? new String(body) : null;
+
+        Map<String, String> headerMap = new HashMap<>();
+        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+            if (!e.getValue().isEmpty()) {
+                headerMap.put(e.getKey(), e.getValue().get(0));
+            }
+        }
+        Map<String, String> queryMap = new HashMap<>();
+        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+            if (!e.getValue().isEmpty()) {
+                queryMap.put(e.getKey(), e.getValue().get(0));
+            }
+        }
+        Map<String, String> pathMap = new HashMap<>(extractPathParams(resource.getPath(), path));
+
+        VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
+                bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
+                resource.getPath(), requestId, regionResolver.getAccountId(), null);
+
+        // A MOCK has no backend: the request template *is* the integration response, and the
+        // "statusCode" it renders is what the integration responses' selectionPatterns are
+        // matched against. Previously only the integration response keyed "200" was ever
+        // consulted, so a preflight declared with any other status (CDK's addCorsPreflight
+        // emits a single "204" response) came back as a bare 200 with no CORS headers.
+        Map<String, IntegrationResponse> integrationResponses = integration.getIntegrationResponses();
+        if (integrationResponses == null || integrationResponses.isEmpty()) {
+            // Leniency: AWS fails with a 500 configuration error when no output mapping exists;
+            // Floci keeps answering an empty 200 so a bare MOCK stays usable as a stub. Checked
+            // before rendering the request template so a malformed template cannot break the stub.
             return Response.ok().build();
+        }
+        Integer mockStatus = resolveMockStatusCode(integration, resource, httpMethod, headers, bodyStr, vtlCtx);
+        if (mockStatus == null) {
+            // A request template that does not render is a configuration error on AWS too.
+            return Response.status(500)
+                    .entity(jsonMessage("Internal server error"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+        IntegrationResponse ir = selectMockIntegrationResponse(integrationResponses, mockStatus);
+        if (ir == null) {
+            LOG.warnv("execute-api: MOCK {0} {1} produced statusCode {2} but no integration response "
+                    + "matches it and none is the default", httpMethod, resource.getPath(), mockStatus);
+            return Response.status(500)
+                    .entity(jsonMessage("Internal server error"))
+                    .type(MediaType.APPLICATION_JSON).build();
         }
 
         String template = ir.responseTemplates() != null
@@ -1357,25 +1401,10 @@ public class ApiGatewayExecuteController {
 
         if (!template.isEmpty()) {
             // Evaluate the response template through VTL (supports $context.responseOverride etc.)
-            String requestId = UUID.randomUUID().toString();
-            String bodyStr = body != null && body.length > 0 ? new String(body) : null;
-
-            Map<String, String> headerMap = new HashMap<>();
-            for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
-                if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
-            }
-            Map<String, String> queryMap = new HashMap<>();
-            for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
-                if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
-            }
-            Map<String, String> pathMap = new HashMap<>(extractPathParams(resource.getPath(), path));
-
-            VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
-                    bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                    resource.getPath(), requestId, regionResolver.getAccountId(), null);
-
             VtlTemplateEngine.EvaluateResult result = vtlEngine.evaluate(template, vtlCtx);
-            if (result.statusOverride() != null) status = result.statusOverride();
+            if (result.statusOverride() != null) {
+                status = result.statusOverride();
+            }
             responseBody = result.body();
             vtlHeaderOverrides = result.headerOverrides();
         }
@@ -1405,7 +1434,9 @@ public class ApiGatewayExecuteController {
         if (ir.responseParameters() != null) {
             for (Map.Entry<String, String> param : ir.responseParameters().entrySet()) {
                 String dest = param.getKey();   // method.response.header.X-Foo
-                if (!dest.startsWith("method.response.header.")) continue;
+                if (!dest.startsWith("method.response.header.")) {
+                    continue;
+                }
                 String headerName = dest.substring("method.response.header.".length());
                 if (vtlOverriddenHeaders.contains(headerName.toLowerCase(Locale.ROOT))) {
                     continue;   // a VTL $context.responseOverride for this header takes precedence
@@ -1419,6 +1450,102 @@ public class ApiGatewayExecuteController {
         }
 
         return rb.build();
+    }
+
+    /**
+     * Matches the {@code statusCode} a MOCK request template renders, e.g. {@code {"statusCode": 200}}.
+     * The key is accepted unquoted because API Gateway tolerates the {@code { statusCode: 200 }}
+     * shorthand that CDK's {@code addCorsPreflight} emits.
+     */
+    private static final Pattern MOCK_STATUS_CODE = Pattern.compile(
+            "[\"']?statusCode[\"']?\\s*:\\s*[\"']?(\\d{3})[\"']?");
+
+    /**
+     * Resolves the status code a MOCK integration "returns" by rendering its request template
+     * (chosen by the request's Content-Type, falling back to {@code application/json} and then
+     * to the only template configured) and reading the {@code statusCode} the <em>rendered</em>
+     * output declares, so VTL conditionals decide exactly as they do on AWS. Without a template
+     * the passthrough request body is inspected instead. Defaults to 200 when nothing declares
+     * one, and returns {@code null} when the template fails to render: that is a configuration
+     * error the caller must surface, not a successful mock.
+     */
+    private Integer resolveMockStatusCode(Integration integration, ApiGatewayResource resource, String httpMethod,
+                                          HttpHeaders headers, String bodyStr,
+                                          VtlTemplateEngine.VtlContext vtlCtx) {
+        String template = selectRequestTemplate(integration.getRequestTemplates(), headers);
+        String source;
+        if (template != null && !template.isEmpty()) {
+            try {
+                source = vtlEngine.evaluate(template, vtlCtx).body();
+            } catch (RuntimeException e) {
+                // Log identifiers only: the template body is API-owner content and may embed secrets.
+                LOG.warnv("execute-api: MOCK request template for {0} {1} failed to render: {2}",
+                        httpMethod, resource.getPath(), e.getMessage());
+                return null;
+            }
+        } else {
+            source = bodyStr;
+        }
+        Integer status = parseMockStatusCode(source);
+        return status != null ? status : 200;
+    }
+
+    private static String selectRequestTemplate(Map<String, String> templates, HttpHeaders headers) {
+        if (templates == null || templates.isEmpty()) {
+            return null;
+        }
+        String contentType = headers != null ? headers.getHeaderString("Content-Type") : null;
+        if (contentType != null) {
+            String mediaType = contentType.split(";", 2)[0].trim();
+            for (Map.Entry<String, String> e : templates.entrySet()) {
+                if (e.getKey().equalsIgnoreCase(mediaType)) {
+                    return e.getValue();
+                }
+            }
+        }
+        String json = templates.get("application/json");
+        if (json != null) {
+            return json;
+        }
+        return templates.size() == 1 ? templates.values().iterator().next() : null;
+    }
+
+    private static Integer parseMockStatusCode(String text) {
+        if (text == null || text.isEmpty()) {
+            return null;
+        }
+        Matcher m = MOCK_STATUS_CODE.matcher(text);
+        return m.find() ? Integer.valueOf(m.group(1)) : null;
+    }
+
+    /**
+     * Picks the integration response for a MOCK status code the way API Gateway does: the first
+     * response whose {@code selectionPattern} matches the status code wins, otherwise the response
+     * without a pattern (the default) is used. Returns {@code null} when neither exists.
+     */
+    private static IntegrationResponse selectMockIntegrationResponse(
+            Map<String, IntegrationResponse> integrationResponses, int mockStatus) {
+        String statusText = String.valueOf(mockStatus);
+        IntegrationResponse defaultResponse = null;
+        for (IntegrationResponse ir : integrationResponses.values()) {
+            if (ir.selectionPattern() == null || ir.selectionPattern().isEmpty()) {
+                if (defaultResponse == null) {
+                    defaultResponse = ir;
+                }
+                continue;
+            }
+            try {
+                if (Pattern.matches(ir.selectionPattern(), statusText)) {
+                    return ir;
+                }
+            } catch (PatternSyntaxException e) {
+                // A malformed selectionPattern cannot match anything; keep evaluating the others
+                // so a valid pattern or the default response still answers.
+                LOG.warnv("execute-api: ignoring invalid selectionPattern {0} on integration response {1}: {2}",
+                        ir.selectionPattern(), ir.statusCode(), e.getDescription());
+            }
+        }
+        return defaultResponse;
     }
 
     // ──────────────────────────── API Gateway v2 dispatch ────────────────────────────
