@@ -387,6 +387,122 @@ class CloudFrontControllerTest {
     }
 
     @Test
+    void originSslProtocolsQuantityMismatchIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
+                        + "<OriginSslProtocols><Quantity>2</Quantity><Items>"
+                        + "<SslProtocol>TLSv1.2</SslProtocol>"
+                        + "</Items></OriginSslProtocols></CustomOriginConfig>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InconsistentQuantities"));
+        }
+    }
+
+    @Test
+    void originReadTimeoutAboveTheAwsMaximumIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
+                        + "<OriginReadTimeout>121</OriginReadTimeout></CustomOriginConfig>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InvalidOriginReadTimeout"));
+        }
+    }
+
+    @Test
+    void originKeepaliveTimeoutOfZeroIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
+                        + "<OriginKeepaliveTimeout>0</OriginKeepaliveTimeout></CustomOriginConfig>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InvalidOriginKeepaliveTimeout"));
+        }
+    }
+
+    @Test
+    void nonNumericOriginReadTimeoutIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
+                        + "<OriginReadTimeout>fast</OriginReadTimeout></CustomOriginConfig>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InvalidOriginReadTimeout"));
+        }
+    }
+
+    @Test
+    void responseCompletionTimeoutBelowOriginReadTimeoutIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
+                        + "<OriginReadTimeout>60</OriginReadTimeout></CustomOriginConfig>"
+                        + "<ResponseCompletionTimeout>30</ResponseCompletionTimeout>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InvalidArgument"));
+        }
+    }
+
+    @Test
+    void responseCompletionTimeoutAtLeastOriginReadTimeoutIsAccepted() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+        when(service.createDistribution(any(), any())).thenReturn(distribution("dist-rct"));
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
+                        + "<OriginReadTimeout>60</OriginReadTimeout></CustomOriginConfig>"
+                        + "<ResponseCompletionTimeout>60</ResponseCompletionTimeout>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+    }
+
+    @Test
+    void responseCompletionTimeoutBelowTheImplicitOriginReadTimeoutDefaultIsRejected() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
+                        + "<ResponseCompletionTimeout>10</ResponseCompletionTimeout>");
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(400, created.getStatus());
+            assertTrue(((String) created.getEntity()).contains("InvalidArgument"));
+        }
+    }
+
+    @Test
     void defaultCacheBehaviorRoundTripsForwardedValues() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);
@@ -532,6 +648,93 @@ class CloudFrontControllerTest {
         }
     }
 
+
+    @Test
+    void customOriginConfigRoundTripsTimeoutsAndSslProtocols() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = """
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>ref-timeouts</CallerReference>
+                  <Enabled>true</Enabled>
+                  <Comment>probe</Comment>
+                  <Origins><Quantity>1</Quantity><Items><Origin>
+                    <Id>o1</Id><DomainName>example.com</DomainName>
+                    <CustomOriginConfig>
+                      <HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>
+                      <OriginProtocolPolicy>https-only</OriginProtocolPolicy>
+                      <OriginKeepaliveTimeout>45</OriginKeepaliveTimeout>
+                      <OriginReadTimeout>60</OriginReadTimeout>
+                      <OriginSslProtocols><Quantity>2</Quantity><Items>
+                        <SslProtocol>TLSv1.1</SslProtocol><SslProtocol>TLSv1.2</SslProtocol>
+                      </Items></OriginSslProtocols>
+                    </CustomOriginConfig>
+                    <ResponseCompletionTimeout>90</ResponseCompletionTimeout>
+                  </Origin></Items></Origins>
+                  <DefaultCacheBehavior>
+                    <TargetOriginId>o1</TargetOriginId>
+                    <ViewerProtocolPolicy>redirect-to-https</ViewerProtocolPolicy>
+                    <AllowedMethods><Quantity>2</Quantity><Items>
+                      <Method>GET</Method><Method>HEAD</Method></Items></AllowedMethods>
+                  </DefaultCacheBehavior>
+                </DistributionConfig>
+                """;
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-timeouts");
+            d.setEtag("etag-timeouts");
+            return d;
+        });
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+
+        when(service.getDistribution("dist-timeouts")).thenReturn(captor.getValue());
+
+        try (Response cfg = controller.getDistributionConfig("dist-timeouts")) {
+            String xml = (String) cfg.getEntity();
+
+            assertEquals("45", XmlParser.extractFirst(xml, "OriginKeepaliveTimeout", null));
+            assertEquals("60", XmlParser.extractFirst(xml, "OriginReadTimeout", null));
+            assertEquals("90", XmlParser.extractFirst(xml, "ResponseCompletionTimeout", null));
+            assertEquals(List.of("TLSv1.1", "TLSv1.2"), XmlParser.extractAll(xml, "SslProtocol"));
+        }
+    }
+
+    @Test
+    void customOriginConfigDefaultsTimeoutsWhenUnspecified() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-defaults");
+            d.setEtag("etag-defaults");
+            return d;
+        });
+
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+
+        when(service.getDistribution("dist-defaults")).thenReturn(captor.getValue());
+
+        try (Response cfg = controller.getDistributionConfig("dist-defaults")) {
+            String xml = (String) cfg.getEntity();
+
+            assertEquals("5", XmlParser.extractFirst(xml, "OriginKeepaliveTimeout", null));
+            assertEquals("30", XmlParser.extractFirst(xml, "OriginReadTimeout", null));
+            assertEquals("0", XmlParser.extractFirst(xml, "ResponseCompletionTimeout", null));
+            assertEquals(List.of("TLSv1.2"), XmlParser.extractAll(xml, "SslProtocol"));
+        }
+    }
 
     private static String distributionConfigBody(String defaultCacheBehaviorExtra) {
         return """
