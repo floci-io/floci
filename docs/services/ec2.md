@@ -138,6 +138,14 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 
 IAM credentials are served when the instance has an `IamInstanceProfile.Arn` set at launch. The container can then call other Floci services with full SigV4 validation using the standard AWS SDK credential chain.
 
+### IMDS and SSM managed instances
+
+IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record.
+
+Registering a container with SSM is independent of this: an SSM agent that calls `UpdateInstanceInformation` becomes a managed instance, but that does not create an EC2 instance record, does not install the IMDS proxy, and does not register the container with IMDS. From such a container, `curl http://169.254.169.254/...` fails outright (no proxy), and a request sent straight to the host IMDS port returns `404` with a message explaining that no EC2 instance is registered for the source IP. Floci also logs a warning when an SSM agent registers from a container that is not backed by a Floci EC2 instance.
+
+To get a container that both answers IMDS (including instance profile credentials) and executes `SendCommand` directly, launch it with `RunInstances` first, then register that same container's SSM agent as a managed instance. Do not register an arbitrary or pre-existing container directly with SSM and expect IMDS to work. See [SSM](ssm.md#run-command-execution) for the SendCommand side of this.
+
 ## Default Resources
 
 Floci seeds the following resources on first use in each region so Terraform, the AWS CLI, and SDK clients work out of the box without any setup:

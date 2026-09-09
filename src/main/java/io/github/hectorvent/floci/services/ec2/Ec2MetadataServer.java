@@ -143,6 +143,10 @@ public class Ec2MetadataServer {
         if (inst != null) {
             tokenToInstance.put(token, inst);
         }
+        else {
+            LOG.debugv("IMDS: token requested from {0}, which is not a registered EC2 container; "
+                    + "metadata requests with this token will fail", ctx.request().remoteAddress().host());
+        }
 
         ctx.response()
                 .setStatusCode(200)
@@ -354,10 +358,28 @@ public class Ec2MetadataServer {
         String remoteIp = ctx.request().remoteAddress().host();
         Instance inst = containerIpToInstance.get(remoteIp);
         if (inst == null) {
-            LOG.warnv("IMDS: could not identify instance for request from {0}", remoteIp);
-            ctx.response().setStatusCode(404).end("Instance not found");
+            String message = unregisteredContainerMessage(remoteIp);
+            LOG.warnv("IMDS: {0}", message);
+            ctx.response().setStatusCode(404)
+                    .putHeader("content-type", "text/plain")
+                    .end(message);
         }
         return inst;
+    }
+
+    /**
+     * Explains why IMDS has nothing to serve for a request coming from {@code remoteIp}.
+     *
+     * <p>IMDS only knows about containers that {@link Ec2ContainerManager} launched through EC2
+     * {@code RunInstances}. Registering a container's SSM agent as a managed instance
+     * ({@code UpdateInstanceInformation}) does not create an EC2 instance record, so a container
+     * that was only registered with SSM ends up here.
+     */
+    static String unregisteredContainerMessage(String remoteIp) {
+        return "Instance not found: no EC2 instance is registered for source IP " + remoteIp + ". "
+                + "IMDS only serves containers launched through EC2 RunInstances; "
+                + "registering a container as an SSM managed instance does not register it with IMDS. "
+                + "Launch the container with RunInstances first, then register its SSM agent.";
     }
 
     // ── Utilities ─────────────────────────────────────────────────────────────
