@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -65,6 +66,7 @@ public class CloudFormationService implements ResourceProvider {
     private final CloudFormationResourceProvisioner provisioner;
     private final S3Service s3Service;
     private final SsmService ssmService;
+    private final CfnDynamicReferences dynamicReferences;
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -81,12 +83,14 @@ public class CloudFormationService implements ResourceProvider {
 
     @Inject
     public CloudFormationService(CloudFormationResourceProvisioner provisioner, S3Service s3Service,
-                                 SsmService ssmService, ObjectMapper objectMapper, EmulatorConfig config,
+                                 SsmService ssmService, CfnDynamicReferences dynamicReferences,
+                                 ObjectMapper objectMapper, EmulatorConfig config,
                                  RegionResolver regionResolver, Clock clock,
                                  StorageFactory storageFactory) {
         this.provisioner = provisioner;
         this.s3Service = s3Service;
         this.ssmService = ssmService;
+        this.dynamicReferences = dynamicReferences;
         this.objectMapper = objectMapper;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -1135,7 +1139,8 @@ public class CloudFormationService implements ResourceProvider {
                     CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                             accountId, region, stack.getStackName(),
                             stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
-                            name -> exports.get(accountExportKey(accountId, exportKey(region, name))));
+                            name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                            value -> dynamicReferences.resolveDynamicReferences(value, region, false));
 
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;
@@ -1233,7 +1238,8 @@ public class CloudFormationService implements ResourceProvider {
             CloudFormationTemplateEngine finalEngine = new CloudFormationTemplateEngine(
                     accountId, region, stack.getStackName(),
                     stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
-                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))));
+                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                    value -> dynamicReferences.resolveDynamicReferences(value, region, false));
 
             // Resolve outputs before mutating stack/global export state, so failed updates do not
             // leave stale or partially registered exports behind.

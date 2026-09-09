@@ -477,7 +477,8 @@ public class CloudFormationResourceProvisioner {
     public StackResource provisionStandalone(String resourceType, JsonNode properties, String region, String accountId) {
         CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                 accountId, region, "cloudcontrol", "cloudcontrol",
-                Map.of(), new HashMap<>(), new HashMap<>(), Map.of(), Map.of(), objectMapper, name -> null);
+                Map.of(), new HashMap<>(), new HashMap<>(), Map.of(), Map.of(), objectMapper, name -> null,
+                value -> dynamicReferences.resolveDynamicReferences(value, region, false));
         return provision("resource", resourceType, properties, engine, region, accountId, "cloudcontrol");
     }
 
@@ -1391,7 +1392,7 @@ public class CloudFormationResourceProvisioner {
         if (instance != null) {
             instance = rdsService.modifyDbInstance(
                     id,
-                    resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
+                    resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                     resolveOptional(props, "DBSubnetGroupName", engine));
         } else {
@@ -1399,8 +1400,8 @@ public class CloudFormationResourceProvisioner {
                     id,
                     resolveOptional(props, "Engine", engine),
                     resolveOptional(props, "EngineVersion", engine),
-                    resolveDynamicReferences(resolveOptional(props, "MasterUsername", engine), region, false),
-                    resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
+                    resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUsername", engine), region, false),
+                    resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
                     resolveOptional(props, "DBName", engine),
                     firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
                     parseIntProp(props, "AllocatedStorage", engine, 20),
@@ -1441,7 +1442,7 @@ public class CloudFormationResourceProvisioner {
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
                     id,
-                    resolveDynamicReferences(resolveOptional(props, "MasterUserPassword", engine), region, true),
+                    resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                     parseServerlessV2Capacity(props, "MinCapacity", engine),
                     parseServerlessV2Capacity(props, "MaxCapacity", engine),
@@ -1454,9 +1455,9 @@ public class CloudFormationResourceProvisioner {
             String engineName = resolveOptional(props, "Engine", engine);
             String engineVersion = resolveOptional(props, "EngineVersion", engine);
             String masterUsername = resolveDynamicReferences(
-                    resolveOptional(props, "MasterUsername", engine), region, false);
+                    resolveOptionalWithoutDynamicReferences(props, "MasterUsername", engine), region, false);
             String masterPassword = resolveDynamicReferences(
-                    resolveOptional(props, "MasterUserPassword", engine), region, true);
+                    resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true);
             String databaseName = resolveOptional(props, "DatabaseName", engine);
             boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
             String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
@@ -5690,8 +5691,27 @@ public class CloudFormationResourceProvisioner {
     }
 
     /**
+     * Like {@link #resolveOptional}, but skips the general dynamic-reference stage that
+     * {@link CloudFormationTemplateEngine#resolve} applies. RDS {@code MasterUsername}/
+     * {@code MasterUserPassword} are the only properties where {@code ssm-secure} is a valid
+     * dynamic reference service, and the general stage rejects {@code ssm-secure} outright since
+     * it is invalid everywhere else; the caller resolves the intrinsic-only result itself via
+     * {@link #resolveDynamicReferences} with the permission only these two properties are allowed.
+     */
+    private String resolveOptionalWithoutDynamicReferences(JsonNode props, String name,
+                                                            CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
+            return null;
+        }
+        return engine.resolveWithoutDynamicReferences(props.get(name));
+    }
+
+    /**
      * Resolves CloudFormation dynamic references in a provisioned property value. Delegates to
-     * {@link CfnDynamicReferences}; the RDS master-credential paths are its only callers today.
+     * {@link CfnDynamicReferences}. {@code allowSsmSecure} is {@code true} only for the RDS
+     * master-credential properties resolved here directly; every other property value reaches
+     * {@link CfnDynamicReferences} through {@link CloudFormationTemplateEngine#resolveNode}, which
+     * disallows {@code ssm-secure} the same way the general path does.
      */
     private String resolveDynamicReferences(String value, String region, boolean allowSsmSecure) {
         return dynamicReferences.resolveDynamicReferences(value, region, allowSsmSecure);
