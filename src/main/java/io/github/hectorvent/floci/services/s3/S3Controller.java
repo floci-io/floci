@@ -2393,7 +2393,7 @@ public class S3Controller {
                 copySourceSseCustomerHeaders(httpHeaders),
                 sseCustomerHeaders(httpHeaders));
         // The destination multipart upload's own SSE settings (captured at
-        // CreateMultipartUpload), not anything from this request's headers —
+        // CreateMultipartUpload), not anything from this request's headers.
         // UploadPartCopy doesn't take server-side-encryption headers itself,
         // parts always inherit the upload they belong to.
         MultipartUpload destinationUpload = s3Service.listParts(destBucket, destKey, uploadId);

@@ -1177,7 +1177,7 @@ class S3MultipartIntegrationTest {
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
         // UploadPartCopy doesn't take x-amz-server-side-encryption headers
-        // itself — a part always inherits the destination multipart upload's
+        // itself, a part always inherits the destination multipart upload's
         // own encryption settings, captured at CreateMultipartUpload above.
         // The CopyPartResult response must reflect those, not come back bare.
         given()
