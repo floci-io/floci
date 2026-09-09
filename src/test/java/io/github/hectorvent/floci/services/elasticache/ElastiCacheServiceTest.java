@@ -257,23 +257,36 @@ class ElastiCacheServiceTest {
     }
 
     @Test
-    void requestedPortAlreadyInUseFallsBackToTheNextFreePort() {
-        // floci multiplexes every group's proxy onto one host, so two groups cannot share a
-        // port. Falling back keeps the create working rather than failing the caller.
+    void requestedPortAlreadyInUseIsRejected() {
+        // floci multiplexes every group's proxy onto one host, so two groups cannot share a port.
+        // Substituting a different one would hand back the drift honoring Port exists to remove,
+        // and it could only ever hit a caller who did pin a port.
         service.createReplicationGroup(singleNodeRequest("grp1", 16390));
 
-        ReplicationGroup second = service.createReplicationGroup(singleNodeRequest("grp2", 16390));
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(singleNodeRequest("grp2", 16390)));
 
-        assertEquals(16379, second.getProxyPort(),
-                "A taken Port must fall back to the next free port, not collide");
+        assertEquals("InvalidParameterValue", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("16390"));
     }
 
     @Test
-    void requestedPortOutsideTheProxyRangeFallsBack() {
-        ReplicationGroup group = service.createReplicationGroup(singleNodeRequest("grp", 9999));
+    void requestedPortOutsideTheProxyRangeIsRejected() {
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(singleNodeRequest("grp", 9999)));
 
-        assertEquals(16379, group.getProxyPort(),
-                "A Port outside the configured proxy range must fall back to an allocated one");
+        assertEquals("InvalidParameterValue", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("9999"));
+    }
+
+    @Test
+    void anUnpinnedCreateStillFallsBackWhenTheBasePortIsTaken() {
+        // The fallback survives for callers that named no port: only an explicit one is refused.
+        service.createReplicationGroup(singleNodeRequest("grp1", 16379));
+
+        ReplicationGroup second = service.createReplicationGroup(singleNodeRequest("grp2", null));
+
+        assertEquals(16380, second.getProxyPort());
     }
 
     @Test
