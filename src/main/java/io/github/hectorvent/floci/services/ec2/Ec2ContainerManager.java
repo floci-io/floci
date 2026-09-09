@@ -1386,7 +1386,12 @@ public class Ec2ContainerManager {
                 "  apt-get update -qq >/dev/null",
                 "  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 socat curl ca-certificates >/dev/null",
                 "elif command -v dnf >/dev/null 2>&1; then",
-                "  dnf install -y iproute socat curl ca-certificates >/dev/null",
+                // --allowerasing lets dnf swap the curl-minimal that
+                // public.ecr.aws/amazonlinux/amazonlinux:2023 ships by default for the full
+                // curl package this proxy needs. Without it, dnf aborts the whole transaction
+                // on a curl/curl-minimal conflict and iproute+socat never install either, even
+                // though neither of them conflicts with anything.
+                "  dnf install -y --allowerasing iproute socat curl ca-certificates >/dev/null",
                 // Same gap as the sshd probe: Amazon Linux 2 has only yum, so on an instance
                 // launched from ami-amazonlinux2 this chain reached its else branch and exited 1
                 // with "No supported package manager found for IMDS proxy dependencies" --
