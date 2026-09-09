@@ -38,6 +38,9 @@ ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
+# The builder image has no zlib-static, so native-image links zlib dynamically and the
+# runner needs libz.so.1, which ubi9-micro does not ship. Take it from the builder image.
+COPY --from=build /usr/lib64/libz.so.1 /usr/lib64/libz.so.1
 COPY --chmod=755 --from=build /app/target/*-runner /app/application
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bin/
