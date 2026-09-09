@@ -37,7 +37,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
-class CloudTrailLogWriterBatchingTest {
+class CloudTrailLogWriterBatchingIntegrationTest {
 
     @Inject
     CloudTrailLogWriter writer;
@@ -91,7 +91,7 @@ class CloudTrailLogWriterBatchingTest {
         List<List<JsonNode>> allObjects = readCloudTrailRecordGroups(bucket);
         assertEquals(2, allObjects.size());
         allObjects = new ArrayList<>(allObjects);
-        allObjects.sort(Comparator.comparingInt(CloudTrailLogWriterBatchingTest::firstRecordIndex));
+        allObjects.sort(Comparator.comparingInt(CloudTrailLogWriterBatchingIntegrationTest::firstRecordIndex));
         assertRecordRange(allObjects.get(0), 0, 999);
         assertRecordRange(allObjects.get(1), 1_000, 1_000);
     }
@@ -112,7 +112,7 @@ class CloudTrailLogWriterBatchingTest {
         writer.flushNow();
 
         List<List<JsonNode>> recordGroups = readCloudTrailRecordGroups(bucket).stream()
-                .sorted(Comparator.comparingInt(CloudTrailLogWriterBatchingTest::firstRecordIndex))
+                .sorted(Comparator.comparingInt(CloudTrailLogWriterBatchingIntegrationTest::firstRecordIndex))
                 .toList();
 
         assertEquals(3, recordGroups.size());
@@ -148,7 +148,7 @@ class CloudTrailLogWriterBatchingTest {
         writer.flushNow();
 
         List<List<JsonNode>> recordGroups = new ArrayList<>(readCloudTrailRecordGroups(destinationBucket));
-        recordGroups.sort(Comparator.comparingInt(CloudTrailLogWriterBatchingTest::firstRecordIndex));
+        recordGroups.sort(Comparator.comparingInt(CloudTrailLogWriterBatchingIntegrationTest::firstRecordIndex));
         assertEquals(2, recordGroups.size());
         assertRecordRange(recordGroups.get(0), 0, 999);
         assertRecordRange(recordGroups.get(1), 1_000, 1_005);

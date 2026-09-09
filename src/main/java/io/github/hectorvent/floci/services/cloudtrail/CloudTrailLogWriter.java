@@ -27,6 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -60,7 +61,7 @@ public class CloudTrailLogWriter {
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final SecureRandom rng = new SecureRandom();
-    private final ConcurrentHashMap<CloudTrailService.TrailKey, Object> flushLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CloudTrailService.TrailKey, FlushLock> flushLocks = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService executor;
 
@@ -125,8 +126,13 @@ public class CloudTrailLogWriter {
     }
 
     private void flushTrailBatches(CloudTrailService.TrailKey key) {
-        Object lock = flushLocks.computeIfAbsent(key, ignored -> new Object());
-        synchronized (lock) {
+        FlushLock lock = flushLocks.compute(key, (ignored, existing) -> {
+            FlushLock result = existing != null ? existing : new FlushLock();
+            result.users++;
+            return result;
+        });
+        lock.mutex.lock();
+        try {
             int remaining = cloudTrailService.pendingRecordCount(key);
             while (remaining > 0) {
                 int flushed = flushTrail(key);
@@ -135,7 +141,21 @@ public class CloudTrailLogWriter {
                 }
                 remaining -= flushed;
             }
+        } finally {
+            lock.mutex.unlock();
+            flushLocks.computeIfPresent(key, (ignored, current) -> {
+                if (current != lock) {
+                    return current;
+                }
+                current.users--;
+                return current.users == 0 ? null : current;
+            });
         }
+    }
+
+    private static final class FlushLock {
+        private final ReentrantLock mutex = new ReentrantLock();
+        private int users;
     }
 
     private int flushTrail(CloudTrailService.TrailKey key) {
