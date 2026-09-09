@@ -50,7 +50,7 @@ public class CloudTrailService {
     private final IamService iamService;
     private final ObjectMapper mapper;
 
-    /** Per-trail pending record buffers — ephemeral, never persisted. */
+    /** Per-trail pending record buffers: ephemeral, never persisted. */
     private final ConcurrentHashMap<PendingTrailKey, PendingRecordBuffer> pendingRecordsByTrail =
             new ConcurrentHashMap<>();
 
@@ -254,7 +254,7 @@ public class CloudTrailService {
     //
     // AddTags/RemoveTags/ListTags identify the trail solely by ARN (ResourceId /
     // ResourceIdList), unlike every other CloudTrail action here which also accepts a
-    // bare trail name — so these don't take a `region` parameter.
+    // bare trail name, so these do not take a `region` parameter.
 
     private static final int MAX_TAGS_PER_RESOURCE = 50;
 
@@ -676,7 +676,7 @@ public class CloudTrailService {
     private boolean matchesAnyAdvancedSelector(List<AdvancedEventSelector> selectors, S3EventInput in) {
         String arn = "arn:aws:s3:::" + in.bucketName() + (in.key() != null ? "/" + in.key() : "");
         // Bucket-level operations (e.g. ListObjects) have no object key and are reported
-        // by CloudTrail as AWS::S3::Bucket resources, not AWS::S3::Object — matching real
+        // by CloudTrail as AWS::S3::Bucket resources, not AWS::S3::Object: matching real
         // AWS behavior, an AWS::S3::Object DataResource selector must never match them.
         String resourceType = in.key() != null ? "AWS::S3::Object" : "AWS::S3::Bucket";
         for (AdvancedEventSelector sel : selectors) {

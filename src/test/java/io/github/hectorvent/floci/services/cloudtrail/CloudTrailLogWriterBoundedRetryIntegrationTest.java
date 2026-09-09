@@ -12,7 +12,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 
@@ -114,8 +116,12 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
         List<JsonNode> delivered = deliveredRecords(destinationBucket);
         assertEquals(PRODUCED_EVENTS, delivered.size(),
                 "a healthy burst must not be limited by the retry budget");
+        Set<String> deliveredKeys = new HashSet<>();
+        for (JsonNode record : delivered) {
+            deliveredKeys.add(record.path("requestParameters").path("key").asText());
+        }
         for (int i = 0; i < PRODUCED_EVENTS; i++) {
-            assertEquals(eventKey(i), delivered.get(i).path("requestParameters").path("key").asText());
+            assertTrue(deliveredKeys.contains(eventKey(i)));
         }
     }
 
@@ -307,8 +313,6 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
             }
         mapper.readTree(json).path("Records").forEach(records::add);
         }
-        records.sort(java.util.Comparator.comparing(record ->
-                record.path("requestParameters").path("key").asText()));
         return records;
     }
 

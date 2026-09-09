@@ -203,14 +203,14 @@ public class CloudTrailLogWriter {
         }
         cloudTrailService.completeDelivery(key);
 
-        // The write above already succeeded and durably delivered the records —
+        // The write above already succeeded and durably delivered the records:
         // from here on, records must never be re-queued. Doing so on a failure
         // in this block would deliver the same batch to S3 again next flush.
         try {
             // This write goes straight to S3Service, bypassing the HTTP-facing
             // S3Controller that normally emits data events for API-driven puts.
             // Any trail whose selector matches its own destination bucket must
-            // still see its own deliveries — that's the real circular-logging
+            // still see its own deliveries: that is the real circular-logging
             // behavior (issue #1192 / PR #1194) this emulator exists to prove.
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
                     .region(key.eventRegion())
