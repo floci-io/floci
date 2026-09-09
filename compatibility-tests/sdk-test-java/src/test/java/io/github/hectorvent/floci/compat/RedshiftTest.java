@@ -20,6 +20,7 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 
+import java.net.ConnectException;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -46,6 +47,12 @@ public class RedshiftTest {
     // brief port-publish/network-alias hiccup between the test runner and floci containers that
     // self-resolves almost immediately. Retrying the whole call, not just relying on the SDK's
     // built-in attempts, gives it long enough to clear.
+    //
+    // Only a pre-handshake ConnectException is worth retrying (review, PR #3216): a broader catch
+    // of SdkClientException would also retry failures that can happen after floci already processed
+    // the request, e.g. a response reset mid-stream on createCluster/deleteCluster - a retry there
+    // resubmits and gets back a real ClusterAlreadyExists/ClusterNotFound, which masks the original
+    // failure behind an unrelated one instead of fixing the flake.
     private static <T> T withRetry(Supplier<T> action) throws InterruptedException {
         Instant deadline = Instant.now().plus(Duration.ofSeconds(30));
         SdkClientException last = null;
@@ -53,11 +60,23 @@ public class RedshiftTest {
             try {
                 return action.get();
             } catch (SdkClientException e) {
+                if (!isConnectionRefused(e)) {
+                    throw e;
+                }
                 last = e;
                 Thread.sleep(1000);
             }
         }
         throw last;
+    }
+
+    private static boolean isConnectionRefused(Throwable e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ConnectException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Test
