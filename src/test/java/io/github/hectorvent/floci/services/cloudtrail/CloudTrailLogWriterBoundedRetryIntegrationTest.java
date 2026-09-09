@@ -93,6 +93,32 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
     }
 
     @Test
+    void healthyBurstAboveRetryLimitIsDeliveredWithoutLoss() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "healthy-burst-source-" + suffix;
+        String destinationBucket = "healthy-burst-logs-" + suffix;
+        String trailName = "healthy-burst-trail-" + suffix;
+
+        createBucket(sourceBucket);
+        createBucket(destinationBucket);
+        createTrail(trailName, destinationBucket);
+        selectSourceBucket(trailName, sourceBucket);
+        startLogging(trailName);
+
+        for (int i = 0; i < PRODUCED_EVENTS; i++) {
+            putObject(sourceBucket, eventKey(i), "event-" + i);
+        }
+        writer.flushNow();
+
+        List<JsonNode> delivered = deliveredRecords(destinationBucket);
+        assertEquals(PRODUCED_EVENTS, delivered.size(),
+                "a healthy burst must not be limited by the retry budget");
+        for (int i = 0; i < PRODUCED_EVENTS; i++) {
+            assertEquals(eventKey(i), delivered.get(i).path("requestParameters").path("key").asText());
+        }
+    }
+
+    @Test
     void retryStateStaysBoundedByBytes() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String sourceBucket = "bounded-bytes-source-" + suffix;

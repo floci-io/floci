@@ -465,10 +465,6 @@ public class CloudTrailService {
         private long byteCount;
 
         synchronized boolean append(String eventRegion, ObjectNode record, long recordBytes) {
-            if (recordCount >= MAX_PENDING_RECORDS_PER_TRAIL
-                    || byteCount + recordBytes > MAX_PENDING_BYTES_PER_TRAIL) {
-                return false;
-            }
             recordsByRegion.computeIfAbsent(eventRegion, ignored -> new ArrayDeque<>())
                     .addLast(new PendingRecord(record, recordBytes));
             recordCount++;
