@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -16,13 +17,18 @@ import java.util.HashMap;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -218,5 +224,133 @@ class EventsCfnProvisionerTest {
     private void doThrowOnRemovePermission(AwsException e) {
         org.mockito.Mockito.doThrow(e).when(events)
                 .removePermission(anyString(), anyString(), org.mockito.ArgumentMatchers.anyBoolean(), anyString());
+    }
+
+    // ── a failed stack update puts the rule's targets back ────────────────────
+
+    private static final String RULE_TARGETS_SNAPSHOT_ATTR = CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR;
+
+    @Test
+    void aRollbackPutsBackATargetTheUpdateDropped() {
+        // Before the snapshot, the reconciliation sweep could delete a live target and a later
+        // resource's failure left it deleted: the rule stopped delivering to it for good.
+        stubPutRule();
+        stubTargetSequence(List.of(storedTarget("keep"), storedTarget("gone")),
+                List.of(storedTarget("keep"), storedTarget("gone")),
+                List.of(storedTarget("keep")));
+        StackResource r = updatedRuleWithTargets("keep");
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(List.of("keep", "gone"), idsOfPutTargets(2).get(1));
+        assertNull(r.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aRollbackRemovesATargetTheUpdateAdded() {
+        // The restore is exact, not additive: what the failed update added does not survive it.
+        stubPutRule();
+        stubTargetSequence(List.of(storedTarget("keep")),
+                List.of(storedTarget("keep"), storedTarget("added")),
+                List.of(storedTarget("keep"), storedTarget("added")));
+        StackResource r = updatedRuleWithTargets("keep", "added");
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<List<String>> removed = ArgumentCaptor.forClass(List.class);
+        verify(events).removeTargets(eq("orders"), any(), removed.capture(), anyString());
+        assertEquals(List.of("added"), removed.getValue());
+        assertEquals(List.of("keep"), idsOfPutTargets(2).get(1));
+    }
+
+    @Test
+    void aRuleThisRunNeverTouchedIsNotRolledBack() {
+        // Answering true here would clear the targets of a rule the update never reconciled. False
+        // is what makes the stack keep reporting that rollback is not implemented for it.
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+        r.setPhysicalId("orders");
+
+        assertFalse(provisioner.rollbackUpdate(r));
+
+        verify(events, never()).putTargets(anyString(), any(), any(), anyString());
+        verify(events, never()).removeTargets(anyString(), any(), any(), anyString());
+    }
+
+    @Test
+    void aFailedReconciliationRestoresTheTargetsAndRethrowsTheFailure() {
+        stubPutRule();
+        stubTargetSequence(List.of(storedTarget("keep"), storedTarget("gone")),
+                List.of(storedTarget("keep"), storedTarget("gone")));
+        AwsException putFailure = new AwsException("ValidationException", "Too many targets", 400);
+        when(events.putTargets(anyString(), any(), any(), anyString())).thenThrow(putFailure).thenReturn(1);
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, ruleProps("keep"), ctx("orders")));
+
+        assertSame(putFailure, thrown);
+        assertEquals(List.of("keep", "gone"), idsOfPutTargets(2).get(1));
+        assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        assertNull(r.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aRestoreThatAlsoFailsIsRecordedOnTheResource() {
+        // The stack has to report UPDATE_ROLLBACK_FAILED naming this rule rather than claiming the
+        // prior targets are live, so the restore failure goes on the resource instead of being
+        // thrown over the failure that is already on its way out.
+        stubPutRule();
+        stubTargetSequence(List.of(storedTarget("keep"), storedTarget("gone")),
+                List.of(storedTarget("keep"), storedTarget("gone")));
+        AwsException putFailure = new AwsException("ValidationException", "Too many targets", 400);
+        doThrow(putFailure).when(events).putTargets(anyString(), any(), any(), anyString());
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, ruleProps("keep"), ctx("orders")));
+
+        assertEquals("Too many targets", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void aCreateTakesNoSnapshotToRollBack() {
+        stubPutRule();
+
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+        provisioner.provision(r, ruleProps("keep"), ctx(null));
+
+        assertNull(r.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    /** Runs an update that reconciles the rule down to {@code desiredIds}, and returns the resource. */
+    private StackResource updatedRuleWithTargets(String... desiredIds) {
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+        provisioner.provision(r, ruleProps(desiredIds), ctx("orders"));
+        return r;
+    }
+
+    private ObjectNode ruleProps(String... targetIds) {
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        ArrayNode declared = props.putArray("Targets");
+        for (String id : targetIds) {
+            declared.add(target(id, "arn:aws:sqs:us-east-1:000000000000:q-" + id));
+        }
+        return props;
+    }
+
+    /** Successive answers from ListTargetsByRule, in the order the run asks for them. */
+    @SafeVarargs
+    private void stubTargetSequence(List<Target> first, List<Target>... rest) {
+        var stub = when(events.listTargetsByRule(anyString(), any(), anyString())).thenReturn(first);
+        for (List<Target> answer : rest) {
+            stub = stub.thenReturn(answer);
+        }
+    }
+
+    /** The target ids of each PutTargets call, in order, asserting there were exactly {@code n}. */
+    private List<List<String>> idsOfPutTargets(int n) {
+        ArgumentCaptor<List<Target>> put = ArgumentCaptor.forClass(List.class);
+        verify(events, times(n)).putTargets(eq("orders"), any(), put.capture(), anyString());
+        return put.getAllValues().stream().map(call -> call.stream().map(Target::getId).toList()).toList();
     }
 }

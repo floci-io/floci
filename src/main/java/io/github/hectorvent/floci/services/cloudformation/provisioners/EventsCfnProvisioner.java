@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -112,6 +114,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionRule(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight. The one an earlier update left behind goes
+        // before this run touches a target, so a rollback never puts back a target the rule stopped
+        // carrying two updates ago.
+        r.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
         // Name is createOnly and the physical id is the rule name, so ctx.stablePhysicalName
         // applies directly: without it an unnamed rule was given a fresh random name on every
         // UpdateStack, creating a second rule and leaving the first behind with its targets.
@@ -181,10 +187,124 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
         }
-        if (!targets.isEmpty()) {
-            eventBridgeService.putTargets(ruleName, busName, targets, ctx.region());
+        if (ctx.isUpdate()) {
+            snapshotTargetsBeforeUpdate(r, ruleName, busName, ctx.region());
         }
-        removeStaleTargets(ruleName, busName, targets, ctx.region());
+        try {
+            if (!targets.isEmpty()) {
+                eventBridgeService.putTargets(ruleName, busName, targets, ctx.region());
+            }
+            removeStaleTargets(ruleName, busName, targets, ctx.region());
+        } catch (RuntimeException updateFailure) {
+            restoreTargetsAfterFailedUpdate(r, updateFailure);
+            throw updateFailure;
+        }
+    }
+
+    /**
+     * Records the targets the rule carries before this update reconciles them, so they can be put
+     * back when the stack update fails: by {@link #restoreTargetsAfterFailedUpdate} when this
+     * rule's own reconciliation is what failed, and by {@link #rollbackUpdate} when a later
+     * resource is. Only taken on an update, because a create has nothing to restore to.
+     *
+     * <p>The rule name, its bus and the region travel with the targets because the rollback hook is
+     * handed the stack resource alone, and those three are how targets are addressed.
+     */
+    private void snapshotTargetsBeforeUpdate(StackResource r, String ruleName, String busName, String region) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("ruleName", ruleName);
+        snapshot.put("busName", busName);
+        snapshot.put("region", region);
+        snapshot.set("targets", objectMapper.valueToTree(
+                eventBridgeService.listTargetsByRule(ruleName, busName, region)));
+        r.getAttributes().put(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    /**
+     * Puts the rule's targets back from the snapshot this update took, while the failure that
+     * interrupted the reconciliation is on its way out of the provisioner. The snapshot is spent
+     * here, so the rollback hook finds nothing left to act on for a rule already restored.
+     *
+     * <p>A restore that fails itself leaves the rule delivering to a set of targets nobody
+     * recorded. Its reason goes on the resource under
+     * {@link CfnRollback#UPDATE_ROLLBACK_FAILURE_ATTR}, which is what makes the stack report
+     * UPDATE_ROLLBACK_FAILED naming this resource instead of a clean rollback, and it is attached
+     * to the update failure as suppressed so neither is lost. The restore repeats the calls the
+     * update just made, so it can come back carrying the very exception that interrupted the
+     * update; suppressing a throwable under itself is rejected by the JDK, and that one is already
+     * the failure being reported.
+     */
+    private void restoreTargetsAfterFailedUpdate(StackResource r, RuntimeException updateFailure) {
+        String rawSnapshot = r.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
+        if (rawSnapshot == null) {
+            return;
+        }
+        try {
+            restoreSnapshottedTargets(r, objectMapper.readTree(rawSnapshot));
+        } catch (RuntimeException | JsonProcessingException restoreFailure) {
+            if (restoreFailure != updateFailure) {
+                updateFailure.addSuppressed(restoreFailure);
+            }
+            String reason = restoreFailure.getMessage() != null
+                    ? restoreFailure.getMessage()
+                    : restoreFailure.getClass().getSimpleName();
+            LOG.errorv("Could not restore the targets of rule {0} after a failed update: {1}",
+                    r.getPhysicalId(), reason);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+        }
+    }
+
+    /**
+     * Puts the rule's targets back to what the snapshot holds and spends it. Exact rather than
+     * additive: a target the failed update added is removed, and every snapshotted target is put
+     * again, so one the update modified goes back to the configuration it was found with.
+     *
+     * <p>This is the hook for an update a <em>later</em> resource failed: this rule's own
+     * reconciliation committed, so its snapshot is still unspent. When the rule's own
+     * reconciliation is what failed, {@link #restoreTargetsAfterFailedUpdate} has already restored
+     * it inside {@code provision} and spent the snapshot there, and a rule this run never touched
+     * carries no snapshot at all, which is the false this returns so the stack keeps reporting that
+     * rollback is not implemented rather than silently clearing its targets.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        String rawSnapshot = resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
+        if (rawSnapshot == null) {
+            return false;
+        }
+        try {
+            restoreSnapshottedTargets(resource, objectMapper.readTree(rawSnapshot));
+        } catch (JsonProcessingException unreadableSnapshot) {
+            throw new IllegalStateException("Could not read the rule target snapshot for "
+                    + resource.getLogicalId(), unreadableSnapshot);
+        }
+        return true;
+    }
+
+    private void restoreSnapshottedTargets(StackResource resource, JsonNode snapshot) {
+        String ruleName = snapshotText(snapshot, "ruleName");
+        String busName = snapshotText(snapshot, "busName");
+        String region = snapshot.get("region").asText();
+        List<Target> restored = objectMapper.convertValue(
+                snapshot.path("targets"), new TypeReference<List<Target>>() { });
+        Set<String> restoredIds = restored.stream().map(Target::getId).collect(Collectors.toSet());
+        List<String> added = eventBridgeService.listTargetsByRule(ruleName, busName, region).stream()
+                .map(Target::getId)
+                .filter(id -> !restoredIds.contains(id))
+                .toList();
+        if (!added.isEmpty()) {
+            eventBridgeService.removeTargets(ruleName, busName, added, region);
+        }
+        if (!restored.isEmpty()) {
+            eventBridgeService.putTargets(ruleName, busName, restored, region);
+        }
+        resource.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
+    }
+
+    /** A snapshotted string, or null when the rule carried none. */
+    private static String snapshotText(JsonNode snapshot, String property) {
+        JsonNode value = snapshot.get(property);
+        return value == null || value.isNull() ? null : value.asText();
     }
 
     /**
