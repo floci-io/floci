@@ -16,7 +16,7 @@ import static org.hamcrest.Matchers.equalTo;
  * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_MonitorInstances.html">MonitorInstances</a>
  */
 @QuarkusTest
-class Ec2MonitorInstancesTest {
+class Ec2MonitorInstancesIntegrationTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
