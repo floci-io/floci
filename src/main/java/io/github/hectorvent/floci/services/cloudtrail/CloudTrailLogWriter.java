@@ -24,9 +24,11 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -60,7 +62,7 @@ public class CloudTrailLogWriter {
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final SecureRandom rng = new SecureRandom();
-    private final Object flushLock = new Object();
+    private final ConcurrentHashMap<CloudTrailService.TrailKey, FlushLock> flushLocks = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService executor;
 
@@ -95,7 +97,7 @@ public class CloudTrailLogWriter {
     void stop(@Observes ShutdownEvent event) {
         if (executor != null) {
             // Best-effort final flush so shutdown doesn't lose buffered events.
-            try { flushAll(); } catch (Exception e) { LOG.warnv(e, "CloudTrail final flush on shutdown failed — some records may be lost"); }
+            try { flushAll(); } catch (Exception e) { LOG.warnv(e, "CloudTrail final flush on shutdown failed: some records may be lost"); }
             executor.shutdownNow();
             executor = null;
         }
@@ -110,33 +112,57 @@ public class CloudTrailLogWriter {
     }
 
     private void flushAll() {
-        synchronized (flushLock) {
-            try {
-                for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
-                    try {
-                        int remaining = cloudTrailService.pendingRecordCount(key);
-                        while (remaining > 0) {
-                            int flushed = flushTrail(key);
-                            if (flushed == 0) {
-                                break;
-                            }
-                            remaining -= flushed;
-                        }
-                    } catch (RuntimeException e) {
-                        LOG.warnv(e, "CloudTrail log flush failed for trail {0} in {1}",
-                                key.trailName(), key.region());
-                    }
+        try {
+            for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
+                try {
+                    flushTrailBatches(key);
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "CloudTrail log flush failed for trail {0} in {1}",
+                            key.trailName(), key.region());
                 }
-            } catch (RuntimeException outer) {
-                LOG.errorv(outer, "CloudTrail log writer iteration failed");
             }
+        } catch (RuntimeException outer) {
+            LOG.errorv(outer, "CloudTrail log writer iteration failed");
         }
+    }
+
+    private void flushTrailBatches(CloudTrailService.TrailKey key) {
+        FlushLock lock = flushLocks.compute(key, (ignored, existing) -> {
+            FlushLock result = existing != null ? existing : new FlushLock();
+            result.users++;
+            return result;
+        });
+        lock.mutex.lock();
+        try {
+            int remaining = cloudTrailService.pendingRecordCount(key);
+            while (remaining > 0) {
+                int flushed = flushTrail(key);
+                if (flushed == 0) {
+                    return;
+                }
+                remaining -= flushed;
+            }
+        } finally {
+            lock.mutex.unlock();
+            flushLocks.computeIfPresent(key, (ignored, current) -> {
+                if (current != lock) {
+                    return current;
+                }
+                current.users--;
+                return current.users == 0 ? null : current;
+            });
+        }
+    }
+
+    private static final class FlushLock {
+        private final ReentrantLock mutex = new ReentrantLock();
+        private int users;
     }
 
     private int flushTrail(CloudTrailService.TrailKey key) {
         Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
         if (trail == null) {
-            // Trail was deleted while records were pending — drop them.
+            // Trail was deleted while records were pending: drop them.
             cloudTrailService.discardPendingRecords(key);
             return 0;
         }
