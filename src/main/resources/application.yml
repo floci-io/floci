@@ -322,6 +322,10 @@ floci:
       enabled: true
       mock: false
       default-image: "rabbitmq:3-management"
+      amqp-host-port-base: 5672
+      amqp-host-port-max: 5699
+      console-host-port-base: 15672
+      console-host-port-max: 15699
     kinesis-analytics:
       enabled: true
       mock: false

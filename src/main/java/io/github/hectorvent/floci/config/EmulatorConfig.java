@@ -1172,6 +1172,31 @@ public interface EmulatorConfig {
 
         @WithDefault("rabbitmq:3-management")
         String defaultImage();
+
+        /**
+         * Host port range the AMQP listener (container port 5672) is published on, one
+         * port per broker. Published in both topologies: no Floci-internal proxy fronts
+         * the broker, so the Docker host-port binding is the only way a client outside
+         * the Docker network (e.g. on the host, with Floci itself containerized) can
+         * reach it (#3240). Env: FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_BASE
+         */
+        @WithDefault("5672")
+        int amqpHostPortBase();
+
+        /** Env: FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_MAX */
+        @WithDefault("5699")
+        int amqpHostPortMax();
+
+        /**
+         * Host port range the RabbitMQ management console (container port 15672) is
+         * published on. Env: FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_BASE
+         */
+        @WithDefault("15672")
+        int consoleHostPortBase();
+
+        /** Env: FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_MAX */
+        @WithDefault("15699")
+        int consoleHostPortMax();
     }
 
     interface KinesisAnalyticsServiceConfig {
