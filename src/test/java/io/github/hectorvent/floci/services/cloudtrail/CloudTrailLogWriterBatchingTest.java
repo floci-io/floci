@@ -19,10 +19,15 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPInputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -69,7 +74,7 @@ class CloudTrailLogWriterBatchingTest {
     }
 
     @Test
-    void flushWritesAtMostOneThousandRecordsAndLeavesTheRestForLater() throws Exception {
+    void flushWritesAllQueuedRecordsInBoundedObjects() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String bucket = "batch-logs-" + suffix;
         String trailName = "batch-trail-" + suffix;
@@ -83,19 +88,12 @@ class CloudTrailLogWriterBatchingTest {
 
         writer.flushNow();
 
-        List<List<JsonNode>> firstFlushObjects = readCloudTrailRecordGroups(bucket);
-        assertEquals(1, firstFlushObjects.size());
-        assertRecordRange(firstFlushObjects.getFirst(), 0, 999);
-
-        writer.flushNow();
-
         List<List<JsonNode>> allObjects = readCloudTrailRecordGroups(bucket);
         assertEquals(2, allObjects.size());
-        List<JsonNode> secondObject = allObjects.stream()
-                .filter(records -> records.size() == 1)
-                .findFirst()
-                .orElseThrow();
-        assertRecordRange(secondObject, 1_000, 1_000);
+        allObjects = new ArrayList<>(allObjects);
+        allObjects.sort(Comparator.comparingInt(CloudTrailLogWriterBatchingTest::firstRecordIndex));
+        assertRecordRange(allObjects.get(0), 0, 999);
+        assertRecordRange(allObjects.get(1), 1_000, 1_000);
     }
 
     @Test
@@ -111,8 +109,6 @@ class CloudTrailLogWriterBatchingTest {
         Deque<ObjectNode> pending = records(2_500);
         installMockCloudTrailService(bucket, trailName, region, key, pending);
 
-        writer.flushNow();
-        writer.flushNow();
         writer.flushNow();
 
         List<List<JsonNode>> recordGroups = readCloudTrailRecordGroups(bucket).stream()
@@ -151,9 +147,74 @@ class CloudTrailLogWriterBatchingTest {
 
         writer.flushNow();
 
-        List<List<JsonNode>> recordGroups = readCloudTrailRecordGroups(destinationBucket);
-        assertEquals(1, recordGroups.size());
-        assertRecordRange(recordGroups.getFirst(), 0, 999);
+        List<List<JsonNode>> recordGroups = new ArrayList<>(readCloudTrailRecordGroups(destinationBucket));
+        recordGroups.sort(Comparator.comparingInt(CloudTrailLogWriterBatchingTest::firstRecordIndex));
+        assertEquals(2, recordGroups.size());
+        assertRecordRange(recordGroups.get(0), 0, 999);
+        assertRecordRange(recordGroups.get(1), 1_000, 1_005);
+    }
+
+    @Test
+    void overlappingFlushesForOneTrailAreSerialized() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "serialized-logs-" + suffix;
+        String trailName = "serialized-trail-" + suffix;
+        String region = "us-east-1";
+
+        createBucket(bucket);
+
+        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey(region, trailName, region);
+        Deque<ObjectNode> pending = records(2);
+        Trail trail = new Trail(trailName,
+                "arn:aws:cloudtrail:" + region + ":000000000000:trail/" + trailName,
+                bucket, null, null, true, false, region, false, false, false, false);
+        CountDownLatch firstDrainEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstDrain = new CountDownLatch(1);
+        CountDownLatch secondDrainEntered = new CountDownLatch(1);
+        AtomicBoolean inDrain = new AtomicBoolean();
+        AtomicBoolean overlap = new AtomicBoolean();
+        AtomicInteger drainCalls = new AtomicInteger();
+
+        CloudTrailService mockService = mock(CloudTrailService.class);
+        when(mockService.trailsWithPendingRecords())
+                .thenAnswer(inv -> pending.isEmpty() ? List.of() : List.of(key));
+        when(mockService.pendingRecordCount(eq(key))).thenAnswer(inv -> pending.size());
+        when(mockService.getTrail(region, trailName)).thenReturn(trail);
+        when(mockService.drainPendingRecords(eq(key), eq(CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE)))
+                .thenAnswer(inv -> {
+                    if (!inDrain.compareAndSet(false, true)) {
+                        overlap.set(true);
+                    }
+                    try {
+                        if (drainCalls.getAndIncrement() == 0) {
+                            firstDrainEntered.countDown();
+                            releaseFirstDrain.await(5, TimeUnit.SECONDS);
+                        } else {
+                            secondDrainEntered.countDown();
+                        }
+                        return drain(pending, CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE);
+                    } finally {
+                        inDrain.set(false);
+                    }
+                });
+        doAnswer(inv -> null).when(mockService).emitS3DataEvent(any());
+        QuarkusMock.installMockForType(mockService, CloudTrailService.class);
+
+        Thread first = new Thread(writer::flushNow);
+        Thread second = new Thread(writer::flushNow);
+        first.start();
+        assertTrue(firstDrainEntered.await(5, TimeUnit.SECONDS));
+        second.start();
+
+        assertFalse(secondDrainEntered.await(200, TimeUnit.MILLISECONDS),
+                "A second flush must wait for the first trail flush to finish");
+        releaseFirstDrain.countDown();
+        first.join(5_000);
+        second.join(5_000);
+
+        assertFalse(first.isAlive(), "First flush did not finish");
+        assertFalse(second.isAlive(), "Second flush did not finish");
+        assertFalse(overlap.get(), "Flushes for one trail overlapped");
     }
 
     private void installMockCloudTrailService(String bucket, String trailName, String region,
@@ -166,6 +227,7 @@ class CloudTrailLogWriterBatchingTest {
         CloudTrailService mockService = mock(CloudTrailService.class);
         when(mockService.trailsWithPendingRecords())
                 .thenAnswer(inv -> pending.isEmpty() ? List.of() : List.of(key));
+        when(mockService.pendingRecordCount(eq(key))).thenAnswer(inv -> pending.size());
         when(mockService.getTrail(region, trailName)).thenReturn(trail);
         when(mockService.drainPendingRecords(eq(key), eq(CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE)))
                 .thenAnswer(inv -> drain(pending, CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE));

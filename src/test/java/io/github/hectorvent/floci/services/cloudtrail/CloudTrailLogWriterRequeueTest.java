@@ -68,6 +68,7 @@ class CloudTrailLogWriterRequeueTest {
         CloudTrailService mockService = mock(CloudTrailService.class);
         when(mockService.trailsWithPendingRecords())
                 .thenAnswer(inv -> pending.isEmpty() ? List.of() : List.of(key));
+        when(mockService.pendingRecordCount(eq(key))).thenAnswer(inv -> pending.size());
         when(mockService.getTrail(region, trailName)).thenReturn(trail);
         when(mockService.drainPendingRecords(eq(key), eq(CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE)))
                 .thenAnswer(inv -> {

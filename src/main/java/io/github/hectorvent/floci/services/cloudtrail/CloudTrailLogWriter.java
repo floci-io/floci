@@ -23,6 +23,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -59,6 +60,7 @@ public class CloudTrailLogWriter {
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final SecureRandom rng = new SecureRandom();
+    private final ConcurrentHashMap<CloudTrailService.TrailKey, Object> flushLocks = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService executor;
 
@@ -111,7 +113,7 @@ public class CloudTrailLogWriter {
         try {
             for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
                 try {
-                    flushTrail(key);
+                    flushTrailBatches(key);
                 } catch (RuntimeException e) {
                     LOG.warnv(e, "CloudTrail log flush failed for trail {0} in {1}",
                             key.trailName(), key.region());
@@ -122,17 +124,31 @@ public class CloudTrailLogWriter {
         }
     }
 
-    private void flushTrail(CloudTrailService.TrailKey key) {
+    private void flushTrailBatches(CloudTrailService.TrailKey key) {
+        Object lock = flushLocks.computeIfAbsent(key, ignored -> new Object());
+        synchronized (lock) {
+            int remaining = cloudTrailService.pendingRecordCount(key);
+            while (remaining > 0) {
+                int flushed = flushTrail(key);
+                if (flushed == 0) {
+                    return;
+                }
+                remaining -= flushed;
+            }
+        }
+    }
+
+    private int flushTrail(CloudTrailService.TrailKey key) {
         Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
         if (trail == null) {
-            // Trail was deleted while records were pending — drop them.
-            cloudTrailService.drainPendingRecords(key);
-            return;
+            // Trail was deleted while records were pending. Drop only the
+            // records that existed when this flush cycle started.
+            return cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE).size();
         }
 
         List<ObjectNode> records = cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE);
         if (records.isEmpty()) {
-            return;
+            return 0;
         }
 
         byte[] payload;
@@ -182,6 +198,7 @@ public class CloudTrailLogWriter {
             LOG.warnv(e, "CloudTrail self-delivery event emission failed for trail {0} "
                     + "(write already succeeded, records not re-queued)", key.trailName());
         }
+        return records.size();
     }
 
     private byte[] serializeAndGzip(List<ObjectNode> records) {

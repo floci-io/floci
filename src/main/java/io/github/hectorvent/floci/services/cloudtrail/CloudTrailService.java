@@ -396,6 +396,11 @@ public class CloudTrailService {
         return drained;
     }
 
+    public int pendingRecordCount(TrailKey key) {
+        ConcurrentLinkedDeque<ObjectNode> q = pendingRecordsByTrail.get(key);
+        return q == null ? 0 : q.size();
+    }
+
     public List<TrailKey> trailsWithPendingRecords() {
         List<TrailKey> result = new ArrayList<>();
         for (Map.Entry<TrailKey, ConcurrentLinkedDeque<ObjectNode>> e : pendingRecordsByTrail.entrySet()) {
