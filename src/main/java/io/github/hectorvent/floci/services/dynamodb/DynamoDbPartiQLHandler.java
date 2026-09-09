@@ -56,7 +56,7 @@ class DynamoDbPartiQLHandler {
         // projects; the message preserves statement order (characterised on
         // real AWS, eu-west-1, 2026-09-02). An LSI read reaches the co-located
         // base item, so non-projected columns stay legal there.
-        if (accessPath.isGlobalSecondaryIndex()) {
+        if (accessPath.isGlobalSecondaryIndex() && !"ALL".equals(accessPath.projectionType())) {
             Set<String> projected = accessPath.projectedAttributeNames(table);
             List<String> unprojected = stmt.columns().stream()
                     .filter(c -> !"*".equals(c))
@@ -151,8 +151,10 @@ class DynamoDbPartiQLHandler {
                     .toList();
         }
 
-        // SELECT * over an index reads the projection, not the whole item.
-        if (stmt.columns().isEmpty() && accessPath.isIndex()) {
+        // SELECT * over an index reads the projection, not the whole item. An
+        // ALL projection stores every base attribute, so nothing is trimmed.
+        if (stmt.columns().isEmpty() && accessPath.isIndex()
+                && !"ALL".equals(accessPath.projectionType())) {
             Set<String> projected = accessPath.projectedAttributeNames(table);
             items = items.stream()
                     .map(item -> (JsonNode) ProjectionEvaluator.trimToAttributes((ObjectNode) item, projected))
