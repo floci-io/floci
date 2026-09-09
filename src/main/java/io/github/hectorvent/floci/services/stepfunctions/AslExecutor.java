@@ -2039,9 +2039,31 @@ public class AslExecutor {
             if (cause != null && JsonataEvaluator.isExpression(cause)) {
                 cause = jsonataEvaluator.evaluateField(cause, "Cause", statesVar, variables).asText();
             }
+        } else {
+            if (stateDef.has("ErrorPath")) {
+                error = resolveFailDynamicField(stateDef.get("ErrorPath").asText(), "ErrorPath", input, context);
+            }
+            if (stateDef.has("CausePath")) {
+                cause = resolveFailDynamicField(stateDef.get("CausePath").asText(), "CausePath", input, context);
+            }
         }
         // AWS does not prefix a Fail state's Cause.
         throw new FailStateException(error, cause, true);
+    }
+
+    /**
+     * Resolves a Fail state's {@code ErrorPath} or {@code CausePath}: a reference path or a
+     * {@code States.*} intrinsic, evaluated against the state's input through the same resolver a
+     * {@code ".$"} payload template field uses. AWS requires the resolved value to be a string;
+     * an unresolvable path or a non-string result both fail the state with {@code States.Runtime},
+     * since a Fail state has no {@code Catch} of its own to route around either failure.
+     */
+    private String resolveFailDynamicField(String path, String field, JsonNode input, JsonNode context) {
+        JsonNode resolved = resolvePayloadTemplateReference(path, input, context, field, input);
+        if (!resolved.isTextual()) {
+            throw new FailStateException("States.Runtime", field + " must resolve to a string");
+        }
+        return resolved.asText();
     }
 
     private StateResult executeParallelState(String name, JsonNode stateDef, JsonNode input,

@@ -72,7 +72,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     // AWS-observed, it is simply the one this code commits to.
     private static final List<String> JSONPATH_ONLY_FIELDS = List.of(
             "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath",
-            "MaxConcurrencyPath");
+            "MaxConcurrencyPath", "ErrorPath", "CausePath");
     // Fields that are valid only in JSONata mode. Validated against real AWS: a JSONPath state
     // carrying any of them returns SCHEMA_VALIDATION_FAILED. Assign is deliberately absent: AWS
     // accepts it on a JSONPath state, so it belongs to neither list. A List for the same reason as
@@ -1972,6 +1972,10 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             }
         }
 
+        if ("Fail".equals(stateType)) {
+            validateFailErrorAndCauseFields(statePath, stateDef, errors);
+        }
+
         if ("Map".equals(stateType)) {
             validateMapConcurrency(statePath, stateDef, stateIsJsonata, errors);
             if (stateDef.has("ItemReader")) {
@@ -2121,6 +2125,37 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         // are always walked for reachability regardless of whether they have a terminal state.
         validateReachability(statesPath, states, subWorkflow.path("StartAt").asText(null),
                 subWorkflowPath + "/StartAt", errors);
+    }
+
+    /**
+     * A Fail state resolves its {@code Error} either from the literal {@code Error} field or
+     * dynamically from {@code ErrorPath}, never both; the same holds for {@code Cause} and
+     * {@code CausePath}. Real AWS refuses a definition that specifies both at CreateStateMachine.
+     */
+    private static void validateFailErrorAndCauseFields(String statePath, JsonNode stateDef, List<String> errors) {
+        if (stateDef.has("Error") && stateDef.has("ErrorPath")) {
+            errors.add("A Fail state cannot include both field 'Error' and 'ErrorPath' at " + statePath);
+        }
+        if (stateDef.has("Cause") && stateDef.has("CausePath")) {
+            errors.add("A Fail state cannot include both field 'Cause' and 'CausePath' at " + statePath);
+        }
+        validateFailPathFieldIsString(statePath, stateDef, "ErrorPath", errors);
+        validateFailPathFieldIsString(statePath, stateDef, "CausePath", errors);
+    }
+
+    /**
+     * {@code ErrorPath}/{@code CausePath} are reference paths or {@code States.*} intrinsics,
+     * always given as a JSON string; a non-string value (a number, object, array, or boolean)
+     * is a definition error AWS rejects at {@code CreateStateMachine}, not something that should
+     * reach execution and fail there instead.
+     */
+    private static void validateFailPathFieldIsString(String statePath, JsonNode stateDef, String field,
+                                                       List<String> errors) {
+        JsonNode value = stateDef.get(field);
+        if (value != null && !value.isTextual()) {
+            errors.add(EXPLICIT_LOCATION_MARKER + "Expected value of type [STRING]"
+                    + MARKER_PAYLOAD_SEPARATOR + statePath + "/" + field);
+        }
     }
 
     private void validateMapConcurrency(String statePath, JsonNode stateDef,
