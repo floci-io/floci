@@ -305,8 +305,10 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
             try (GZIPInputStream gzin = new GZIPInputStream(new ByteArrayInputStream(gz))) {
                 json = gzin.readAllBytes();
             }
-            mapper.readTree(json).path("Records").forEach(records::add);
+        mapper.readTree(json).path("Records").forEach(records::add);
         }
+        records.sort(java.util.Comparator.comparing(record ->
+                record.path("requestParameters").path("key").asText()));
         return records;
     }
 
