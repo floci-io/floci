@@ -720,6 +720,61 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void updateTableRejectsGsiIncludeProjectionWithoutNonKeyAttributes() {
+        createUsersTable("eu-west-1");
+        var ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "Users",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "INCLUDE"}
+                    }}]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
+        assertTrue(service.describeTable("Users", "eu-west-1").getGlobalSecondaryIndexes().isEmpty());
+    }
+
+    @Test
+    void updateTableRejectsAllProjectionCarryingNonKeyAttributes() {
+        createUsersTable("eu-west-1");
+        var ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "Users",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "ALL", "NonKeyAttributes": ["x"]}
+                    }}]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is ALL, but NonKeyAttributes is specified", ex.getMessage());
+    }
+
+    // Checked against real DynamoDB: the projection is validated before the table lookup.
+    @Test
+    void updateTableValidatesGsiProjectionBeforeTableLookup() {
+        var ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "NoSuchTable",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "INCLUDE"}
+                    }}]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
+    }
+
+    @Test
     void createTableRejectsStreamViewTypeWithStreamEnabledFalse() {
         var ex = expectValidationException("CreateTable", json("""
                 {

@@ -1357,6 +1357,7 @@ public class DynamoDbJsonHandler {
                             nonKeyAttributes.add(nonKeyAttr.asText());
                         }
                     }
+                    validateProjectionSpec(projectionType, nonKeyAttributes);
                     GlobalSecondaryIndex newGsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes);
                     JsonNode newGsiPt = createNode.path("ProvisionedThroughput");
                     if (!newGsiPt.isMissingNode()) {
