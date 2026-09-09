@@ -139,6 +139,29 @@ class DynamoDbStreamServiceTest {
     }
 
     @Test
+    void rejectsAnEmptyLatestIteratorWhenRecordsAreTrimmedBeforeFirstPoll() throws Exception {
+        var table = new TableDefinition("EmptyLatestTable",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                "us-east-1", "000000000000");
+        table.setStreamEnabled(true);
+        StreamDescription stream = service.enableStream(
+                table.getTableName(), TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
+        String iterator = service.getShardIterator(
+                stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "LATEST", null);
+
+        for (int i = 0; i <= DynamoDbStreamService.MAX_RECORDS; i++) {
+            service.captureEvent(table.getTableName(), "INSERT", null, item, table, "us-east-1");
+        }
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> service.getRecords(iterator, 100));
+
+        assertEquals("TrimmedDataAccessException", exception.getErrorCode());
+    }
+
+    @Test
     void allowsAnEmptyStreamIteratorWhenRetentionHasNotBeenExceeded() throws Exception {
         var table = new TableDefinition("EmptyTable",
                 List.of(new KeySchemaElement("userId", "HASH")),

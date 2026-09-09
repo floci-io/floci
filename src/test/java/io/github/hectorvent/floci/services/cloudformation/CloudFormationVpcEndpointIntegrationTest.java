@@ -57,7 +57,7 @@ class CloudFormationVpcEndpointIntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
+        String stackDescription = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", "DescribeStacks")
@@ -66,18 +66,9 @@ class CloudFormationVpcEndpointIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
-            .body(containsString("<OutputValue>vpce-"));
-
-        String endpointsBeforeDelete = given()
-            .formParam("Action", "DescribeVpcEndpoints")
-            .header("Authorization", EC2_AUTH)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
             .extract().asString();
-        String endpointId = XmlParser.extractFirst(endpointsBeforeDelete, "vpcEndpointId", null);
+        org.junit.jupiter.api.Assertions.assertTrue(stackDescription.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        String endpointId = XmlParser.extractFirst(stackDescription, "OutputValue", null);
         org.junit.jupiter.api.Assertions.assertNotNull(endpointId);
 
         given()

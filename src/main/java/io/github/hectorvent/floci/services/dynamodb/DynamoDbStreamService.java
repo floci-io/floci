@@ -170,11 +170,13 @@ public class DynamoDbStreamService {
 
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(sd.getStreamArn());
         if (deque != null) {
-            streamRecordCounts.computeIfAbsent(sd.getStreamArn(), ignored -> new AtomicLong())
-                    .incrementAndGet();
-            deque.addLast(record);
-            while (deque.size() > MAX_RECORDS) {
-                deque.pollFirst();
+            synchronized (deque) {
+                streamRecordCounts.computeIfAbsent(sd.getStreamArn(), ignored -> new AtomicLong())
+                        .incrementAndGet();
+                deque.addLast(record);
+                while (deque.size() > MAX_RECORDS) {
+                    deque.pollFirst();
+                }
             }
         }
     }
@@ -239,7 +241,17 @@ public class DynamoDbStreamService {
         }
 
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
-        List<DynamoDbStreamRecord> snapshot = deque != null ? new ArrayList<>(deque) : List.of();
+        List<DynamoDbStreamRecord> snapshot;
+        long recordCount;
+        if (deque == null) {
+            snapshot = List.of();
+            recordCount = 0;
+        } else {
+            synchronized (deque) {
+                snapshot = new ArrayList<>(deque);
+                recordCount = streamRecordCounts.getOrDefault(streamArn, new AtomicLong()).get();
+            }
+        }
 
         String cursorSequence = switch (iteratorType) {
             case "TRIM_HORIZON" -> snapshot.isEmpty() ? zeroSequence() : snapshot.get(0).getSequenceNumber();
@@ -256,10 +268,8 @@ public class DynamoDbStreamService {
         };
 
         boolean inclusive = "TRIM_HORIZON".equals(iteratorType) || "AT_SEQUENCE_NUMBER".equals(iteratorType);
-        long recordCount = zeroSequence().equals(cursorSequence)
-                ? streamRecordCounts.getOrDefault(streamArn, new AtomicLong()).get()
-                : -1;
-        return encodeIterator(streamArn, cursorSequence, inclusive, recordCount);
+        long cursorRecordCount = zeroSequence().equals(cursorSequence) ? recordCount : -1;
+        return encodeIterator(streamArn, cursorSequence, inclusive, cursorRecordCount);
     }
 
     private int findSequencePosition(List<DynamoDbStreamRecord> records, String targetSeq, boolean inclusive) {
@@ -283,9 +293,18 @@ public class DynamoDbStreamService {
         long cursorRecordCount = parseRecordCount(parts[3]);
 
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
-        List<DynamoDbStreamRecord> snapshot = deque != null ? new ArrayList<>(deque) : List.of();
+        List<DynamoDbStreamRecord> snapshot;
+        long currentRecordCount;
+        if (deque == null) {
+            snapshot = List.of();
+            currentRecordCount = 0;
+        } else {
+            synchronized (deque) {
+                snapshot = new ArrayList<>(deque);
+                currentRecordCount = streamRecordCounts.getOrDefault(streamArn, new AtomicLong()).get();
+            }
+        }
         int position = findSequencePosition(snapshot, cursorSequence, inclusive);
-        long currentRecordCount = streamRecordCounts.getOrDefault(streamArn, new AtomicLong()).get();
         if (zeroSequence().equals(cursorSequence) && cursorRecordCount >= 0
                 && currentRecordCount - cursorRecordCount > MAX_RECORDS) {
             throw new AwsException("TrimmedDataAccessException",
