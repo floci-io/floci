@@ -133,6 +133,117 @@ class BatchCfnProvisionerTest {
         assertEquals(JD_ARN, r.getAttributes().get("JobDefinitionArn"));
     }
 
+    // ── update ───────────────────────────────────────────────────────────────
+
+    private ProvisionContext updateCtx(String priorPhysicalId) {
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            return node == null ? null : node.asText();
+        });
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+    }
+
+    @Test
+    void updatingAComputeEnvironmentUpdatesInPlaceInsteadOfCreatingAgain() {
+        // createComputeEnvironment rejects a duplicate name, so the second UpdateStack used to
+        // fail the whole stack rather than update the environment.
+        StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
+        r.getAttributes().put("ComputeEnvironmentName", "envy");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("ComputeEnvironmentName", "envy");
+        props.put("State", "DISABLED");
+
+        provisioner.provision(r, props, updateCtx(CE_ARN));
+
+        ArgumentCaptor<JsonNode> update = ArgumentCaptor.forClass(JsonNode.class);
+        verify(batch).updateComputeEnvironment(update.capture());
+        verify(batch, never()).createComputeEnvironment(any(), anyString());
+        assertEquals(CE_ARN, update.getValue().path("computeEnvironment").asText());
+        assertEquals("DISABLED", update.getValue().path("state").asText());
+        assertEquals(CE_ARN, r.getPhysicalId(), "an in-place update keeps the physical id");
+    }
+
+    @Test
+    void updatingAJobQueueUpdatesInPlace() {
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        r.getAttributes().put("JobQueueName", "queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "9");
+
+        provisioner.provision(r, props, updateCtx(JQ_ARN));
+
+        ArgumentCaptor<JsonNode> update = ArgumentCaptor.forClass(JsonNode.class);
+        verify(batch).updateJobQueue(update.capture());
+        verify(batch, never()).createJobQueue(any(), anyString());
+        assertEquals(9, update.getValue().path("priority").asInt());
+        assertEquals(JQ_ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void renamingAComputeEnvironmentCreatesRatherThanUpdates() {
+        // The name is createOnly, so a changed name is a replacing update: it still arrives with a
+        // prior physical id, but must create a new entity rather than mutate one that has that name.
+        when(batch.createComputeEnvironment(any(), anyString()))
+                .thenReturn(mapper.createObjectNode().put("computeEnvironmentArn", CE_ARN + "-new"));
+        StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
+        r.getAttributes().put("ComputeEnvironmentName", "envy");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("ComputeEnvironmentName", "renamed");
+        props.put("Type", "MANAGED");
+
+        provisioner.provision(r, props, updateCtx(CE_ARN));
+
+        verify(batch).createComputeEnvironment(any(), anyString());
+        verify(batch, never()).updateComputeEnvironment(any());
+        assertEquals(CE_ARN + "-new", r.getPhysicalId());
+    }
+
+    @Test
+    void anUnnamedComputeEnvironmentKeepsItsGeneratedNameAcrossUpdates() {
+        // The defect this guards: generating unconditionally gave an unnamed resource a fresh
+        // random name on every update, creating a second environment and orphaning the first.
+        StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
+        r.getAttributes().put("ComputeEnvironmentName", "my-stack-Compute-ab12cd");
+
+        provisioner.provision(r, mapper.createObjectNode(), updateCtx(CE_ARN));
+
+        verify(batch).updateComputeEnvironment(any());
+        verify(batch, never()).createComputeEnvironment(any(), anyString());
+    }
+
+    @Test
+    void anUnnamedResourceRecoversItsNameFromThePriorArn() {
+        // Stacks provisioned before the name attribute was recorded still have to update in place
+        // rather than create a duplicate.
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+
+        provisioner.provision(r, mapper.createObjectNode(), updateCtx(JQ_ARN));
+
+        verify(batch).updateJobQueue(any());
+        verify(batch, never()).createJobQueue(any(), anyString());
+    }
+
+    @Test
+    void updatingAJobDefinitionRegistersANewRevisionUnderTheSameName() {
+        // AWS updates a job definition by recording a new revision, which is what
+        // registerJobDefinition already does, so there is no separate update call.
+        when(batch.registerJobDefinition(any(), anyString()))
+                .thenReturn(mapper.createObjectNode().put("jobDefinitionArn", JD_ARN).put("revision", 2));
+        StackResource r = resource("AWS::Batch::JobDefinition", "Definition");
+        r.getAttributes().put("JobDefinitionName", "def");
+        ObjectNode props = mapper.createObjectNode();
+        props.putObject("ContainerProperties").put("Image", "busybox");
+
+        provisioner.provision(r, props, updateCtx(JD_ARN));
+
+        ArgumentCaptor<JsonNode> req = ArgumentCaptor.forClass(JsonNode.class);
+        verify(batch).registerJobDefinition(req.capture(), anyString());
+        assertEquals("def", req.getValue().path("jobDefinitionName").asText());
+    }
+
     // ── delete ───────────────────────────────────────────────────────────────
 
     @Test

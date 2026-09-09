@@ -128,21 +128,31 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionComputeEnvironment(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "ComputeEnvironmentName");
-        if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), NAME_MAX_LENGTH, false);
+        String name = stableName(r, ctx, props, "ComputeEnvironmentName");
+
+        String arn;
+        if (reusesPriorEntity(r, ctx, name, "ComputeEnvironmentName")) {
+            // UpdateComputeEnvironment is the schema's update handler and takes only these three;
+            // ComputeEnvironmentName, Type and Tags are createOnly, so a change to those is a
+            // replacement the engine drives, not something to push through here.
+            ObjectNode update = JsonNodeFactory.instance.objectNode();
+            update.put("computeEnvironment", ctx.priorPhysicalId());
+            putResolvedText(update, "state", props, "State", ctx);
+            putResolvedText(update, "serviceRole", props, "ServiceRole", ctx);
+            putResolvedObject(update, "computeResources", props, "ComputeResources", ctx);
+            batchService.updateComputeEnvironment(update);
+            arn = ctx.priorPhysicalId();
+        } else {
+            ObjectNode req = JsonNodeFactory.instance.objectNode();
+            req.put("computeEnvironmentName", name);
+            putResolvedText(req, "type", props, "Type", ctx);
+            putResolvedText(req, "state", props, "State", ctx);
+            putResolvedText(req, "serviceRole", props, "ServiceRole", ctx);
+            putResolvedObject(req, "computeResources", props, "ComputeResources", ctx);
+            putTags(req, props, ctx);
+            arn = batchService.createComputeEnvironment(req, ctx.region())
+                    .path("computeEnvironmentArn").asText();
         }
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("computeEnvironmentName", name);
-        putResolvedText(req, "type", props, "Type", ctx);
-        putResolvedText(req, "state", props, "State", ctx);
-        putResolvedText(req, "serviceRole", props, "ServiceRole", ctx);
-        putResolvedObject(req, "computeResources", props, "ComputeResources", ctx);
-        putTags(req, props, ctx);
-
-        ObjectNode response = batchService.createComputeEnvironment(req, ctx.region());
-        String arn = response.path("computeEnvironmentArn").asText();
         r.setPhysicalId(arn);
         r.getAttributes().put("Arn", arn);
         r.getAttributes().put("ComputeEnvironmentArn", arn);
@@ -150,22 +160,32 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionJobQueue(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "JobQueueName");
-        if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), NAME_MAX_LENGTH, false);
-        }
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("jobQueueName", name);
+        String name = stableName(r, ctx, props, "JobQueueName");
         String priority = ctx.resolveOptional(props, "Priority");
-        req.put("priority", priority != null ? Integer.parseInt(priority) : 1);
-        putResolvedText(req, "state", props, "State", ctx);
-        putResolvedText(req, "jobQueueType", props, "JobQueueType", ctx);
-        req.set("computeEnvironmentOrder", computeEnvironmentOrder(props, ctx));
-        putTags(req, props, ctx);
 
-        ObjectNode response = batchService.createJobQueue(req, ctx.region());
-        String arn = response.path("jobQueueArn").asText();
+        String arn;
+        if (reusesPriorEntity(r, ctx, name, "JobQueueName")) {
+            // UpdateJobQueue is the schema's update handler; JobQueueName and JobQueueType are
+            // createOnly, so only these three are pushed through.
+            ObjectNode update = JsonNodeFactory.instance.objectNode();
+            update.put("jobQueue", ctx.priorPhysicalId());
+            putResolvedText(update, "state", props, "State", ctx);
+            if (priority != null) {
+                update.put("priority", Integer.parseInt(priority));
+            }
+            update.set("computeEnvironmentOrder", computeEnvironmentOrder(props, ctx));
+            batchService.updateJobQueue(update);
+            arn = ctx.priorPhysicalId();
+        } else {
+            ObjectNode req = JsonNodeFactory.instance.objectNode();
+            req.put("jobQueueName", name);
+            req.put("priority", priority != null ? Integer.parseInt(priority) : 1);
+            putResolvedText(req, "state", props, "State", ctx);
+            putResolvedText(req, "jobQueueType", props, "JobQueueType", ctx);
+            req.set("computeEnvironmentOrder", computeEnvironmentOrder(props, ctx));
+            putTags(req, props, ctx);
+            arn = batchService.createJobQueue(req, ctx.region()).path("jobQueueArn").asText();
+        }
         r.setPhysicalId(arn);
         r.getAttributes().put("Arn", arn);
         r.getAttributes().put("JobQueueArn", arn);
@@ -173,10 +193,9 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionJobDefinition(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "JobDefinitionName");
-        if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), NAME_MAX_LENGTH, false);
-        }
+        // No update branch: RegisterJobDefinition on an existing name records a new revision,
+        // which is how AWS updates a job definition. Only the name has to stay steady.
+        String name = stableName(r, ctx, props, "JobDefinitionName");
 
         ObjectNode req = JsonNodeFactory.instance.objectNode();
         req.put("jobDefinitionName", name);
@@ -208,6 +227,63 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("JobDefinitionArn", arn);
         r.getAttributes().put("JobDefinitionName", name);
         r.getAttributes().put("Revision", response.path("revision").asText());
+    }
+
+    /**
+     * The name to use this time round: the template's, else the one this resource already has,
+     * and only failing both a freshly generated one.
+     *
+     * <p>{@code ctx.stablePhysicalName} does not fit these types. It falls back to the prior
+     * physical id, and for Batch that id is an ARN rather than the name, so it would feed an ARN
+     * back in as a name. The prior name comes from the attribute recorded at create time instead,
+     * the way SqsCfnProvisioner reads QueueName beside the queue URL. Without this, an unnamed
+     * resource got a fresh random name on every UpdateStack, creating a second entity and
+     * orphaning the first.
+     */
+    private String stableName(StackResource r, ProvisionContext ctx, JsonNode props, String nameKey) {
+        // For all three types the template property and the recorded attribute share a name.
+        String explicit = ctx.resolveOptional(props, nameKey);
+        if (explicit != null && !explicit.isBlank()) {
+            return explicit;
+        }
+        String prior = priorName(r, ctx, nameKey);
+        if (prior != null && !prior.isBlank()) {
+            return prior;
+        }
+        return ctx.generatePhysicalName(r.getLogicalId(), NAME_MAX_LENGTH, false);
+    }
+
+    /**
+     * Whether {@code name} is the entity this resource already had, so it must be updated rather
+     * than created. {@code ctx.reusesPriorEntity} compares against the physical id, which is the
+     * ARN here, so the comparison is made against the recorded name instead. A replacing update
+     * arrives with a prior id too but has derived a different name, and must still create.
+     */
+    private boolean reusesPriorEntity(StackResource r, ProvisionContext ctx, String name, String attribute) {
+        return ctx.isUpdate() && name.equals(priorName(r, ctx, attribute));
+    }
+
+    /**
+     * The recorded name, falling back to the one embedded in the prior ARN for a resource created
+     * before that attribute was stored. Batch ARNs end in {@code <kind>/<name>}, and the job
+     * definition's also carries {@code :<revision>}.
+     */
+    private String priorName(StackResource r, ProvisionContext ctx, String attribute) {
+        String recorded = r.getAttributes() != null ? r.getAttributes().get(attribute) : null;
+        if (recorded != null && !recorded.isBlank()) {
+            return recorded;
+        }
+        String priorId = ctx.priorPhysicalId();
+        if (priorId == null || !priorId.startsWith("arn:")) {
+            return null;
+        }
+        int slash = priorId.lastIndexOf('/');
+        if (slash < 0 || slash == priorId.length() - 1) {
+            return null;
+        }
+        String tail = priorId.substring(slash + 1);
+        int colon = tail.lastIndexOf(':');
+        return colon > 0 ? tail.substring(0, colon) : tail;
     }
 
     private ArrayNode computeEnvironmentOrder(JsonNode props, ProvisionContext ctx) {
