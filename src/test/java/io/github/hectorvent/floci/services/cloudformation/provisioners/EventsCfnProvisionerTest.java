@@ -144,4 +144,33 @@ class EventsCfnProvisionerTest {
         verify(events, never()).removeTargets(anyString(), any(), any(), anyString());
     }
 
+    // ── a failed policy removal is not swallowed ─────────────────────────────
+
+    @Test
+    void anAlreadyGonePolicyStatementCountsAsDeleted() {
+        doThrowOnRemovePermission(new AwsException("ResourceNotFoundException",
+                "Statement not found: sid-1", 400));
+
+        provisioner.delete("AWS::Events::EventBusPolicy", "orders-bus|sid-1", REGION);
+
+        verify(events).removePermission("orders-bus", "sid-1", false, REGION);
+    }
+
+    @Test
+    void aFailedPolicyRemovalReachesTheStack() {
+        // The previous catch-all logged every failure at debug and returned, so the statement
+        // stayed on the bus while the stack still reported DELETE_COMPLETE.
+        doThrowOnRemovePermission(new AwsException("ValidationException", "StatementId is required.", 400));
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.delete("AWS::Events::EventBusPolicy", "orders-bus|sid-1", REGION));
+
+        assertEquals("ValidationException", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("StatementId"));
+    }
+
+    private void doThrowOnRemovePermission(AwsException e) {
+        org.mockito.Mockito.doThrow(e).when(events)
+                .removePermission(anyString(), anyString(), org.mockito.ArgumentMatchers.anyBoolean(), anyString());
+    }
 }

@@ -579,14 +579,16 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void removeEventBusPolicySafe(String physicalId, String region) {
-        try {
-            int sep = physicalId.lastIndexOf('|');
-            String busName = sep >= 0 ? physicalId.substring(0, sep) : "default";
-            String statementId = sep >= 0 ? physicalId.substring(sep + 1) : physicalId;
-            eventBridgeService.removePermission(busName, statementId, false, region);
-        } catch (Exception e) {
-            LOG.debugv("Could not remove event bus policy {0}: {1}", physicalId, e.getMessage());
-        }
+        int sep = physicalId.lastIndexOf('|');
+        String busName = sep >= 0 ? physicalId.substring(0, sep) : "default";
+        String statementId = sep >= 0 ? physicalId.substring(sep + 1) : physicalId;
+        // Only an already-gone bus or statement means "done"; RemovePermission raises
+        // ResourceNotFoundException for both. Anything else is a real failure and must reach the
+        // stack as DELETE_FAILED rather than being logged away, which is what the previous
+        // catch-all did: the statement stayed on the bus and the stack still reported deleted.
+        CfnDeletes.safeDelete("Event bus policy statement", physicalId,
+                () -> eventBridgeService.removePermission(busName, statementId, false, region),
+                "ResourceNotFoundException");
     }
     private static String resolveOrDefault(JsonNode props, String name, ProvisionContext ctx, String defaultValue) {
         String value = ctx.resolveOptional(props, name);
