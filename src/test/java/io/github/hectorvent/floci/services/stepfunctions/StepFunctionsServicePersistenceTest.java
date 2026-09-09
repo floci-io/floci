@@ -104,6 +104,9 @@ class StepFunctionsServicePersistenceTest {
     @Test
     void waitingExecutionIsAbortedWithHistoryAndOldTaskTokenIsRejectedAfterReload() {
         PersistentTestStorageFactory storage = new PersistentTestStorageFactory(tempDir);
+        Mockito.when(regionResolver.buildArn("states", "us-east-1",
+                        "execution:TestStateMachine:waiting"))
+                .thenReturn("arn:aws:states:us-east-1:000000000000:execution:TestStateMachine:waiting");
         Mockito.when(regionResolver.buildArn("states", "us-east-1", "activity:waiting"))
                 .thenReturn("arn:aws:states:us-east-1:000000000000:activity:waiting");
         AtomicReference<StepFunctionsService> serviceReference = new AtomicReference<>();

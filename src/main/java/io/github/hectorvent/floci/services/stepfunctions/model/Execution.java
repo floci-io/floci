@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
@@ -20,7 +19,6 @@ public class Execution {
     private Double stopDate;
     private String error;
     private String cause;
-    @JsonIgnore
     private List<HistoryEvent> history = new ArrayList<>();
 
     public Execution() {
