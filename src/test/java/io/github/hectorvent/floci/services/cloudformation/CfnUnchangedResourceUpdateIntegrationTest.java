@@ -1,10 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
-
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -47,19 +45,15 @@ class CfnUnchangedResourceUpdateIntegrationTest {
 
     /**
      * Pulls the PhysicalResourceId of one logical resource out of a DescribeStackResources body.
-     * The member ordering is not guaranteed, so match the pair rather than a fixed offset.
+     * The member ordering is not guaranteed, so pick the member by its LogicalResourceId rather
+     * than by position.
      */
     private static String physicalIdOf(String describeBody, String logicalId) {
-        Matcher m = Pattern.compile(
-                "<member>(?:(?!</member>).)*?<LogicalResourceId>" + Pattern.quote(logicalId)
-                        + "</LogicalResourceId>(?:(?!</member>).)*?</member>", Pattern.DOTALL)
-                .matcher(describeBody);
-        if (!m.find()) {
-            return null;
-        }
-        Matcher pid = Pattern.compile("<PhysicalResourceId>(.*?)</PhysicalResourceId>", Pattern.DOTALL)
-                .matcher(m.group());
-        return pid.find() ? pid.group(1) : null;
+        return XmlParser.extractGroups(describeBody, "member").stream()
+                .filter(member -> logicalId.equals(member.get("LogicalResourceId")))
+                .map(member -> member.get("PhysicalResourceId"))
+                .findFirst()
+                .orElse(null);
     }
 
     private String namedPhysicalId(String stackName) {
