@@ -19,6 +19,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -463,6 +464,36 @@ class CloudWatchDashboardCfnProvisionerTest {
         assertTrue(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
         assertTrue(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR),
                 "the snapshot is kept for the next attempt");
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+    }
+
+    /**
+     * The unwind repeats the tag call the update just made, so a service that keeps failing hands
+     * back the same exception instance. A throwable cannot suppress itself; the failure is still
+     * recorded and the original one still reported.
+     */
+    @Test
+    void anUnwindThatFailsWithTheUpdatesOwnExceptionIsStillRecorded() {
+        Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
+        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
+        when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
+        when(dashboards.putDashboard(eq("ops"), anyString(), anyMap(), eq(REGION))).thenReturn(before);
+        AwsException persistent = new AwsException("InternalServiceError", "tags down", 500);
+        doThrow(persistent).when(dashboards).tagResource(eq(arn("ops")), anyMap(), eq(REGION));
+
+        StackResource r = resource();
+        r.setPhysicalId("ops");
+        r.getAttributes().put("FlociDashboardNameMode", "explicit");
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"DashboardName": "ops", "DashboardBody": "{}", "Tags": [{"Key": "team", "Value": "data"}]}
+                """), new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, "ops")));
+
+        assertSame(persistent, thrown);
+        assertEquals(0, thrown.getSuppressed().length);
+        assertEquals("Could not roll back the update of dashboard ops: tags down",
+                r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        assertTrue(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR));
         assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
     }
 

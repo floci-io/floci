@@ -1,13 +1,17 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -17,6 +21,8 @@ import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
 
 /**
  * Provisions an {@code AWS::CloudWatch::Dashboard} through a CloudFormation stack and reads it
@@ -26,6 +32,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 @QuarkusTest
 class CloudFormationCloudWatchDashboardIntegrationTest {
+
+    @InjectSpy
+    CloudWatchDashboardsService dashboardsService;
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260908/us-east-1/cloudformation/aws4_request";
@@ -217,6 +226,90 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
         awaitStackDeleted(stack);
+    }
+
+    /**
+     * The tag reconciliation runs after PutDashboard has already written the new body, so a failure
+     * there leaves the dashboard carrying the update the stack is about to disown. The provisioner
+     * puts the body and tags back before the failure leaves it, and the stack reports a clean
+     * rollback with the original failure as the resource's reason.
+     */
+    @Test
+    void anUpdateThatFailedOnItsTagsPutsTheDashboardBackAndTheStackRollsBackCleanly()
+            throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-dashboard-tagfail-" + suffix;
+        String name = "ops-tagfail-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(EXTRA_TAG, ""), Map.of("Name", name));
+        describeStacks(stack, "CREATE_COMPLETE");
+        String arn = dashboardArn(name);
+
+        // The update's tag call fails; the restore's own tag call is left working, which is what
+        // makes this the clean-rollback case rather than the failed-restore one below.
+        Mockito.doThrow(new IllegalStateException("simulated tagResource failure"))
+                .doCallRealMethod()
+                .when(dashboardsService)
+                .tagResource(anyString(), anyMap(), anyString());
+        try {
+            cloudFormation(stack, "UpdateStack", TEMPLATE.formatted("", ""),
+                    Map.of("Name", name, "Title", "Errors", "Team", "data"));
+            String rolledBack = describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(name, outputValue(rolledBack, "DashboardRef"));
+            getDashboard(name).then()
+                .statusCode(200)
+                .body("GetDashboardResponse.GetDashboardResult.DashboardBody", containsString("\"Requests\""))
+                .body("GetDashboardResponse.GetDashboardResult.DashboardBody", not(containsString("\"Errors\"")));
+            assertTags(arn, Map.of("team", "platform", "env", "dev"), Map.of());
+            String events = describeEvents(stack);
+            assertTrue(events.contains("simulated tagResource failure"), events);
+            assertTrue(events.contains("<ResourceStatusReason>Resource update rolled back</ResourceStatusReason>"),
+                    events);
+        } finally {
+            Mockito.doCallRealMethod().when(dashboardsService).tagResource(anyString(), anyMap(), anyString());
+        }
+
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        awaitStackDeleted(stack);
+    }
+
+    /**
+     * The restore repeats the tag call the update just made, so a tag failure that persists takes
+     * the restore down with it and nobody knows what the dashboard carries. The stack says so:
+     * UPDATE_ROLLBACK_FAILED naming the dashboard, rather than a clean rollback claiming the prior
+     * dashboard is intact.
+     */
+    @Test
+    void aFailedRestoreLeavesTheStackInUpdateRollbackFailedNamingTheDashboard() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-dashboard-restorefail-" + suffix;
+        String name = "ops-restorefail-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(EXTRA_TAG, ""), Map.of("Name", name));
+        describeStacks(stack, "CREATE_COMPLETE");
+
+        Mockito.doThrow(new IllegalStateException("simulated persistent tagResource failure"))
+                .when(dashboardsService)
+                .tagResource(anyString(), anyMap(), anyString());
+        try {
+            cloudFormation(stack, "UpdateStack", TEMPLATE.formatted("", ""),
+                    Map.of("Name", name, "Title", "Errors", "Team", "data"));
+            String failed = describeStacks(stack, "UPDATE_ROLLBACK_FAILED");
+            assertTrue(failed.contains("The following resource(s) failed to roll back: [Dashboard]."), failed);
+            String events = describeEvents(stack);
+            assertTrue(events.contains("Could not roll back the update of dashboard " + name
+                    + ": simulated persistent tagResource failure"), events);
+            assertTrue(!events.contains("<ResourceStatusReason>Resource update rolled back</ResourceStatusReason>"),
+                    events);
+        } finally {
+            Mockito.doCallRealMethod().when(dashboardsService).tagResource(anyString(), anyMap(), anyString());
+        }
+
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        awaitStackDeleted(stack);
+        // A resource left UPDATE_FAILED by a failed rollback is not one DeleteStack removes, so the
+        // dashboard outlives the stack and this test removes it itself.
+        dashboardsService.deleteDashboards(List.of(name), "us-east-1");
     }
 
     /** Dropping an explicit name is a replacement on AWS: the dashboard comes back under a generated name. */

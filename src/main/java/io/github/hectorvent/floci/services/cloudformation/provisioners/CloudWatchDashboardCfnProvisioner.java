@@ -108,16 +108,21 @@ public class CloudWatchDashboardCfnProvisioner implements CfnResourceProvisioner
      * new body, or a half-reconciled set of tags, is still live. The stack must report the original
      * failure, so an unwind that cannot restore is attached to it and recorded as a rollback
      * failure, which ends the stack in UPDATE_ROLLBACK_FAILED rather than claiming the prior
-     * dashboard is intact.
+     * dashboard is intact. The unwind repeats the tag call the update just made, so it can come
+     * back carrying the very exception that interrupted the update; a throwable cannot be
+     * suppressed under itself, and the failure is recorded before the two are joined so that
+     * record never depends on it.
      */
     private void unwind(StackResource r, String name, RuntimeException failure) {
         try {
             rollbackUpdate(r);
             r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
         } catch (RuntimeException unwindFailure) {
-            failure.addSuppressed(unwindFailure);
             r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
                     "Could not roll back the update of dashboard " + name + ": " + unwindFailure.getMessage());
+            if (unwindFailure != failure) {
+                failure.addSuppressed(unwindFailure);
+            }
         }
     }
 
