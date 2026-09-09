@@ -204,7 +204,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Provisions an {@code AWS::Events::EventBus} (a custom EventBridge event bus). Without this the
      * resource would fall through to the generic stub, which assigns a physical id but never registers
-     * the bus with the EventBridge service — so any {@code AWS::Events::Rule} (or PutEvents) targeting
+     * the bus with the EventBridge service, so any {@code AWS::Events::Rule} (or PutEvents) targeting
      * the bus fails "EventBus not found". Per the AWS spec, {@code Ref} returns the bus <em>name</em>
      * (not the ARN), so the physical id is the name; {@code Fn::GetAtt "Arn"} exposes the ARN.
      */
