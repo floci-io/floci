@@ -28,6 +28,7 @@ import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -64,6 +65,30 @@ class StepFunctionsServicePersistenceTest {
     private final AslExecutor aslExecutor = Mockito.mock(AslExecutor.class);
     private final SfnMockLoader mockLoader = Mockito.mock(SfnMockLoader.class);
     private final RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+
+    @Test
+    void historyCheckpointCallbackRunsAtBoundedIntervals() {
+        AtomicInteger lastCheckpoint = new AtomicInteger();
+        StepFunctionsService.ExecutionHistory history =
+                new StepFunctionsService.ExecutionHistory(eventCount -> {
+                    if (eventCount % 100 == 0) {
+                        lastCheckpoint.set(eventCount);
+                    }
+                });
+
+        for (int eventId = 1; eventId <= 99; eventId++) {
+            HistoryEvent event = new HistoryEvent();
+            event.setId((long) eventId);
+            history.add(event);
+        }
+        assertEquals(0, lastCheckpoint.get());
+
+        HistoryEvent checkpointEvent = new HistoryEvent();
+        checkpointEvent.setId(100L);
+        history.add(checkpointEvent);
+
+        assertEquals(100, lastCheckpoint.get());
+    }
 
     @Test
     void completedExecutionRetainsExactHistoryAfterReload() {

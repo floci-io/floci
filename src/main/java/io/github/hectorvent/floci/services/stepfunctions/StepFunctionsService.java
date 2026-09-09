@@ -37,11 +37,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.IntConsumer;
 
 @ApplicationScoped
 public class StepFunctionsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(StepFunctionsService.class);
+    private static final int HISTORY_PERSIST_CHECKPOINT = 100;
 
     private final StorageBackend<String, StateMachine> stateMachineStore;
     // Account-aware: the startup sweep has no request context and must reach every account.
@@ -577,7 +579,11 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             exec.setName(execName);
             exec.setInput(input);
             exec.setStatus("RUNNING");
-            history = new ExecutionHistory(() -> executionStore.put(arn, exec));
+            history = new ExecutionHistory(eventCount -> {
+                if (eventCount % HISTORY_PERSIST_CHECKPOINT == 0) {
+                    executionStore.put(arn, exec);
+                }
+            });
             var startEvent = new HistoryEvent();
             startEvent.setId(1L);
             startEvent.setPreviousEventId(0L);
@@ -826,20 +832,24 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
         private static final long serialVersionUID = 1L;
 
-        private final Runnable onAppend;
+        private final IntConsumer onAppend;
         private boolean sealed;
 
         ExecutionHistory() {
-            this(() -> { });
+            this(eventCount -> { });
         }
 
         ExecutionHistory(Runnable onAppend) {
+            this(eventCount -> onAppend.run());
+        }
+
+        ExecutionHistory(IntConsumer onAppend) {
             this.onAppend = onAppend;
         }
 
         ExecutionHistory(List<HistoryEvent> events, Runnable onAppend, boolean sealed) {
             super(events != null ? events : List.of());
-            this.onAppend = onAppend;
+            this.onAppend = eventCount -> onAppend.run();
             this.sealed = sealed;
         }
 
@@ -850,7 +860,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             }
             boolean added = super.add(event);
             if (added) {
-                onAppend.run();
+                onAppend.accept(size());
             }
             return added;
         }
