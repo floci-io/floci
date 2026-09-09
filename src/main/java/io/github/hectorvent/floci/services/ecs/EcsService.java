@@ -1632,8 +1632,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
             if (accountId != null && !accountId.isBlank()) {
                 return accountId;
             }
-        } catch (IllegalArgumentException ignored) {
-            // ignored
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Could not parse an account from ECS task ARN {0}, reconciling it in the default account: {1}",
+                    taskArn, e.getMessage());
         }
         return regionResolver.getAccountId();
     }
