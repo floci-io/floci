@@ -22,7 +22,17 @@ public record CloudTrailEntry(
         boolean logging,
         Long startLoggingTime,
         Long stopLoggingTime,
-        Map<String, String> tags) {
+        Map<String, String> tags,
+        Long latestDeliveryTime,
+        String latestDeliveryError) {
+
+    public CloudTrailEntry(Trail trail, List<EventSelector> selectors,
+                           List<AdvancedEventSelector> advancedSelectors, boolean logging,
+                           Long startLoggingTime, Long stopLoggingTime,
+                           Map<String, String> tags) {
+        this(trail, selectors, advancedSelectors, logging, startLoggingTime, stopLoggingTime,
+                tags, null, null);
+    }
 
     // Not Map.copyOf: AWS allows a tag with a null value (AddTags omitting "Value"),
     // and Map.copyOf/Map.of reject null values.
@@ -32,36 +42,52 @@ public record CloudTrailEntry(
 
     public CloudTrailEntry withTrail(Trail updated) {
         return new CloudTrailEntry(updated, selectors, advancedSelectors, logging,
-                startLoggingTime, stopLoggingTime, tags);
+                startLoggingTime, stopLoggingTime, tags,
+                latestDeliveryTime, latestDeliveryError);
     }
 
     /** Sets basic selectors, clearing any advanced selectors — a trail holds one kind or the other. */
     public CloudTrailEntry withSelectors(List<EventSelector> updated, boolean hasCustomSelectors) {
         Trail updatedTrail = withHasCustomSelectors(hasCustomSelectors);
         return new CloudTrailEntry(updatedTrail, updated, List.of(), logging,
-                startLoggingTime, stopLoggingTime, tags);
+                startLoggingTime, stopLoggingTime, tags,
+                latestDeliveryTime, latestDeliveryError);
     }
 
     /** Sets advanced selectors, clearing any basic selectors — a trail holds one kind or the other. */
     public CloudTrailEntry withAdvancedSelectors(List<AdvancedEventSelector> updated, boolean hasCustomSelectors) {
         Trail updatedTrail = withHasCustomSelectors(hasCustomSelectors);
         return new CloudTrailEntry(updatedTrail, List.of(), updated, logging,
-                startLoggingTime, stopLoggingTime, tags);
+                startLoggingTime, stopLoggingTime, tags,
+                latestDeliveryTime, latestDeliveryError);
     }
 
     public CloudTrailEntry withTags(Map<String, String> updated) {
         return new CloudTrailEntry(trail, selectors, advancedSelectors, logging,
-                startLoggingTime, stopLoggingTime, updated);
+                startLoggingTime, stopLoggingTime, updated,
+                latestDeliveryTime, latestDeliveryError);
     }
 
     public CloudTrailEntry startLogging(long time) {
         return new CloudTrailEntry(trail, selectors, advancedSelectors, true, time,
-                stopLoggingTime, tags);
+                stopLoggingTime, tags,
+                latestDeliveryTime, latestDeliveryError);
     }
 
     public CloudTrailEntry stopLogging(long time) {
         return new CloudTrailEntry(trail, selectors, advancedSelectors, false, startLoggingTime,
-                time, tags);
+                time, tags,
+                latestDeliveryTime, latestDeliveryError);
+    }
+
+    public CloudTrailEntry withDeliveryFailure(String error) {
+        return new CloudTrailEntry(trail, selectors, advancedSelectors, logging,
+                startLoggingTime, stopLoggingTime, tags, latestDeliveryTime, error);
+    }
+
+    public CloudTrailEntry withDeliverySuccess(long time) {
+        return new CloudTrailEntry(trail, selectors, advancedSelectors, logging,
+                startLoggingTime, stopLoggingTime, tags, time, null);
     }
 
     private Trail withHasCustomSelectors(boolean hasCustomSelectors) {

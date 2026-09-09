@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -58,6 +59,7 @@ public class CloudTrailLogWriter {
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final SecureRandom rng = new SecureRandom();
+    private final Object flushLock = new Object();
 
     private ScheduledExecutorService executor;
 
@@ -107,17 +109,19 @@ public class CloudTrailLogWriter {
     }
 
     private void flushAll() {
-        try {
-            for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
-                try {
-                    flushTrail(key);
-                } catch (RuntimeException e) {
-                    LOG.warnv(e, "CloudTrail log flush failed for trail {0} in {1}",
-                            key.trailName(), key.region());
+        synchronized (flushLock) {
+            try {
+                for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
+                    try {
+                        flushTrail(key);
+                    } catch (RuntimeException e) {
+                        LOG.warnv(e, "CloudTrail log flush failed for trail {0} in {1}",
+                                key.trailName(), key.region());
+                    }
                 }
+            } catch (RuntimeException outer) {
+                LOG.errorv(outer, "CloudTrail log writer iteration failed");
             }
-        } catch (RuntimeException outer) {
-            LOG.errorv(outer, "CloudTrail log writer iteration failed");
         }
     }
 
@@ -149,9 +153,19 @@ public class CloudTrailLogWriter {
         } catch (RuntimeException e) {
             // Re-queue so records survive the failed flush and are retried next cycle.
             cloudTrailService.requeueRecords(key, records);
+            try {
+                cloudTrailService.recordDeliveryFailure(key, deliveryError(e));
+            } catch (RuntimeException statusError) {
+                LOG.warnv(statusError, "CloudTrail delivery failure status update failed for trail {0}", key.trailName());
+            }
             LOG.warnv(e, "CloudTrail flush failed for trail {0} ({1} records re-queued)",
                     key.trailName(), records.size());
             throw e;
+        }
+        try {
+            cloudTrailService.recordDeliverySuccess(key, System.currentTimeMillis());
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "CloudTrail delivery success status update failed for trail {0}", key.trailName());
         }
 
         // The write above already succeeded and durably delivered the records —
@@ -181,6 +195,14 @@ public class CloudTrailLogWriter {
             LOG.warnv(e, "CloudTrail self-delivery event emission failed for trail {0} "
                     + "(write already succeeded, records not re-queued)", key.trailName());
         }
+    }
+
+    private String deliveryError(RuntimeException e) {
+        String message = e.getMessage() == null ? "" : ": " + e.getMessage();
+        if (e instanceof AwsException awsException) {
+            return awsException.getErrorCode() + message;
+        }
+        return e.getClass().getSimpleName() + message;
     }
 
     private byte[] serializeAndGzip(List<ObjectNode> records) {

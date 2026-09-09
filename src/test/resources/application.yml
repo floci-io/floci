@@ -332,6 +332,7 @@ floci:
       emit-mode: off
     cloudtrail:
       enabled: true
+      flush-interval-seconds: 3600
     lightsail:
       enabled: true
     cloudcontrol:

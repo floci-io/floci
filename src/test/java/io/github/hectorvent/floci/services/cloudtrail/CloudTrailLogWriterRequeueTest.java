@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudtrail;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
@@ -115,15 +116,6 @@ class CloudTrailLogWriterRequeueTest {
     private static List<String> listKeys(String bucket) {
         String xml = given().when().get("/" + bucket + "?list-type=2")
                 .then().statusCode(200).extract().asString();
-        List<String> keys = new ArrayList<>();
-        int from = 0;
-        while (true) {
-            int open = xml.indexOf("<Key>", from);
-            if (open < 0) break;
-            int close = xml.indexOf("</Key>", open);
-            keys.add(xml.substring(open + 5, close));
-            from = close + 6;
-        }
-        return keys;
+        return XmlParser.extractAll(xml, "Key");
     }
 }

@@ -206,7 +206,12 @@ public class CloudTrailJsonHandler {
         resp.put("IsLogging", status.logging());
         if (status.startLoggingTime() != null) {
             resp.put("StartLoggingTime", status.startLoggingTime() / 1000.0);
-            resp.put("LatestDeliveryTime", status.startLoggingTime() / 1000.0);
+        }
+        if (status.latestDeliveryTime() != null) {
+            resp.put("LatestDeliveryTime", status.latestDeliveryTime() / 1000.0);
+        }
+        if (status.latestDeliveryError() != null) {
+            resp.put("LatestDeliveryError", status.latestDeliveryError());
         }
         if (status.stopLoggingTime() != null) {
             resp.put("StopLoggingTime", status.stopLoggingTime() / 1000.0);
