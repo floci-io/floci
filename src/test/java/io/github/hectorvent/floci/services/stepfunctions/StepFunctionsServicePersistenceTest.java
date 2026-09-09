@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.Activity;
 import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
+import io.github.hectorvent.floci.services.stepfunctions.model.MockedTestCase;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
@@ -24,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -112,7 +115,7 @@ class StepFunctionsServicePersistenceTest {
         AtomicReference<StepFunctionsService> serviceReference = new AtomicReference<>();
         Instance<StepFunctionsService> serviceInstance = Mockito.mock(Instance.class);
         Mockito.when(serviceInstance.get()).thenAnswer(ignored -> serviceReference.get());
-        AslExecutor realExecutor = realExecutor(serviceInstance);
+        RestartableAslExecutor realExecutor = realExecutor(serviceInstance);
         StepFunctionsService beforeRestart = serviceWithStorage(storage, realExecutor);
         serviceReference.set(beforeRestart);
         Activity activity = beforeRestart.createActivity("waiting", "us-east-1", Map.of());
@@ -126,26 +129,31 @@ class StepFunctionsServicePersistenceTest {
         List<HistoryEvent> expectedHistory = new ArrayList<>(beforeRestart.getExecutionHistory(started.getExecutionArn()));
         storage.flushAll();
         realExecutor.stop();
-        beforeRestart.clear();
 
-        StepFunctionsService afterRestart = serviceWithStorage(new PersistentTestStorageFactory(tempDir));
-        afterRestart.abortAbandonedExecutions();
+        try {
+            StepFunctionsService afterRestart = serviceWithStorage(new PersistentTestStorageFactory(tempDir));
+            afterRestart.abortAbandonedExecutions();
 
-        Execution reloaded = afterRestart.describeExecution(started.getExecutionArn());
-        assertEquals("ABORTED", reloaded.getStatus());
-        assertNull(reloaded.getOutput());
-        assertNull(reloaded.getError());
-        assertNull(reloaded.getCause());
-        HistoryEvent aborted = new HistoryEvent();
-        aborted.setId(expectedHistory.size() + 1L);
-        aborted.setPreviousEventId((long) expectedHistory.size());
-        aborted.setType("ExecutionAborted");
-        aborted.setDetails(Map.of());
-        expectedHistory.add(aborted);
-        List<HistoryEvent> actualHistory = afterRestart.getExecutionHistory(started.getExecutionArn());
-        aborted.setTimestamp(actualHistory.getLast().getTimestamp());
-        assertHistoryEquals(expectedHistory, actualHistory);
-        assertFalse(afterRestart.sendTaskSuccess(taskToken, "{\"done\":true}"));
+            Execution reloaded = afterRestart.describeExecution(started.getExecutionArn());
+            assertEquals("ABORTED", reloaded.getStatus());
+            assertNull(reloaded.getOutput());
+            assertNull(reloaded.getError());
+            assertNull(reloaded.getCause());
+            HistoryEvent aborted = new HistoryEvent();
+            aborted.setId(expectedHistory.size() + 1L);
+            aborted.setPreviousEventId((long) expectedHistory.size());
+            aborted.setType("ExecutionAborted");
+            aborted.setDetails(Map.of());
+            expectedHistory.add(aborted);
+            List<HistoryEvent> actualHistory = afterRestart.getExecutionHistory(started.getExecutionArn());
+            aborted.setTimestamp(actualHistory.getLast().getTimestamp());
+            assertHistoryEquals(expectedHistory, actualHistory);
+            assertFalse(afterRestart.sendTaskSuccess(taskToken, "{\"done\":true}"));
+        } finally {
+            beforeRestart.abortAbandonedExecutions();
+            beforeRestart.clear();
+            assertTrue(realExecutor.awaitCompletion());
+        }
     }
 
     @Test
@@ -338,9 +346,45 @@ class StepFunctionsServicePersistenceTest {
         return stateMachine;
     }
 
-    private static AslExecutor realExecutor(Instance<StepFunctionsService> serviceInstance) {
-        return new AslExecutor(null, null, null, null, null, null, null, null, null, null,
+    private static RestartableAslExecutor realExecutor(Instance<StepFunctionsService> serviceInstance) {
+        return new RestartableAslExecutor(serviceInstance);
+    }
+
+    private static final class RestartableAslExecutor extends AslExecutor {
+        private final CountDownLatch completion = new CountDownLatch(1);
+
+        private RestartableAslExecutor(Instance<StepFunctionsService> serviceInstance) {
+            super(null, null, null, null, null, null, null, null, null, null,
                 null, null, null, new ObjectMapper(), null, serviceInstance, null, null, null);
+        }
+
+        private boolean awaitCompletion() {
+            try {
+                return completion.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        @Override
+        public void executeAsync(StateMachine stateMachine, Execution execution,
+                                 List<HistoryEvent> history, MockedTestCase mockedTestCase,
+                                 java.util.function.BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+            super.executeAsync(stateMachine, execution, history, mockedTestCase,
+                    (updatedExecution, updatedHistory) -> {
+                        try {
+                            onUpdate.accept(updatedExecution, updatedHistory);
+                        } finally {
+                            completion.countDown();
+                        }
+                    });
+        }
+
+        @Override
+        void stop() {
+            // Keep the waiting worker alive until the test has reloaded the persisted snapshot.
+        }
     }
 
     private static void assertHistoryEquals(List<HistoryEvent> expected, List<HistoryEvent> actual) {
