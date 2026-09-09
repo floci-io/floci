@@ -71,9 +71,9 @@ AWS::ElasticLoadBalancingV2::Listener	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::ListenerRule	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::LoadBalancer	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::TargetGroup	ElbV2CfnProvisioner
-AWS::Events::EventBus	LEGACY_SWITCH
-AWS::Events::EventBusPolicy	LEGACY_SWITCH
-AWS::Events::Rule	LEGACY_SWITCH
+AWS::Events::EventBus	EventsCfnProvisioner
+AWS::Events::EventBusPolicy	EventsCfnProvisioner
+AWS::Events::Rule	EventsCfnProvisioner
 AWS::IAM::AccessKey	LEGACY_SWITCH
 AWS::IAM::InstanceProfile	LEGACY_SWITCH
 AWS::IAM::ManagedPolicy	LEGACY_SWITCH

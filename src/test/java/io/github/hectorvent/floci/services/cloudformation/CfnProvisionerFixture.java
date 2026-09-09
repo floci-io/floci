@@ -30,6 +30,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
@@ -297,6 +298,9 @@ final class CfnProvisionerFixture {
             }
             if (backupService != null) {
                 discovered.add(new BackupVaultCfnProvisioner(backupService));
+            }
+            if (eventBridgeService != null) {
+                discovered.add(new EventsCfnProvisioner(eventBridgeService, objectMapper));
             }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));
@@ -590,7 +594,6 @@ final class CfnProvisionerFixture {
                     ssmService,
                     kmsService,
                     secretsManagerService,
-                    eventBridgeService,
                     apiGatewayService,
                     apiGatewayV2Service,
                     ecrService,
