@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 
@@ -109,10 +110,11 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionRule(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String ruleName = ctx.resolveOptional(props, "Name");
-        if (ruleName == null || ruleName.isBlank()) {
-            ruleName = ctx.generatePhysicalName(r.getLogicalId(), 64, false);
-        }
+        // Name is createOnly and the physical id is the rule name, so ctx.stablePhysicalName
+        // applies directly: without it an unnamed rule was given a fresh random name on every
+        // UpdateStack, creating a second rule and leaving the first behind with its targets.
+        String ruleName = ctx.stablePhysicalName(
+                ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
 
         String busName = ctx.resolveOptional(props, "EventBusName");
         String description = ctx.resolveOptional(props, "Description");
@@ -139,8 +141,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
 
         // Provision inline targets
-        if (props != null && props.has("Targets")) {
-            List<Target> targets = new ArrayList<>();
+        List<Target> targets = new ArrayList<>();
+        if (props != null && props.has("Targets") && props.get("Targets").isArray()) {
             for (JsonNode targetNode : props.get("Targets")) {
                 JsonNode resolved = ctx.engine().resolveNode(targetNode);
                 String targetId = resolved.path("Id").asText(null);
@@ -176,9 +178,26 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                     targets.add(target);
                 }
             }
-            if (!targets.isEmpty()) {
-                eventBridgeService.putTargets(ruleName, busName, targets, ctx.region());
-            }
+        }
+        if (!targets.isEmpty()) {
+            eventBridgeService.putTargets(ruleName, busName, targets, ctx.region());
+        }
+        removeStaleTargets(ruleName, busName, targets, ctx.region());
+    }
+
+    /**
+     * Drives the rule's targets to the template's desired state. PutTargets only upserts by id,
+     * so a target dropped from the template stayed on the rule forever, still delivering events.
+     * A template that declares no Targets at all means no targets, so the sweep runs either way.
+     */
+    private void removeStaleTargets(String ruleName, String busName, List<Target> desired, String region) {
+        Set<String> desiredIds = desired.stream().map(Target::getId).collect(Collectors.toSet());
+        List<String> stale = eventBridgeService.listTargetsByRule(ruleName, busName, region).stream()
+                .map(Target::getId)
+                .filter(id -> !desiredIds.contains(id))
+                .toList();
+        if (!stale.isEmpty()) {
+            eventBridgeService.removeTargets(ruleName, busName, stale, region);
         }
     }
 
