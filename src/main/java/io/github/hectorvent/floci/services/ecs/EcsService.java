@@ -1581,14 +1581,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     // ── Service Reconciliation ────────────────────────────────────────────────
 
     void reconcile() {
+        try {
+            reconcileTasks();
+        } catch (Exception e) {
+            LOG.warnv(e, "ECS task reconciliation tick failed: {0}", e.getMessage());
+        }
         for (String accountId : reconcilableAccountIds()) {
             RequestScopes.runAs(accountId, () -> {
-                try {
-                    reconcileTasks();
-                } catch (Exception e) {
-                    LOG.warnv(e, "ECS task reconciliation tick failed for account {0}: {1}",
-                            accountId, e.getMessage());
-                }
                 try {
                     reconcileServices();
                 } catch (Exception e) {
@@ -1617,12 +1616,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
 
     private void reconcileTasks() {
         for (String taskArn : taskHandles.keySet()) {
-            try {
-                reconcileTask(taskArn);
-            } catch (Exception e) {
-                LOG.debugv("Error reconciling ECS task {0}: {1}", taskArn, e.getMessage());
-            }
+            RequestScopes.runAs(taskAccountId(taskArn), () -> {
+                try {
+                    reconcileTask(taskArn);
+                } catch (Exception e) {
+                    LOG.debugv("Error reconciling ECS task {0}: {1}", taskArn, e.getMessage());
+                }
+            });
         }
+    }
+
+    private String taskAccountId(String taskArn) {
+        try {
+            String accountId = AwsArnUtils.parse(taskArn).accountId();
+            if (accountId != null && !accountId.isBlank()) {
+                return accountId;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // ignored
+        }
+        return regionResolver.getAccountId();
     }
 
     private void reconcileTask(String taskArn) {

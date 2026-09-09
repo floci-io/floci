@@ -17,7 +17,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-class EcsReconcileTickResilienceTest {
+class EcsReconcileTickResilienceServiceTest {
 
     private static final String REGION = "us-east-1";
 

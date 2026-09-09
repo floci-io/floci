@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
+import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import org.junit.jupiter.api.Test;
 
@@ -23,7 +24,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-class EcsReconcilerMultiAccountTest {
+class EcsReconcilerMultiAccountServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String DEFAULT_ACCOUNT = "000000000000";
