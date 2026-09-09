@@ -263,6 +263,19 @@ class IotMqttBrokerDeviceVerificationTest {
         }
     }
 
+    @Test
+    void stoppingAfterClientDisconnectDoesNotFail() throws Exception {
+        RegisteredDevice device = registered(deviceLeaf);
+        when(service.findRegisteredCertificate(certificate(deviceLeaf))).thenReturn(Optional.of(device));
+        when(service.isConnectAllowed(eq(device), eq("sensor-1"), eq("127.0.0.1"), isNull())).thenReturn(true);
+
+        MqttClient client = connectTls("sensor-1", deviceLeaf, null);
+        client.disconnect();
+        client.close();
+
+        broker.stop();
+    }
+
     /** Dials {@code host}, which Paho also sends as the TLS server name; MQTT 3.1.1 pinned so a refusal is not retried as 3.1. */
     private MqttClient connectTls(String clientId, CertificateGenerator.GeneratedCertificate leaf, String host) throws Exception {
         MqttClient client = new MqttClient("ssl://" + (host == null ? "127.0.0.1" : host) + ":" + tlsPort, clientId, new MemoryPersistence());

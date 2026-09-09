@@ -730,6 +730,7 @@ public interface EmulatorConfig {
         IdentityStoreServiceConfig identitystore();
         BudgetsServiceConfig budgets();
         Inspector2ServiceConfig inspector2();
+        SecurityHubServiceConfig securityhub();
         DetectiveServiceConfig detective();
         ServiceQuotasServiceConfig servicequotas();
         RamServiceConfig ram();
@@ -786,6 +787,11 @@ public interface EmulatorConfig {
     }
 
     interface Inspector2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface SecurityHubServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

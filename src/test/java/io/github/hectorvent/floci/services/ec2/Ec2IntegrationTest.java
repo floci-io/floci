@@ -2016,6 +2016,35 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(44)
+    void describeLaunchTemplatesRejectsMissingName() {
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateName.1", "no-such-template")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidLaunchTemplateName.NotFoundException"));
+    }
+
+    @Test
+    @Order(44)
+    void describeLaunchTemplatesWithNoMatchingFilterStaysAnEmptyList() {
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("Filter.1.Name", "launch-template-name")
+            .formParam("Filter.1.Value.1", "no-such-template")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<item>")));
+    }
+
+    @Test
     @Order(45)
     void describeLaunchTemplateVersionsById() {
         given()

@@ -267,6 +267,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>inspector2</artifactId>
         </dependency>
+        <!-- AWS Security Hub client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>securityhub</artifactId>
+        </dependency>
         <!-- AWS Account Management client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -335,6 +340,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>guardduty</artifactId>
+        </dependency>
+        <!-- AWS Resource Access Manager client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ram</artifactId>
         </dependency>
         <!-- Secrets Manager client -->
         <dependency>

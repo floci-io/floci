@@ -12,6 +12,8 @@ import java.util.Map;
 public class Cluster {
 
     private String name;
+    private String accountId;
+    private String region;
     private String description;
     private ClusterStatus status;
     private String nodeType;
@@ -35,6 +37,12 @@ public class Cluster {
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
+
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public String getRegion() { return region; }
+    public void setRegion(String region) { this.region = region; }
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }

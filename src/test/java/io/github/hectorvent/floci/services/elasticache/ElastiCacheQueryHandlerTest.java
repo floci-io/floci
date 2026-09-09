@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.core.common.AwsException;
 import java.util.List;
 import java.util.Map;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 import org.mockito.ArgumentCaptor;
@@ -236,6 +237,42 @@ class ElastiCacheQueryHandlerTest {
         assertEquals("us-east-1", request.region());
         assertEquals(new ReplicationGroupSettings(true, "alias/cache", 7, "06:30-07:30"), request.settings());
         assertEquals(Map.of("Name", "g1"), request.tags());
+    }
+
+    @Test
+    void createReplicationGroup_passesTheRequestedPortToService() {
+        // Port is a modeled optional input on CreateReplicationGroup; the handler dropped it,
+        // so a caller that pinned one always read back whatever port floci allocated.
+        when(service.createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class)))
+                .thenReturn(group("g1"));
+        MultivaluedMap<String, String> p = params();
+        p.add("ReplicationGroupId", "g1");
+        p.add("ReplicationGroupDescription", "d");
+        p.add("Port", "6395");
+
+        assertEquals(200, handler.handle("CreateReplicationGroup", p, "us-east-1").getStatus());
+
+        ArgumentCaptor<ElastiCacheService.CreateReplicationGroupRequest> captor =
+                ArgumentCaptor.forClass(ElastiCacheService.CreateReplicationGroupRequest.class);
+        verify(service).createReplicationGroup(captor.capture());
+        assertEquals(6395, captor.getValue().port());
+    }
+
+    @Test
+    void createReplicationGroup_leavesPortNullWhenAbsent() {
+        when(service.createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class)))
+                .thenReturn(group("g1"));
+        MultivaluedMap<String, String> p = params();
+        p.add("ReplicationGroupId", "g1");
+        p.add("ReplicationGroupDescription", "d");
+
+        assertEquals(200, handler.handle("CreateReplicationGroup", p, "us-east-1").getStatus());
+
+        ArgumentCaptor<ElastiCacheService.CreateReplicationGroupRequest> captor =
+                ArgumentCaptor.forClass(ElastiCacheService.CreateReplicationGroupRequest.class);
+        verify(service).createReplicationGroup(captor.capture());
+        assertNull(captor.getValue().port(),
+                "An absent Port must stay null so the service allocates as before");
     }
 
     @Test

@@ -205,4 +205,43 @@ class Ec2TransitGatewayVpcAttachmentIntegrationTest {
         .then().statusCode(200)
             .body("DeleteTransitGatewayResponse.transitGateway.state", equalTo("deleted"));
     }
+
+    /**
+     * Connect attachments cannot be created yet, so the describe answers with the AWS-shaped
+     * empty collection: the EC2 namespace, a requestId, and an empty transitGatewayConnectSet.
+     */
+    @Test
+    @Order(7)
+    void describeTransitGatewayConnectsAnswersAnEmptySetOverTheQueryProtocol() {
+        String body = given()
+            .formParam("Action", "DescribeTransitGatewayConnects")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeTransitGatewayConnectsResponse.requestId", not(equalTo("")))
+            .extract().asString();
+
+        assertThat(body, containsString("<DescribeTransitGatewayConnectsResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">"));
+        assertThat(body, containsString("<transitGatewayConnectSet></transitGatewayConnectSet>"));
+    }
+
+    @Test
+    @Order(8)
+    void describeTransitGatewayConnectsRejectsMalformedAndUnknownIdsOverTheQueryProtocol() {
+        given()
+            .formParam("Action", "DescribeTransitGatewayConnects")
+            .formParam("TransitGatewayAttachmentIds.1", "tgw-connect-nope")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayAttachmentID.Malformed"));
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayConnects")
+            .formParam("TransitGatewayAttachmentIds.1", "tgw-attach-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayConnectID.NotFound"));
+    }
 }

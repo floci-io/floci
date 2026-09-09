@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
+import io.github.hectorvent.floci.services.organizations.model.Organization;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -34,21 +36,14 @@ import java.util.regex.Pattern;
  * GetResourceShareInvitations, find the share via GetResourceShares(OTHER-ACCOUNTS), and read
  * the shared ARNs via ListResources.
  *
- * <p>Principals are stored but not enforced for visibility: floci's org is the only org, and
- * launched containers call in with placeholder credentials that resolve to the default account,
- * so OTHER-ACCOUNTS simply means "every share the caller does not own", and ListResources /
- * GetResourceShares never wait on an invitation being accepted. Mutations are the opposite: they
- * are owner-only, and a non-owner gets the same UnknownResourceException a never-created ARN
- * gets.
+ * <p>Visibility is principal-aware: an owner sees its own shares, an account principal sees a
+ * share only while its invitation is pending or accepted, and organization/OU principals are
+ * visible only to members resolved through the existing Organizations service. This same rule
+ * is used by GetResourceShares, ListResources, and ListPrincipals so filtering one operation
+ * cannot leak metadata through another.
  *
- * <p>Invitations exist purely as the accept/reject bookkeeping {@code aws_ram_resource_share_accepter}
- * needs, not as a visibility gate: an organization/OU principal (real AWS's own auto-accept case)
- * never gets one, and neither does an account principal while organization sharing is enabled
- * (matching {@code EnableSharingWithAwsOrganization}'s effect on member accounts). A bare AWS
- * account-id principal added while organization sharing is off gets a PENDING invitation the
- * receiving account can accept or reject, but, unlike real AWS, the share and its resources are
- * visible under OTHER-ACCOUNTS regardless of that invitation's status, for the same reason
- * visibility isn't otherwise gated by principal.
+ * <p>Mutations remain owner-only, and a non-owner gets the same UnknownResourceException a
+ * never-created ARN gets.
  */
 @ApplicationScoped
 public class RamService {
@@ -61,13 +56,20 @@ public class RamService {
     private static final Pattern ACCOUNT_ID_PRINCIPAL = Pattern.compile("\\d{12}");
 
     private final StorageFactory storageFactory;
+    private final OrganizationsService organizationsService;
     private StorageBackend<String, ResourceShare> shares;
     private StorageBackend<String, Boolean> settings;
     private StorageBackend<String, ResourceShareInvitation> invitations;
 
     @Inject
-    public RamService(StorageFactory storageFactory) {
+    public RamService(StorageFactory storageFactory, OrganizationsService organizationsService) {
         this.storageFactory = storageFactory;
+        this.organizationsService = organizationsService;
+    }
+
+    /** Constructor used by isolated service tests with an explicit Organizations test double. */
+    RamService(StorageFactory storageFactory) {
+        this(storageFactory, null);
     }
 
     @PostConstruct
@@ -85,7 +87,23 @@ public class RamService {
         return true;
     }
 
+    public boolean enableSharingWithAwsOrganization(String callerAccountId) {
+        if (settings instanceof AccountAwareStorageBackend<Boolean> accountAware) {
+            accountAware.putForAccount(callerAccountId, ORGANIZATION_SHARING_KEY, true);
+        } else {
+            settings.put(ORGANIZATION_SHARING_KEY, true);
+        }
+        return true;
+    }
+
     public boolean isSharingWithOrganizationEnabled() {
+        return settings.get(ORGANIZATION_SHARING_KEY).orElse(false);
+    }
+
+    public boolean isSharingWithOrganizationEnabled(String accountId) {
+        if (settings instanceof AccountAwareStorageBackend<Boolean> accountAware) {
+            return accountAware.getForAccount(accountId, ORGANIZATION_SHARING_KEY).orElse(false);
+        }
         return settings.get(ORGANIZATION_SHARING_KEY).orElse(false);
     }
 
@@ -239,7 +257,7 @@ public class RamService {
      * was REJECTED gets invited again, same as real AWS re-sharing after a rejection.
      */
     private void inviteAccountPrincipals(ResourceShare share, List<String> principals) {
-        if (isSharingWithOrganizationEnabled()) {
+        if (isSharingWithOrganizationEnabled(share.getOwningAccountId())) {
             return;
         }
         // Serializes the live-invitation check against the insert: two concurrent
@@ -489,12 +507,87 @@ public class RamService {
         if ("SELF".equals(resourceOwner)) {
             return owned;
         }
-        // OTHER-ACCOUNTS: every non-owned share is visible, regardless of principals.
-        // Launched-container credentials resolve to the emulator default account, so a
-        // principal-based check would hide account-principal shares from the very Lambda
-        // they were shared with (LZA's Custom::GetResourceShare filters client-side by
-        // owningAccountId + name anyway).
-        return !owned;
+        if (owned) {
+            return false;
+        }
+        return share.getPrincipals().stream()
+                .anyMatch(principal -> isVisibleToPrincipal(share, principal, callerAccountId));
+    }
+
+    private boolean isVisibleToPrincipal(ResourceShare share, String principal, String callerAccountId) {
+        if (ACCOUNT_ID_PRINCIPAL.matcher(principal).matches()) {
+            if (!principal.equals(callerAccountId)) {
+                return false;
+            }
+            // A rejected or removed invitation is no longer an authorization to discover the
+            // share. PENDING remains visible because RAM exposes the invitation's share metadata
+            // before the receiver accepts it.
+            boolean hasLiveInvitation = allInvitations().stream()
+                    .anyMatch(candidate -> candidate.resourceShareArn().equals(share.getResourceShareArn())
+                            && candidate.receiverAccountId().equals(callerAccountId)
+                            && ("PENDING".equals(candidate.status())
+                            || "ACCEPTED".equals(candidate.status())));
+            if (hasLiveInvitation) {
+                return true;
+            }
+            // Organization sharing auto-accepts account principals without persisting an
+            // invitation. Restrict that path to the owner's organization, never any organization.
+            return isSharingWithOrganizationEnabled(share.getOwningAccountId())
+                    && isMemberOfSameOrganization(share.getOwningAccountId(), callerAccountId);
+        }
+
+        return isOrganizationPrincipalVisible(principal, callerAccountId);
+    }
+
+    private boolean isOrganizationPrincipalVisible(String principal, String callerAccountId) {
+        if (organizationsService == null) {
+            return false;
+        }
+        String[] arn = principal.split(":", 6);
+        if (arn.length != 6 || !"aws".equals(arn[1]) || !"organizations".equals(arn[2])) {
+            return false;
+        }
+        String[] resource = arn[5].split("/");
+        if (resource.length < 2) {
+            return false;
+        }
+        Organization organization = findOrganizationForCaller(callerAccountId);
+        if (organization == null) {
+            return false;
+        }
+        if (!organization.getId().equals(resource[1])) {
+            return false;
+        }
+        if ("organization".equals(resource[0])) {
+            return resource.length == 2;
+        }
+        if (!"ou".equals(resource[0]) || resource.length != 3) {
+            return false;
+        }
+        try {
+            String path = organizationsService.organizationPath(callerAccountId, callerAccountId);
+            return List.of(path.split("/")).contains(resource[2]);
+        } catch (AwsException e) {
+            return false;
+        }
+    }
+
+    private boolean isMemberOfSameOrganization(String ownerAccountId, String callerAccountId) {
+        Organization ownerOrganization = findOrganizationForCaller(ownerAccountId);
+        Organization callerOrganization = findOrganizationForCaller(callerAccountId);
+        return ownerOrganization != null && callerOrganization != null
+                && ownerOrganization.getId().equals(callerOrganization.getId());
+    }
+
+    private Organization findOrganizationForCaller(String callerAccountId) {
+        if (organizationsService == null) {
+            return null;
+        }
+        try {
+            return organizationsService.describeOrganization(callerAccountId);
+        } catch (AwsException e) {
+            return null;
+        }
     }
 
     /** {@code arn:aws:ec2:...:transit-gateway/tgw-1} → {@code ec2:TransitGateway}. */

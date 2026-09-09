@@ -20,6 +20,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -172,6 +173,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         List<String> resources = arnBuilder.buildResources(credentialScope, ctx, region, accountId);
 
         Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
+        // A request naming several resources is authorized once per resource, as on AWS, so a
+        // permitted first target cannot carry later targets that the policy does not allow.
+        List<Map<String, List<String>>> remainingTargets =
+                conditionContextResolver.resolveRemainingTargets(credentialScope, action, ctx);
 
         // aws:PrincipalArn is populated for every principal this filter can identify — IAM users,
         // assumed-role sessions, and now the synthesized account-root principal above, using AWS's
@@ -186,10 +191,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
             conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
         }
+        List<Map<String, List<String>>> targetContexts = new ArrayList<>();
+        targetContexts.add(conditionContext);
+        for (Map<String, List<String>> target : remainingTargets) {
+            Map<String, List<String>> targetContext = new HashMap<>(target);
+            principalArn.ifPresent(arn -> targetContext.put("aws:PrincipalArn", List.of(arn)));
+            targetContexts.add(targetContext);
+        }
 
         for (String resource : resources) {
-            Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
-            if (decision == Decision.DENY) {
+            for (Map<String, List<String>> targetContext : targetContexts) {
+                Decision decision = evaluator.evaluate(caller, null, action, resource, targetContext);
+                if (decision != Decision.DENY) {
+                    continue;
+                }
                 LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
                 String denyMessage = "User: arn:aws:iam::" + accountId
                         + ":user/" + akid + " is not authorized to perform: " + action

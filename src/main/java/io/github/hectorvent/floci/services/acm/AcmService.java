@@ -108,9 +108,24 @@ public class AcmService implements ResourceProvider {
                                           String idempotencyToken, KeyAlgorithm keyAlgorithm,
                                           String certAuthorityArn, CertificateOptions options,
                                           Map<String, String> tags, String region) {
+        return requestCertificate(domainName, sans, validationMethod, idempotencyToken, keyAlgorithm,
+            certAuthorityArn, options, tags, Map.of(), region);
+    }
+
+    /**
+     * @param validationDomains the {@code ValidationDomain} of each requested {@code DomainValidationOptions}
+     *                          entry, keyed by its {@code DomainName}. Domains absent from the map validate
+     *                          against themselves, which is what AWS reports when the caller supplies nothing.
+     */
+    public Certificate requestCertificate(String domainName, List<String> sans, ValidationMethod validationMethod,
+                                          String idempotencyToken, KeyAlgorithm keyAlgorithm,
+                                          String certAuthorityArn, CertificateOptions options,
+                                          Map<String, String> tags, Map<String, String> validationDomains,
+                                          String region) {
         logSecurityWarningOnce();
         validateDomainName(domainName);
         validateSans(sans);
+        Map<String, String> requestedValidationDomains = indexValidationDomains(validationDomains, domainName, sans);
         if (tags != null) {
             validateTags(tags);
         }
@@ -182,7 +197,8 @@ public class AcmService implements ResourceProvider {
 
         List<DomainValidation> validations = new ArrayList<>();
         for (String san : allSans) {
-            validations.add(generateDomainValidation(san, validationMethod, status));
+            validations.add(generateDomainValidation(san, requestedValidationDomains.get(san.toLowerCase(Locale.ROOT)),
+                validationMethod, status));
         }
         cert.setDomainValidationOptions(validations);
 
@@ -720,14 +736,56 @@ public class AcmService implements ResourceProvider {
     }
 
     /**
+     * Indexes the {@code ValidationDomain} of each requested {@code DomainValidationOptions} entry by a
+     * lowercased {@code DomainName}, rejecting the entries AWS rejects: a {@code DomainName} that is not
+     * part of the request, and a {@code ValidationDomain} that is neither the domain itself nor one of
+     * its superdomains.
+     */
+    private Map<String, String> indexValidationDomains(Map<String, String> validationDomains,
+                                                       String domainName, List<String> sans) {
+        if (validationDomains == null || validationDomains.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> requested = new HashSet<>();
+        requested.add(domainName.toLowerCase(Locale.ROOT));
+        if (sans != null) {
+            sans.forEach(san -> requested.add(san.toLowerCase(Locale.ROOT)));
+        }
+        Map<String, String> indexed = new HashMap<>();
+        validationDomains.forEach((domain, validationDomain) -> {
+            String key = domain.toLowerCase(Locale.ROOT);
+            if (!requested.contains(key) || !isValidationDomainOf(domain, validationDomain)) {
+                throw new AwsException("InvalidDomainValidationOptionsException",
+                    "One or more values in the DomainValidationOption structure is incorrect.", 400);
+            }
+            indexed.put(key, validationDomain);
+        });
+        return indexed;
+    }
+
+    /**
+     * A {@code ValidationDomain} is only usable for a domain when it is that domain or one of its
+     * superdomains: it is the suffix of the mailboxes ACM will accept an approval from.
+     */
+    static boolean isValidationDomainOf(String domain, String validationDomain) {
+        String lowerDomain = domain.toLowerCase(Locale.ROOT);
+        String lowerValidationDomain = validationDomain.toLowerCase(Locale.ROOT);
+        return lowerDomain.equals(lowerValidationDomain) || lowerDomain.endsWith("." + lowerValidationDomain);
+    }
+
+    /**
      * Generates a domain validation entry whose status follows the certificate: an ISSUED
      * certificate has validated every domain, a PENDING_VALIDATION one has not yet.
+     *
+     * @param requestedValidationDomain the {@code ValidationDomain} the caller asked for, or {@code null}
+     *                                  to validate the domain against itself
      */
-    private DomainValidation generateDomainValidation(String domain, ValidationMethod method, CertificateStatus status) {
+    private DomainValidation generateDomainValidation(String domain, String requestedValidationDomain,
+                                                      ValidationMethod method, CertificateStatus status) {
         String validationToken = generateValidationToken(domain);
-        String validationDomain = baseDomain(domain);
+        String recordBase = baseDomain(domain);
         ResourceRecord resourceRecord = new ResourceRecord(
-            "_" + validationToken.substring(0, 32) + "." + validationDomain + ".",
+            "_" + validationToken.substring(0, 32) + "." + recordBase + ".",
             "CNAME",
             "_" + validationToken.substring(32) + ".acm-validations.aws."
         );
@@ -736,7 +794,7 @@ public class AcmService implements ResourceProvider {
 
         return new DomainValidation(
             domain,
-            domain,
+            requestedValidationDomain != null ? requestedValidationDomain : domain,
             validationStatus,
             method != null ? method.name() : "DNS",
             resourceRecord,

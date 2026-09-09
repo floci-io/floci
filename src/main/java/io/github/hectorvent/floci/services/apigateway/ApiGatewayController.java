@@ -322,13 +322,13 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         if ("import".equals(mode)) {
             RestApi api = service.importRestApi(region, body);
-            return Response.status(201).entity(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+            return Response.status(201).entity(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
         }
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
             RestApi api = service.createRestApi(region, request);
-            return Response.status(201).entity(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+            return Response.status(201).entity(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
         } catch (IOException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
@@ -343,7 +343,7 @@ public class ApiGatewayController {
                                String body) {
         String region = regionResolver.resolveRegion(headers);
         RestApi api = service.putRestApi(region, apiId, mode, body);
-        return Response.ok(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @GET
@@ -353,7 +353,7 @@ public class ApiGatewayController {
         List<RestApi> apis = service.getRestApis(region);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        apis.forEach(a -> items.add(toApiNode(a)));
+        apis.forEach(a -> items.add(toApiNode(region, a)));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -361,7 +361,7 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}")
     public Response getRestApi(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(toApiNode(service.getRestApi(region, apiId)).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toApiNode(region, service.getRestApi(region, apiId)).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @PATCH
@@ -370,7 +370,7 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         List<Map<String, String>> patchOperations = parsePatchOperations(body);
         RestApi api = service.updateRestApi(region, apiId, patchOperations);
-        return Response.ok(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -1902,7 +1902,7 @@ public class ApiGatewayController {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private ObjectNode toApiNode(RestApi api) {
+    private ObjectNode toApiNode(String region, RestApi api) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("id", api.getId());
         node.put("name", api.getName());
@@ -1927,6 +1927,21 @@ public class ApiGatewayController {
         ArrayNode vpcIds = epNode.putArray("vpcEndpointIds");
         epConfig.getVpcEndpointIds().forEach(vpcIds::add);
         node.set("endpointConfiguration", epNode);
+
+        // The root resource is created with the API and is already reachable through
+        // GetResources, but AWS also reports its id on the API itself. Terraform reads it
+        // as aws_api_gateway_rest_api.root_resource_id, which is how the first resource
+        // under "/" gets its parent, so leaving it out breaks the conventional way of
+        // building a REST API.
+        service.findRootResourceId(region, api.getId()).ifPresent(id -> node.put("rootResourceId", id));
+
+        // Neither member is settable on a REST API here: createRestApi ignores both and
+        // updateRestApi patches only /name and /description, so the emulated value is always
+        // the AWS default. Report the defaults rather than omitting them, because a client
+        // that reads an absent member back as "" or null sees it as a difference from the
+        // configuration it just sent and never converges.
+        node.put("apiKeySource", "HEADER");
+        node.put("disableExecuteApiEndpoint", false);
 
         return node;
     }

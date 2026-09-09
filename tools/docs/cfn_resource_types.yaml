@@ -49,6 +49,7 @@ order:
   - AWS::WAFv2
   - AWS::Config
   - AWS::CloudFormation
+  - AWS::CloudTrail
   - Custom
   - AWS::CDK
 
@@ -105,6 +106,7 @@ service_labels:
   AWS::CertificateManager: ACM
   AWS::CloudFormation: CloudFormation
   AWS::CloudFront: CloudFront
+  AWS::CloudTrail: CloudTrail
   AWS::CloudWatch: CloudWatch
   AWS::CodeBuild: CodeBuild
   AWS::CodePipeline: CodePipeline

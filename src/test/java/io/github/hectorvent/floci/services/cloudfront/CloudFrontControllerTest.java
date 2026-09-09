@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -319,6 +320,218 @@ class CloudFrontControllerTest {
             assertTrue(((String) created.getEntity()).contains("InconsistentQuantities"));
         }
     }
+    @Test
+    void customOriginConfigEchoesOriginSslProtocolsSoTheAwsProviderDoesNotSegfault() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        // A custom origin whose request omits OriginSslProtocols, as the aws provider sends for a
+        // minimal distribution. The provider flattens CustomOriginConfig.OriginSslProtocols.Items with
+        // no nil guard, so an omitted object segfaults it on read-back. AWS always echoes the object.
+        String body = distributionConfigBody("");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-ssl");
+            d.setEtag("etag-ssl");
+            return d;
+        });
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+        when(service.getDistribution("dist-ssl")).thenReturn(captor.getValue());
+
+        try (Response dist = controller.getDistribution("dist-ssl")) {
+            String xml = (String) dist.getEntity();
+            int start = xml.indexOf("<OriginSslProtocols>");
+            assertTrue(start >= 0, "CustomOriginConfig must echo an OriginSslProtocols object");
+            String block = xml.substring(start, xml.indexOf("</OriginSslProtocols>", start));
+            assertTrue(block.contains("<SslProtocol>"),
+                    "OriginSslProtocols must list at least one protocol");
+        }
+    }
+
+    @Test
+    void customOriginConfigRoundTripsSubmittedOriginSslProtocols() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace(
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
+                        + "<OriginSslProtocols><Quantity>2</Quantity><Items>"
+                        + "<SslProtocol>TLSv1.1</SslProtocol><SslProtocol>TLSv1.2</SslProtocol>"
+                        + "</Items></OriginSslProtocols></CustomOriginConfig>");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-ssl2");
+            d.setEtag("etag-ssl2");
+            return d;
+        });
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+        when(service.getDistribution("dist-ssl2")).thenReturn(captor.getValue());
+
+        try (Response cfg = controller.getDistributionConfig("dist-ssl2")) {
+            String xml = (String) cfg.getEntity();
+            int start = xml.indexOf("<OriginSslProtocols>");
+            assertTrue(start >= 0);
+            String block = xml.substring(start, xml.indexOf("</OriginSslProtocols>", start));
+            assertTrue(block.contains("<SslProtocol>TLSv1.1</SslProtocol>"), "echoes TLSv1.1");
+            assertTrue(block.contains("<SslProtocol>TLSv1.2</SslProtocol>"), "echoes TLSv1.2");
+        }
+    }
+
+    @Test
+    void defaultCacheBehaviorRoundTripsForwardedValues() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody(
+                "<ForwardedValues><QueryString>true</QueryString>"
+                        + "<Cookies><Forward>all</Forward></Cookies></ForwardedValues>");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-fv");
+            d.setEtag("etag-fv");
+            return d;
+        });
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+        when(service.getDistribution("dist-fv")).thenReturn(captor.getValue());
+
+        try (Response dist = controller.getDistribution("dist-fv")) {
+            String xml = (String) dist.getEntity();
+            int start = xml.indexOf("<ForwardedValues>");
+            assertTrue(start >= 0, "DefaultCacheBehavior must echo a ForwardedValues object");
+            String block = xml.substring(start, xml.indexOf("</ForwardedValues>", start));
+            assertTrue(block.contains("<QueryString>true</QueryString>"), "echoes QueryString");
+            assertTrue(block.contains("<Forward>all</Forward>"), "echoes Cookies.Forward");
+        }
+    }
+
+    @Test
+    void defaultCacheBehaviorRoundTripsAnExplicitZeroDefaultTtl() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        // default_ttl = 0 with forwarded_values is the usual "do not cache". Treating 0 as "unset"
+        // drops it from the read-back, so the provider sees the attribute disappear and diffs forever.
+        String body = distributionConfigBody(
+                "<MinTTL>0</MinTTL><DefaultTTL>0</DefaultTTL><MaxTTL>0</MaxTTL>"
+                        + "<ForwardedValues><QueryString>false</QueryString>"
+                        + "<Cookies><Forward>none</Forward></Cookies></ForwardedValues>");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-ttl0");
+            d.setEtag("etag-ttl0");
+            return d;
+        });
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+        when(service.getDistribution("dist-ttl0")).thenReturn(captor.getValue());
+
+        try (Response dist = controller.getDistribution("dist-ttl0")) {
+            String xml = (String) dist.getEntity();
+            assertTrue(xml.contains("<MinTTL>0</MinTTL>"), "echoes an explicit MinTTL of 0");
+            assertTrue(xml.contains("<DefaultTTL>0</DefaultTTL>"), "echoes an explicit DefaultTTL of 0");
+            assertTrue(xml.contains("<MaxTTL>0</MaxTTL>"), "echoes an explicit MaxTTL of 0");
+        }
+    }
+
+    @Test
+    void defaultCacheBehaviorOmitsTtlsTheClientNeverSubmitted() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody(
+                "<ForwardedValues><QueryString>false</QueryString>"
+                        + "<Cookies><Forward>none</Forward></Cookies></ForwardedValues>");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-ttlabsent");
+            d.setEtag("etag-ttlabsent");
+            return d;
+        });
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+        when(service.getDistribution("dist-ttlabsent")).thenReturn(captor.getValue());
+
+        try (Response dist = controller.getDistribution("dist-ttlabsent")) {
+            String xml = (String) dist.getEntity();
+            assertFalse(xml.contains("<DefaultTTL>"), "an unsubmitted DefaultTTL stays absent");
+            assertFalse(xml.contains("<MaxTTL>"), "an unsubmitted MaxTTL stays absent");
+        }
+    }
+
+    @Test
+    void forwardedValuesRoundTripsHeadersQueryStringCacheKeysAndWhitelistedCookies() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        // Headers, QueryStringCacheKeys and Cookies.WhitelistedNames are Quantity/Items pairs. Echoing
+        // a bare Quantity 0 loses them, so the provider reads the lists back empty and diffs each plan.
+        String body = distributionConfigBody(
+                "<ForwardedValues><QueryString>true</QueryString>"
+                        + "<Cookies><Forward>whitelist</Forward>"
+                        + "<WhitelistedNames><Quantity>2</Quantity><Items>"
+                        + "<Name>session</Name><Name>tracking</Name></Items></WhitelistedNames>"
+                        + "</Cookies>"
+                        + "<Headers><Quantity>2</Quantity><Items>"
+                        + "<Name>Origin</Name><Name>Accept</Name></Items></Headers>"
+                        + "<QueryStringCacheKeys><Quantity>1</Quantity><Items>"
+                        + "<Name>page</Name></Items></QueryStringCacheKeys>"
+                        + "</ForwardedValues>");
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-fvnames");
+            d.setEtag("etag-fvnames");
+            return d;
+        });
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+        when(service.getDistribution("dist-fvnames")).thenReturn(captor.getValue());
+
+        try (Response dist = controller.getDistribution("dist-fvnames")) {
+            String xml = (String) dist.getEntity();
+            int start = xml.indexOf("<ForwardedValues>");
+            assertTrue(start >= 0);
+            String block = xml.substring(start, xml.indexOf("</ForwardedValues>", start));
+
+            String cookies = block.substring(
+                    block.indexOf("<Cookies>"), block.indexOf("</Cookies>"));
+            assertEquals(List.of("session", "tracking"), XmlParser.extractAll(cookies, "Name"),
+                    "whitelisted cookie names round-trip inside Cookies");
+
+            String headers = block.substring(
+                    block.indexOf("<Headers>"), block.indexOf("</Headers>"));
+            assertEquals(List.of("Origin", "Accept"), XmlParser.extractAll(headers, "Name"),
+                    "forwarded headers round-trip");
+            assertTrue(headers.contains("<Quantity>2</Quantity>"), "Headers.Quantity matches");
+
+            String keys = block.substring(
+                    block.indexOf("<QueryStringCacheKeys>"), block.indexOf("</QueryStringCacheKeys>"));
+            assertEquals(List.of("page"), XmlParser.extractAll(keys, "Name"),
+                    "query string cache keys round-trip");
+        }
+    }
+
 
     private static String distributionConfigBody(String defaultCacheBehaviorExtra) {
         return """

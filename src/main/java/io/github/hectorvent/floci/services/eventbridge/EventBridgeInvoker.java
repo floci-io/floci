@@ -122,11 +122,17 @@ public class EventBridgeInvoker {
                     LOG.warnv("EventBridge Firehose target missing Firehose service: {0}", arn);
                     return;
                 }
-                String streamName = arn.substring(
-                        arn.indexOf(":deliverystream/") + ":deliverystream/".length());
+                AwsArnUtils.Arn streamArn = AwsArnUtils.parse(arn);
+                String streamName = streamArn.resource().substring("deliverystream/".length());
                 // AWS puts the (input-transformed) event JSON as the record Data verbatim,
                 // without appending a newline; the delivery-side NDJSON flush handles separation.
-                firehoseService.putRecord(streamName, new Record(payload.getBytes(StandardCharsets.UTF_8)));
+                Record record = new Record(payload.getBytes(StandardCharsets.UTF_8));
+                if (regionResolver == null || regionResolver.getRegion() == null) {
+                    // Preserve the standalone/test mode where no request ownership context exists.
+                    firehoseService.putRecord(streamName, record);
+                } else {
+                    firehoseService.putRecord(streamArn.accountId(), streamArn.region(), streamName, record);
+                }
                 LOG.debugv("EventBridge delivered to Firehose: {0}", arn);
             } else if (arn.contains(":events:") && arn.contains(":event-bus/")) {
                 if (eventBridgeService == null) {

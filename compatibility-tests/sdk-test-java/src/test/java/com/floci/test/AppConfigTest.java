@@ -28,6 +28,7 @@ class AppConfigTest {
     private static String deploymentStrategyId;
     private static String configurationToken;
     private static String secondConfigurationToken;
+    private static String unchangedConfigurationToken;
     private static String intervalSessionToken;
     private static String emptyAppId;
     private static String emptyEnvId;
@@ -153,6 +154,7 @@ class AppConfigTest {
         assertThat(response.contentType()).startsWith("application/json");
         assertThat(response.versionLabel()).isEqualTo("1");
         assertThat(response.nextPollConfigurationToken()).isNotNull();
+        assertThat(response.nextPollConfigurationToken()).isNotEqualTo(configurationToken);
         secondConfigurationToken = response.nextPollConfigurationToken();
     }
 
@@ -176,6 +178,21 @@ class AppConfigTest {
 
     @Test
     @Order(11)
+    void repeatedPollWithSameVersionReturnsEmptyPayload() {
+        GetLatestConfigurationResponse response = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
+                .configurationToken(secondConfigurationToken)
+                .build());
+
+        assertThat(response.configuration().asByteArray()).isEmpty();
+        assertThat(response.contentType()).isEqualTo("application/octet-stream");
+        assertThat(response.versionLabel()).isNull();
+        assertThat(response.nextPollConfigurationToken()).isNotNull();
+        assertThat(response.nextPollConfigurationToken()).isNotEqualTo(secondConfigurationToken);
+        unchangedConfigurationToken = response.nextPollConfigurationToken();
+    }
+
+    @Test
+    @Order(12)
     void updatedDeploymentIsVisibleOnNextPollToken() {
         CreateHostedConfigurationVersionResponse versionResponse = appConfig.createHostedConfigurationVersion(
                 CreateHostedConfigurationVersionRequest.builder()
@@ -195,15 +212,17 @@ class AppConfigTest {
                 .build());
 
         GetLatestConfigurationResponse response = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
-                .configurationToken(secondConfigurationToken)
+                .configurationToken(unchangedConfigurationToken)
                 .build());
 
         assertThat(response.configuration().asString(StandardCharsets.UTF_8)).isEqualTo("{\"key\": \"value-2\"}");
         assertThat(response.versionLabel()).isEqualTo("2");
+        assertThat(response.nextPollConfigurationToken()).isNotNull();
+        assertThat(response.nextPollConfigurationToken()).isNotEqualTo(unchangedConfigurationToken);
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     @DisplayName("Poll interval: requested minimum is returned to the client")
     void requiredMinimumPollIntervalIsReturned() {
         var sessionResponse = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
@@ -230,7 +249,7 @@ class AppConfigTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void emptyConfigurationReturnsEmptyPayload() {
         emptyAppId = appConfig.createApplication(CreateApplicationRequest.builder()
                 .name(TestFixtures.uniqueName("empty-app"))

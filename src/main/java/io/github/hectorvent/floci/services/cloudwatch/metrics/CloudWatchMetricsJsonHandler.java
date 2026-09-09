@@ -5,8 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
+import io.github.hectorvent.floci.services.cloudwatch.metricstreams.CloudWatchMetricStreamsService;
+import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStream;
+import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStreamFilter;
+import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStreamStatisticsConfiguration;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
@@ -30,14 +35,17 @@ public class CloudWatchMetricsJsonHandler {
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsJsonHandler.class);
     private final CloudWatchMetricsService metricsService;
     private final CloudWatchDashboardsService dashboardsService;
+    private final CloudWatchMetricStreamsService metricStreamsService;
     private final ObjectMapper objectMapper;
 
     @Inject
     public CloudWatchMetricsJsonHandler(CloudWatchMetricsService metricsService,
                                         CloudWatchDashboardsService dashboardsService,
+                                        CloudWatchMetricStreamsService metricStreamsService,
                                         ObjectMapper objectMapper) {
         this.metricsService = metricsService;
         this.dashboardsService = dashboardsService;
+        this.metricStreamsService = metricStreamsService;
         this.objectMapper = objectMapper;
     }
 
@@ -59,6 +67,12 @@ public class CloudWatchMetricsJsonHandler {
             case "GetDashboard" -> handleGetDashboard(request, region);
             case "ListDashboards" -> handleListDashboards(request, region);
             case "DeleteDashboards" -> handleDeleteDashboards(request, region);
+            case "PutMetricStream" -> handlePutMetricStream(request, region);
+            case "GetMetricStream" -> handleGetMetricStream(request, region);
+            case "ListMetricStreams" -> handleListMetricStreams(request, region);
+            case "DeleteMetricStream" -> handleDeleteMetricStream(request, region);
+            case "StartMetricStreams" -> handleStartMetricStreams(request, region);
+            case "StopMetricStreams" -> handleStopMetricStreams(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported by CloudWatch JSON."))
                     .build();
@@ -243,9 +257,14 @@ public class CloudWatchMetricsJsonHandler {
         String arn = request.has("ResourceARN") ? request.path("ResourceARN").asText() : request.path("ResourceArn").asText();
         if (arn.isEmpty()) arn = request.path("resourceArn").asText();
 
-        Map<String, String> tags = CloudWatchDashboardsService.isDashboardArn(arn)
-                ? dashboardsService.listTagsForResource(arn, region)
-                : metricsService.listTagsForResource(arn, region);
+        Map<String, String> tags;
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            tags = dashboardsService.listTagsForResource(arn, region);
+        } else if (CloudWatchMetricStreamsService.isMetricStreamArn(arn)) {
+            tags = metricStreamsService.listTagsForResource(arn, region);
+        } else {
+            tags = metricsService.listTagsForResource(arn, region);
+        }
         ArrayNode tagsArray = objectMapper.createArrayNode();
         tags.forEach((k, v) -> tagsArray.addObject().put("Key", k).put("Value", v));
         return Response.ok(objectMapper.createObjectNode().set("Tags", tagsArray)).build();
@@ -262,6 +281,8 @@ public class CloudWatchMetricsJsonHandler {
         }
         if (CloudWatchDashboardsService.isDashboardArn(arn)) {
             dashboardsService.tagResource(arn, tags, region);
+        } else if (CloudWatchMetricStreamsService.isMetricStreamArn(arn)) {
+            metricStreamsService.tagResource(arn, tags, region);
         } else {
             metricsService.tagResource(arn, tags, region);
         }
@@ -279,6 +300,8 @@ public class CloudWatchMetricsJsonHandler {
         }
         if (CloudWatchDashboardsService.isDashboardArn(arn)) {
             dashboardsService.untagResource(arn, keys, region);
+        } else if (CloudWatchMetricStreamsService.isMetricStreamArn(arn)) {
+            metricStreamsService.untagResource(arn, keys, region);
         } else {
             metricsService.untagResource(arn, keys, region);
         }
@@ -399,6 +422,161 @@ public class CloudWatchMetricsJsonHandler {
         }
         dashboardsService.deleteDashboards(names, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    // ──────────────────────────── Metric Streams ────────────────────────────
+
+    private Response handlePutMetricStream(JsonNode request, String region) {
+        MetricStream stream = new MetricStream();
+        stream.setName(request.path("Name").asText(null));
+        stream.setFirehoseArn(request.path("FirehoseArn").asText(null));
+        stream.setRoleArn(request.path("RoleArn").asText(null));
+        stream.setOutputFormat(request.path("OutputFormat").asText(null));
+        stream.setIncludeLinkedAccountsMetrics(request.path("IncludeLinkedAccountsMetrics").asBoolean(false));
+        stream.setIncludeFilters(parseStreamFiltersJson(request.path("IncludeFilters")));
+        stream.setExcludeFilters(parseStreamFiltersJson(request.path("ExcludeFilters")));
+        stream.setStatisticsConfigurations(parseStatisticsConfigurationsJson(request.path("StatisticsConfigurations")));
+        JsonNode tagsNode = request.path("Tags");
+        if (tagsNode.isArray()) {
+            Map<String, String> tags = new LinkedHashMap<>();
+            tagsNode.forEach(t -> tags.put(t.path("Key").asText(), t.path("Value").asText()));
+            stream.setTags(tags);
+        }
+
+        MetricStream stored = metricStreamsService.putMetricStream(stream, region);
+        return Response.ok(objectMapper.createObjectNode().put("Arn", stored.getArn())).build();
+    }
+
+    private Response handleGetMetricStream(JsonNode request, String region) {
+        MetricStream stream = metricStreamsService.getMetricStream(request.path("Name").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Arn", stream.getArn());
+        response.put("Name", stream.getName());
+        response.put("FirehoseArn", stream.getFirehoseArn());
+        response.put("RoleArn", stream.getRoleArn());
+        response.put("State", stream.getState());
+        response.put("OutputFormat", stream.getOutputFormat());
+        response.put("CreationDate", stream.getCreationDate());
+        response.put("LastUpdateDate", stream.getLastUpdateDate());
+        response.put("IncludeLinkedAccountsMetrics", stream.isIncludeLinkedAccountsMetrics());
+        if (!stream.getIncludeFilters().isEmpty()) {
+            response.set("IncludeFilters", streamFiltersNode(stream.getIncludeFilters()));
+        }
+        if (!stream.getExcludeFilters().isEmpty()) {
+            response.set("ExcludeFilters", streamFiltersNode(stream.getExcludeFilters()));
+        }
+        if (!stream.getStatisticsConfigurations().isEmpty()) {
+            response.set("StatisticsConfigurations",
+                    statisticsConfigurationsNode(stream.getStatisticsConfigurations()));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleListMetricStreams(JsonNode request, String region) {
+        Integer maxResults = request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
+        PaginatedResult<MetricStream> page = metricStreamsService.listMetricStreams(
+                maxResults, request.path("NextToken").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode entries = response.putArray("Entries");
+        for (MetricStream stream : page.items()) {
+            ObjectNode entry = entries.addObject();
+            entry.put("Arn", stream.getArn());
+            entry.put("Name", stream.getName());
+            entry.put("FirehoseArn", stream.getFirehoseArn());
+            entry.put("State", stream.getState());
+            entry.put("OutputFormat", stream.getOutputFormat());
+            entry.put("CreationDate", stream.getCreationDate());
+            entry.put("LastUpdateDate", stream.getLastUpdateDate());
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteMetricStream(JsonNode request, String region) {
+        metricStreamsService.deleteMetricStream(request.path("Name").asText(null), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleStartMetricStreams(JsonNode request, String region) {
+        metricStreamsService.startMetricStreams(parseNamesJson(request.path("Names")), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleStopMetricStreams(JsonNode request, String region) {
+        metricStreamsService.stopMetricStreams(parseNamesJson(request.path("Names")), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private List<String> parseNamesJson(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        if (node.isArray()) {
+            node.forEach(n -> names.add(n.asText()));
+        }
+        return names;
+    }
+
+    private ArrayNode streamFiltersNode(List<MetricStreamFilter> filters) {
+        ArrayNode array = objectMapper.createArrayNode();
+        for (MetricStreamFilter filter : filters) {
+            ObjectNode node = array.addObject();
+            node.put("Namespace", filter.getNamespace());
+            if (!filter.getMetricNames().isEmpty()) {
+                ArrayNode metricNames = node.putArray("MetricNames");
+                filter.getMetricNames().forEach(metricNames::add);
+            }
+        }
+        return array;
+    }
+
+    private ArrayNode statisticsConfigurationsNode(List<MetricStreamStatisticsConfiguration> configurations) {
+        ArrayNode array = objectMapper.createArrayNode();
+        for (MetricStreamStatisticsConfiguration configuration : configurations) {
+            ObjectNode node = array.addObject();
+            ArrayNode includeMetrics = node.putArray("IncludeMetrics");
+            for (var metric : configuration.getIncludeMetrics()) {
+                includeMetrics.addObject()
+                        .put("Namespace", metric.namespace())
+                        .put("MetricName", metric.metricName());
+            }
+            ArrayNode additionalStatistics = node.putArray("AdditionalStatistics");
+            configuration.getAdditionalStatistics().forEach(additionalStatistics::add);
+        }
+        return array;
+    }
+
+    private List<MetricStreamFilter> parseStreamFiltersJson(JsonNode node) {
+        List<MetricStreamFilter> filters = new ArrayList<>();
+        if (!node.isArray()) {
+            return filters;
+        }
+        for (JsonNode entry : node) {
+            List<String> metricNames = new ArrayList<>();
+            entry.path("MetricNames").forEach(n -> metricNames.add(n.asText()));
+            filters.add(new MetricStreamFilter(entry.path("Namespace").asText(null), metricNames));
+        }
+        return filters;
+    }
+
+    private List<MetricStreamStatisticsConfiguration> parseStatisticsConfigurationsJson(JsonNode node) {
+        List<MetricStreamStatisticsConfiguration> configurations = new ArrayList<>();
+        if (!node.isArray()) {
+            return configurations;
+        }
+        for (JsonNode entry : node) {
+            MetricStreamStatisticsConfiguration configuration = new MetricStreamStatisticsConfiguration();
+            List<MetricStreamStatisticsConfiguration.IncludeMetric> includeMetrics = new ArrayList<>();
+            entry.path("IncludeMetrics").forEach(m -> includeMetrics.add(
+                    new MetricStreamStatisticsConfiguration.IncludeMetric(
+                            m.path("Namespace").asText(null), m.path("MetricName").asText(null))));
+            configuration.setIncludeMetrics(includeMetrics);
+            List<String> additionalStatistics = new ArrayList<>();
+            entry.path("AdditionalStatistics").forEach(s -> additionalStatistics.add(s.asText()));
+            configuration.setAdditionalStatistics(additionalStatistics);
+            configurations.add(configuration);
+        }
+        return configurations;
     }
 
     private List<MetricDatum> parseMetricDataJson(JsonNode node) {

@@ -906,7 +906,7 @@ public class LambdaService implements ResourceProvider {
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             warmPool.drainEnvironment(version.get());
             functionStore.deleteVersion(region, name, qualifier);
-            reclaimVersionCodeDirectory(fn, qualifier, version.get());
+            reclaimVersionCodeDirectory(region, fn, qualifier, version.get());
             // The snapshot may still share $LATEST's code directory, so this only reclaims once no
             // remaining version references it.
             reclaimLegacyCodeDirectoryIfUnused(name);
@@ -930,7 +930,7 @@ public class LambdaService implements ResourceProvider {
             if (concurrencyLimiter != null) {
                 concurrencyLimiter.reset(arn);
             }
-            codeStore.delete(ownerAccount(fn), functionName);
+            codeStore.delete(ownerAccount(fn), region, functionName);
             functionStore.delete(region, functionName);
             reclaimLegacyCodeDirectoryIfUnused(functionName);
             versionCounters.remove(versionCounterKey(region, fn));
@@ -963,15 +963,15 @@ public class LambdaService implements ResourceProvider {
      * and hot-reload versions never had a copy at all: for those the recorded path is the live
      * function's own directory, and removing it would delete the code {@code $LATEST} still runs.
      */
-    private void reclaimVersionCodeDirectory(LambdaFunction fn, String version, LambdaFunction snapshot) {
+    private void reclaimVersionCodeDirectory(String region, LambdaFunction fn, String version, LambdaFunction snapshot) {
         String recorded = snapshot.getCodeLocalPath();
         if (recorded == null) {
             return;
         }
-        String owned = codeStore.getVersionCodePath(ownerAccount(fn), fn.getFunctionName(), version)
+        String owned = codeStore.getVersionCodePath(ownerAccount(fn), region, fn.getFunctionName(), version)
                 .toAbsolutePath().normalize().toString();
         if (owned.equals(Path.of(recorded).toAbsolutePath().normalize().toString())) {
-            codeStore.deleteVersion(ownerAccount(fn), fn.getFunctionName(), version);
+            codeStore.deleteVersion(ownerAccount(fn), region, fn.getFunctionName(), version);
         }
     }
 
@@ -1911,14 +1911,14 @@ public class LambdaService implements ResourceProvider {
      * configuration, and falling back leaves it exactly as good as every version published before
      * this existed, rather than turning a working call into an error.
      */
-    private String versionCodePath(LambdaFunction fn, String version) {
+    private String versionCodePath(String region, LambdaFunction fn, String version) {
         String current = fn.getCodeLocalPath();
         if (current == null || fn.getHotReloadHostPath() != null) {
             return current;
         }
         try {
             Path copied = codeStore.copyForVersion(
-                    ownerAccount(fn), fn.getFunctionName(), version, Path.of(current));
+                    ownerAccount(fn), region, fn.getFunctionName(), version, Path.of(current));
             return copied == null ? current : copied.toAbsolutePath().normalize().toString();
         } catch (IOException e) {
             LOG.warnv("Could not give version {0} of {1} its own code directory, "
@@ -2051,7 +2051,7 @@ public class LambdaService implements ResourceProvider {
             // Nothing to copy for image-backed or hot-reload functions, which keep the reference
             // they had: an image is already immutable by digest, and a hot-reload function's whole
             // point is that its bind-mounted directory tracks the developer's working tree.
-            snapshot.setCodeLocalPath(versionCodePath(fn, String.valueOf(version)));
+            snapshot.setCodeLocalPath(versionCodePath(region, fn, String.valueOf(version)));
             snapshot.setCodeSha256(fn.getCodeSha256());
             snapshot.setS3Bucket(fn.getS3Bucket());
             snapshot.setS3Key(fn.getS3Key());
@@ -2266,6 +2266,16 @@ public class LambdaService implements ResourceProvider {
     /**
      * LogGroup is the one LoggingConfig member with a documented length and character
      * constraint rather than an enum: 1-512 characters, {@code [.\-_/#A-Za-z0-9]+}.
+     *
+     * <p>A blank LogGroup (empty or whitespace-only) is deliberately read as "not supplied"
+     * rather than as a violation of that 1-character minimum, so {@link #applyLoggingConfig}
+     * falls back to the {@code /aws/lambda/} default exactly as it does for an absent member.
+     * The minimum is real in the service model, but botocore enforces it client side, so an
+     * empty LogGroup never reaches the wire from an SDK caller and nobody has observed what
+     * the service itself answers to one. Rejecting it here would be a 400 we inferred rather
+     * than measured; accepting it costs a caller nothing. That leniency is pinned by
+     * {@code LambdaVpcSnapStartLoggingIntegrationTest}, so a later reader who wants the
+     * minimum enforced has to change the decision, not just the guard.
      */
     private static void validateLogGroup(Object value) {
         if (!(value instanceof String group) || group.isBlank()) {
@@ -2741,7 +2751,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes, String region) {
-        Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
+        Path codePath = codeStore.getCodePath(ownerAccount(fn), region, fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath, configuredZipMaxEntries());
             // Publish the new code identity under the same per-function lock publishVersion holds.

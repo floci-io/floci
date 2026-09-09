@@ -126,6 +126,7 @@ public class ElastiCacheService implements ResourceProvider {
             Integer numCacheClusters,
             Boolean automaticFailoverEnabled,
             Boolean multiAzEnabled,
+            Integer port,
             ReplicationGroupSettings settings,
             Map<String, String> tags) {
     }
@@ -142,7 +143,7 @@ public class ElastiCacheService implements ResourceProvider {
                                                    Map<String, String> tags) {
         return createReplicationGroup(new CreateReplicationGroupRequest(groupId, description,
                 authMode, authToken, region, null, null, null, null, null, null,
-                null, null, null, null, null, settings, tags));
+                null, null, null, null, null, null, settings, tags));
     }
 
     public ReplicationGroup createReplicationGroup(CreateReplicationGroupRequest request) {
@@ -221,7 +222,7 @@ public class ElastiCacheService implements ResourceProvider {
                                                       ReplicationGroupSettings resolvedSettings) {
         String groupId = request.replicationGroupId();
         AuthMode authMode = request.authMode();
-        int proxyPort = allocateProxyPort();
+        int proxyPort = allocateProxyPort(request.port());
         String image = config.services().elasticache().defaultImage();
 
         LOG.infov("Creating replication group {0} with authMode={1} on proxy port {2}",
@@ -304,8 +305,11 @@ public class ElastiCacheService implements ResourceProvider {
                 int[] slots = ValkeyClusterFormation.slotRange(shard, numNodeGroups);
                 for (int member = 0; member <= replicasPerNodeGroup; member++) {
                     String memberId = groupId + "-" + nodeGroupId + "-" + String.format("%03d", member + 1);
+                    // The group's Port is reported from the first node's proxy port, so only that
+                    // node can honor a requested port; the rest take whatever is free.
+                    Integer requestedPort = nodes.isEmpty() ? request.port() : null;
                     nodes.add(new ClusterNode(memberId, nodeGroupId, member == 0,
-                            allocateProxyPort(), slots[0] + "-" + slots[1]));
+                            allocateProxyPort(requestedPort), slots[0] + "-" + slots[1]));
                 }
             }
 
@@ -917,8 +921,45 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     private int allocateProxyPort() {
+        return allocateProxyPort(null);
+    }
+
+    /**
+     * Honors the request's {@code Port} when it is free and inside the proxy range. AWS models
+     * Port as an optional input on CreateReplicationGroup ("the port number on which each member
+     * of the replication group accepts connections"), so a caller that pins one and reads back a
+     * different value sees permanent drift: Terraform treats the port as replacement-forcing.
+     *
+     * <p>An explicit port is therefore either honored or refused, never quietly changed.
+     * Substituting one reproduces the very drift honoring it was meant to remove, and the
+     * substitution could only ever hit a caller who did ask for a port: one who does not care
+     * passes null and never reaches that branch. Floci multiplexes every group's proxy onto one
+     * host, so two groups genuinely cannot share a port, and a caller who pinned an unavailable
+     * one needs to know rather than discover it as drift later.
+     *
+     * <p>Only an unpinned create falls back through the range below.
+     * {@code NeptuneService.allocateProxyPort} still substitutes on this path and carries the
+     * same flaw.
+     */
+    private int allocateProxyPort(Integer requested) {
         int base = config.services().elasticache().proxyBasePort();
         int max = config.services().elasticache().proxyMaxPort();
+        if (requested != null) {
+            if (requested < base || requested > max) {
+                LOG.infov("Rejecting ElastiCache port {0}: outside the proxy range {1}-{2}",
+                        String.valueOf(requested), String.valueOf(base), String.valueOf(max));
+                throw new AwsException("InvalidParameterValue",
+                        "Port " + requested + " is outside the port range this emulator serves ("
+                                + base + "-" + max + ").", 400);
+            }
+            if (!usedPorts.add(requested)) {
+                LOG.infov("Rejecting ElastiCache port {0}: already used by another replication group",
+                        String.valueOf(requested));
+                throw new AwsException("InvalidParameterValue",
+                        "Port " + requested + " is already in use by another replication group.", 400);
+            }
+            return requested;
+        }
         for (int port = base; port <= max; port++) {
             if (usedPorts.add(port)) {
                 return port;

@@ -32,12 +32,40 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SsmCommandServiceDirectExecutionTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RegionResolver regionResolver = mock(RegionResolver.class);
+
+    @Test
+    void agentRegistrationChecksEc2BackingOnFirstRegistrationOnly() throws Exception {
+        SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
+        when(executor.isContainerBacked("mi-agent-only")).thenReturn(false);
+
+        SsmCommandService service = new SsmCommandService(
+                new InMemoryStorageFactory(),
+                objectMapper,
+                regionResolver,
+                executor);
+
+        String registration = """
+                {
+                  "InstanceId": "mi-agent-only",
+                  "AgentName": "amazon-ssm-agent",
+                  "IPAddress": "172.17.0.9"
+                }
+                """;
+        service.updateInstanceInformation(objectMapper.readTree(registration), "us-west-2");
+        service.updateInstanceInformation(objectMapper.readTree(registration), "us-west-2");
+
+        verify(executor, times(1)).isContainerBacked("mi-agent-only");
+        assertEquals(1, service.describeInstanceInformation("us-west-2").size());
+        assertEquals("mi-agent-only", service.describeInstanceInformation("us-west-2").getFirst().getInstanceId());
+    }
 
     @Test
     void directExecutionCompletesCommandWithoutQueuedAgentMessage() throws Exception {

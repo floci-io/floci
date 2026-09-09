@@ -69,7 +69,15 @@ public class SsmDirectCommandExecutor {
         if (!"AWS-RunShellScript".equals(documentName)) {
             return false;
         }
+        return isContainerBacked(instanceId);
+    }
 
+    /**
+     * Whether {@code instanceId} is a Floci EC2 instance whose Docker container is running.
+     * Only such instances get direct command execution and an IMDS registration; any other
+     * managed instance is served through the SSM agent polling flow.
+     */
+    public boolean isContainerBacked(String instanceId) {
         Instance instance = ec2Service.findInstanceById(instanceId);
         if (instance == null || instance.getDockerContainerId() == null || instance.getDockerContainerId().isBlank()) {
             return false;

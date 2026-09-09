@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
+import io.github.hectorvent.floci.services.organizations.model.Organization;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -23,6 +25,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Resource-share semantics behind LZA's TGW share flow: the owning account creates a share
@@ -42,7 +47,13 @@ class RamServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new RamService(new SharedStorageFactory());
+        OrganizationsService organizations = mock(OrganizationsService.class);
+        Organization organization = new Organization();
+        organization.setId("o-abc123");
+        when(organizations.describeOrganization(anyString())).thenReturn(organization);
+        when(organizations.organizationPath(anyString(), anyString()))
+                .thenReturn("o-abc123/r-root/ou-root-infra/222222222222/");
+        service = new RamService(new SharedStorageFactory(), organizations);
         service.initializeStorage();
     }
 
@@ -109,15 +120,27 @@ class RamServiceTest {
     }
 
     @Test
-    void accountPrincipalShareIsVisibleToAnyNonOwningCaller() {
-        // LZA's Custom::GetResourceShare Lambda runs on launched-container placeholder
-        // credentials, so its caller resolves to the emulator default account rather than
-        // the function's account. OTHER-ACCOUNTS must therefore return every non-owned
-        // share and leave the narrowing to the Lambda's own owningAccountId+name filter.
+    void unrelatedCallerCannotSeeAnAccountPrincipalShare() {
         service.createResourceShare(
                 "ipam-pool-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertEquals(1, service.getResourceShares("000000000000", "OTHER-ACCOUNTS").size());
+        assertTrue(service.getResourceShares("000000000000", "OTHER-ACCOUNTS").isEmpty());
+        assertTrue(service.listResources("000000000000", "OTHER-ACCOUNTS", List.of()).isEmpty());
+        assertTrue(service.listPrincipals("000000000000", "OTHER-ACCOUNTS", List.of()).isEmpty());
+    }
+
+    @Test
+    void rejectedInvitationNoLongerGrantsShareVisibility() {
+        service.createResourceShare(
+                "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+                .getFirst().resourceShareInvitationArn();
+
+        service.rejectResourceShareInvitation(invitationArn, ACCEPTER);
+
+        assertTrue(service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").isEmpty());
+        assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
+        assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
     }
 
     @Test
@@ -329,7 +352,7 @@ class RamServiceTest {
 
     @Test
     void accountPrincipalUnderEnabledOrganizationSharingCreatesNoInvitation() {
-        service.enableSharingWithAwsOrganization();
+        service.enableSharingWithAwsOrganization(OWNER);
 
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
@@ -404,6 +427,14 @@ class RamServiceTest {
                 service.getResourceShareInvitations(ACCEPTER, List.of(), List.of());
         assertEquals(2, invitations.size());
         assertTrue(invitations.stream().anyMatch(i -> "PENDING".equals(i.status())));
+
+        // The live invitation must keep the share visible even when the rejected historical
+        // invitation is returned first by storage scans.
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+        assertEquals(1, service.listResources(ACCEPTER, "OTHER-ACCOUNTS",
+                List.of(share.getResourceShareArn())).size());
+        assertEquals(1, service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS",
+                List.of(share.getResourceShareArn())).size());
     }
 
     @Test

@@ -503,7 +503,9 @@ public class AwsQueryController {
             "PutMetricData", "ListMetrics", "GetMetricStatistics", "GetMetricData",
             "PutMetricAlarm", "DescribeAlarms", "DeleteAlarms", "SetAlarmState",
             "ListTagsForResource", "TagResource", "UntagResource",
-            "PutDashboard", "GetDashboard", "ListDashboards", "DeleteDashboards"
+            "PutDashboard", "GetDashboard", "ListDashboards", "DeleteDashboards",
+            "PutMetricStream", "GetMetricStream", "ListMetricStreams", "DeleteMetricStream",
+            "StartMetricStreams", "StopMetricStreams"
     );
 
     private static final Set<String> ELASTIC_BEANSTALK_ACTIONS = Set.of(

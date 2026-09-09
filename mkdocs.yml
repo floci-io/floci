@@ -126,6 +126,7 @@ nav:
     - AWS Budgets: services/budgets.md
     - Amazon Macie: services/macie2.md
     - Amazon Inspector: services/inspector2.md
+    - Security Hub: services/securityhub.md
     - Amazon Detective: services/detective.md
     - Control Catalog: services/controlcatalog.md
     - Control Tower: services/controltower.md

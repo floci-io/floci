@@ -408,6 +408,14 @@ A `Condition` operator can only match a key floci actually places in the request
 floci populates:
 
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
+- `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
+  `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
+  `s3:PutBucketTagging` (the `<Tagging>` body).
+- `aws:ResourceTag/<key>`: the target resource's current tags, for `ec2:CreateTags`,
+  `ec2:DeleteTags`, `ec2:TerminateInstances` and `ec2:DescribeInstances` (the first
+  `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucketTagging`
+  and `s3:DeleteBucket` (the bucket). A request naming several EC2 resources is evaluated
+  once per resource and denied when any of them fails the condition, as on AWS.
 - `aws:PrincipalArn`: the caller's ARN, resolved from the signing access key. It is the
   IAM-user ARN for a user access key, the assumed-role ARN for an STS session, and
   `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),

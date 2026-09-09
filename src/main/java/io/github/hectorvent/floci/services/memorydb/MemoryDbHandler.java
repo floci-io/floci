@@ -43,15 +43,15 @@ public class MemoryDbHandler {
         try {
             return switch (action) {
                 case "CreateCluster" -> handleCreateCluster(request, region);
-                case "DescribeClusters" -> handleDescribeClusters(request);
-                case "UpdateCluster" -> handleUpdateCluster(request);
-                case "DeleteCluster" -> handleDeleteCluster(request);
+                case "DescribeClusters" -> handleDescribeClusters(request, region);
+                case "UpdateCluster" -> handleUpdateCluster(request, region);
+                case "DeleteCluster" -> handleDeleteCluster(request, region);
                 case "CreateUser" -> handleCreateUser(request, region);
                 case "DescribeUsers" -> handleDescribeUsers(request, region);
-                case "DeleteUser" -> handleDeleteUser(request);
+                case "DeleteUser" -> handleDeleteUser(request, region);
                 case "CreateACL" -> handleCreateAcl(request, region);
                 case "DescribeACLs" -> handleDescribeAcls(request, region);
-                case "DeleteACL" -> handleDeleteAcl(request);
+                case "DeleteACL" -> handleDeleteAcl(request, region);
                 case "ListTags" -> handleListTags(request);
                 case "TagResource" -> handleTagResource(request);
                 case "UntagResource" -> handleUntagResource(request);
@@ -91,24 +91,24 @@ public class MemoryDbHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleDescribeClusters(JsonNode request) {
+    private Response handleDescribeClusters(JsonNode request, String region) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Clusters");
-        for (Cluster cluster : service.describeClusters(text(request, "ClusterName"))) {
+        for (Cluster cluster : service.describeClusters(text(request, "ClusterName"), region)) {
             arr.add(clusterNode(cluster));
         }
         return Response.ok(response).build();
     }
 
-    private Response handleUpdateCluster(JsonNode request) {
-        Cluster updated = service.updateCluster(text(request, "ClusterName"), text(request, "Description"));
+    private Response handleUpdateCluster(JsonNode request, String region) {
+        Cluster updated = service.updateCluster(text(request, "ClusterName"), text(request, "Description"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Cluster", clusterNode(updated));
         return Response.ok(response).build();
     }
 
-    private Response handleDeleteCluster(JsonNode request) {
-        Cluster deleted = service.deleteCluster(text(request, "ClusterName"));
+    private Response handleDeleteCluster(JsonNode request, String region) {
+        Cluster deleted = service.deleteCluster(text(request, "ClusterName"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Cluster", clusterNode(deleted));
         return Response.ok(response).build();
@@ -136,8 +136,8 @@ public class MemoryDbHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleDeleteUser(JsonNode request) {
-        User deleted = service.deleteUser(text(request, "UserName"));
+    private Response handleDeleteUser(JsonNode request, String region) {
+        User deleted = service.deleteUser(text(request, "UserName"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("User", userNode(deleted));
         return Response.ok(response).build();
@@ -162,8 +162,8 @@ public class MemoryDbHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleDeleteAcl(JsonNode request) {
-        Acl deleted = service.deleteAcl(text(request, "ACLName"));
+    private Response handleDeleteAcl(JsonNode request, String region) {
+        Acl deleted = service.deleteAcl(text(request, "ACLName"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ACL", aclNode(deleted));
         return Response.ok(response).build();
@@ -227,7 +227,7 @@ public class MemoryDbHandler {
             authentication.put("PasswordCount", user.getPasswords() != null ? user.getPasswords().size() : 0);
         }
         ArrayNode aclNames = node.putArray("ACLNames");
-        service.aclNamesForUser(user.getName()).forEach(aclNames::add);
+        service.aclNamesForUser(user.getName(), user.getRegion()).forEach(aclNames::add);
         if (user.getArn() != null) {
             node.put("ARN", user.getArn());
         }
@@ -244,7 +244,7 @@ public class MemoryDbHandler {
             node.put("MinimumEngineVersion", acl.getMinimumEngineVersion());
         }
         ArrayNode clustersArr = node.putArray("Clusters");
-        service.clustersUsingAcl(acl.getName()).forEach(clustersArr::add);
+        service.clustersUsingAcl(acl.getName(), acl.getRegion()).forEach(clustersArr::add);
         if (acl.getArn() != null) {
             node.put("ARN", acl.getArn());
         }
