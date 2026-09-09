@@ -444,8 +444,9 @@ public class RedshiftQueryHandler {
             String dbUser = requireParam(params, "DbUser");
             // describeClusters throws ClusterNotFound (404) for an unknown id.
             service.describeClusters(clusterId);
+            // AWS prefixes the returned name IAMA: when AutoCreate is true, IAM: when it is false.
             boolean autoCreate = Boolean.parseBoolean(params.getFirst("AutoCreate"));
-            String effectiveDbUser = autoCreate ? "IAM:" + dbUser : dbUser;
+            String effectiveDbUser = (autoCreate ? "IAMA:" : "IAM:") + dbUser;
             int duration = resolveDurationSeconds(params);
             List<String> dbGroups = memberList(params, "DbGroups");
 

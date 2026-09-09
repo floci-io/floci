@@ -409,7 +409,7 @@ class RedshiftQueryHandlerTest {
 
         assertEquals(200, response.getStatus());
         String xml = (String) response.getEntity();
-        assertTrue(xml.contains("<DbUser>analyst</DbUser>"));
+        assertTrue(xml.contains("<DbUser>IAM:analyst</DbUser>"));
         assertTrue(xml.contains("<DbPassword>"));
         assertTrue(xml.contains("<Expiration>"));
         assertTrue(xml.contains("<GetClusterCredentialsResult>"));
@@ -424,7 +424,7 @@ class RedshiftQueryHandlerTest {
 
         handler.handle("GetClusterCredentials", params);
 
-        assertTrue(credentialBroker.resolve("acc", "c1", "analyst").isPresent());
+        assertTrue(credentialBroker.resolve("acc", "c1", "IAM:analyst").isPresent());
     }
 
     @Test
@@ -448,7 +448,7 @@ class RedshiftQueryHandlerTest {
 
         handler.handle("GetClusterCredentials", params);
 
-        java.time.Instant expiresAt = credentialBroker.resolve("acc", "c1", "analyst").orElseThrow().expiresAt();
+        java.time.Instant expiresAt = credentialBroker.resolve("acc", "c1", "IAM:analyst").orElseThrow().expiresAt();
         assertTrue(expiresAt.isAfter(java.time.Instant.now().plusSeconds(800)),
                 "an out-of-range config default must fall back to the AWS minimum, not be used as-is");
     }
@@ -480,12 +480,25 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void getClusterCredentialsAutoCreatePrefixesIamOnDbUser() {
+    void getClusterCredentialsAutoCreateTruePrefixesIamaOnDbUser() {
         when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "c1");
         params.putSingle("DbUser", "analyst");
         params.putSingle("AutoCreate", "true");
+
+        Response response = handler.handle("GetClusterCredentials", params);
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DbUser>IAMA:analyst</DbUser>"));
+    }
+
+    @Test
+    void getClusterCredentialsAutoCreateFalsePrefixesIamOnDbUser() {
+        when(service.describeClusters("c1")).thenReturn(List.of(availableCluster("c1")));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("DbUser", "analyst");
 
         Response response = handler.handle("GetClusterCredentials", params);
 

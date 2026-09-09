@@ -179,7 +179,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 - The rewrite is textual (regex-based). It masks single-quoted string literals first, so `DEFAULT` / `CHECK` string values are safe, but it is **not** comment-aware and does not recognize escape strings (`E'...'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe: the statement then reaches PostgreSQL, which returns its own syntax error, but avoid apostrophes-in-comments in `CREATE TABLE` / `ALTER TABLE`.
 - A `rewrite` failure or any statement the interceptor does not recognize is forwarded unmodified (fail-open); PostgreSQL then rejects the Redshift-only syntax itself.
 - Simple Query ('Q') messages larger than 16 MiB bypass the interceptor and stream through verbatim without heap buffering; non-query traffic also streams through with no size limit.
-- `GetClusterCredentials` / `GetClusterCredentialsWithIAM` mint a short-lived password held in memory (lost on restart). The returned `DbUser` is nominal: the session runs as the cluster master, not a distinct PostgreSQL role, so `current_user`, `GRANT`, and object ownership are the master's.
+- `GetClusterCredentials` / `GetClusterCredentialsWithIAM` mint a short-lived password held in memory (lost on restart). As in AWS, `GetClusterCredentials` prefixes the returned `DbUser` with `IAM:` when `AutoCreate` is false and `IAMA:` when it is true; that prefixed name is what the auth proxy and Data API accept. The returned `DbUser` is nominal: the session runs as the cluster master, not a distinct PostgreSQL role, so `current_user`, `GRANT`, and object ownership are the master's.
 
 ### UNLOAD to S3
 

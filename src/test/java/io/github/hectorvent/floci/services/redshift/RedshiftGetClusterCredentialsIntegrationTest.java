@@ -83,12 +83,13 @@ class RedshiftGetClusterCredentialsIntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body(containsString("<DbUser>analyst</DbUser>"))
+            .body(containsString("<DbUser>IAM:analyst</DbUser>"))
             .body(containsString("<DbPassword>"))
             .body(containsString("<Expiration>"));
 
+        // A client passes back the exact DbUser that GetClusterCredentials returned.
         String id = RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
-                {"Sql": "SELECT 1", "ClusterIdentifier": "%s", "DbUser": "analyst", "Database": "dev"}
+                {"Sql": "SELECT 1", "ClusterIdentifier": "%s", "DbUser": "IAM:analyst", "Database": "dev"}
                 """.formatted(clusterId)).then().statusCode(200).extract().path("Id");
         awaitFinished(id);
 
