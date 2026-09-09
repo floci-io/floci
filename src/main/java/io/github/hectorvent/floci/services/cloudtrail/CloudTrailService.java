@@ -402,12 +402,19 @@ public class CloudTrailService {
     }
 
     public List<ObjectNode> drainPendingRecords(TrailKey key) {
+        return drainPendingRecords(key, Integer.MAX_VALUE);
+    }
+
+    public List<ObjectNode> drainPendingRecords(TrailKey key, int maxRecords) {
+        if (maxRecords <= 0) {
+            return List.of();
+        }
         List<ObjectNode> drained = new ArrayList<>();
         pendingRecordsByTrail.compute(pendingTrailKey(key), (ignored, buffer) -> {
             if (buffer == null) {
                 return null;
             }
-            drained.addAll(buffer.drain(key.eventRegion()));
+            drained.addAll(buffer.drain(key.eventRegion(), maxRecords));
             return buffer.isEmpty() ? null : buffer;
         });
         return drained.isEmpty() ? List.of() : drained;
@@ -421,6 +428,11 @@ public class CloudTrailService {
             }
         }
         return result;
+    }
+
+    public int pendingRecordCount(TrailKey key) {
+        PendingRecordBuffer buffer = pendingRecordsByTrail.get(pendingTrailKey(key));
+        return buffer == null ? 0 : buffer.pendingCount(key.eventRegion());
     }
 
     public Trail getTrail(String region, String trailName) {
@@ -508,13 +520,24 @@ public class CloudTrailService {
         }
 
         synchronized List<ObjectNode> drain(String eventRegion) {
+            return drain(eventRegion, Integer.MAX_VALUE);
+        }
+
+        synchronized List<ObjectNode> drain(String eventRegion, int maxRecords) {
             ArrayDeque<PendingRecord> records = recordsByRegion.remove(eventRegion);
             if (records == null || records.isEmpty()) {
                 return List.of();
             }
-            inFlightByRegion.put(eventRegion, new ArrayList<>(records));
-            List<ObjectNode> drained = new ArrayList<>(records.size());
-            for (PendingRecord pending : records) {
+            List<PendingRecord> selected = new ArrayList<>(Math.min(records.size(), maxRecords));
+            while (selected.size() < maxRecords && !records.isEmpty()) {
+                selected.add(records.removeFirst());
+            }
+            if (!records.isEmpty()) {
+                recordsByRegion.put(eventRegion, records);
+            }
+            inFlightByRegion.put(eventRegion, selected);
+            List<ObjectNode> drained = new ArrayList<>(selected.size());
+            for (PendingRecord pending : selected) {
                 drained.add(pending.record());
             }
             return drained;
@@ -550,6 +573,12 @@ public class CloudTrailService {
 
         synchronized boolean isEmpty() {
             return recordCount == 0 && inFlightByRegion.isEmpty();
+        }
+
+        synchronized int pendingCount(String eventRegion) {
+            ArrayDeque<PendingRecord> records = recordsByRegion.get(eventRegion);
+            List<PendingRecord> inFlight = inFlightByRegion.get(eventRegion);
+            return (records == null ? 0 : records.size()) + (inFlight == null ? 0 : inFlight.size());
         }
 
         synchronized List<String> eventRegions() {

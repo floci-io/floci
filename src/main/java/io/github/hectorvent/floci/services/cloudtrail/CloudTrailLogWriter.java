@@ -47,6 +47,7 @@ import java.util.zip.GZIPOutputStream;
 public class CloudTrailLogWriter {
 
     private static final Logger LOG = Logger.getLogger(CloudTrailLogWriter.class);
+    static final int MAX_RECORDS_PER_LOG_FILE = 1_000;
 
     private static final DateTimeFormatter PATH_DATE = DateTimeFormatter.ofPattern("yyyy/MM/dd");
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmm'Z'");
@@ -113,7 +114,14 @@ public class CloudTrailLogWriter {
             try {
                 for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
                     try {
-                        flushTrail(key);
+                        int remaining = cloudTrailService.pendingRecordCount(key);
+                        while (remaining > 0) {
+                            int flushed = flushTrail(key);
+                            if (flushed == 0) {
+                                break;
+                            }
+                            remaining -= flushed;
+                        }
                     } catch (RuntimeException e) {
                         LOG.warnv(e, "CloudTrail log flush failed for trail {0} in {1}",
                                 key.trailName(), key.region());
@@ -125,17 +133,17 @@ public class CloudTrailLogWriter {
         }
     }
 
-    private void flushTrail(CloudTrailService.TrailKey key) {
+    private int flushTrail(CloudTrailService.TrailKey key) {
         Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
         if (trail == null) {
             // Trail was deleted while records were pending — drop them.
             cloudTrailService.discardPendingRecords(key);
-            return;
+            return 0;
         }
 
-        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key);
+        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE);
         if (records.isEmpty()) {
-            return;
+            return 0;
         }
 
         byte[] payload;
@@ -196,6 +204,7 @@ public class CloudTrailLogWriter {
             LOG.warnv(e, "CloudTrail self-delivery event emission failed for trail {0} "
                     + "(write already succeeded, records not re-queued)", key.trailName());
         }
+        return records.size();
     }
 
     private String deliveryError(RuntimeException e) {

@@ -3103,9 +3103,32 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void updateItemRejectsSetThroughMissingIntermediateMapPath() {
+        createOrdersTable("us-east-1");
+        service.putItem("Orders", item("customerId", "c9", "orderId", "o9"), "us-east-1");
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#missing", "missing");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "x"));
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("customerId", attributeValue("S", "c9"));
+        key.set("orderId", attributeValue("S", "o9"));
+
+        var ex = assertThrows(AwsException.class, () -> service.updateItem("Orders", key, null,
+                "SET #missing.subkey = :val", exprNames, exprValues, "NONE", null, "us-east-1", "NONE"));
+        assertEquals("The document path provided in the update expression is invalid for update", ex.getMessage());
+    }
+
+    @Test
     void updateItemWithNestedDottedPathSetAndRemove() {
         createOrdersTable("us-east-1");
-        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"), "us-east-1");
+        // AWS requires every intermediate of a document path to already exist,
+        // so the details map is seeded before SET #details.subkey runs.
+        ObjectNode initialItem = item("customerId", "c1", "orderId", "o1");
+        initialItem.set("details", mapAttributeValue(mapper.createObjectNode()));
+        service.putItem("Orders", initialItem, "us-east-1");
 
         ObjectNode exprNames = mapper.createObjectNode();
         exprNames.put("#details", "details");

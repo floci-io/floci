@@ -99,7 +99,7 @@ cross-resource references.
 | Kinesis | `Stream` |
 | Kinesis Data Firehose | `DeliveryStream` |
 | IoT Core | `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
-| CloudFront | `Distribution` |
+| CloudFront | `CachePolicy`, `Distribution`, `OriginAccessControl`, `OriginRequestPolicy`, `ResponseHeadersPolicy` |
 | CloudWatch | `Alarm` |
 | CloudWatch Logs | `LogGroup` |
 | WAFv2 | `WebACL` |

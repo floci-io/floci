@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFrontCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
@@ -30,6 +31,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
@@ -232,6 +234,9 @@ final class CfnProvisionerFixture {
             if (cognitoService != null) {
                 discovered.add(new CognitoCfnProvisioner(cognitoService));
             }
+            if (cloudFrontService != null) {
+                discovered.add(new CloudFrontCfnProvisioner(cloudFrontService));
+            }
             if (firehoseService != null) {
                 discovered.add(new FirehoseCfnProvisioner(firehoseService));
             }
@@ -297,6 +302,9 @@ final class CfnProvisionerFixture {
             }
             if (backupService != null) {
                 discovered.add(new BackupVaultCfnProvisioner(backupService));
+            }
+            if (eventBridgeService != null) {
+                discovered.add(new EventsCfnProvisioner(eventBridgeService));
             }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));
@@ -590,7 +598,6 @@ final class CfnProvisionerFixture {
                     ssmService,
                     kmsService,
                     secretsManagerService,
-                    eventBridgeService,
                     apiGatewayService,
                     apiGatewayV2Service,
                     ecrService,
