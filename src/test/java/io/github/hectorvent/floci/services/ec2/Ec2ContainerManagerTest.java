@@ -12,6 +12,7 @@ import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
+import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
@@ -226,6 +227,35 @@ class Ec2ContainerManagerTest {
         assertNull(instance.getImdsSourceIp(), "one address means one registration");
         verify(metadataServer).registerContainer("172.17.0.4", "i-bridge-only", instance);
         verify(metadataServer, never()).unregisterContainer(anyString(), any(Instance.class));
+    }
+
+    @Test
+    void restoreMetadataRegistrationKeepsTheImdsSourceWhenTheContainerCannotBeInspected() {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+
+        DockerClient dockerClient = mock(DockerClient.class);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenThrow(new DockerException("dial unix /var/run/docker.sock: EOF", 500));
+
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        Ec2ContainerManager manager = managerWith(lifecycleManager, dockerClient, metadataServer);
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-inspect-failed");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        instance.setContainerBridgeIp("10.0.1.10");
+        instance.setImdsSourceIp("172.17.0.4");
+
+        assertTrue(manager.restoreMetadataRegistration(instance));
+
+        // A failed inspect leaves the bridge attachment unknown, not known to be absent. Tearing
+        // the registration down here would stop this healthy instance's metadata requests
+        // resolving, with nothing registered in place of what was removed.
+        verify(metadataServer, never()).unregisterContainer("172.17.0.4", instance);
+        assertEquals("172.17.0.4", instance.getImdsSourceIp(),
+                "a transient Docker failure must not drop an existing IMDS source registration");
     }
 
     @Test

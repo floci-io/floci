@@ -906,7 +906,22 @@ public class Ec2ContainerManager {
      *                   the bridge address is the same one, there is no second address to track
      */
     private void refreshImdsSourceRegistration(Instance instance, String containerId, String reportedIp) {
-        String bridgeIp = bridgeNetworkIp(containerId);
+        String bridgeIp;
+        try {
+            bridgeIp = bridgeNetworkIp(containerId);
+        } catch (RuntimeException e) {
+            // An inspect that failed says nothing about where the container is attached, and the
+            // unregister below is only correct for a container that definitely has no separate
+            // bridge address. Reading "I could not find out" as "there is none" would tear down a
+            // healthy instance's IMDS source registration over a transient Docker hiccup and put
+            // nothing in its place, leaving its metadata requests unresolvable until some later
+            // start or restore happened to succeed. Leave the registration exactly as it is; the
+            // next start or restore refreshes it once inspect works again.
+            LOG.warnv("Could not inspect container {0} for its bridge IP, leaving the IMDS source "
+                    + "registration of EC2 instance {1} unchanged: {2}",
+                    containerId, instance.getInstanceId(), e.getMessage());
+            return;
+        }
         // Nothing to track separately when the reported address is the bridge address: that is a
         // plain bridge-only instance, and the caller has already registered it.
         String current = bridgeIp != null && !bridgeIp.isBlank() && !bridgeIp.equals(reportedIp) ? bridgeIp : null;
@@ -927,21 +942,22 @@ public class Ec2ContainerManager {
      * so the source address of its IMDS requests, lives. Distinct from
      * {@link #getContainerBridgeIp}, which despite the name prefers the VPC network's address.
      *
+     * <p>Returning null has to mean one thing only — "this container has no bridge address" —
+     * because callers act on that answer. A failed inspect is a different answer, "I could not
+     * find out", so it propagates instead of being folded into the same null.
+     *
      * @return the address, or null when the container is not on the default bridge at all
+     * @throws RuntimeException if the container could not be inspected, leaving its bridge
+     *                          attachment unknown rather than known to be absent
      */
     private String bridgeNetworkIp(String containerId) {
-        try {
-            var inspect = dockerClient.inspectContainerCmd(containerId).exec();
-            if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
-                return null;
-            }
-            ContainerNetwork bridge = inspect.getNetworkSettings().getNetworks().get("bridge");
-            return bridge == null || bridge.getIpAddress() == null || bridge.getIpAddress().isBlank()
-                    ? null : bridge.getIpAddress();
-        } catch (Exception e) {
-            LOG.warnv("Could not inspect container {0} for its bridge IP: {1}", containerId, e.getMessage());
+        var inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
             return null;
         }
+        ContainerNetwork bridge = inspect.getNetworkSettings().getNetworks().get("bridge");
+        return bridge == null || bridge.getIpAddress() == null || bridge.getIpAddress().isBlank()
+                ? null : bridge.getIpAddress();
     }
 
     /**
