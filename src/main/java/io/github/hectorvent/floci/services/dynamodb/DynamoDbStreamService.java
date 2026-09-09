@@ -42,6 +42,7 @@ public class DynamoDbStreamService {
     private final ConcurrentHashMap<String, StreamDescription> streams = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<DynamoDbStreamRecord>> records =
             new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicLong> streamRecordCounts = new ConcurrentHashMap<>();
     private final AtomicLong sequenceCounter = new AtomicLong(0);
 
     private final ObjectMapper objectMapper;
@@ -111,6 +112,7 @@ public class DynamoDbStreamService {
 
         streams.put(key, sd);
         records.put(streamArn, new ConcurrentLinkedDeque<>());
+        streamRecordCounts.put(streamArn, new AtomicLong());
         LOG.infov("Enabled stream for table {0} in region {1}: {2}", tableName, region, streamArn);
         return sd;
     }
@@ -129,6 +131,7 @@ public class DynamoDbStreamService {
         StreamDescription sd = streams.remove(key);
         if (sd != null) {
             records.remove(sd.getStreamArn());
+            streamRecordCounts.remove(sd.getStreamArn());
             LOG.infov("Deleted stream for table {0} in region {1}", tableName, region);
         }
     }
@@ -167,6 +170,8 @@ public class DynamoDbStreamService {
 
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(sd.getStreamArn());
         if (deque != null) {
+            streamRecordCounts.computeIfAbsent(sd.getStreamArn(), ignored -> new AtomicLong())
+                    .incrementAndGet();
             deque.addLast(record);
             while (deque.size() > MAX_RECORDS) {
                 deque.pollFirst();
@@ -251,7 +256,10 @@ public class DynamoDbStreamService {
         };
 
         boolean inclusive = "TRIM_HORIZON".equals(iteratorType) || "AT_SEQUENCE_NUMBER".equals(iteratorType);
-        return encodeIterator(streamArn, cursorSequence, inclusive);
+        long recordCount = zeroSequence().equals(cursorSequence)
+                ? streamRecordCounts.getOrDefault(streamArn, new AtomicLong()).get()
+                : -1;
+        return encodeIterator(streamArn, cursorSequence, inclusive, recordCount);
     }
 
     private int findSequencePosition(List<DynamoDbStreamRecord> records, String targetSeq, boolean inclusive) {
@@ -272,10 +280,17 @@ public class DynamoDbStreamService {
         String streamArn = parts[0];
         String cursorSequence = parts[1];
         boolean inclusive = Boolean.parseBoolean(parts[2]);
+        long cursorRecordCount = parseRecordCount(parts[3]);
 
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
         List<DynamoDbStreamRecord> snapshot = deque != null ? new ArrayList<>(deque) : List.of();
         int position = findSequencePosition(snapshot, cursorSequence, inclusive);
+        long currentRecordCount = streamRecordCounts.getOrDefault(streamArn, new AtomicLong()).get();
+        if (zeroSequence().equals(cursorSequence) && cursorRecordCount >= 0
+                && currentRecordCount - cursorRecordCount > MAX_RECORDS) {
+            throw new AwsException("TrimmedDataAccessException",
+                    "The requested sequence number has been trimmed", 400);
+        }
         if (!snapshot.isEmpty() && !zeroSequence().equals(cursorSequence)
                 && cursorSequence.compareTo(snapshot.get(0).getSequenceNumber()) < 0) {
             throw new AwsException("TrimmedDataAccessException",
@@ -289,12 +304,13 @@ public class DynamoDbStreamService {
         String nextSequence = page.isEmpty()
                 ? cursorSequence
                 : page.get(page.size() - 1).getSequenceNumber();
-        String nextIterator = encodeIterator(streamArn, nextSequence, page.isEmpty() && inclusive);
+        long nextRecordCount = zeroSequence().equals(nextSequence) ? cursorRecordCount : -1;
+        String nextIterator = encodeIterator(streamArn, nextSequence, page.isEmpty() && inclusive, nextRecordCount);
         return new GetRecordsResult(new ArrayList<>(page), nextIterator);
     }
 
-    private String encodeIterator(String streamArn, String sequenceNumber, boolean inclusive) {
-        String raw = streamArn + "|" + sequenceNumber + "|" + inclusive;
+    private String encodeIterator(String streamArn, String sequenceNumber, boolean inclusive, long recordCount) {
+        String raw = streamArn + "|" + sequenceNumber + "|" + inclusive + "|" + recordCount;
         return Base64.getEncoder().encodeToString(raw.getBytes());
     }
 
@@ -303,15 +319,31 @@ public class DynamoDbStreamService {
             String raw = new String(Base64.getDecoder().decode(iterator));
             int lastPipe = raw.lastIndexOf('|');
             int sequencePipe = raw.lastIndexOf('|', lastPipe - 1);
-            if (sequencePipe < 0 || lastPipe < 0 || lastPipe == raw.length() - 1) {
+            int inclusivePipe = raw.lastIndexOf('|', sequencePipe - 1);
+            if (inclusivePipe < 0 || sequencePipe < 0 || lastPipe < 0 || lastPipe == raw.length() - 1) {
                 throw new AwsException("ValidationException", "Invalid shard iterator", 400);
             }
-            String inclusive = raw.substring(lastPipe + 1);
+            String inclusive = raw.substring(sequencePipe + 1, lastPipe);
+            String recordCount = raw.substring(lastPipe + 1);
             if (!"true".equals(inclusive) && !"false".equals(inclusive)) {
                 throw new AwsException("ValidationException", "Invalid shard iterator", 400);
             }
-            return new String[]{raw.substring(0, sequencePipe), raw.substring(sequencePipe + 1, lastPipe), inclusive};
+            try {
+                Long.parseLong(recordCount);
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationException", "Invalid shard iterator", 400);
+            }
+            return new String[]{raw.substring(0, inclusivePipe), raw.substring(inclusivePipe + 1, sequencePipe),
+                    inclusive, recordCount};
         } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", "Invalid shard iterator", 400);
+        }
+    }
+
+    private long parseRecordCount(String recordCount) {
+        try {
+            return Long.parseLong(recordCount);
+        } catch (NumberFormatException e) {
             throw new AwsException("ValidationException", "Invalid shard iterator", 400);
         }
     }
