@@ -114,8 +114,13 @@ Bats-based suites keep their normal console output and also write JUnit XML repo
 
 - `sdk-test-awscli/test-results/junit.xml`
 - `compat-cdk/test-results/junit.xml`
-- `compat-terraform/test-results/junit.xml`
-- `compat-opentofu/test-results/junit.xml`
+- `compat-terraform/test-results/junit-<bats file>.xml`
+- `compat-opentofu/test-results/junit-<bats file>.xml`
+
+The Terraform and OpenTofu suites run each `test/*.bats` file in its own process
+concurrently, so they write one report per file rather than a single `junit.xml`.
+Every consumer globs the directory, so nothing downstream changes. Set
+`BATS_PARALLEL_FILES=0` to run the files one at a time when isolating a failure.
 
 ## Configuration
 
