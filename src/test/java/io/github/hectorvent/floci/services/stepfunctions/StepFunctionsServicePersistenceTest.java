@@ -4,11 +4,17 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.stepfunctions.model.Activity;
+import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
 
 import java.text.MessageFormat;
@@ -17,19 +23,29 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 
 /** Verifies executions abandoned by a restart reach a terminal status when the emulator comes back. */
 class StepFunctionsServicePersistenceTest {
+
+    @TempDir
+    Path tempDir;
 
     private static final String DEFAULT_ACCOUNT = "000000000000";
     private static final String OTHER_ACCOUNT = "222222222222";
@@ -45,6 +61,89 @@ class StepFunctionsServicePersistenceTest {
     private final AslExecutor aslExecutor = Mockito.mock(AslExecutor.class);
     private final SfnMockLoader mockLoader = Mockito.mock(SfnMockLoader.class);
     private final RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+
+    @Test
+    void completedExecutionRetainsExactHistoryAfterReload() {
+        PersistentTestStorageFactory storage = new PersistentTestStorageFactory(tempDir);
+        StateMachine stateMachine = stateMachine();
+        storage.create("stepfunctions", "sfn-state-machines.json",
+                new TypeReference<Map<String, StateMachine>>() {})
+                .putForAccount(DEFAULT_ACCOUNT, STATE_MACHINE_ARN, stateMachine);
+        Mockito.when(regionResolver.buildArn("states", "us-east-1",
+                        "execution:TestStateMachine:completed"))
+                .thenReturn(EXECUTION_ARN);
+        doAnswer(invocation -> {
+            Execution execution = invocation.getArgument(1);
+            List<HistoryEvent> history = invocation.getArgument(2);
+            HistoryEvent succeeded = new HistoryEvent();
+            succeeded.setId(2L);
+            succeeded.setPreviousEventId(1L);
+            succeeded.setType("ExecutionSucceeded");
+            succeeded.setDetails(Map.of("output", "{\"result\":true}"));
+            history.add(succeeded);
+            execution.setStatus("SUCCEEDED");
+            execution.setOutput("{\"result\":true}");
+            invocation.<java.util.function.BiConsumer<Execution, List<HistoryEvent>>>getArgument(4)
+                    .accept(execution, history);
+            return null;
+        }).when(aslExecutor).executeAsync(any(StateMachine.class), any(Execution.class), anyList(),
+                isNull(), any());
+
+        StepFunctionsService beforeRestart = serviceWithStorage(storage);
+        Execution started = beforeRestart.startExecution(STATE_MACHINE_ARN, "completed", "{}", "us-east-1");
+        List<HistoryEvent> expectedHistory = beforeRestart.getExecutionHistory(started.getExecutionArn());
+        storage.flushAll();
+
+        StepFunctionsService afterRestart = serviceWithStorage(new PersistentTestStorageFactory(tempDir));
+
+        assertEquals("SUCCEEDED", afterRestart.describeExecution(EXECUTION_ARN).getStatus());
+        assertEquals("{\"result\":true}", afterRestart.describeExecution(EXECUTION_ARN).getOutput());
+        assertHistoryEquals(expectedHistory, afterRestart.getExecutionHistory(EXECUTION_ARN));
+    }
+
+    @Test
+    void waitingExecutionIsAbortedWithHistoryAndOldTaskTokenIsRejectedAfterReload() {
+        PersistentTestStorageFactory storage = new PersistentTestStorageFactory(tempDir);
+        Mockito.when(regionResolver.buildArn("states", "us-east-1", "activity:waiting"))
+                .thenReturn("arn:aws:states:us-east-1:000000000000:activity:waiting");
+        AtomicReference<StepFunctionsService> serviceReference = new AtomicReference<>();
+        Instance<StepFunctionsService> serviceInstance = Mockito.mock(Instance.class);
+        Mockito.when(serviceInstance.get()).thenAnswer(ignored -> serviceReference.get());
+        AslExecutor realExecutor = realExecutor(serviceInstance);
+        StepFunctionsService beforeRestart = serviceWithStorage(storage, realExecutor);
+        serviceReference.set(beforeRestart);
+        Activity activity = beforeRestart.createActivity("waiting", "us-east-1", Map.of());
+        StateMachine stateMachine = stateMachine(activity.getActivityArn());
+        storage.create("stepfunctions", "sfn-state-machines.json",
+                new TypeReference<Map<String, StateMachine>>() {})
+                .putForAccount(DEFAULT_ACCOUNT, STATE_MACHINE_ARN, stateMachine);
+        Execution started = beforeRestart.startExecution(STATE_MACHINE_ARN, "waiting", "{}", "us-east-1");
+        ActivityTask task = beforeRestart.getActivityTask(activity.getActivityArn(), "worker");
+        String taskToken = task.getTaskToken();
+        List<HistoryEvent> expectedHistory = new ArrayList<>(beforeRestart.getExecutionHistory(started.getExecutionArn()));
+        storage.flushAll();
+        realExecutor.stop();
+        beforeRestart.clear();
+
+        StepFunctionsService afterRestart = serviceWithStorage(new PersistentTestStorageFactory(tempDir));
+        afterRestart.abortAbandonedExecutions();
+
+        Execution reloaded = afterRestart.describeExecution(started.getExecutionArn());
+        assertEquals("ABORTED", reloaded.getStatus());
+        assertNull(reloaded.getOutput());
+        assertNull(reloaded.getError());
+        assertNull(reloaded.getCause());
+        HistoryEvent aborted = new HistoryEvent();
+        aborted.setId(expectedHistory.size() + 1L);
+        aborted.setPreviousEventId((long) expectedHistory.size());
+        aborted.setType("ExecutionAborted");
+        aborted.setDetails(Map.of());
+        expectedHistory.add(aborted);
+        List<HistoryEvent> actualHistory = afterRestart.getExecutionHistory(started.getExecutionArn());
+        aborted.setTimestamp(actualHistory.getLast().getTimestamp());
+        assertHistoryEquals(expectedHistory, actualHistory);
+        assertFalse(afterRestart.sendTaskSuccess(taskToken, "{\"done\":true}"));
+    }
 
     @Test
     void abandonedRunningExecutionIsAbortedOnRestart() {
@@ -219,12 +318,51 @@ class StepFunctionsServicePersistenceTest {
         return execution;
     }
 
+    private static StateMachine stateMachine() {
+        StateMachine stateMachine = new StateMachine();
+        stateMachine.setStateMachineArn(STATE_MACHINE_ARN);
+        stateMachine.setName("TestStateMachine");
+        stateMachine.setRoleArn("arn:aws:iam::000000000000:role/test-role");
+        stateMachine.setType("STANDARD");
+        stateMachine.setDefinition("{\"StartAt\":\"Done\",\"States\":{\"Done\":{\"Type\":\"Pass\",\"End\":true}}}");
+        return stateMachine;
+    }
+
+    private static StateMachine stateMachine(String activityArn) {
+        StateMachine stateMachine = stateMachine();
+        stateMachine.setDefinition("{\"StartAt\":\"Wait\",\"States\":{\"Wait\":{\"Type\":\"Task\",\"Resource\":\""
+                + activityArn + ".waitForTaskToken\",\"End\":true}}}");
+        return stateMachine;
+    }
+
+    private static AslExecutor realExecutor(Instance<StepFunctionsService> serviceInstance) {
+        return new AslExecutor(null, null, null, null, null, null, null, null, null, null,
+                null, null, null, new ObjectMapper(), null, serviceInstance, null, null, null);
+    }
+
+    private static void assertHistoryEquals(List<HistoryEvent> expected, List<HistoryEvent> actual) {
+        assertEquals(expected.size(), actual.size());
+        for (int index = 0; index < expected.size(); index++) {
+            HistoryEvent expectedEvent = expected.get(index);
+            HistoryEvent actualEvent = actual.get(index);
+            assertEquals(expectedEvent.getId(), actualEvent.getId());
+            assertEquals(expectedEvent.getTimestamp(), actualEvent.getTimestamp());
+            assertEquals(expectedEvent.getType(), actualEvent.getType());
+            assertEquals(expectedEvent.getPreviousEventId(), actualEvent.getPreviousEventId());
+            assertEquals(expectedEvent.getDetails(), actualEvent.getDetails());
+        }
+    }
+
     private StepFunctionsService serviceWithStorage(StorageFactory storage) {
-        return new StepFunctionsService(storage, regionResolver, aslExecutor,
+        return serviceWithStorage(storage, aslExecutor);
+    }
+
+    private StepFunctionsService serviceWithStorage(StorageFactory storage, AslExecutor executor) {
+        return new StepFunctionsService(storage, regionResolver, executor,
                 new ObjectMapper(), mockLoader);
     }
 
-    private static AccountAwareStorageBackend<Execution> executionStore(SharedStorageFactory storage) {
+    private static AccountAwareStorageBackend<Execution> executionStore(StorageFactory storage) {
         return storage.create("stepfunctions", "sfn-executions.json",
                 new TypeReference<Map<String, Execution>>() {});
     }
@@ -243,6 +381,34 @@ class StepFunctionsServicePersistenceTest {
                                                        TypeReference<Map<String, V>> typeReference) {
             return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(
                     fileName, ignored -> AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT));
+        }
+    }
+
+    private static final class PersistentTestStorageFactory extends StorageFactory {
+        private final Path directory;
+        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
+
+        private PersistentTestStorageFactory(Path directory) {
+            super(null, null);
+            this.directory = directory;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <V> AccountAwareStorageBackend<V> create(String serviceName,
+                                                       String fileName,
+                                                       TypeReference<Map<String, V>> typeReference) {
+            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName, ignored -> {
+                PersistentStorage<String, V> storage = new PersistentStorage<>(
+                        directory.resolve(fileName), typeReference);
+                storage.load();
+                return new AccountAwareStorageBackend<>(storage, null, DEFAULT_ACCOUNT);
+            });
+        }
+
+        @Override
+        public void flushAll() {
+            stores.values().forEach(StorageBackend::flush);
         }
     }
 }

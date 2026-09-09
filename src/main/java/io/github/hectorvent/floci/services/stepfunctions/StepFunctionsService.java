@@ -577,9 +577,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             exec.setName(execName);
             exec.setInput(input);
             exec.setStatus("RUNNING");
-            executionStore.put(arn, exec);
-
-            history = new ExecutionHistory();
+            history = new ExecutionHistory(() -> executionStore.put(arn, exec));
             var startEvent = new HistoryEvent();
             startEvent.setId(1L);
             startEvent.setPreviousEventId(0L);
@@ -587,7 +585,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             startEvent.setDetails(Map.of("input", input != null ? input : "{}",
                                          "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : "",
                                          "inputDetails", Map.of("truncated", false)));
+            exec.setHistory(history);
             history.add(startEvent);
+            executionStore.put(arn, exec);
             historyCache.put(arn, history);
         }
 
@@ -794,18 +794,23 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         if (cause != null) {
             details.put("cause", cause);
         }
-        // An execution can outlive its history: the executions are stored, the histories are held in
-        // memory only, so a restart in persistent mode brings a RUNNING execution back with nothing
-        // behind it. The abort still gets recorded, against a history that starts here.
-        historyCache.computeIfAbsent(arn, key -> new ExecutionHistory())
-                .sealWith("ExecutionAborted", details);
+        // A restart can leave a RUNNING execution without its worker and token future. Preserve all
+        // persisted events, then append the terminal event that explains the deterministic recovery.
+        ExecutionHistory history = historyCache.computeIfAbsent(arn,
+                key -> new ExecutionHistory(exec.getHistory(), () -> { }, false));
+        exec.setHistory(history);
+        history.sealWith("ExecutionAborted", details);
         return true;
     }
 
     public List<HistoryEvent> getExecutionHistory(String arn) {
-        describeExecution(arn);
-        ExecutionHistory history = historyCache.get(arn);
-        return history != null ? history : Collections.emptyList();
+        Execution exec = describeExecution(arn);
+        return historyCache.computeIfAbsent(arn,
+                key -> new ExecutionHistory(exec.getHistory(), () -> { }, isTerminal(exec.getStatus())));
+    }
+
+    private static boolean isTerminal(String status) {
+        return !"RUNNING".equals(status);
     }
 
     /**
@@ -821,14 +826,33 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
         private static final long serialVersionUID = 1L;
 
+        private final Runnable onAppend;
         private boolean sealed;
+
+        ExecutionHistory() {
+            this(() -> { });
+        }
+
+        ExecutionHistory(Runnable onAppend) {
+            this.onAppend = onAppend;
+        }
+
+        ExecutionHistory(List<HistoryEvent> events, Runnable onAppend, boolean sealed) {
+            super(events != null ? events : List.of());
+            this.onAppend = onAppend;
+            this.sealed = sealed;
+        }
 
         @Override
         public synchronized boolean add(HistoryEvent event) {
             if (sealed) {
                 return false;
             }
-            return super.add(event);
+            boolean added = super.add(event);
+            if (added) {
+                onAppend.run();
+            }
+            return added;
         }
 
         /** Appends the terminal event, numbered from the end of the history, and takes no more. */
