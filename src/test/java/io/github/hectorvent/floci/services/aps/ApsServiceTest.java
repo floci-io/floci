@@ -187,7 +187,7 @@ class ApsServiceTest {
         // A tag call served by another region must not see (or mutate) this workspace.
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.tagResource(EU_WEST_1, workspace.getArn(), Map.of("team", "devops")));
-        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
         assertTrue(service.listTags(US_EAST_1, workspace.getArn()).isEmpty());
     }
 
@@ -339,6 +339,42 @@ class ApsServiceTest {
         service.deleteWorkspace(US_EAST_1, workspaceId);
 
         assertTrue(backendsByFile.get("aps-rule-groups-namespaces.json").scan(k -> true).isEmpty());
+    }
+
+    @Test
+    void createRuleGroupsNamespaceRejectsNamesThatBreakPathAddressing() {
+        String workspaceId = service.createWorkspace(US_EAST_1, "rules", null, null).getWorkspaceId();
+
+        for (String invalid : List.of("nested/name", "", "!!!", "x".repeat(129))) {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    service.createRuleGroupsNamespace(US_EAST_1, workspaceId, invalid, RULES, null));
+            assertEquals("ValidationException", ex.getErrorCode(), "name: " + invalid);
+            assertEquals(400, ex.getHttpStatus());
+        }
+    }
+
+    @Test
+    void tagHandlerRejectsArnsFromAnotherAccountOrRegion() {
+        String workspaceId = service.createWorkspace(US_EAST_1, "rules", null, null).getWorkspaceId();
+        service.createRuleGroupsNamespace(US_EAST_1, workspaceId, "alerts", RULES, null);
+
+        String foreignAccount = "arn:aws:aps:us-east-1:999999999999:rulegroupsnamespace/"
+                + workspaceId + "/alerts";
+        AwsException byAccount = assertThrows(AwsException.class,
+                () -> service.listTags(US_EAST_1, foreignAccount));
+        assertEquals("ValidationException", byAccount.getErrorCode());
+
+        String foreignRegion = "arn:aws:aps:eu-west-1:000000000000:rulegroupsnamespace/"
+                + workspaceId + "/alerts";
+        AwsException byRegion = assertThrows(AwsException.class,
+                () -> service.listTags(US_EAST_1, foreignRegion));
+        assertEquals("ValidationException", byRegion.getErrorCode());
+
+        String foreignService = "arn:aws:ecs:us-east-1:000000000000:rulegroupsnamespace/"
+                + workspaceId + "/alerts";
+        AwsException byService = assertThrows(AwsException.class,
+                () -> service.listTags(US_EAST_1, foreignService));
+        assertEquals("ValidationException", byService.getErrorCode());
     }
 
     @Test

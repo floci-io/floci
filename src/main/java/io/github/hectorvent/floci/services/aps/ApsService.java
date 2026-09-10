@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class ApsService implements TagHandler {
@@ -27,6 +28,8 @@ public class ApsService implements TagHandler {
     // AMP's ListWorkspacesRequest declares maxResults with a default of 100 and a maximum of 1000.
     private static final int DEFAULT_PAGE = 100;
     private static final int MAX_PAGE = 1000;
+    private static final int MAX_NAMESPACE_NAME_LENGTH = 128;
+    private static final Pattern NAMESPACE_NAME = Pattern.compile(".*[0-9A-Za-z][-.0-9A-Z_a-z]*.*");
 
     private final StorageBackend<String, PrometheusWorkspace> storage;
     private final StorageBackend<String, RuleGroupsNamespace> namespaceStorage;
@@ -217,12 +220,18 @@ public class ApsService implements TagHandler {
     }
 
     private Taggable taggableByArn(String region, String arn) {
-        String resource;
+        AwsArnUtils.Arn parsed;
         try {
-            resource = AwsArnUtils.parse(arn).resource();
+            parsed = AwsArnUtils.parse(arn);
         } catch (IllegalArgumentException e) {
             throw new AwsException("ValidationException", "Invalid resource ARN: " + arn, 400);
         }
+        if (!"aps".equals(parsed.service()) || !region.equals(parsed.region())
+                || !regionResolver.getAccountId().equals(parsed.accountId())) {
+            throw new AwsException("ValidationException",
+                    "The resource ARN does not belong to this AMP account and region: " + arn, 400);
+        }
+        String resource = parsed.resource();
         String workspacePrefix = "workspace/";
         if (resource.startsWith(workspacePrefix) && resource.length() > workspacePrefix.length()) {
             PrometheusWorkspace workspace =
@@ -262,8 +271,12 @@ public class ApsService implements TagHandler {
     }
 
     private static void requireNamespaceName(String name) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("ValidationException", "name must not be empty.", 400);
+        if (name == null || name.isEmpty() || name.length() > MAX_NAMESPACE_NAME_LENGTH
+                || !NAMESPACE_NAME.matcher(name).matches() || name.indexOf('/') >= 0) {
+            throw new AwsException("ValidationException",
+                    "name must be 1 to " + MAX_NAMESPACE_NAME_LENGTH
+                            + " characters matching " + NAMESPACE_NAME.pattern()
+                            + " and must not contain '/'.", 400);
         }
     }
 

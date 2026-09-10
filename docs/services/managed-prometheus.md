@@ -35,6 +35,14 @@ definitions, scrapers and logging configurations are not implemented.
   `ResourceNotFoundException` (404) otherwise.
 - The `name` parameter of `ListRuleGroupsNamespaces` is a **prefix** filter, like `alias` on
   `ListWorkspaces`.
+- Namespace names are validated against AMP's documented constraints (1 to 128 characters
+  matching `.*[0-9A-Za-z][-.0-9A-Z_a-z]*.*`). Floci additionally rejects `/`, because the
+  namespace is addressed as a single path segment.
+- `clientToken` on `CreateRuleGroupsNamespace` is accepted and ignored, the same as on
+  `CreateWorkspace`: creates are not deduplicated.
+- The shared tags dispatcher rejects an ARN whose service, region or account does not match the
+  request with `ValidationException` (400), rather than resolving it against the request's own
+  region.
 
 ## Supported Operations
 
