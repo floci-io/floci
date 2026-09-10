@@ -56,6 +56,7 @@ class MskServiceTest {
     private StorageFactory storageFactory;
     private EmulatorConfig config;
     private RedpandaManager redpandaManager;
+    private RegionResolver regionResolver;
     // MskService's constructor creates the cluster backend first and the configuration backend
     // second; captured here so tests can seed raw entries directly into the configuration store
     // (e.g. to simulate a pre-revision-history persisted entry) without exposing it from MskService.
@@ -87,7 +88,10 @@ class MskServiceTest {
         when(config.defaultRegion()).thenReturn("us-east-1");
 
         redpandaManager = Mockito.mock(RedpandaManager.class);
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        regionResolver = Mockito.mock(RegionResolver.class);
+        when(regionResolver.getRegion()).thenReturn("us-east-1");
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
         mskService = new MskService(storageFactory, config, regionResolver, redpandaManager);
     }
 
@@ -127,6 +131,42 @@ class MskServiceTest {
         mskService.createCluster("cluster-2");
         List<MskCluster> clusters = mskService.listClusters();
         assertEquals(2, clusters.size());
+    }
+
+    @Test
+    void sameClusterNameIsAllowedInDifferentRegionsAndListsOnlyCurrentRegion() {
+        MskCluster east = mskService.createCluster("shared-name");
+
+        when(regionResolver.getRegion()).thenReturn("eu-west-1");
+        MskCluster west = mskService.createCluster("shared-name");
+
+        assertNotEquals(east.getClusterArn(), west.getClusterArn());
+        assertTrue(east.getClusterArn().contains(":us-east-1:"));
+        assertTrue(west.getClusterArn().contains(":eu-west-1:"));
+        assertEquals(List.of(west), mskService.listClusters());
+
+        when(regionResolver.getRegion()).thenReturn("us-east-1");
+        assertEquals(List.of(east), mskService.listClusters());
+    }
+
+    @Test
+    void sameClusterNameIsRejectedWithinOneRegion() {
+        mskService.createCluster("shared-name");
+
+        AwsException error = assertThrows(AwsException.class, () -> mskService.createCluster("shared-name"));
+
+        assertEquals("ConflictException", error.getErrorCode());
+    }
+
+    @Test
+    void clusterCannotBeDescribedOrDeletedFromAnotherRegion() {
+        MskCluster east = mskService.createCluster("regional-cluster");
+
+        when(regionResolver.getRegion()).thenReturn("eu-west-1");
+
+        assertThrows(AwsException.class, () -> mskService.describeCluster(east.getClusterArn()));
+        assertThrows(AwsException.class, () -> mskService.deleteCluster(east.getClusterArn()));
+        assertEquals(0, mskService.listClusters().size());
     }
 
     @Test

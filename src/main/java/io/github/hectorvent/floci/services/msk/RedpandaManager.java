@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.msk;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -149,8 +150,9 @@ public class RedpandaManager {
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "msk", cluster.getClusterName(), regionResolver.getAccountId(),
-                        regionResolver.getDefaultRegion()));
+                        "msk", cluster.getClusterName(),
+                        AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getAccountId()),
+                        AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion())));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);
@@ -200,12 +202,12 @@ public class RedpandaManager {
                 : info.containerId();
         String logGroup = "/aws/msk/cluster/" + cluster.getClusterName();
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = regionResolver.getDefaultRegion();
+        String region = AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion());
 
         Closeable logHandle = logStreamer.attach(
                 info.containerId(), logGroup, logStream, region, "msk:" + cluster.getClusterName());
         if (logHandle != null) {
-            logStreams.put(cluster.getClusterName(), logHandle);
+            logStreams.put(clusterIdentityKey(cluster), logHandle);
         }
     }
 
@@ -249,7 +251,7 @@ public class RedpandaManager {
         }
 
         // Close log stream
-        Closeable logHandle = logStreams.remove(cluster.getClusterName());
+        Closeable logHandle = logStreams.remove(clusterIdentityKey(cluster));
 
         lifecycleManager.stopAndRemove(cluster.getContainerId(), logHandle);
         LOG.infov("Redpanda container {0} stopped and removed", cluster.getContainerId());
@@ -279,5 +281,9 @@ public class RedpandaManager {
     public void removeClusterStorage(MskCluster cluster) {
         ContainerStorageHelper.removeStorage(config, lifecycleManager,
                 "msk", cluster.getVolumeId(), cluster.getClusterName());
+    }
+
+    private String clusterIdentityKey(MskCluster cluster) {
+        return cluster.getClusterArn() != null ? cluster.getClusterArn() : cluster.getClusterName();
     }
 }
