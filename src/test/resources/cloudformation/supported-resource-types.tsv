@@ -16,6 +16,12 @@ AWS::ApiGatewayV2::Deployment	LEGACY_SWITCH
 AWS::ApiGatewayV2::Integration	LEGACY_SWITCH
 AWS::ApiGatewayV2::Route	LEGACY_SWITCH
 AWS::ApiGatewayV2::Stage	LEGACY_SWITCH
+AWS::AppSync::ApiKey	AppSyncCfnProvisioner
+AWS::AppSync::DataSource	AppSyncCfnProvisioner
+AWS::AppSync::FunctionConfiguration	AppSyncCfnProvisioner
+AWS::AppSync::GraphQLApi	AppSyncCfnProvisioner
+AWS::AppSync::GraphQLSchema	AppSyncCfnProvisioner
+AWS::AppSync::Resolver	AppSyncCfnProvisioner
 AWS::AutoScaling::AutoScalingGroup	LEGACY_SWITCH
 AWS::AutoScaling::LaunchConfiguration	LEGACY_SWITCH
 AWS::AutoScaling::LifecycleHook	AutoScalingLifecycleHookCfnProvisioner
@@ -101,6 +107,7 @@ AWS::Lambda::LayerVersion	LEGACY_SWITCH
 AWS::Lambda::MicrovmImage	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::NetworkConnector	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::Permission	LambdaAddressingCfnProvisioner
+AWS::Lambda::Url	LambdaAddressingCfnProvisioner
 AWS::Lambda::Version	LambdaVersionAliasCfnProvisioner
 AWS::Logs::LogGroup	LogsCfnProvisioner
 AWS::Organizations::Account	OrganizationsCfnProvisioner
