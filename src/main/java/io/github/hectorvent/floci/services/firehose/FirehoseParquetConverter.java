@@ -203,8 +203,10 @@ public class FirehoseParquetConverter {
                 }
             }
 
-            // Still before the Parquet: a failure here leaves the converted rows in the
-            // staging bucket, so nothing is delivered and the flush fails as a whole.
+            // Still before the Parquet: a failure here delivers nothing at all and the
+            // flush fails as a whole. Nothing is kept for a retry, the staged object goes
+            // on the way out either way, so recovery belongs to the source: a Kinesis
+            // stream re-reads its uncommitted checkpoint, a DirectPut buffer cannot.
             String errorKey = failures.isEmpty()
                     ? null
                     : writeErrorOutput(stream, s3, bucket, failures, deliveryTime, schemaConfig);
