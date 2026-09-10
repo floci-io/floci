@@ -4662,7 +4662,11 @@ public class S3Service implements Resettable, ResourceProvider {
         // same profile as the source body copy itself.
         boolean copyAnnotations = !"EXCLUDE".equalsIgnoreCase(effectiveOptions.getAnnotationDirective());
         boolean selfCopy = sourceBucket.equals(destBucket);
-        Bucket sourceMonitor = requireBucket(sourceBucket);
+        // resolveBucket (not requireBucket): with globalBucketNamespace the bucket can belong to
+        // another account, and this must be the same instance the write path (storeObject) locks.
+        Bucket sourceMonitor = resolveBucket(sourceBucket)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
         List<AnnotationSnapshot> sourceAnnotations = List.of();
         if (copyAnnotations && !selfCopy) {
             // Cross-bucket copy: the destination overwrite cannot touch the source's annotation
@@ -4702,9 +4706,13 @@ public class S3Service implements Resettable, ResourceProvider {
         // never attach to a newer, unrelated object that lands in between (the annotations'
         // plain-key identity is shared by every non-versioned object at this key). The source
         // monitor above was already released, so the two locks are never held together and a
-        // concurrent reverse copy cannot deadlock.
+        // concurrent reverse copy cannot deadlock. resolveBucket (not requireBucket) keeps
+        // cross-account destinations working with globalBucketNamespace, and returns the same
+        // instance storeObject locks, so this monitor re-enters the write path's own.
         S3Object[] result = {null};
-        synchronized (requireBucket(destBucket)) {
+        synchronized (resolveBucket(destBucket)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404))) {
             result[0] = storeObjectCopy(destBucket, destKey, source, metadata, effectiveChecksum,
                     effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
                     effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,

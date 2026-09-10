@@ -2,6 +2,9 @@ package com.floci.test;
 
 import org.junit.jupiter.api.*;
 
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -24,6 +27,7 @@ import static org.assertj.core.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class S3AnnotationsTest {
 
+    private static final Logger LOG = Logger.getLogger(S3AnnotationsTest.class.getName());
     private static S3Client s3;
     private static final String BUCKET = "sdk-annotations-bucket";
     private static final String KEY = "docs/annotated.txt";
@@ -37,15 +41,19 @@ class S3AnnotationsTest {
 
     @AfterAll
     static void teardown() {
+        // Cleanup failures are logged with context instead of swallowed: a leaked object or a
+        // bucket that failed to delete would otherwise hide from later test runs.
         for (String key : new String[]{"docs/annotated.txt", "docs/annotated-copy.txt", "docs/annotated-copied.txt"}) {
             try {
                 s3.deleteObject(r -> r.bucket(BUCKET).key(key));
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to clean up object " + BUCKET + "/" + key, e);
             }
         }
         try {
             s3.deleteBucket(r -> r.bucket(BUCKET));
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to clean up bucket " + BUCKET, e);
         }
     }
 
