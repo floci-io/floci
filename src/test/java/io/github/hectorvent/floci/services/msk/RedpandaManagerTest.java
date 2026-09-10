@@ -254,6 +254,24 @@ class RedpandaManagerTest {
     }
 
     @Test
+    void startContainerReusesLegacyHostPathWhenScopedPathIsMissing() throws Exception {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(54321);
+        Files.createDirectories(tempDir.resolve("msk").resolve("test-cluster"));
+
+        ContainerInfo info = new ContainerInfo("container-legacy",
+                Map.of(KAFKA_PORT, new EndpointInfo("localhost", 54321)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        manager.startContainer(newCluster());
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        assertEquals(tempDir.resolve("msk").resolve("test-cluster").toAbsolutePath(),
+                Path.of(specCaptor.getValue().binds().get(0).getPath()).toAbsolutePath());
+    }
+
+    @Test
     void stopContainerReleasesAllocatedKafkaHostPort() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
 

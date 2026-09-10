@@ -97,6 +97,10 @@ public class MskCluster {
     @JsonProperty("accountId")
     private String accountId;
 
+    // Region is persisted separately so records created before regional ARNs remain identifiable.
+    @JsonProperty("resourceRegion")
+    private String resourceRegion;
+
     // 6-char hex generated once at creation for stable, collision-free volume/container naming
     @JsonProperty("volumeId")
     private String volumeId;
@@ -179,6 +183,9 @@ public class MskCluster {
 
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public String getResourceRegion() { return resourceRegion; }
+    public void setResourceRegion(String resourceRegion) { this.resourceRegion = resourceRegion; }
 
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }

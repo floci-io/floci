@@ -20,6 +20,7 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -167,8 +168,7 @@ public class RedpandaManager {
                     "/var/lib/redpanda/data");
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
-            String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "msk", clusterStorageId(cluster))
-                    .toAbsolutePath().toString();
+            String hostDataPath = legacyCompatibleHostPath(cluster).toAbsolutePath().toString();
             if (!containerDetector.isRunningInContainer()) {
                 ContainerStorageHelper.ensureHostDir(hostDataPath);
             }
@@ -293,5 +293,13 @@ public class RedpandaManager {
         String region = AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion());
         return ContainerStorageHelper.dockerName(config,
                 "msk-" + account + "-" + region + "-" + cluster.getClusterName());
+    }
+
+    private Path legacyCompatibleHostPath(MskCluster cluster) {
+        Path scopedPath = ContainerStorageHelper.hostResourcePath(config, "msk", clusterStorageId(cluster));
+        Path legacyPath = ContainerStorageHelper.hostResourcePath(config, "msk", cluster.getClusterName());
+        return Files.exists(scopedPath) || !Files.exists(legacyPath)
+                ? scopedPath
+                : legacyPath;
     }
 }

@@ -132,6 +132,7 @@ public class MskService implements ResourceProvider {
         MskCluster cluster = new MskCluster(clusterArn, clusterName, resolvedKafkaVersion);
         cluster.setClusterType(PROVISIONED_CLUSTER_TYPE);
         cluster.setAccountId(accountId);
+        cluster.setResourceRegion(regionResolver.getRegion());
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
 
         if (request.getNumberOfBrokerNodes() != null) {
@@ -342,6 +343,7 @@ public class MskService implements ResourceProvider {
         cluster.setServerless(request.getServerless());
         cluster.setTags(request.getTags());
         cluster.setAccountId(accountId);
+        cluster.setResourceRegion(regionResolver.getRegion());
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
 
         // Provisioned-only members must not surface on a serverless cluster.
@@ -667,7 +669,12 @@ public class MskService implements ResourceProvider {
     }
 
     private boolean isCurrentRegion(MskCluster cluster) {
-        return regionResolver.getRegion().equals(AwsArnUtils.regionOrDefault(
-                cluster.getClusterArn(), config.defaultRegion()));
+        if (cluster.getResourceRegion() != null) {
+            return regionResolver.getRegion().equals(cluster.getResourceRegion());
+        }
+        // Older records have no request-region marker and their ARN always used the configured
+        // default. Keep them visible until they are recreated so an upgrade does not hide or
+        // strand persisted clusters whose original request region was not stored.
+        return true;
     }
 }

@@ -150,6 +150,17 @@ class MskServiceTest {
     }
 
     @Test
+    void legacyClusterWithoutResourceRegionRemainsVisibleAfterRegionalIsolation() {
+        MskCluster legacy = mskService.createCluster("legacy-cluster");
+        legacy.setResourceRegion(null);
+
+        when(regionResolver.getRegion()).thenReturn("eu-west-1");
+
+        assertEquals(List.of(legacy), mskService.listClusters());
+        assertEquals(legacy, mskService.describeCluster(legacy.getClusterArn()));
+    }
+
+    @Test
     void sameClusterNameIsRejectedWithinOneRegion() {
         mskService.createCluster("shared-name");
 
@@ -395,6 +406,8 @@ class MskServiceTest {
         assertNotNull(reloaded.getVolumeId());
         assertEquals(cluster.getAccountId(), reloaded.getAccountId());
         assertNotNull(reloaded.getAccountId());
+        assertEquals(cluster.getResourceRegion(), reloaded.getResourceRegion());
+        assertNotNull(reloaded.getResourceRegion());
 
         // and the client-facing metadata survives too
         assertEquals(3, reloaded.getNumberOfBrokerNodes());
