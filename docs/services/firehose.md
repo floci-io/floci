@@ -83,6 +83,17 @@ An omitted `Enabled` counts as enabled; `Enabled: false` stores and merges the c
 - Error-output records report the delivery time as both `arrivalTimestamp` and `attemptEndingTimestamp` (Floci does not track per-record arrival), and omit AWS's `sequenceNumber`/`subSequenceNumber` members. An absent `ErrorOutputPrefix` writes them at the bucket root with no default time prefix, which matches AWS's object-name documentation but was not probed.
 - The Parquet object carries no `Content-Encoding`, where AWS labels it `hadoop-snappy` even though the body is a plain Parquet file (probed), and its row order may differ from put order, as it does on AWS (probed).
 
+## Record transformation
+
+`ProcessingConfiguration` on the extended S3 destination is modelled, validated and echoed, but **not applied**: a stream that enables a transformation is accepted and delivers its records untransformed, and create and update log a warning saying so. Validation follows AWS, down to the messages and the order they are reported in.
+
+Two behaviors are worth knowing because they differ from the conversion block above. `UpdateDestination` replaces this block whole rather than merging it member-wise, so an update carrying only `{"Enabled": false}` leaves no processors behind, and each update is validated against its own content rather than the merged result. And a stored Lambda processor is echoed with `NumberOfRetries` and `RoleArn` filled in and its parameters reordered, as AWS returns them.
+
+### Known deviations from AWS
+
+- The transformation is not applied. A transform function is never invoked, so records reach the destination exactly as they were put, which is what makes a local test of one pass where AWS would not.
+- Two checks AWS itself does not make are deliberately absent: `NumberOfRetries` is not range-checked, despite the documented 1 to 8, and the function a `LambdaArn` names is not required to exist.
+
 ## S3 object keys
 
 Delivered objects are named `<evaluated prefix><streamName>-<versionId>-<yyyy-MM-dd-HH-mm-ss>-<uuid><file extension>`, matching [AWS's object name format](https://docs.aws.amazon.com/firehose/latest/dev/s3-object-name.html):

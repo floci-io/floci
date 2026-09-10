@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.firehose;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Processor;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessorParameter;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -10,6 +13,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The error codes and messages asserted here were captured from real AWS's raw
@@ -18,6 +22,121 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class S3DestinationValidatorTest {
 
     private static final String ENUM_SET = "[ZIP, HADOOP_SNAPPY, Snappy, GZIP, UNCOMPRESSED]";
+
+    private static final String PROCESSOR_TYPE_SET = "[Decompression, Lambda, RecordDeAggregation,"
+            + " MetadataExtraction, AppendDelimiterToRecord, CloudWatchLogProcessing]";
+    private static final String PARAMETER_NAME_SET = "[DataMessageExtraction, NumberOfRetries, Delimiter,"
+            + " RoleArn, JsonParsingEngine, SubRecordType, MetadataExtractionQuery,"
+            + " BufferIntervalInSeconds, LambdaArn, BufferSizeInMBs, CompressionFormat]";
+
+    private static ProcessorParameter namedParameter(String name, String value) {
+        ProcessorParameter parameter = new ProcessorParameter();
+        parameter.setParameterName(name);
+        parameter.setParameterValue(value);
+        return parameter;
+    }
+
+    private static S3Destination withProcessors(String unusedShapeName, Processor... processors) {
+        ProcessingConfiguration processing = new ProcessingConfiguration();
+        processing.setEnabled(true);
+        processing.setProcessors(java.util.List.of(processors));
+        S3Destination config = new S3Destination();
+        config.setProcessingConfiguration(processing);
+        return config;
+    }
+
+    private static S3Destination withProcessor(String type, String... parameterNames) {
+        Processor processor = new Processor();
+        processor.setType(type);
+        java.util.List<ProcessorParameter> parameters = new java.util.ArrayList<>();
+        for (String name : parameterNames) {
+            ProcessorParameter parameter = new ProcessorParameter();
+            parameter.setParameterName(name);
+            parameter.setParameterValue("value");
+            parameters.add(parameter);
+        }
+        processor.setParameters(parameters);
+        ProcessingConfiguration processing = new ProcessingConfiguration();
+        processing.setEnabled(true);
+        processing.setProcessors(java.util.List.of(processor));
+        S3Destination config = new S3Destination();
+        config.setProcessingConfiguration(processing);
+        return config;
+    }
+
+    // The enum sets and the 1-based member paths are the ones AWS prints (probed).
+    @Test
+    void anUnknownProcessorTypeFailsItsEnum() {
+        AwsException error = assertThrows(AwsException.class, () -> S3DestinationValidator.validateWireShape(
+                withProcessor("Bogus"), "extendedS3DestinationConfiguration"));
+
+        assertEquals("1 validation error detected: Value at 'extendedS3DestinationConfiguration"
+                + ".processingConfiguration.processors.1.member.type' failed to satisfy constraint:"
+                + " Member must satisfy enum value set: " + PROCESSOR_TYPE_SET, error.getMessage());
+    }
+
+    @Test
+    void anUnknownParameterNameFailsItsEnum() {
+        AwsException error = assertThrows(AwsException.class, () -> S3DestinationValidator.validateWireShape(
+                withProcessor("Lambda", "LambdaArn", "Bogus"), "extendedS3DestinationUpdate"));
+
+        assertEquals("1 validation error detected: Value at 'extendedS3DestinationUpdate"
+                + ".processingConfiguration.processors.1.member.parameters.2.member.parameterName'"
+                + " failed to satisfy constraint: Member must satisfy enum value set: "
+                + PARAMETER_NAME_SET, error.getMessage());
+    }
+
+    @Test
+    void aProcessorWithoutATypeFailsAsRequired() {
+        Processor processor = new Processor();
+        processor.setParameters(java.util.List.of(namedParameter("LambdaArn", "value")));
+        AwsException error = assertThrows(AwsException.class, () -> S3DestinationValidator.validateWireShape(
+                withProcessors("extendedS3DestinationConfiguration", processor),
+                "extendedS3DestinationConfiguration"));
+
+        assertEquals("1 validation error detected: Value at 'extendedS3DestinationConfiguration"
+                + ".processingConfiguration.processors.1.member.type' failed to satisfy constraint:"
+                + " Member must not be null", error.getMessage());
+    }
+
+    @Test
+    void aParameterMissingEitherMemberFailsAsRequired() {
+        Processor processor = new Processor();
+        processor.setType("Lambda");
+        processor.setParameters(java.util.List.of(new ProcessorParameter()));
+        AwsException error = assertThrows(AwsException.class, () -> S3DestinationValidator.validateWireShape(
+                withProcessors("extendedS3DestinationConfiguration", processor),
+                "extendedS3DestinationConfiguration"));
+
+        assertTrue(error.getMessage().contains("parameters.1.member.parameterName' failed to satisfy"
+                + " constraint: Member must not be null"), error.getMessage());
+        assertTrue(error.getMessage().contains("parameters.1.member.parameterValue' failed to satisfy"
+                + " constraint: Member must not be null"), error.getMessage());
+    }
+
+    // An empty value trips the length and the pattern, in that order.
+    @Test
+    void anEmptyParameterValueFailsBothItsConstraints() {
+        Processor processor = new Processor();
+        processor.setType("Lambda");
+        processor.setParameters(java.util.List.of(namedParameter("LambdaArn", "")));
+        AwsException error = assertThrows(AwsException.class, () -> S3DestinationValidator.validateWireShape(
+                withProcessors("extendedS3DestinationConfiguration", processor),
+                "extendedS3DestinationConfiguration"));
+
+        assertEquals("2 validation errors detected: Value at 'extendedS3DestinationConfiguration"
+                + ".processingConfiguration.processors.1.member.parameters.1.member.parameterValue'"
+                + " failed to satisfy constraint: Member must have length greater than or equal to 1;"
+                + " Value at 'extendedS3DestinationConfiguration.processingConfiguration.processors.1"
+                + ".member.parameters.1.member.parameterValue' failed to satisfy constraint: Member"
+                + " must satisfy regular expression pattern: ^(?!\\s*$).+", error.getMessage());
+    }
+
+    @Test
+    void aKnownProcessorAndParameterPass() {
+        assertDoesNotThrow(() -> S3DestinationValidator.validateWireShape(
+                withProcessor("Lambda", "LambdaArn", "NumberOfRetries"), "extendedS3DestinationConfiguration"));
+    }
 
     private static S3Destination withCompressionFormat(String compressionFormat) {
         S3Destination config = new S3Destination();

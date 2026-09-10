@@ -309,6 +309,11 @@ public class FirehoseService implements ResourceProvider {
 
         validateBufferingHints(s3Config);
         DataFormatConversionValidator.validateEffective(s3Config);
+        ProcessingConfigurationValidator.validateEffective(s3Config);
+        if (s3Config != null) {
+            s3Config.canonicalizeProcessors();
+        }
+        warnIfProcessingEnabled(name, s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", region, accountId,
                 "deliverystream/" + name).toString();
         // CreateDeliveryStream's KinesisStreamSourceConfiguration carries only the ARN and
@@ -364,7 +369,9 @@ public class FirehoseService implements ResourceProvider {
         S3Destination current = destination.getExtendedS3DestinationDescription();
         if (current == null) {
             DataFormatConversionValidator.validateEffective(update);
+            ProcessingConfigurationValidator.validateEffective(update);
             update.applyDefaults();
+            update.canonicalizeProcessors();
             destination.setExtendedS3DestinationDescription(update);
         } else {
             // AWS validates the merged effective state, not the update shape: enabling
@@ -373,12 +380,19 @@ public class FirehoseService implements ResourceProvider {
             // Validating a merged view first also keeps a failed update from leaving a
             // half-merged destination behind in the memory backend.
             DataFormatConversionValidator.validateEffective(mergedView(current, update));
+            // Not the merged view: an update carrying a ProcessingConfiguration replaces
+            // the stored one outright, so AWS validates what the update itself says. A
+            // processor without LambdaArn is rejected even when the stored one had it
+            // (probed 2026-09-10, unlike the conversion block above).
+            ProcessingConfigurationValidator.validateEffective(update);
             mergeDestination(current, update);
+            current.canonicalizeProcessors();
         }
         stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
         stream.setLastUpdateTimestamp(java.time.Instant.now());
         streamPut(streamKey, stream);
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
+        warnIfProcessingEnabled(name, stream.s3Destination());
     }
 
     public void startDeliveryStreamEncryption(String name, String keyType, String keyArn) {
@@ -450,6 +464,20 @@ public class FirehoseService implements ResourceProvider {
         }
     }
 
+    /**
+     * Says, where the configuration is set, that the transformation will not be applied.
+     * Fires on create and on every update that leaves it enabled, so a caller who keeps
+     * changing the destination keeps being told. Deliberately not in the flush path,
+     * which runs on every buffered delivery: create and update are caller-driven and are
+     * the moments a caller can act on the warning.
+     */
+    private static void warnIfProcessingEnabled(String name, S3Destination s3) {
+        if (s3 != null && s3.isProcessingEnabled()) {
+            LOG.warnv("Delivery stream {0} enables a record transformation, which Floci does not"
+                    + " apply yet; its records will be delivered untransformed", name);
+        }
+    }
+
     private static void mergeDestination(S3Destination current, S3Destination update) {
         if (update.getRoleArn() != null) current.setRoleArn(update.getRoleArn());
         if (update.getBucketArn() != null) current.setBucketArn(update.getBucketArn());
@@ -461,6 +489,12 @@ public class FirehoseService implements ResourceProvider {
         if (update.getBufferingHints() != null) current.setBufferingHints(update.getBufferingHints());
         if (update.getEncryptionConfiguration() != null) current.setEncryptionConfiguration(update.getEncryptionConfiguration());
         if (update.getS3BackupMode() != null) current.setS3BackupMode(update.getS3BackupMode());
+        // Replaced whole, not merged member-wise: an update carrying only
+        // {"Enabled": false} leaves Processors empty on real AWS, where the same shape
+        // preserves the conversion block's members (probed 2026-09-10).
+        if (update.getProcessingConfiguration() != null) {
+            current.setProcessingConfiguration(update.getProcessingConfiguration());
+        }
         if (update.getDataFormatConversionConfiguration() != null) {
             current.setDataFormatConversionConfiguration(mergeConversion(
                     current.getDataFormatConversionConfiguration(), update.getDataFormatConversionConfiguration()));

@@ -4,12 +4,16 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.OpenXJsonSerDe;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.OrcSerDe;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ParquetSerDe;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Processor;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessorParameter;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.SchemaConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Serializer;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -104,6 +108,7 @@ final class S3DestinationValidator {
         // violations sit in more than one of them.
         collectOpenXMappingViolations(config, shapeName, violations);
         collectSchemaViolations(config, shapeName, violations);
+        collectProcessingViolations(config, shapeName, violations);
         if (!violations.isEmpty()) {
             throw constraintViolations(violations);
         }
@@ -309,6 +314,101 @@ final class S3DestinationValidator {
         if (notANumber || value < min) {
             violations.add(violation(shapeName, member,
                     "Member must have value greater than or equal to " + (long) min));
+        }
+    }
+
+    /**
+     * The processor and parameter enums, in the order AWS prints them in a
+     * constraint message, which is neither declaration nor alphabetical order
+     * (probed 2026-09-10).
+     */
+    private static final String PROCESSOR_TYPE_SET =
+            "[Decompression, Lambda, RecordDeAggregation, MetadataExtraction,"
+                    + " AppendDelimiterToRecord, CloudWatchLogProcessing]";
+    private static final String PARAMETER_NAME_SET =
+            "[DataMessageExtraction, NumberOfRetries, Delimiter, RoleArn, JsonParsingEngine,"
+                    + " SubRecordType, MetadataExtractionQuery, BufferIntervalInSeconds, LambdaArn,"
+                    + " BufferSizeInMBs, CompressionFormat]";
+    private static final int PARAMETER_VALUE_MAX_LENGTH = 5120;
+    private static final String PARAMETER_VALUE_REGEX = "^(?!\\s*$).+";
+    private static final Pattern PARAMETER_VALUE_NOT_BLANK = Pattern.compile(PARAMETER_VALUE_REGEX);
+    private static final Set<String> PROCESSOR_TYPES = Set.of("Decompression", "Lambda",
+            "RecordDeAggregation", "MetadataExtraction", "AppendDelimiterToRecord",
+            "CloudWatchLogProcessing");
+    private static final Set<String> PARAMETER_NAMES = Set.of("DataMessageExtraction",
+            "NumberOfRetries", "Delimiter", "RoleArn", "JsonParsingEngine", "SubRecordType",
+            "MetadataExtractionQuery", "BufferIntervalInSeconds", "LambdaArn", "BufferSizeInMBs",
+            "CompressionFormat");
+
+    /**
+     * Both members are required, and the value carries a length range and a
+     * not-blank pattern. An empty value trips the length and the pattern, printed in
+     * that order, as the probed message does.
+     */
+    private static void collectParameterViolations(ProcessorParameter parameter, String shapeName,
+                                                   String parameterPath, List<String> violations) {
+        String name = parameter.getParameterName();
+        if (name == null) {
+            violations.add(violation(shapeName, parameterPath + ".parameterName",
+                    "Member must not be null"));
+        } else if (!PARAMETER_NAMES.contains(name)) {
+            violations.add(violation(shapeName, parameterPath + ".parameterName",
+                    "Member must satisfy enum value set: " + PARAMETER_NAME_SET));
+        }
+        String value = parameter.getParameterValue();
+        if (value == null) {
+            violations.add(violation(shapeName, parameterPath + ".parameterValue",
+                    "Member must not be null"));
+            return;
+        }
+        if (value.length() < 1) {
+            violations.add(violation(shapeName, parameterPath + ".parameterValue",
+                    "Member must have length greater than or equal to 1"));
+        } else if (value.length() > PARAMETER_VALUE_MAX_LENGTH) {
+            violations.add(violation(shapeName, parameterPath + ".parameterValue",
+                    "Member must have length less than or equal to " + PARAMETER_VALUE_MAX_LENGTH));
+        }
+        if (PARAMETER_VALUE_NOT_BLANK.matcher(value).matches()) {
+            return;
+        }
+        violations.add(violation(shapeName, parameterPath + ".parameterValue",
+                "Member must satisfy regular expression pattern: " + PARAMETER_VALUE_REGEX));
+    }
+
+    /** Members are numbered from 1 in these paths, as the probed messages show. */
+    private static void collectProcessingViolations(S3Destination config, String shapeName,
+                                                    List<String> violations) {
+        ProcessingConfiguration processing = config.getProcessingConfiguration();
+        if (processing == null || processing.getProcessors() == null) {
+            return;
+        }
+        List<Processor> processors = processing.getProcessors();
+        for (int i = 0; i < processors.size(); i++) {
+            Processor processor = processors.get(i);
+            if (processor == null) {
+                continue;
+            }
+            String processorPath = "processingConfiguration.processors." + (i + 1) + ".member";
+            // The processor's own member before the ones nested in it, which is the
+            // order AWS prints them when both are violated (probed).
+            if (processor.getType() == null) {
+                violations.add(violation(shapeName, processorPath + ".type", "Member must not be null"));
+            } else if (!PROCESSOR_TYPES.contains(processor.getType())) {
+                violations.add(violation(shapeName, processorPath + ".type",
+                        "Member must satisfy enum value set: " + PROCESSOR_TYPE_SET));
+            }
+            List<ProcessorParameter> parameters = processor.getParameters();
+            if (parameters == null) {
+                continue;
+            }
+            for (int j = 0; j < parameters.size(); j++) {
+                ProcessorParameter parameter = parameters.get(j);
+                if (parameter == null) {
+                    continue;
+                }
+                String parameterPath = processorPath + ".parameters." + (j + 1) + ".member";
+                collectParameterViolations(parameter, shapeName, parameterPath, violations);
+            }
         }
     }
 

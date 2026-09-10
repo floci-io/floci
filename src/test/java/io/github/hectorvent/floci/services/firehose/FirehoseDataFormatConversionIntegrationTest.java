@@ -186,6 +186,49 @@ class FirehoseDataFormatConversionIntegrationTest {
             .body(DESCRIPTION_PATH + ".DataFormatConversionConfiguration", nullValue());
     }
 
+    /**
+     * The processing member is extended-only in AWS's model too, so the legacy shapes
+     * drop it the same way. Wire-level rather than through the service, since the
+     * dropping happens in the handler as the request is unmarshalled.
+     */
+    @Test
+    @Order(7)
+    void legacyS3DestinationShapeIgnoresTheProcessingMember() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateDeliveryStream")
+            .body("""
+                    {
+                      "DeliveryStreamName": "legacy-shape-processing-stream",
+                      "S3DestinationConfiguration": {
+                        "RoleARN": "%s",
+                        "BucketARN": "%s",
+                        "CompressionFormat": "UNCOMPRESSED",
+                        "ProcessingConfiguration": {
+                          "Enabled": true,
+                          "Processors": [ { "Type": "Lambda", "Parameters": [
+                            { "ParameterName": "LambdaArn",
+                              "ParameterValue": "arn:aws:lambda:us-east-1:000000000000:function:t" } ] } ]
+                        }
+                      }
+                    }
+                    """.formatted(ROLE_ARN, BUCKET_ARN))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"legacy-shape-processing-stream\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(DESCRIPTION_PATH + ".ProcessingConfiguration", nullValue());
+    }
+
     @Test
     @Order(4)
     void createRejectsCompressedDestinationsWithTheAwsMessage() {
