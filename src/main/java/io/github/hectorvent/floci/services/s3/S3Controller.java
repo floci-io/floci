@@ -1741,13 +1741,27 @@ public class S3Controller {
                         new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
 
-            config.setEventBridgeEnabled(xml.contains("<EventBridgeConfiguration"));
+            config.setEventBridgeEnabled(parseEventBridgeConfiguration(xml));
 
             s3Service.putBucketNotificationConfiguration(bucket, config);
             return Response.ok().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    private static boolean parseEventBridgeConfiguration(String xml) {
+        if (!"NotificationConfiguration".equals(XmlParser.rootElementName(xml))) {
+            throw new AwsException("MalformedXML", "The XML you provided was not well-formed.", 400);
+        }
+        List<String> children = XmlParser.childElementNames(xml, "NotificationConfiguration");
+        long eventBridgeConfigurations = children.stream()
+                .filter("EventBridgeConfiguration"::equals)
+                .count();
+        if (eventBridgeConfigurations > 1) {
+            throw new AwsException("MalformedXML", "The XML you provided was not well-formed.", 400);
+        }
+        return eventBridgeConfigurations == 1;
     }
 
     private record ParsedNotificationGroup(String id, String arn, List<String> events,
