@@ -201,11 +201,21 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
      * resource handlers do. CloudFormation already tears down in reverse dependency order, so a
      * queue is gone before the environment it points at.
      *
-     * <p>Deliberately no {@code CfnDeletes.safeDelete} here. Every {@link BatchService} failure is
-     * {@code ClientException}, so tolerating that code would be a catch-all: a real refusal such
-     * as "still associated with a job queue" would be swallowed into a green stack delete instead
-     * of failing it. Already-gone is handled by looking first, which is also what keeps the
-     * disable step from throwing on a resource someone removed out of band.
+     * <p>Deliberately no {@code CfnDeletes.safeDelete} here, and it is the API that rules it out
+     * rather than a gap in {@link BatchService}. Batch declares exactly two errors on
+     * DeleteComputeEnvironment, DeleteJobQueue and DeregisterJobDefinition, {@code ClientException}
+     * (400) and {@code ServerException} (500); there is no not-found code in the service model to
+     * name, so there is none to tolerate. {@code safeDelete} takes the specific already-gone code
+     * on purpose, and passing {@code ClientException} would be the catch-all AGENTS.md rules out:
+     * a real refusal such as "Cannot delete compute environment still associated with a job queue"
+     * would be swallowed into a green stack delete instead of failing it. Giving Batch a
+     * Floci-only not-found code to satisfy the pattern would put a code on the wire that AWS never
+     * sends.
+     *
+     * <p>Already-gone is handled by looking first instead, which is also what keeps the disable
+     * step from throwing on a resource someone removed out of band. {@code EcsCfnProvisioner} does
+     * tolerate a blanket {@code ClientException} for its task-definition arm, so the divergence
+     * here is deliberate rather than an oversight.
      */
     @Override
     public void delete(String resourceType, String physicalId, String region) {
