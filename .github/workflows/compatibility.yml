@@ -10,6 +10,8 @@ on:
       - 'docker/entrypoint.sh'
       - 'docker/localstack-parity.sh'
       - 'docker/healthcheck.sh'
+      - 'docker/run-docker-tests.sh'
+      - 'docker/test-run-docker-tests.sh'
       - 'compatibility-tests/**'
       - '.github/ci/compat-timing-report.py'
       - '.github/ci/compat-opentofu-drift-check.py'
@@ -25,6 +27,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docker-runner-regression:
+    name: compat / Docker runner failure aggregation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test Docker runner failure aggregation
+        run: bash docker/test-run-docker-tests.sh
+
   compat-aws-cli-shim:
     name: compat / aws CLI endpoint resolution
     runs-on: ubuntu-24.04-arm
