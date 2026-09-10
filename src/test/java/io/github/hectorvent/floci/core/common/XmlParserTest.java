@@ -2,12 +2,92 @@ package io.github.hectorvent.floci.core.common;
 
 import org.junit.jupiter.api.Test;
 
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
+
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class XmlParserTest {
+
+    // --- newStreamReader: the hardening this centralises ---
+
+    /**
+     * The reason three controllers stopped standing up their own XMLInputFactory. Each restated
+     * these settings, and a copy that forgot one would be an XXE hole nothing would catch.
+     */
+    @Test
+    void newStreamReaderIgnoresEntitiesDeclaredInADoctype() throws Exception {
+        // The DTD is skipped rather than rejected, so the document itself still parses. What
+        // protects us is that nothing in it takes effect: an entity it declares stays undefined,
+        // so any reference to one fails instead of expanding.
+        String declaredButUnused = """
+                <!DOCTYPE root [ <!ENTITY x "expanded"> ]>
+                <Root><Value>plain</Value></Root>
+                """;
+
+        XMLStreamReader r = XmlParser.newStreamReader(declaredButUnused);
+        StringBuilder text = new StringBuilder();
+        while (r.hasNext()) {
+            if (r.next() == XMLStreamConstants.CHARACTERS) {
+                text.append(r.getText());
+            }
+        }
+        assertEquals("plain", text.toString().trim(), "the document parses, the DTD is ignored");
+
+        String referenced = """
+                <!DOCTYPE root [ <!ENTITY x "expanded"> ]>
+                <Root><Value>&x;</Value></Root>
+                """;
+
+        XMLStreamException e = assertThrows(XMLStreamException.class, () -> {
+            XMLStreamReader r2 = XmlParser.newStreamReader(referenced);
+            while (r2.hasNext()) {
+                r2.next();
+            }
+        }, "an entity from the skipped DTD must not expand");
+        assertTrue(e.getMessage().contains("not declared"),
+                "should fail because the DTD never took effect, was: " + e.getMessage());
+    }
+
+    @Test
+    void newStreamReaderDoesNotExpandAnExternalEntity() {
+        // Pointing at a path that does not exist: if the entity were resolved this would fail
+        // by trying to read it. Refusing the DTD outright is the behaviour we want.
+        String xml = """
+                <!DOCTYPE root [ <!ENTITY secret SYSTEM "file:///nonexistent/secret"> ]>
+                <Root><Value>&secret;</Value></Root>
+                """;
+
+        XMLStreamException e = assertThrows(XMLStreamException.class, () -> {
+            XMLStreamReader r = XmlParser.newStreamReader(xml);
+            while (r.hasNext()) {
+                r.next();
+            }
+        }, "an external entity must never be resolved");
+        assertTrue(e.getMessage().contains("not declared"),
+                "must fail without reading the file at all, was: " + e.getMessage());
+    }
+
+    @Test
+    void newStreamReaderIsNamespaceAwareAndReadsAttributes() throws Exception {
+        // Attributes are why a caller reaches for a raw reader instead of the helpers here.
+        String xml = "<Root xmlns=\"http://example.com/ns\"><Item id=\"7\" name=\"x\"/></Root>";
+
+        XMLStreamReader r = XmlParser.newStreamReader(xml);
+        String id = null;
+        while (r.hasNext()) {
+            if (r.next() == XMLStreamConstants.START_ELEMENT && "Item".equals(r.getLocalName())) {
+                id = r.getAttributeValue(null, "id");
+                assertEquals("http://example.com/ns", r.getNamespaceURI(),
+                        "the reader must be namespace-aware");
+            }
+        }
+        assertEquals("7", id);
+    }
 
     // --- extractGroupsMulti: nested element resilience ---
 

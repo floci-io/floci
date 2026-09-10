@@ -11,10 +11,8 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
-import java.io.StringReader;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -41,15 +39,6 @@ public class CloudFrontController {
     private static final String RESTRICTIONS = "Restrictions";
     private static final String DEFAULT_GEO_RESTRICTION_TYPE = "none";
     private static final int EMPTY_QUANTITY = 0;
-
-    private static final XMLInputFactory XML_FACTORY;
-
-    static {
-        XML_FACTORY = XMLInputFactory.newInstance();
-        XML_FACTORY.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
-        XML_FACTORY.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
-        XML_FACTORY.setProperty(XMLInputFactory.SUPPORT_DTD, false);
-    }
 
     private final CloudFrontService service;
 
@@ -2500,8 +2489,7 @@ public class CloudFrontController {
             return values;
         }
         try {
-            XMLStreamReader reader = XML_FACTORY.createXMLStreamReader(
-                    new StringReader(body));
+            XMLStreamReader reader = XmlParser.newStreamReader(body);
             boolean inDistributionConfig = false;
             int nestedDepth = 0;
             while (reader.hasNext()) {
@@ -2574,7 +2562,7 @@ public class CloudFrontController {
             return result;
         }
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inBlock = false;
             boolean inItem = false;
             Map<String, Object> current = null;
@@ -2641,7 +2629,7 @@ public class CloudFrontController {
             return result;
         }
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inOrigins = false;
             boolean inOrigin = false;
             boolean inS3OriginConfig = false;
@@ -2999,7 +2987,7 @@ public class CloudFrontController {
             return dcb;
         }
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inDcb = false;
             boolean inAllowedMethods = false;
             boolean inCachedMethods = false;
@@ -3282,7 +3270,7 @@ public class CloudFrontController {
             return result;
         }
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inCacheBehaviors = false;
             boolean inCacheBehavior = false;
             boolean inAllowedMethods = false;
@@ -3666,7 +3654,7 @@ public class CloudFrontController {
             return result;
         }
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inAliases = false;
             while (r.hasNext()) {
                 int event = r.next();
@@ -3695,7 +3683,7 @@ public class CloudFrontController {
             return result;
         }
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inVc = false;
             while (r.hasNext()) {
                 int event = r.next();

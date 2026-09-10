@@ -43,6 +43,18 @@ public final class XmlParser {
     private XmlParser() {}
 
     /**
+     * A stream reader over {@code xml} using this class's hardened settings: namespace-aware,
+     * with DTDs and external entities disabled.
+     *
+     * <p>For callers whose parsing goes beyond the extraction helpers here, typically because
+     * they read attributes. Reaching for {@link XMLInputFactory} directly means restating the
+     * hardening, and a copy that forgets a property is an XXE hole that nothing would catch.
+     */
+    public static XMLStreamReader newStreamReader(String xml) throws XMLStreamException {
+        return FACTORY.createXMLStreamReader(new StringReader(xml));
+    }
+
+    /**
      * Parses XML into a namespace-aware DOM document with external entities and
      * DTD processing disabled. DOM is required by the JDK XML-DSig API.
      */

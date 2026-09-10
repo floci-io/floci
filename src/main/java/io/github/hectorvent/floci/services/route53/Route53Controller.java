@@ -23,10 +23,8 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Response;
 
-import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
-import java.io.StringReader;
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -62,15 +60,6 @@ public class Route53Controller {
             "cn-north-1", "cn-northwest-1",
             "af-south-1", "eu-south-1", "eu-south-2",
             "il-central-1", "mx-central-1");
-
-    private static final XMLInputFactory XML_FACTORY;
-
-    static {
-        XML_FACTORY = XMLInputFactory.newInstance();
-        XML_FACTORY.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
-        XML_FACTORY.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
-        XML_FACTORY.setProperty(XMLInputFactory.SUPPORT_DTD, false);
-    }
 
     @Inject
     Route53Service service;
@@ -913,7 +902,7 @@ public class Route53Controller {
         if (body == null || body.isEmpty()) return result;
 
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             String currentAction = null;
             ResourceRecordSet currentRrs = null;
             List<ResourceRecord> currentRecords = null;
@@ -1078,7 +1067,7 @@ public class Route53Controller {
         List<String> keys = new ArrayList<>();
         if (body == null || body.isEmpty()) return keys;
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inRemove = false;
             while (r.hasNext()) {
                 int event = r.next();
