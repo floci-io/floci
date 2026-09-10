@@ -367,6 +367,47 @@ class S3ServiceAnnotationsTest {
                 s3Service.getObjectAnnotation(BUCKET, "docs/copy2.txt", "excluded", null));
     }
 
+    @Test
+    void crossBucketCopyCarriesAnnotationsByDefaultAndHonorsExclude() {
+        putAnnotation("cross-bucket", "payload");
+        s3Service.createBucket("cross-bucket-dest", "us-east-1");
+        s3Service.copyObject(BUCKET, "docs/readme.txt", "cross-bucket-dest", "docs/copy.txt",
+                new io.github.hectorvent.floci.services.s3.model.CopyObjectOptions());
+        ObjectAnnotation annotation = s3Service.getObjectAnnotation("cross-bucket-dest",
+                "docs/copy.txt", "cross-bucket", null);
+        assertEquals("payload", new String(
+                s3Service.readObjectAnnotationPayload(annotation), StandardCharsets.UTF_8));
+
+        s3Service.copyObject(BUCKET, "docs/readme.txt", "cross-bucket-dest", "docs/copy-excluded.txt",
+                new io.github.hectorvent.floci.services.s3.model.CopyObjectOptions()
+                        .withAnnotationDirective("EXCLUDE"));
+        assertThrowsAws("NoSuchAnnotation", () ->
+                s3Service.getObjectAnnotation("cross-bucket-dest", "docs/copy-excluded.txt", "cross-bucket", null));
+    }
+
+    // ========== Reset ==========
+
+    @Test
+    void resetRemovesAnnotationPayloadFiles() throws Exception {
+        putAnnotation("reset-me", "payload");
+        s3Service.clear();
+        // The metadata was erased and the .s3ann payload files must not leak: the .annotations
+        // root is empty for every account partition.
+        Path accountsRoot = tempDir.resolve("s3").resolve(".accounts");
+        if (Files.isDirectory(accountsRoot)) {
+            try (var accounts = Files.list(accountsRoot)) {
+                for (Path account : accounts.toList()) {
+                    Path annotationsRoot = account.resolve(".annotations");
+                    assertFalse(Files.exists(annotationsRoot),
+                            "annotation payloads survived reset: " + annotationsRoot);
+                }
+            }
+        }
+        assertThrowsAws("NoSuchAnnotation", () ->
+                s3Service.readObjectAnnotationPayload(
+                        s3Service.getObjectAnnotation(BUCKET, "docs/readme.txt", "reset-me", null)));
+    }
+
     // ========== Review regressions ==========
 
     @Test

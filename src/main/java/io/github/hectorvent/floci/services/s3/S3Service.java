@@ -265,6 +265,31 @@ public class S3Service implements Resettable, ResourceProvider {
         memoryAnnotationStore.clear();
         memoryMultipartStore.clear();
         multipartUploads.clear();
+        if (!inMemory) {
+            // The reset above erases the annotation metadata through storageFactory.clearAll(),
+            // so detached .s3ann payload files become unreachable: sweep the annotation payload
+            // root for every account partition (reset runs outside request context, so the
+            // default account alone is not enough). Mirrors the metadata erase; the pre-existing
+            // .s3data behavior is unchanged.
+            deleteAnnotationPayloadRoots();
+        }
+    }
+
+    private void deleteAnnotationPayloadRoots() {
+        Path accountsRoot = dataRoot.resolve(ACCOUNT_STORAGE_ROOT);
+        if (!Files.isDirectory(accountsRoot)) {
+            return;
+        }
+        try (var accounts = Files.list(accountsRoot)) {
+            for (Path account : accounts.toList()) {
+                Path annotationsRoot = account.resolve(ANNOTATION_STORAGE_ROOT);
+                if (Files.isDirectory(annotationsRoot)) {
+                    deleteDirectory(annotationsRoot);
+                }
+            }
+        } catch (IOException e) {
+            LOG.errorv(e, "Failed to reset annotation payload files under {0}", accountsRoot);
+        }
     }
 
     public Bucket createBucket(String bucketName, String region) {
@@ -4672,16 +4697,26 @@ public class S3Service implements Resettable, ResourceProvider {
             fireNotifications(destBucket, destKey, "ObjectCreated:Copy", result[0]);
             return result[0];
         }
-        S3Object copy = storeObjectCopy(destBucket, destKey, source, metadata, effectiveChecksum,
-                effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
-                effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
-                effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
-        if (copyAnnotations) {
-            restoreAnnotations(sourceAnnotations, destBucket, destKey, copy);
+        // Publish and restore under the DESTINATION bucket monitor: an overwrite of the
+        // destination key is serialized against the restore, so the copied annotations can
+        // never attach to a newer, unrelated object that lands in between (the annotations'
+        // plain-key identity is shared by every non-versioned object at this key). The source
+        // monitor above was already released, so the two locks are never held together and a
+        // concurrent reverse copy cannot deadlock.
+        S3Object[] result = {null};
+        synchronized (requireBucket(destBucket)) {
+            result[0] = storeObjectCopy(destBucket, destKey, source, metadata, effectiveChecksum,
+                    effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
+                    effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
+                    effectiveSseKmsKeyId, effectiveOptions, copyChecksumAlgorithm, effectiveTags);
+            if (copyAnnotations) {
+                restoreAnnotations(sourceAnnotations, destBucket, destKey, result[0]);
+            }
         }
+        // Fired outside the bucket monitor, matching the self-copy path.
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
-        fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);
-        return copy;
+        fireNotifications(destBucket, destKey, "ObjectCreated:Copy", result[0]);
+        return result[0];
     }
 
     private S3Object storeObjectCopy(String destBucket, String destKey, S3Object source,
@@ -4736,16 +4771,36 @@ public class S3Service implements Resettable, ResourceProvider {
             return;
         }
         String destParentKey = annotationParentKey(destBucket, destKey, copy.getVersionId());
-        for (AnnotationSnapshot snapshot : snapshots) {
-            // The payload bytes are identical, so the source annotation's ETag and checksum are
-            // preserved; only the identity fields and lastModified are recomputed.
-            ObjectAnnotation copied = new ObjectAnnotation(destBucket, destKey, copy.getVersionId(),
-                    snapshot.metadata().getAnnotationName(), snapshot.metadata().getSize(),
-                    snapshot.metadata().getETag(), Instant.now(),
-                    snapshot.metadata().getChecksumAlgorithm(), snapshot.metadata().getChecksumValue());
-            copied.setServerSideEncryption(copy.getServerSideEncryption());
-            writeAnnotationPayload(copied, snapshot.payload());
-            annotationStore.put(annotationStoreKey(destParentKey, snapshot.metadata().getAnnotationName()), copied);
+        // The destination object is already published, so a mid-restore failure must not leave a
+        // partial annotation set behind (a failed copy whose retry would find partial state).
+        // Every restored annotation is tracked before its writes; on failure the written
+        // annotations are rolled back best-effort, leaving the destination with none of the
+        // copied annotations rather than a partial set.
+        List<ObjectAnnotation> restored = new ArrayList<>();
+        try {
+            for (AnnotationSnapshot snapshot : snapshots) {
+                // The payload bytes are identical, so the source annotation's ETag and checksum
+                // are preserved; only the identity fields and lastModified are recomputed.
+                ObjectAnnotation copied = new ObjectAnnotation(destBucket, destKey, copy.getVersionId(),
+                        snapshot.metadata().getAnnotationName(), snapshot.metadata().getSize(),
+                        snapshot.metadata().getETag(), Instant.now(),
+                        snapshot.metadata().getChecksumAlgorithm(), snapshot.metadata().getChecksumValue());
+                copied.setServerSideEncryption(copy.getServerSideEncryption());
+                restored.add(copied);
+                writeAnnotationPayload(copied, snapshot.payload());
+                annotationStore.put(annotationStoreKey(destParentKey, copied.getAnnotationName()), copied);
+            }
+        } catch (RuntimeException e) {
+            for (ObjectAnnotation restoredAnnotation : restored) {
+                try {
+                    annotationStore.delete(annotationStoreKey(destParentKey, restoredAnnotation.getAnnotationName()));
+                    deleteAnnotationPayload(restoredAnnotation);
+                } catch (RuntimeException rollbackError) {
+                    LOG.warnv(rollbackError, "Failed to roll back annotation {0} on copy destination {1}/{2}",
+                            restoredAnnotation.getAnnotationName(), destBucket, destKey);
+                }
+            }
+            throw e;
         }
     }
 
