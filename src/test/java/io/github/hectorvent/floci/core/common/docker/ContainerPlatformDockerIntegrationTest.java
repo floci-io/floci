@@ -84,9 +84,15 @@ class ContainerPlatformDockerIntegrationTest {
             LOG.warnv(e, "Could not start the foreign-platform container, falling back to inspect");
             return null;
         }
-        Integer status = dockerClient.waitContainerCmd(containerId)
-                .exec(new WaitContainerResultCallback())
-                .awaitStatusCode(60, TimeUnit.SECONDS);
+        Integer status;
+        try {
+            status = dockerClient.waitContainerCmd(containerId)
+                    .exec(new WaitContainerResultCallback())
+                    .awaitStatusCode(60, TimeUnit.SECONDS);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Waiting on the foreign-platform container failed, falling back to inspect");
+            return null;
+        }
         if (status == null || status != 0) {
             LOG.warnv("The foreign-platform container exited with {0}, falling back to inspect: {1}",
                     status, logs(containerId));
@@ -116,6 +122,7 @@ class ContainerPlatformDockerIntegrationTest {
         return reported;
     }
 
+    /** Best effort, as in the sibling Docker tests: a read that fails reports itself in the text. */
     private String logs(String containerId) {
         StringBuilder out = new StringBuilder();
         try {
@@ -128,7 +135,9 @@ class ContainerPlatformDockerIntegrationTest {
                     }).awaitCompletion(10, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while reading container logs", e);
+            out.append("(interrupted while reading logs)");
+        } catch (Exception e) {
+            out.append("(could not read logs: ").append(e.getMessage()).append(')');
         }
         return out.toString();
     }
