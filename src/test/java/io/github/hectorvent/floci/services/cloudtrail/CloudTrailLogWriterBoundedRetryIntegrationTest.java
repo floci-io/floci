@@ -12,10 +12,13 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
 import static io.restassured.RestAssured.given;
@@ -301,6 +304,14 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
         return String.format("events/%04d.txt", index);
     }
 
+    // Two log files written in the same flush cycle can land in the same delivery
+    // minute, leaving only a random filename suffix (CloudTrailLogWriter#randomFilenameSuffix)
+    // to distinguish their S3 keys. That suffix carries no relationship to write order, so
+    // relying on S3 listing order across files (as real CloudTrail's own key layout would
+    // also not support) is not a reliable way to reconstruct delivery order. Each event's
+    // own key already encodes its original sequence, so sort on that instead.
+    private static final Pattern EVENT_INDEX = Pattern.compile("(\\d+)\\.txt$");
+
     private static List<JsonNode> deliveredRecords(String bucket) throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         List<JsonNode> records = new ArrayList<>();
@@ -313,7 +324,13 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
             }
         mapper.readTree(json).path("Records").forEach(records::add);
         }
+        records.sort(Comparator.comparingInt(CloudTrailLogWriterBoundedRetryIntegrationTest::sourceEventIndex));
         return records;
+    }
+
+    private static int sourceEventIndex(JsonNode record) {
+        Matcher m = EVENT_INDEX.matcher(record.path("requestParameters").path("key").asText(""));
+        return m.find() ? Integer.parseInt(m.group(1)) : Integer.MAX_VALUE;
     }
 
     private static List<String> listLogKeys(String bucket) {
