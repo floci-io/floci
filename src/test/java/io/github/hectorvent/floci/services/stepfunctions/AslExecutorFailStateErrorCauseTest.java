@@ -52,6 +52,7 @@ class AslExecutorFailStateErrorCauseTest {
                 mock(DynamoDbService.class),
                 mock(DynamoDbJsonHandler.class),
                 mock(SqsJsonHandler.class),
+                mock(io.github.hectorvent.floci.services.sns.SnsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
                 mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
                 mock(S3Service.class),
