@@ -256,6 +256,7 @@ public class Ec2QueryHandler {
                 case "RequestSpotInstances" -> handleRequestSpotInstances(params, region);
                 case "DescribeSpotInstanceRequests" -> handleDescribeSpotInstanceRequests(params, region);
                 case "CancelSpotInstanceRequests" -> handleCancelSpotInstanceRequests(params, region);
+                case "DescribeSpotPriceHistory" -> handleDescribeSpotPriceHistory(params, region);
                 // IPAM
                 case "EnableIpamOrganizationAdminAccount" -> handleEnableIpamOrgAdmin(params);
                 case "DisableIpamOrganizationAdminAccount" -> handleDisableIpamOrgAdmin(params);
@@ -5368,6 +5369,23 @@ public class Ec2QueryHandler {
         }
         xml.end("spotInstanceRequestSet")
                 .end("CancelSpotInstanceRequestsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * Return the EC2 Query response shape for spot price history.
+     *
+     * <p>Floci does not currently maintain a spot-price snapshot. AWS returns an empty
+     * {@code spotPriceHistorySet} when no matching records exist, which is sufficient for
+     * clients such as Karpenter to distinguish an empty result from an unsupported action.</p>
+     */
+    private Response handleDescribeSpotPriceHistory(MultivaluedMap<String, String> p, String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeSpotPriceHistoryResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("spotPriceHistorySet")
+                .end("spotPriceHistorySet")
+                .end("DescribeSpotPriceHistoryResponse");
         return xmlResponse(xml.build());
     }
 
