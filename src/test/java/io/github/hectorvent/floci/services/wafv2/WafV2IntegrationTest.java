@@ -357,12 +357,30 @@ class WafV2IntegrationTest {
                         + "\"Addresses\":[\"10.0.0.0/24\",\"203.0.113.10\"]}")
                 .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
 
+        // A rejected create must not leave a partially persisted IP set behind.
+        call("ListIPSets", "{\"Scope\":\"REGIONAL\"}")
+                .then().statusCode(200)
+                .body("IPSets.findAll { it.Name == 'floci-waf-mixed' }", hasSize(0));
+
         // The guard must not reject well-formed blocks, IPv6 included.
         Response created = call("CreateIPSet",
                 "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"IPAddressVersion\":\"IPV4\","
                         + "\"Addresses\":[\"10.1.0.0/16\",\"192.0.2.0/24\"]}");
         created.then().statusCode(200);
         String id = created.jsonPath().getString("Summary.Id");
+
+        Response ipv6Created = call("CreateIPSet",
+                "{\"Name\":\"floci-waf-cidr-ipv6\",\"Scope\":\"REGIONAL\","
+                        + "\"IPAddressVersion\":\"IPV6\",\"Addresses\":[\"2001:db8::/32\"]}");
+        ipv6Created.then().statusCode(200);
+        String ipv6Id = ipv6Created.jsonPath().getString("Summary.Id");
+        String ipv6LockToken = call("GetIPSet",
+                "{\"Name\":\"floci-waf-cidr-ipv6\",\"Scope\":\"REGIONAL\",\"Id\":\"" + ipv6Id + "\"}")
+                .then().statusCode(200).extract().jsonPath().getString("LockToken");
+        call("DeleteIPSet",
+                "{\"Name\":\"floci-waf-cidr-ipv6\",\"Scope\":\"REGIONAL\",\"Id\":\"" + ipv6Id
+                        + "\",\"LockToken\":\"" + ipv6LockToken + "\"}")
+                .then().statusCode(200);
 
         String lockToken = call("GetIPSet",
                 "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\"}")
