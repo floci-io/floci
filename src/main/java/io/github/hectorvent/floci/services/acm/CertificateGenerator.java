@@ -69,11 +69,13 @@ public class CertificateGenerator {
     private static final int PBE_ITERATIONS = 4096;
 
     /**
-     * Pattern matching IPv4 addresses (e.g. 192.168.1.100) and IPv6 addresses
-     * (bracketed like [::1] or raw like ::1, fe80::1).
+     * A dotted quad with every octet in range. Deliberately strict: a loose pattern lets a
+     * value like {@code 1234} reach {@link InetAddress#getByName}, which happily decodes it as
+     * {@code 0.0.4.210} and bakes a nonsense address into the certificate.
      */
-    private static final Pattern IP_ADDRESS_PATTERN = Pattern.compile(
-            "^\\[?([0-9a-fA-F:]+)]?$|^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$"
+    private static final Pattern IPV4_PATTERN = Pattern.compile(
+            "^(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)"
+                    + "(\\.(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)){3}$"
     );
 
     public record GeneratedCertificate(
@@ -342,15 +344,15 @@ public class CertificateGenerator {
     private static GeneralName toGeneralName(String san) {
         if (isIpAddress(san)) {
             try {
-                // Strip brackets from IPv6 if present (e.g. [::1] → ::1)
-                String raw = san.startsWith("[") && san.endsWith("]")
-                        ? san.substring(1, san.length() - 1)
-                        : san;
+                String raw = stripBrackets(san);
                 byte[] addr = InetAddress.getByName(raw).getAddress();
                 return new GeneralName(GeneralName.iPAddress,
                         new org.bouncycastle.asn1.DEROctetString(addr));
             } catch (Exception e) {
-                // Fallback to DNS name if IP parsing fails
+                // Only a malformed IPv6 literal reaches this: IPv4 is range-checked before it
+                // gets here, and a colon-bearing value is never resolved. Emitting it as a DNS
+                // name keeps the name covered; dropping it would silently stop the server
+                // serving that host, which fails a handshake with nothing to point at.
                 LOG.debugv("Could not parse '{0}' as IP address, treating as DNS name", san);
                 return new GeneralName(GeneralName.dNSName, san);
             }
@@ -359,14 +361,28 @@ public class CertificateGenerator {
     }
 
     /**
-     * Checks whether a SAN value looks like an IP address (IPv4 or IPv6).
-     * Wildcard entries (e.g. *.localhost) are never IP addresses.
+     * Whether a SAN value has the shape of an IP address literal. Wildcard entries are never
+     * IP addresses.
+     *
+     * <p>An IPv6 literal is recognised by containing a colon, which no hostname may. That is
+     * what keeps certificate generation off the name service: {@link InetAddress#getByName}
+     * resolves a colon-free name through DNS, so only values already known to be literals are
+     * ever handed to it. A colon-bearing value is parsed as a literal or rejected outright,
+     * never looked up.
      */
     static boolean isIpAddress(String value) {
         if (value == null || value.isBlank() || value.startsWith("*")) {
             return false;
         }
-        return IP_ADDRESS_PATTERN.matcher(value).matches();
+        String raw = stripBrackets(value);
+        return IPV4_PATTERN.matcher(raw).matches() || raw.indexOf(':') >= 0;
+    }
+
+    /** Unwraps the brackets an IPv6 literal may carry, e.g. {@code [::1]} to {@code ::1}. */
+    private static String stripBrackets(String value) {
+        return value.length() > 1 && value.startsWith("[") && value.endsWith("]")
+                ? value.substring(1, value.length() - 1)
+                : value;
     }
 
     /**
