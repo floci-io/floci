@@ -19,11 +19,21 @@ public final class AwsArnUtils {
     public record Arn(String partition, String service, String region, String accountId, String resource) {
 
         /**
-         * Factory for standard AWS ARNs using the {@code aws} partition.
-         * Produces: {@code arn:aws:<service>:<region>:<accountId>:<resource>}
+         * Factory for AWS ARNs, deriving the partition from the region.
+         * Produces: {@code arn:<partition>:<service>:<region>:<accountId>:<resource>}
+         *
+         * <p>A resource in {@code cn-north-1} gets {@code aws-cn}, one in {@code us-gov-west-1}
+         * gets {@code aws-us-gov}, and everything else gets {@code aws}. See
+         * {@link AwsRegions#partitionFor}.
+         *
+         * <p>Global services pass an empty region and therefore keep {@code aws}. That is a known
+         * gap rather than a decision: an IAM ARN in a GovCloud deployment really is
+         * {@code arn:aws-us-gov:iam::…}, but nothing in the region argument can say so. Those call
+         * sites need a partition from the deployment, not from the resource, and they are left
+         * alone until there is one.
          */
         public static Arn of(String service, String region, String accountId, String resource) {
-            return new Arn("aws", service, region, accountId, resource);
+            return new Arn(AwsRegions.partitionFor(region), service, region, accountId, resource);
         }
 
         @Override
