@@ -479,4 +479,115 @@ class BatchCfnProvisionerTest {
         assertTrue(provisioner.hasReplacementUpdate(r), "a changed name replaces the definition");
         assertEquals(JD_ARN, provisioner.updateCleanupPhysicalId(r));
     }
+
+    private ObjectNode detail(String key, String arn, java.util.Map<String, Object> fields) {
+        ObjectNode out = mapper.createObjectNode();
+        ObjectNode item = out.putArray(key).addObject();
+        item.put("arn", arn);
+        fields.forEach((k, v) -> {
+            if (v instanceof Integer i) {
+                item.put(k, i);
+            } else {
+                item.put(k, String.valueOf(v));
+            }
+        });
+        return out;
+    }
+
+    // ── update rollback ──────────────────────────────────────────────────────
+
+    @Test
+    void rollingBackAnInPlaceComputeEnvironmentUpdateRestoresWhatItFound() {
+        // Without this the resource fell to "Rollback is not implemented", which drives the whole
+        // stack to UPDATE_ROLLBACK_FAILED and leaves the environment on the failed update's values.
+        when(batch.describeComputeEnvironments(any())).thenReturn(
+                detail("computeEnvironments", CE_ARN,
+                        java.util.Map.of("state", "ENABLED", "serviceRole", "role-before")));
+        StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
+        r.getAttributes().put("ComputeEnvironmentName", "envy");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("ComputeEnvironmentName", "envy");
+        props.put("Type", "MANAGED");
+        props.put("State", "DISABLED");
+        props.put("ServiceRole", "role-after");
+        provisioner.provision(r, props, updateCtx(CE_ARN));
+
+        assertTrue(provisioner.rollbackUpdate(r), "an in-place update is restorable from the snapshot");
+
+        ArgumentCaptor<JsonNode> calls = ArgumentCaptor.forClass(JsonNode.class);
+        verify(batch, org.mockito.Mockito.times(2)).updateComputeEnvironment(calls.capture());
+        JsonNode restore = calls.getAllValues().get(1);
+        assertEquals(CE_ARN, restore.path("computeEnvironment").asText());
+        assertEquals("ENABLED", restore.path("state").asText(), "the state it was found with");
+        assertEquals("role-before", restore.path("serviceRole").asText());
+    }
+
+    @Test
+    void rollingBackAnInPlaceJobQueueUpdateRestoresPriorityAndState() {
+        when(batch.describeJobQueues(any())).thenReturn(
+                detail("jobQueues", JQ_ARN, java.util.Map.of("state", "ENABLED", "priority", 3)));
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        r.getAttributes().put("JobQueueName", "queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "9");
+        props.put("State", "DISABLED");
+        provisioner.provision(r, props, updateCtx(JQ_ARN));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<JsonNode> calls = ArgumentCaptor.forClass(JsonNode.class);
+        verify(batch, org.mockito.Mockito.times(2)).updateJobQueue(calls.capture());
+        JsonNode restore = calls.getAllValues().get(1);
+        assertEquals(3, restore.path("priority").asInt(), "the priority it was found with");
+        assertEquals("ENABLED", restore.path("state").asText());
+    }
+
+    @Test
+    void rollingBackAJobDefinitionRevisionDeregistersTheOneTheUpdateRegistered() {
+        when(batch.registerJobDefinition(any(), anyString()))
+                .thenReturn(mapper.createObjectNode().put("jobDefinitionArn", JD_ARN + "-r2"));
+        when(batch.describeJobDefinitions(any()))
+                .thenReturn(describeWith("jobDefinitions", JD_ARN + "-r2"));
+        StackResource r = resource("AWS::Batch::JobDefinition", "Definition");
+        r.getAttributes().put("JobDefinitionName", "my-stack-Definition-ab12cd");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobDefinitionName", "my-stack-Definition-ab12cd");
+        props.put("Type", "container");
+        provisioner.provision(r, props, updateCtx(JD_ARN));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<JsonNode> deregistered = ArgumentCaptor.forClass(JsonNode.class);
+        verify(batch).deregisterJobDefinition(deregistered.capture());
+        assertEquals(JD_ARN + "-r2", deregistered.getValue().path("jobDefinition").asText(),
+                "the revision the failed update registered, not the one it started from");
+        assertEquals(JD_ARN, r.getPhysicalId(), "the resource names the prior revision again");
+    }
+
+    @Test
+    void aResourceThisUpdateNeverTouchedReportsItCannotBeRolledBack() {
+        // Answering true here would claim a restore that never happened. False is the honest
+        // answer and is what makes the engine report the resource accurately.
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void clearingTheUpdateDropsTheSnapshot() {
+        when(batch.describeJobQueues(any())).thenReturn(
+                detail("jobQueues", JQ_ARN, java.util.Map.of("state", "ENABLED", "priority", 3)));
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        r.getAttributes().put("JobQueueName", "queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "9");
+        provisioner.provision(r, props, updateCtx(JQ_ARN));
+
+        provisioner.clearUpdate(r);
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.BATCH_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r), "a spent snapshot cannot be replayed");
+    }
 }

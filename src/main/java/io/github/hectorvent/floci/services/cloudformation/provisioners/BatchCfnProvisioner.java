@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -28,6 +30,10 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
 
     private static final int NAME_MAX_LENGTH = 128;
 
+    // Held rather than injected: AGENTS.md has a provisioner inject only the service it wraps, and
+    // the snapshot below needs nothing the configured mapper adds.
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final BatchService batchService;
 
     @Inject
@@ -44,6 +50,8 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.BATCH_UPDATE_SNAPSHOT_ATTR);
         // Taken before the arms run: they overwrite the recorded name, and the prior-entity check
         // reads it, so a decision made afterwards would compare the new name against itself.
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
@@ -78,7 +86,110 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.BATCH_UPDATE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
+    }
+
+    /**
+     * Undoes a Batch update when a later resource fails the same stack update. A replacement is
+     * undone through the cleanup record, which points the resource back at the prior entity and
+     * deletes the one this update created. Otherwise the update was in place, and the snapshot
+     * taken before the mutating call is replayed through the same update call that changed it.
+     *
+     * <p>The snapshot is spent only once the restore succeeded: a restore that throws leaves it in
+     * place for the next attempt rather than reporting a rollback that never happened. A resource
+     * this update never touched carries no snapshot and answers false, so the engine keeps
+     * reporting honestly instead of claiming a rollback it did not perform.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        String raw = resource.getAttributes().get(CfnRollback.BATCH_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null || raw.isBlank()) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException unreadableSnapshot) {
+            throw new IllegalStateException("Could not read the Batch update snapshot for "
+                    + resource.getLogicalId(), unreadableSnapshot);
+        }
+        restoreSnapshot(resource, snapshot);
+        resource.getAttributes().remove(CfnRollback.BATCH_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    private void restoreSnapshot(StackResource resource, JsonNode snapshot) {
+        String priorId = snapshot.path("physicalId").asText(null);
+        switch (snapshot.path("type").asText("")) {
+            case "AWS::Batch::ComputeEnvironment" -> {
+                ObjectNode update = JsonNodeFactory.instance.objectNode();
+                update.put("computeEnvironment", priorId);
+                copySnapshotted(update, snapshot, "state", "serviceRole", "computeResources");
+                batchService.updateComputeEnvironment(update);
+            }
+            case "AWS::Batch::JobQueue" -> {
+                ObjectNode update = JsonNodeFactory.instance.objectNode();
+                update.put("jobQueue", priorId);
+                copySnapshotted(update, snapshot, "state", "priority", "computeEnvironmentOrder");
+                batchService.updateJobQueue(update);
+            }
+            case "AWS::Batch::JobDefinition" -> {
+                // A revision bump leaves the prior revision ACTIVE, as on AWS, so rolling back is
+                // deregistering the revision this update registered and naming the prior one again.
+                String registered = resource.getPhysicalId();
+                if (registered != null && !registered.equals(priorId)) {
+                    deregisterJobDefinition(registered);
+                }
+                resource.setPhysicalId(priorId);
+                resource.getAttributes().put("Arn", priorId);
+                resource.getAttributes().put("JobDefinitionArn", priorId);
+            }
+            default -> throw new IllegalStateException(
+                    "Unreadable Batch update snapshot on " + resource.getLogicalId());
+        }
+    }
+
+    private static void copySnapshotted(ObjectNode into, JsonNode snapshot, String... fields) {
+        for (String field : fields) {
+            if (snapshot.has(field) && !snapshot.get(field).isNull()) {
+                into.set(field, snapshot.get(field));
+            }
+        }
+    }
+
+    /**
+     * Records what the entity looks like now, before the update call about to change it. The
+     * describe is the only source: the template holds the desired state, not the current one.
+     *
+     * <p>Best effort by design. An entity the describe cannot find leaves no snapshot, and
+     * {@code rollbackUpdate} then answers false rather than restoring a guess, which is the honest
+     * answer: the engine reports the resource as not rolled back instead of claiming a restore
+     * that never had anything to restore from. Failing the update here would be worse, since it
+     * would break a working update over missing rollback insurance.
+     */
+    private void snapshotBeforeUpdate(StackResource r, String type, String physicalId,
+                                      String requestKey, Function<ObjectNode, ObjectNode> describe,
+                                      String... fields) {
+        ObjectNode req = JsonNodeFactory.instance.objectNode();
+        req.putArray(requestKey).add(physicalId);
+        ObjectNode described = describe.apply(req);
+        if (described == null) {
+            return;
+        }
+        JsonNode found = described.path(requestKey);
+        if (found.isEmpty()) {
+            return;
+        }
+        JsonNode current = found.get(0);
+        ObjectNode snapshot = JsonNodeFactory.instance.objectNode();
+        snapshot.put("type", type);
+        snapshot.put("physicalId", physicalId);
+        copySnapshotted(snapshot, current, fields);
+        r.getAttributes().put(CfnRollback.BATCH_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
     /**
@@ -166,6 +277,9 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             // UpdateComputeEnvironment is the schema's update handler and takes only these three;
             // ComputeEnvironmentName, Type and Tags are createOnly, so a change to those is a
             // replacement the engine drives, not something to push through here.
+            snapshotBeforeUpdate(r, "AWS::Batch::ComputeEnvironment", ctx.priorPhysicalId(),
+                    "computeEnvironments", req -> batchService.describeComputeEnvironments(req),
+                    "state", "serviceRole", "computeResources");
             ObjectNode update = JsonNodeFactory.instance.objectNode();
             update.put("computeEnvironment", ctx.priorPhysicalId());
             putResolvedText(update, "state", props, "State", ctx);
@@ -203,6 +317,9 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         if (reusesPriorEntity(r, ctx, name, "JobQueueName")) {
             // UpdateJobQueue is the schema's update handler; JobQueueName and JobQueueType are
             // createOnly, so only these three are pushed through.
+            snapshotBeforeUpdate(r, "AWS::Batch::JobQueue", ctx.priorPhysicalId(),
+                    "jobQueues", req -> batchService.describeJobQueues(req),
+                    "state", "priority", "computeEnvironmentOrder");
             ObjectNode update = JsonNodeFactory.instance.objectNode();
             update.put("jobQueue", ctx.priorPhysicalId());
             putResolvedText(update, "state", props, "State", ctx);
@@ -259,6 +376,7 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         }
         putTags(req, props, ctx);
 
+        String priorArn = ctx.isUpdate() ? ctx.priorPhysicalId() : null;
         ObjectNode response = batchService.registerJobDefinition(req, ctx.region());
         String arn = response.path("jobDefinitionArn").asText();
         r.setPhysicalId(arn);
@@ -272,6 +390,13 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             // AWS: registering revision 2 does not retire revision 1, which a job may still name.
             // Recording it as displaced would have the cleanup deregister a live revision. Only a
             // changed name replaces the entity, which is the branch below.
+            //
+            // Rolling one back is still possible, and is the snapshot's job: deregister the
+            // revision this update registered and name the prior one again.
+            ObjectNode snapshot = JsonNodeFactory.instance.objectNode();
+            snapshot.put("type", "AWS::Batch::JobDefinition");
+            snapshot.put("physicalId", priorArn);
+            r.getAttributes().put(CfnRollback.BATCH_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
             return;
         }
         ReplacementCleanup.record(r, ctx, attributesBefore);

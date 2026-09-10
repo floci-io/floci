@@ -299,6 +299,101 @@ class CloudFormationBatchIntegrationTest {
             .body("computeEnvironments", hasSize(0));
     }
 
+    /**
+     * A failed stack update puts an in-place Batch change back. Without {@code rollbackUpdate} the
+     * queue fell to "Rollback is not implemented for AWS::Batch::JobQueue", which drives the whole
+     * stack to UPDATE_ROLLBACK_FAILED and leaves the queue on the failed update's priority. The
+     * status assertion is the one that proves the hook is reached: the unit tests can show the
+     * provisioner restores, only this shows the engine asks it to.
+     */
+    @Test
+    void aFailedUpdateRollsBackAnInPlaceJobQueueChange() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String computeName = "cfn-batch-rb-ce-" + suffix;
+        String queueName = "cfn-batch-rb-queue-" + suffix;
+        String stackName = "cfn-batch-rb-stack-" + suffix;
+
+        createStack(stackName, queueTemplate(computeName, queueName, 5, false));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        assertQueuePriority(queueName, 5);
+
+        // The nested stack has no TemplateURL so it cannot provision, and it depends on the queue,
+        // so the queue's in-place update commits first and the failure lands after it.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", queueTemplate(computeName, queueName, 9, true))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+        assertQueuePriority(queueName, 5);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static void createStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static String queueTemplate(String computeName, String queueName, int priority,
+                                        boolean withFailingResource) {
+        return "{\"Resources\":{"
+                + "\"Compute\":{\"Type\":\"AWS::Batch::ComputeEnvironment\",\"Properties\":{"
+                + "\"ComputeEnvironmentName\":\"" + computeName + "\",\"Type\":\"MANAGED\","
+                + "\"ComputeResources\":{\"Type\":\"FARGATE\",\"MaxvCpus\":4,"
+                + "\"Subnets\":[\"subnet-local\"],\"SecurityGroupIds\":[\"sg-local\"]}}},"
+                + "\"Queue\":{\"Type\":\"AWS::Batch::JobQueue\",\"Properties\":{"
+                + "\"JobQueueName\":\"" + queueName + "\",\"Priority\":" + priority + ","
+                + "\"ComputeEnvironmentOrder\":[{\"Order\":1,"
+                + "\"ComputeEnvironment\":{\"Ref\":\"Compute\"}}]}}"
+                + (withFailingResource
+                        ? ",\"Nested\":{\"Type\":\"AWS::CloudFormation::Stack\","
+                          + "\"DependsOn\":\"Queue\",\"Properties\":{}}"
+                        : "")
+                + "}}";
+    }
+
+    private static void assertQueuePriority(String queueName, int priority) {
+        givenBatchJson("{\"jobQueues\":[\"%s\"]}".formatted(queueName))
+        .when()
+            .post("/v1/describejobqueues")
+        .then()
+            .statusCode(200)
+            .body("jobQueues", hasSize(1))
+            .body("jobQueues[0].priority", equalTo(priority));
+    }
+
+    private static void assertStackStatus(String stackName, String status) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>" + status + "</StackStatus>"));
+    }
+
     private static io.restassured.specification.RequestSpecification givenBatchJson(String body) {
         return given()
                 .header("Authorization", BATCH_AUTH)
