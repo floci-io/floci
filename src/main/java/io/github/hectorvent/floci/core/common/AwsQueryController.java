@@ -171,7 +171,7 @@ public class AwsQueryController {
             "DescribeAddressesAttribute",
             "DescribeIamInstanceProfileAssociations",
             "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
-            "DescribeInstanceTypes", "DescribeInstanceTypeOfferings",
+            "DescribeInstanceTypes", "DescribeInstanceTypeOfferings", "DescribeSpotPriceHistory",
             "CreateLaunchTemplate", "CreateLaunchTemplateVersion", "DescribeLaunchTemplates", "DescribeLaunchTemplateVersions",
             "ModifyLaunchTemplate", "DeleteLaunchTemplate",
             "DescribeNetworkInterfaces",
