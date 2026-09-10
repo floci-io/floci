@@ -93,6 +93,7 @@ Two behaviors are worth knowing because they differ from the conversion block ab
 
 - The transformation is not applied. A transform function is never invoked, so records reach the destination exactly as they were put, which is what makes a local test of one pass where AWS would not.
 - Two checks AWS itself does not make are deliberately absent: `NumberOfRetries` is not range-checked, despite the documented 1 to 8, and the function a `LambdaArn` names is not required to exist.
+- A null entry in `Processors` or `Parameters`, which a raw JSON client can send, is ignored rather than reported. Real AWS answers `InternalFailure` there, a fault of its own that is not worth reproducing; skipping the entry leaves the same configuration as omitting it would.
 
 ## S3 object keys
 

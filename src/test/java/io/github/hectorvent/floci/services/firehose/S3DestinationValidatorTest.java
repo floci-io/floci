@@ -132,6 +132,24 @@ class S3DestinationValidatorTest {
                 + " must satisfy regular expression pattern: ^(?!\\s*$).+", error.getMessage());
     }
 
+    // Probed: real AWS answers InternalFailure for a null list member. Reproducing a
+    // fault of its own helps nobody, and skipping the entry leaves the configuration
+    // the caller would have had by omitting it.
+    @Test
+    void aNullListMemberIsIgnoredRatherThanReported() {
+        Processor processor = new Processor();
+        processor.setType("Lambda");
+        processor.setParameters(java.util.Arrays.asList(namedParameter("LambdaArn", "value"), null));
+        ProcessingConfiguration processing = new ProcessingConfiguration();
+        processing.setEnabled(true);
+        processing.setProcessors(java.util.Arrays.asList(processor, null));
+        S3Destination config = new S3Destination();
+        config.setProcessingConfiguration(processing);
+
+        assertDoesNotThrow(() -> S3DestinationValidator.validateWireShape(
+                config, "extendedS3DestinationConfiguration"));
+    }
+
     @Test
     void aKnownProcessorAndParameterPass() {
         assertDoesNotThrow(() -> S3DestinationValidator.validateWireShape(
