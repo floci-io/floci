@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-class DynamoDbKeySizeTest {
+class DynamoDbKeySizeServiceTest {
 
     private static final String REGION = "us-east-1";
     private DynamoDbService service;
