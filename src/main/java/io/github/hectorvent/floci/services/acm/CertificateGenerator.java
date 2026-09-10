@@ -350,7 +350,8 @@ public class CertificateGenerator {
                         new org.bouncycastle.asn1.DEROctetString(addr));
             } catch (Exception e) {
                 // Only a malformed IPv6 literal reaches this: IPv4 is range-checked before it
-                // gets here, and a colon-bearing value is never resolved. Emitting it as a DNS
+                // gets here, and a value only arrives with a colon and a literal-shaped first
+                // character, which the JDK rejects outright rather than resolving. Emitting it as a DNS
                 // name keeps the name covered; dropping it would silently stop the server
                 // serving that host, which fails a handshake with nothing to point at.
                 LOG.debugv("Could not parse '{0}' as IP address, treating as DNS name", san);
@@ -364,18 +365,46 @@ public class CertificateGenerator {
      * Whether a SAN value has the shape of an IP address literal. Wildcard entries are never
      * IP addresses.
      *
-     * <p>An IPv6 literal is recognised by containing a colon, which no hostname may. That is
-     * what keeps certificate generation off the name service: {@link InetAddress#getByName}
-     * resolves a colon-free name through DNS, so only values already known to be literals are
-     * ever handed to it. A colon-bearing value is parsed as a literal or rejected outright,
-     * never looked up.
+     * <p>This has to match the set {@link InetAddress#getByName} parses as a literal rather than
+     * resolving, because anything outside that set is sent to the name service, and certificate
+     * generation must not make network calls. That set is narrower than "contains a colon":
+     * {@code getAllByName} only attempts a literal parse when the <em>first</em> character is an
+     * ASCII hex digit or a colon, and otherwise resolves. So {@code z:1} holds a colon and is
+     * still looked up.
+     *
+     * <p>Both halves of the colon test are load-bearing. Inside the JDK's literal branch a failed
+     * IPv6 parse only throws when the value contains a colon; without one it falls through to a
+     * lookup. So the value must both contain a colon and begin like a literal for the parse to be
+     * guaranteed to fail closed.
      */
     static boolean isIpAddress(String value) {
         if (value == null || value.isBlank() || value.startsWith("*")) {
             return false;
         }
         String raw = stripBrackets(value);
-        return IPV4_PATTERN.matcher(raw).matches() || raw.indexOf(':') >= 0;
+        return IPV4_PATTERN.matcher(raw).matches()
+                || (raw.indexOf(':') >= 0 && startsLikeAnIpLiteral(raw.charAt(0)));
+    }
+
+    /**
+     * The JDK's own leading-character test for "try to parse this as a literal", spelled out
+     * rather than delegated.
+     *
+     * <p>Deliberately not {@code Character.digit(c, 16)}. {@code IPAddressUtil.digit} resolves to
+     * an ASCII-only parser unless {@code jdk.net.allowAmbiguousIPAddressLiterals} is set, and its
+     * own comment gives the accepted set as {@code [0-9,A-F,a-f]}. {@code Character.digit} is
+     * wider: it answers 1 for the Arabic-Indic digit one, so a value like {@code \u0661:1} would
+     * pass this check, be handed to the resolver, and be looked up after the JDK declined to read
+     * it as a literal.
+     *
+     * <p>Being stricter than the JDK is safe in both directions. If that property ever is set,
+     * this check simply routes the value to the dNSName fallback instead of the resolver.
+     */
+    private static boolean startsLikeAnIpLiteral(char first) {
+        return first == ':'
+                || (first >= '0' && first <= '9')
+                || (first >= 'a' && first <= 'f')
+                || (first >= 'A' && first <= 'F');
     }
 
     /** Unwraps the brackets an IPv6 literal may carry, e.g. {@code [::1]} to {@code ::1}. */

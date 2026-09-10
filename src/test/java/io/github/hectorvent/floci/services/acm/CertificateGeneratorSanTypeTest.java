@@ -233,4 +233,43 @@ class CertificateGeneratorSanTypeTest {
         assertFalse(CertificateGenerator.isIpAddress(""));
         assertFalse(CertificateGenerator.isIpAddress("   "));
     }
+
+    /**
+     * A colon somewhere is not enough to make a value a literal, and treating it as one puts the
+     * resolver back in the certificate path.
+     *
+     * <p>{@code InetAddress.getAllByName} only attempts a literal parse when the first character
+     * is an ASCII hex digit or a colon; everything else it resolves. Measured on JDK 25,
+     * {@code getByName("z:1")} takes tens of milliseconds and fails with the resolver's
+     * "nodename nor servname provided", while {@code getByName("fffff::1")} fails in under a
+     * millisecond with "invalid IPv6 address literal". Only the second never left the JVM.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"z:1", "host:8080", "xyz::1", "-:1", "_:1", "g::1"})
+    void isIpAddress_colonButNotLiteralShaped_staysADnsName(String value) {
+        assertFalse(CertificateGenerator.isIpAddress(value),
+                value + " starts with a character the JDK will not read as a literal, so calling it "
+                        + "an IP address would send it to the name service");
+    }
+
+    /**
+     * The shape a {@code Character.digit(c, 16)} implementation would let through.
+     *
+     * <p>{@code IPAddressUtil.digit} is ASCII-only by default and its own comment gives the set as
+     * [0-9,A-F,a-f], but {@code Character.digit} answers 1 for the Arabic-Indic digit one. Writing
+     * the leading-character test the convenient way would classify this as a literal, hand it to
+     * the resolver, and have the JDK decline to parse it and look it up instead.
+     */
+    @Test
+    void isIpAddress_nonAsciiDigitLeadingColonValue_staysADnsName() {
+        assertFalse(CertificateGenerator.isIpAddress("\u0661:1"),
+                "a non-ASCII digit is not one of [0-9,A-F,a-f], so the JDK would resolve this");
+    }
+
+    /** Literal-shaped leading characters still count, including uppercase hex and a bare colon. */
+    @ParameterizedTest
+    @ValueSource(strings = {"::1", "FE80::1", "fe80::1", "0::1", "9:1", "A::1", "f::1"})
+    void isIpAddress_literalShapedLeadingCharacter_isStillAnIpAddress(String value) {
+        assertTrue(CertificateGenerator.isIpAddress(value), value + " should be detected as IP");
+    }
 }
