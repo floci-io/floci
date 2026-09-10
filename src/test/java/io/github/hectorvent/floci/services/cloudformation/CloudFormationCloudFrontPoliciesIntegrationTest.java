@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -275,14 +276,18 @@ class CloudFormationCloudFrontPoliciesIntegrationTest {
             .atMost(STACK_DELETE_TIMEOUT)
             .pollInterval(STACK_DELETE_POLL_INTERVAL)
             .untilAsserted(() -> {
-                given()
+                Response response = given()
                     .contentType("application/x-www-form-urlencoded")
                     .header("Authorization", CFN_AUTH)
                     .formParam("Action", "DescribeStacks")
                     .formParam("StackName", stackName)
                 .when()
-                    .post("/")
-                .then()
+                    .post("/");
+                if (response.statusCode() == 200
+                        && response.asString().contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
+                    fail("Stack deletion failed: " + response.asString());
+                }
+                response.then()
                     .statusCode(400)
                     .body(containsString("Stack with id " + stackName + " does not exist"));
             });
