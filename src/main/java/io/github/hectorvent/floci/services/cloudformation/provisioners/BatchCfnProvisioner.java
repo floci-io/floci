@@ -102,6 +102,25 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
      * place for the next attempt rather than reporting a rollback that never happened. A resource
      * this update never touched carries no snapshot and answers false, so the engine keeps
      * reporting honestly instead of claiming a rollback it did not perform.
+     *
+     * <p><strong>Known limitation, compute environments only.</strong> The restore is exact for
+     * every value the environment already carried, and cannot remove one the failed update
+     * introduced. A {@code serviceRole}, or a {@code computeResources} key, that was absent before
+     * the update is absent from the snapshot too, so the restore call simply omits it, and
+     * UpdateComputeEnvironment leaves an omitted field alone and merges {@code computeResources}
+     * rather than replacing it. The value therefore survives a rollback the stack reports as
+     * successful.
+     *
+     * <p>This is not a gap that can be closed here. UpdateComputeEnvironment is the only way to
+     * put the environment back, and its request shape has no removal: every member other than
+     * {@code computeEnvironment} is an optional set-value, and the partial-merge semantics are
+     * AWS's own. Recorded rather than worked around, in the way
+     * {@code CognitoCfnProvisioner} records its own in-place rollback limitation, and pinned by
+     * {@code BatchCfnProvisionerTest.aRollbackCannotRemoveAValueTheFailedUpdateAdded}.
+     *
+     * <p>Job queues are not affected: {@code updateJobQueue} assigns
+     * {@code computeEnvironmentOrder} wholesale rather than merging it, and {@code state} and
+     * {@code priority} are always present, so that restore is exact.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {

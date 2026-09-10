@@ -522,6 +522,47 @@ class BatchCfnProvisionerTest {
         assertEquals("role-before", restore.path("serviceRole").asText());
     }
 
+    /**
+     * Pins a known limitation rather than a fix, the way
+     * {@code CognitoCfnProvisionerTest.anInPlaceUserPoolClientUpdateCannotBeRolledBack} pins
+     * Cognito's. The snapshot records what the describe returned, so a field that was absent
+     * before the update is absent from the snapshot and omitted from the restore call, and
+     * UpdateComputeEnvironment leaves an omitted field alone. The value the failed update added
+     * therefore survives.
+     *
+     * <p>Asserting the survivor explicitly, rather than just that the rollback returned true, is
+     * what makes this test useful: it goes red if the merge semantics ever change without the
+     * disclosure on {@code rollbackUpdate} changing with them.
+     */
+    @Test
+    void aRollbackCannotRemoveAValueTheFailedUpdateAdded() {
+        // No serviceRole before the update: the environment simply does not carry one.
+        when(batch.describeComputeEnvironments(any())).thenReturn(
+                detail("computeEnvironments", CE_ARN, java.util.Map.of("state", "ENABLED")));
+        StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
+        r.getAttributes().put("ComputeEnvironmentName", "envy");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("ComputeEnvironmentName", "envy");
+        props.put("Type", "MANAGED");
+        props.put("State", "DISABLED");
+        props.put("ServiceRole", "role-the-update-added");
+        provisioner.provision(r, props, updateCtx(CE_ARN));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<JsonNode> calls = ArgumentCaptor.forClass(JsonNode.class);
+        verify(batch, org.mockito.Mockito.times(2)).updateComputeEnvironment(calls.capture());
+        JsonNode failedUpdate = calls.getAllValues().get(0);
+        JsonNode restore = calls.getAllValues().get(1);
+
+        assertEquals("role-the-update-added", failedUpdate.path("serviceRole").asText(),
+                "the failed update did set a serviceRole");
+        assertEquals("ENABLED", restore.path("state").asText(),
+                "a value the environment already carried is restored exactly");
+        assertFalse(restore.has("serviceRole"),
+                "the restore cannot ask for a serviceRole it never saw, so the added one survives");
+    }
+
     @Test
     void rollingBackAnInPlaceJobQueueUpdateRestoresPriorityAndState() {
         when(batch.describeJobQueues(any())).thenReturn(
