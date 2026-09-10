@@ -3013,7 +3013,7 @@ public class AslExecutor {
         }
         String path = stateDef.get("InputPath").asText();
         if (path == null || path.equals("null")) {
-            return NullNode.getInstance();
+            return objectMapper.createObjectNode();
         }
         return resolvePath(path, input);
     }
@@ -3038,7 +3038,7 @@ public class AslExecutor {
         }
         String path = stateDef.get("OutputPath").asText();
         if (path == null || path.equals("null")) {
-            return NullNode.getInstance();
+            return objectMapper.createObjectNode();
         }
         return resolvePath(path, output);
     }

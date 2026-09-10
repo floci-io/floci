@@ -133,6 +133,39 @@ class AslExecutorStatePathTest {
     }
 
     @Test
+    void passInputPathNullDiscardsInputAsEmptyObject() throws Exception {
+        assertOutput("""
+                {"StartAt":"Pass","States":{
+                  "Pass":{"Type":"Pass","InputPath":null,"End":true}}}
+                """,
+                "{\"discarded\":true}",
+                "{}");
+    }
+
+    @Test
+    void passOutputPathNullDiscardsOutputAsEmptyObject() throws Exception {
+        assertOutput("""
+                {"StartAt":"Pass","States":{
+                  "Pass":{"Type":"Pass","OutputPath":null,"End":true}}}
+                """,
+                "{\"discarded\":true}",
+                "{}");
+    }
+
+    @Test
+    void mapIteratorOutputPathNullProducesEmptyObjects() throws Exception {
+        assertOutput("""
+                {"StartAt":"Each","States":{
+                  "Each":{"Type":"Map","ItemsPath":"$.ids","MaxConcurrency":1,
+                    "Iterator":{"StartAt":"Pass","States":{
+                      "Pass":{"Type":"Pass","OutputPath":null,"End":true}}},
+                    "End":true}}}
+                """,
+                "{\"ids\":[1,2]}",
+                "[{},{}]");
+    }
+
+    @Test
     void parallelInputPathFeedsBranchesAndResultPathStillMergesIntoOriginalInput() throws Exception {
         assertOutput("""
                 {"StartAt":"Parallel","States":{
