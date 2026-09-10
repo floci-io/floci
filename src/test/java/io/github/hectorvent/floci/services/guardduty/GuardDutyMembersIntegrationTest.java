@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.guardduty;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -11,9 +12,29 @@ import static org.hamcrest.Matchers.hasSize;
 
 @QuarkusTest
 class GuardDutyMembersIntegrationTest {
+    private boolean enabledOrganizationAdmin;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    /**
+     * GuardDuty's organization admin accounts are shared by every test in the JVM, and Macie
+     * answers the same {@code /admin} route, so an admin left behind here makes
+     * {@code MacieOrganizationIntegrationTest.sharedAdminRouteKeepsGuardDutyBehavior} see one
+     * where it expects none. The flag keeps the teardown to the test that enabled it, so a
+     * single-method run of this class still works.
+     */
+    @AfterEach
+    void disableTheOrganizationAdminThisTestEnabled() {
+        if (enabledOrganizationAdmin) {
+            given().contentType("application/json")
+                    .header("Authorization", auth("444444444444"))
+                    .body("{\"adminAccountId\":\"444444444444\"}")
+                    .post("/admin/disable")
+                    .then().statusCode(200);
+        }
     }
 
     @Test
@@ -49,6 +70,7 @@ class GuardDutyMembersIntegrationTest {
                 .body("{\"adminAccountId\":\"444444444444\"}")
                 .post("/admin/enable")
                 .then().statusCode(200);
+        enabledOrganizationAdmin = true;
 
         String detectorId = createDetector("444444444444");
 
