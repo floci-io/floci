@@ -31,6 +31,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * <p>Both fields are resolved through the same reference-path resolver a {@code ".$"} payload
  * template field uses, so an unresolvable path fails with {@code States.Runtime}, matching the
  * precedent set for issue #2521 in {@link AslExecutorUnresolvableJsonPathTest}.
+ *
+ * <p>The fixture supplies all service handlers required by the production executor, including
+ * the SNS handler introduced by the Step Functions SNS integration.
  */
 @QuarkusTest
 class AslExecutorFailStateErrorCauseTest {
