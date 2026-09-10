@@ -925,6 +925,27 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void scanRejectsTotalSegmentsBelowOne() {
+        var ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Segment": 0, "TotalSegments": 0}
+                """));
+        assertEquals("1 validation error detected: Value '0' at 'totalSegments' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsTotalSegmentsBeforeSegmentWhenBothAreOutOfRange() {
+        var ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Segment": -1, "TotalSegments": 0}
+                """));
+        assertEquals("2 validation errors detected: "
+                + "Value '0' at 'totalSegments' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 1; "
+                + "Value '-1' at 'segment' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 0", ex.getMessage());
+    }
+
+    @Test
     void scanAcceptsSegmentsAtTheBounds() throws Exception {
         createUsersTable("eu-west-1");
 

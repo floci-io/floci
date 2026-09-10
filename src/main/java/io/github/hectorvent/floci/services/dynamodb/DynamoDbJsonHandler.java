@@ -1041,10 +1041,6 @@ public class DynamoDbJsonHandler {
         }
 
         var segmentErrors = new ArrayList<String>();
-        if (segment != null && segment < 0) {
-            segmentErrors.add("Value '" + segment + "' at 'segment' failed to satisfy constraint: "
-                    + "Member must have value greater than or equal to 0");
-        }
         if (totalSegments != null) {
             if (totalSegments < 1) {
                 segmentErrors.add("Value '" + totalSegments + "' at 'totalSegments' failed to satisfy constraint: "
@@ -1054,6 +1050,10 @@ public class DynamoDbJsonHandler {
                 segmentErrors.add("Value '" + totalSegments + "' at 'totalSegments' failed to satisfy constraint: "
                         + "Member must have value less than or equal to " + MAX_TOTAL_SEGMENTS);
             }
+        }
+        if (segment != null && segment < 0) {
+            segmentErrors.add("Value '" + segment + "' at 'segment' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 0");
         }
         if (!segmentErrors.isEmpty()) {
             var n = segmentErrors.size();
