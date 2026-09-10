@@ -83,6 +83,7 @@ public class FirehoseParquetConverter {
     private static final BigDecimal EPOCH_MILLIS_FLOOR = new BigDecimal("1000000000000");
     private static final BigDecimal MAX_TIMESTAMP_MILLIS = BigDecimal.valueOf(Long.MAX_VALUE / 1000);
     private static final int MAX_TIMESTAMP_DIGITS = String.valueOf(Long.MAX_VALUE / 1000).length();
+    private static final int MAX_BUFFER_HINT = 8 * 1024 * 1024;
     // Probed: AWS reads a space-separated timestamp leniently, one-digit month, day,
     // hour, minute and second included, and a date column the same way, while its
     // 'T' form is the strict ISO one and rejects "2026-9-7T12:00:02Z".
@@ -348,7 +349,7 @@ public class FirehoseParquetConverter {
 
         // Straight to bytes: a default converting batch buffers 128 MiB, and going
         // through a StringBuilder and a String would hold two more copies of it.
-        ByteArrayOutputStream ndjson = new ByteArrayOutputStream(rows.size() * 128);
+        ByteArrayOutputStream ndjson = new ByteArrayOutputStream(initialSize(rows.size(), 128));
         for (Map<String, Object> row : rows) {
             ndjson.write(mapper.writeValueAsBytes(row));
             ndjson.write('\n');
@@ -378,8 +379,9 @@ public class FirehoseParquetConverter {
                     + escapeSqlLiteral("s3://" + stagingBucket + "/" + parquetKey)
                     + "' (FORMAT PARQUET, COMPRESSION " + parquetCompression(parquetSerDe) + ")";
             // The account S3Service itself resolved, so the sidecar reads the staged
-            // NDJSON from, and writes the Parquet to, the same partition: both sides
-            // read one RequestContext with one default, in a request and outside it.
+            // NDJSON from, and writes the Parquet to, the same partition. A scheduled
+            // flush establishes the stream's own account before reaching here, so this
+            // is the owner in that path as much as in a request.
             try {
                 duckClient.execute("SELECT 1 AS ok", setupSql, null, regionResolver.getAccountId());
             } catch (Exception e) {
@@ -447,7 +449,7 @@ public class FirehoseParquetConverter {
                 ? schemaConfig.getVersionId() : "LATEST");
         catalogTable.put("roleArn", schemaConfig.getRoleArn());
 
-        ByteArrayOutputStream body = new ByteArrayOutputStream(failures.size() * 256);
+        ByteArrayOutputStream body = new ByteArrayOutputStream(initialSize(failures.size(), 256));
         for (FailedRecord failure : failures) {
             Map<String, Object> line = new LinkedHashMap<>();
             line.put("attemptsMade", 1);
@@ -481,6 +483,15 @@ public class FirehoseParquetConverter {
     }
 
     /** Escapes a value for embedding inside a DuckDB single-quoted SQL literal. */
+    /**
+     * A sizing hint only, so it is capped: a batch of many small records would
+     * otherwise ask for a multi-gigabyte array, or overflow the product to a
+     * negative int and fail before any record is written.
+     */
+    private static int initialSize(int count, int perEntry) {
+        return (int) Math.min((long) count * perEntry, MAX_BUFFER_HINT);
+    }
+
     private static String escapeSqlLiteral(String raw) {
         return raw.replace("'", "''");
     }
