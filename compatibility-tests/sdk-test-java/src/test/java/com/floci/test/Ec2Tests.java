@@ -278,6 +278,7 @@ class Ec2Tests {
                 .containsExactly("arm64");
     }
 
+    /** Regression coverage for the Karpenter instance-type compatibility contract. */
     @Test
     @Order(7)
     @DisplayName("DescribeInstanceTypes - supported usage classes")
