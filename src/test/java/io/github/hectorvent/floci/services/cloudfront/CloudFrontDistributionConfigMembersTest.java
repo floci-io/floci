@@ -7,7 +7,6 @@ import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
-import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -38,8 +37,11 @@ class CloudFrontDistributionConfigMembersTest {
     private static final String LOGGING_PREFIX =
             "//*[local-name()='Logging']/*[local-name()='Prefix']";
 
-    @Inject
-    CloudFrontService cloudFrontService;
+    private final CloudFrontService cloudFrontService;
+
+    CloudFrontDistributionConfigMembersTest(CloudFrontService cloudFrontService) {
+        this.cloudFrontService = cloudFrontService;
+    }
 
     /** The minimum a caller can legally supply: no Logging element at all. */
     private String createMinimalDistribution(String originId) {
