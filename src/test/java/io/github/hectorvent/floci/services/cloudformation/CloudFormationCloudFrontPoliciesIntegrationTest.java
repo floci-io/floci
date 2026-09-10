@@ -12,11 +12,13 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -34,6 +36,8 @@ class CloudFormationCloudFrontPoliciesIntegrationTest {
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
+    private static final Duration STACK_DELETE_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration STACK_DELETE_POLL_INTERVAL = Duration.ofMillis(50);
 
     @Inject
     CloudFrontService cloudFrontService;
@@ -267,16 +271,21 @@ class CloudFormationCloudFrontPoliciesIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(400)
-            .body(containsString("Stack with id " + stackName + " does not exist"));
+        await()
+            .atMost(STACK_DELETE_TIMEOUT)
+            .pollInterval(STACK_DELETE_POLL_INTERVAL)
+            .untilAsserted(() -> {
+                given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .header("Authorization", CFN_AUTH)
+                    .formParam("Action", "DescribeStacks")
+                    .formParam("StackName", stackName)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(400)
+                    .body(containsString("Stack with id " + stackName + " does not exist"));
+            });
     }
 
     private static String describeStacks(String stackName) {
