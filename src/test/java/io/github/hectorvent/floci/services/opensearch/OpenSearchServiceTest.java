@@ -82,27 +82,20 @@ class OpenSearchServiceTest {
     }
 
     @Test
-    void readinessPollerContinuesAfterOneReadinessFailure() throws InterruptedException {
+    void readinessPollerContinuesAfterOneReadinessFailure() {
         when(domainManager.tryStartDomain(any())).thenReturn(true);
         when(domainManager.isReady(any()))
                 .thenThrow(new RuntimeException("temporary readiness failure"))
                 .thenReturn(true);
 
-        service.init();
-        try {
-            service.createDomain("ready-recovery", "OpenSearch_2.11",
-                    null, null, null, "us-east-1");
+        service.createDomain("ready-recovery", "OpenSearch_2.11",
+                null, null, null, "us-east-1");
 
-            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
-            while (service.describeDomain("ready-recovery").isProcessing()
-                    && System.nanoTime() < deadline) {
-                Thread.sleep(50);
-            }
+        service.pollReadiness();
+        assertTrue(service.describeDomain("ready-recovery").isProcessing());
 
-            assertFalse(service.describeDomain("ready-recovery").isProcessing());
-            verify(domainManager, atLeast(2)).isReady(any());
-        } finally {
-            service.shutdown();
-        }
+        service.pollReadiness();
+        assertFalse(service.describeDomain("ready-recovery").isProcessing());
+        verify(domainManager, atLeast(2)).isReady(any());
     }
 }
