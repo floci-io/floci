@@ -44,13 +44,41 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // Taken before the arms run: they overwrite the recorded name, and the prior-entity check
+        // reads it, so a decision made afterwards would compare the new name against itself.
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
-            case "AWS::Batch::ComputeEnvironment" -> provisionComputeEnvironment(r, props, ctx);
-            case "AWS::Batch::JobQueue" -> provisionJobQueue(r, props, ctx);
-            case "AWS::Batch::JobDefinition" -> provisionJobDefinition(r, props, ctx);
+            case "AWS::Batch::ComputeEnvironment" -> provisionComputeEnvironment(r, props, ctx, attributesBefore);
+            case "AWS::Batch::JobQueue" -> provisionJobQueue(r, props, ctx, attributesBefore);
+            case "AWS::Batch::JobDefinition" -> provisionJobDefinition(r, props, ctx, attributesBefore);
             default -> throw new IllegalStateException(
                     "BatchCfnProvisioner cannot handle " + r.getResourceType());
         }
+    }
+
+    /**
+     * Whether this update replaced the physical entity, so the displaced one is still owed a
+     * delete once the update commits. Without these four hooks a renamed compute environment or
+     * job queue stayed live in Batch forever: the engine was never told a replacement happened.
+     */
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
     }
 
     /**
@@ -128,7 +156,8 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         return !describe.apply(req).path(requestKey).isEmpty();
     }
 
-    private void provisionComputeEnvironment(StackResource r, JsonNode props, ProvisionContext ctx) {
+    private void provisionComputeEnvironment(StackResource r, JsonNode props, ProvisionContext ctx,
+                                             Map<String, String> attributesBefore) {
         String name = stableName(r, ctx, props, "ComputeEnvironmentName");
         require("AWS::Batch::ComputeEnvironment", "Type", ctx.resolveOptional(props, "Type"));
 
@@ -159,9 +188,13 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", arn);
         r.getAttributes().put("ComputeEnvironmentArn", arn);
         r.getAttributes().put("ComputeEnvironmentName", name);
+        // An in-place update kept the prior ARN, so this records nothing; a rename minted a new
+        // one, and the environment it displaced is owed a delete once the update commits.
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
-    private void provisionJobQueue(StackResource r, JsonNode props, ProvisionContext ctx) {
+    private void provisionJobQueue(StackResource r, JsonNode props, ProvisionContext ctx,
+                                   Map<String, String> attributesBefore) {
         String name = stableName(r, ctx, props, "JobQueueName");
         String priority = ctx.resolveOptional(props, "Priority");
         require("AWS::Batch::JobQueue", "Priority", priority);
@@ -191,12 +224,16 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", arn);
         r.getAttributes().put("JobQueueArn", arn);
         r.getAttributes().put("JobQueueName", name);
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
-    private void provisionJobDefinition(StackResource r, JsonNode props, ProvisionContext ctx) {
+    private void provisionJobDefinition(StackResource r, JsonNode props, ProvisionContext ctx,
+                                        Map<String, String> attributesBefore) {
         // No update branch: RegisterJobDefinition on an existing name records a new revision,
         // which is how AWS updates a job definition. Only the name has to stay steady.
         String name = stableName(r, ctx, props, "JobDefinitionName");
+        // Decided before the register call overwrites the recorded name below.
+        boolean sameDefinition = reusesPriorEntity(r, ctx, name, "JobDefinitionName");
         String type = ctx.resolveOptional(props, "Type");
         require("AWS::Batch::JobDefinition", "Type", type);
 
@@ -228,6 +265,16 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", arn);
         r.getAttributes().put("JobDefinitionArn", arn);
         r.getAttributes().put("JobDefinitionName", name);
+
+        if (sameDefinition) {
+            // A revision bump is not a replacement. The registry schema's primaryIdentifier for
+            // this type is JobDefinitionName, not the ARN, and the prior revision stays ACTIVE on
+            // AWS: registering revision 2 does not retire revision 1, which a job may still name.
+            // Recording it as displaced would have the cleanup deregister a live revision. Only a
+            // changed name replaces the entity, which is the branch below.
+            return;
+        }
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     /** The schema's required properties fail the resource with the repo's ValidationError wording. */

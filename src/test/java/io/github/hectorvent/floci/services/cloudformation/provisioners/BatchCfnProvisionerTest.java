@@ -389,4 +389,94 @@ class BatchCfnProvisionerTest {
         verify(batch, never()).describeJobQueues(any());
         verify(batch, never()).deleteJobQueue(any());
     }
+
+    // ── replacement cleanup ──────────────────────────────────────────────────
+
+    @Test
+    void renamingAComputeEnvironmentRecordsTheDisplacedOneForCleanup() {
+        // The leak this closes: the rename created the replacement, but the engine was never told
+        // a replacement happened, so the old environment stayed live in Batch forever.
+        when(batch.createComputeEnvironment(any(), anyString()))
+                .thenReturn(mapper.createObjectNode().put("computeEnvironmentArn", CE_ARN + "-new"));
+        StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
+        r.getAttributes().put("ComputeEnvironmentName", "envy");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("ComputeEnvironmentName", "renamed");
+        props.put("Type", "MANAGED");
+
+        provisioner.provision(r, props, updateCtx(CE_ARN));
+
+        assertTrue(provisioner.hasReplacementUpdate(r), "the engine has to learn a replacement happened");
+        assertEquals(CE_ARN, provisioner.updateCleanupPhysicalId(r), "the displaced environment is owed a delete");
+    }
+
+    @Test
+    void completingTheUpdateDeletesTheDisplacedComputeEnvironment() {
+        when(batch.createComputeEnvironment(any(), anyString()))
+                .thenReturn(mapper.createObjectNode().put("computeEnvironmentArn", CE_ARN + "-new"));
+        when(batch.describeComputeEnvironments(any()))
+                .thenReturn(describeWith("computeEnvironments", CE_ARN));
+        StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
+        r.getAttributes().put("ComputeEnvironmentName", "envy");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("ComputeEnvironmentName", "renamed");
+        props.put("Type", "MANAGED");
+        provisioner.provision(r, props, updateCtx(CE_ARN));
+
+        UpdateCleanupResult result = provisioner.completeUpdate(r);
+
+        assertTrue(result.applicable());
+        assertTrue(result.complete(), "the displaced environment was deleted");
+        ArgumentCaptor<JsonNode> deleted = ArgumentCaptor.forClass(JsonNode.class);
+        verify(batch).deleteComputeEnvironment(deleted.capture());
+        assertEquals(CE_ARN, deleted.getValue().path("computeEnvironment").asText());
+    }
+
+    @Test
+    void anInPlaceUpdateOwesNoReplacementCleanup() {
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        r.getAttributes().put("JobQueueName", "queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "9");
+
+        provisioner.provision(r, props, updateCtx(JQ_ARN));
+
+        assertFalse(provisioner.hasReplacementUpdate(r), "nothing was displaced");
+    }
+
+    @Test
+    void aJobDefinitionRevisionBumpIsNotAReplacement() {
+        // The prior revision stays ACTIVE on AWS, and the schema's primaryIdentifier for this type
+        // is JobDefinitionName rather than the ARN. Recording the bump as a replacement would have
+        // the cleanup deregister a revision a running job may still name.
+        when(batch.registerJobDefinition(any(), anyString()))
+                .thenReturn(mapper.createObjectNode().put("jobDefinitionArn", JD_ARN + "-r2"));
+        StackResource r = resource("AWS::Batch::JobDefinition", "Definition");
+        r.getAttributes().put("JobDefinitionName", "my-stack-Definition-ab12cd");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobDefinitionName", "my-stack-Definition-ab12cd");
+        props.put("Type", "container");
+
+        provisioner.provision(r, props, updateCtx(JD_ARN));
+
+        assertFalse(provisioner.hasReplacementUpdate(r),
+                "a new revision under the same name replaces nothing");
+    }
+
+    @Test
+    void renamingAJobDefinitionIsAReplacement() {
+        when(batch.registerJobDefinition(any(), anyString()))
+                .thenReturn(mapper.createObjectNode().put("jobDefinitionArn", JD_ARN + "-renamed"));
+        StackResource r = resource("AWS::Batch::JobDefinition", "Definition");
+        r.getAttributes().put("JobDefinitionName", "my-stack-Definition-ab12cd");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobDefinitionName", "renamed");
+        props.put("Type", "container");
+
+        provisioner.provision(r, props, updateCtx(JD_ARN));
+
+        assertTrue(provisioner.hasReplacementUpdate(r), "a changed name replaces the definition");
+        assertEquals(JD_ARN, provisioner.updateCleanupPhysicalId(r));
+    }
 }
