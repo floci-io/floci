@@ -3059,6 +3059,7 @@ public class DynamoDbService implements ResourceProvider {
             throw missingKeyException(surface);
         }
         validateKeyAttributeValue(table, pkAttr, pkName, surface);
+        validateKeySize(pkAttr, true);
 
         String pk = extractScalarValue(pkAttr);
         String skName = table.getSortKeyName();
@@ -3068,9 +3069,20 @@ public class DynamoDbService implements ResourceProvider {
                 throw missingKeyException(surface);
             }
             validateKeyAttributeValue(table, skAttr, skName, surface);
+            validateKeySize(skAttr, false);
             return pk + "#" + extractScalarValue(skAttr);
         }
         return pk;
+    }
+
+    private void validateKeySize(JsonNode attr, boolean partitionKey) {
+        int limit = partitionKey ? 2048 : 1024;
+        if ((attr.has("S") || attr.has("B")) && DynamoDbItemSize.attributeValueSize(attr) > limit) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Size of "
+                    + (partitionKey ? "hashkey" : "rangekey")
+                    + " has exceeded the maximum size limit of " + limit + " bytes", 400);
+        }
     }
 
     private AwsException missingKeyException(KeySurface surface) {
