@@ -1410,6 +1410,57 @@ class SsoAdminServiceTest {
                 "arn:aws:iam::aws:policy/OverQuotaPolicy"));
     }
 
+    /**
+     * The model's ManagedPolicyArn pattern is partition-tolerant. Pinning it to the commercial
+     * partition refused a legal GovCloud or China managed-policy ARN.
+     */
+    @Test
+    void attachAcceptsManagedPolicyArnsFromEveryPartition() {
+        PermissionSet permissionSet = createPermissionSet("PartitionAdmins");
+
+        service.attachPolicy(service.getInstanceArn(), permissionSet.arn(),
+                "arn:aws-us-gov:iam::aws:policy/ReadOnlyAccess");
+        service.attachPolicy(service.getInstanceArn(), permissionSet.arn(),
+                "arn:aws-cn:iam::aws:policy/SecurityAudit");
+        service.attachPolicy(service.getInstanceArn(), permissionSet.arn(),
+                "arn:aws-iso-b:iam::aws:policy/ViewOnlyAccess");
+    }
+
+    /** AWS-managed policies live under a path, which the previous {@code .+} tail also allowed. */
+    @Test
+    void attachAcceptsAServiceRolePath() {
+        PermissionSet permissionSet = createPermissionSet("PathAdmins");
+
+        service.attachPolicy(service.getInstanceArn(), permissionSet.arn(),
+                "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy");
+    }
+
+    /**
+     * Tightening the tail from {@code .+} to the model's charset. A space is not a legal policy
+     * name and used to be accepted.
+     */
+    @Test
+    void attachRejectsAPolicyNameOutsideTheModelCharset() {
+        PermissionSet permissionSet = createPermissionSet("StrictAdmins");
+
+        assertThrows(AwsException.class, () -> service.attachPolicy(service.getInstanceArn(),
+                permissionSet.arn(), "arn:aws:iam::aws:policy/bad name"));
+    }
+
+    /**
+     * AttachManagedPolicyToPermissionSet takes AWS-managed policies only, which the model spells
+     * as the literal {@code ::aws:policy} account segment. Customer-managed policies go through
+     * the separate customer-managed-reference operations, so this rejection is correct AWS
+     * behaviour and must survive the widening above.
+     */
+    @Test
+    void attachStillRejectsACustomerManagedPolicy() {
+        PermissionSet permissionSet = createPermissionSet("CustomerAdmins");
+
+        assertThrows(AwsException.class, () -> service.attachPolicy(service.getInstanceArn(),
+                permissionSet.arn(), "arn:aws:iam::" + ACCOUNT_ID + ":policy/MyOwnPolicy"));
+    }
+
     @Test
     void managedPolicyPaginationHonorsMaxResultsAndNextToken() {
         PermissionSet permissionSet = createPermissionSet("PlatformAdmins");

@@ -1802,9 +1802,14 @@ public class DynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
+    /**
+     * Botocore gives DynamoDB's {@code ResourceArnString} no pattern at all, only a length range,
+     * so this shape is the emulator's own. Widening the partition keeps it from rejecting a legal
+     * GovCloud or China table ARN.
+     */
     private static final java.util.regex.Pattern DYNAMODB_TABLE_ARN_PATTERN =
-            java.util.regex.Pattern.compile(
-                    "^arn:aws:dynamodb:[a-z0-9-]+:\\d{12}:table/[a-zA-Z0-9._-]+$");
+            java.util.regex.Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX
+                    + ":dynamodb:[a-z0-9-]+:\\d{12}:table/[a-zA-Z0-9._-]+$");
 
     private static boolean isValidDynamoDbTableArn(String arn) {
         return arn != null && DYNAMODB_TABLE_ARN_PATTERN.matcher(arn).matches();

@@ -2008,7 +2008,7 @@ public class KmsService implements ResourceProvider {
             id = aliasStore.get(aliasKey)
                     .map(KmsAlias::getTargetKeyId)
                     .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + keyIdOrArn, 404));
-        } else if (id.startsWith("arn:aws:kms:")) {
+        } else if (AwsArnUtils.isArnFor(id, "kms")) {
             // Key arn
             id = id.substring(id.lastIndexOf("/") + 1);
         } else if (id.startsWith("alias/")) {

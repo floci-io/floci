@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync.graphql.auth;
 
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -63,13 +64,22 @@ public class IamAuthValidator {
         return "test".equals(accessKeyId);
     }
 
+    /**
+     * The resource these two build is matched against a policy the customer wrote using the ARN
+     * AppSync handed them, and that ARN carries the region's partition. Pinning {@code aws} here
+     * meant a GovCloud policy naming its own API never matched, and the request was denied.
+     */
+    private static String appsyncArnPrefix(String region) {
+        return "arn:" + AwsRegions.partitionFor(region) + ":appsync:";
+    }
+
     static String requestArn(String region, String accountId, String apiId) {
-        return "arn:aws:appsync:" + nullToEmpty(region) + ":" + nullToEmpty(accountId)
+        return appsyncArnPrefix(region) + nullToEmpty(region) + ":" + nullToEmpty(accountId)
                 + ":apis/" + apiId + "/*";
     }
 
     static String fieldArn(String region, String accountId, String apiId, String typeName, String fieldName) {
-        return "arn:aws:appsync:" + nullToEmpty(region) + ":" + nullToEmpty(accountId)
+        return appsyncArnPrefix(region) + nullToEmpty(region) + ":" + nullToEmpty(accountId)
                 + ":apis/" + apiId + "/types/" + typeName + "/fields/" + fieldName;
     }
 

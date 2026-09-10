@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -440,9 +441,21 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                 "StateMachineDoesNotExist", "State machine does not exist", 400);
     }
 
+    /**
+     * Key prefix matching every Step Functions ARN in {@code region}. This store is keyed by the
+     * full ARN, unlike the other services, which key by {@code region::name}, so the prefix has to
+     * carry the region's partition or a list cannot find what a create wrote.
+     *
+     * <p>Deliberately stops before the account segment: the store holds resources for more than
+     * one account under account isolation, so {@code RegionResolver.buildArn} is the wrong helper
+     * here, since it appends its own account id.
+     */
+    private static String regionArnPrefix(String region) {
+        return "arn:" + AwsRegions.partitionFor(region) + ":states:" + region + ":";
+    }
+
     public List<StateMachine> listStateMachines(String region) {
-        String prefix = "arn:aws:states:" + region + ":";
-        return stateMachineStore.scan(k -> k.startsWith(prefix));
+        return stateMachineStore.scan(k -> k.startsWith(regionArnPrefix(region)));
     }
 
     // ── State machine versions ──────────────────────────────────────────────
@@ -901,7 +914,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     public List<Activity> listActivities(String region) {
-        String prefix = "arn:aws:states:" + region + ":";
+        String prefix = regionArnPrefix(region);
         return activityStore.scan(k -> k.startsWith(prefix) && k.contains(":activity:"));
     }
 

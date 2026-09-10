@@ -58,7 +58,14 @@ public class SsoAdminService implements Resettable {
     private static final Pattern PERMISSION_SET_NAME = Pattern.compile("[\\w+=,.@-]+");
     private static final Pattern PERMISSION_SET_ARN = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:sso:::permissionSet/(?:sso)?ins-[a-zA-Z0-9-.]{16}/ps-[a-zA-Z0-9-./]{16}");
     private static final Pattern PRINCIPAL_ID = Pattern.compile("([0-9a-f]{10}-|)[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}");
-    private static final Pattern MANAGED_POLICY_ARN = Pattern.compile("arn:aws:iam::aws:policy/.+");
+    /**
+     * The model's own {@code ManagedPolicyArn} pattern. The previous
+     * {@code arn:aws:iam::aws:policy/.+} was wrong in both directions: it pinned the commercial
+     * partition, and its {@code .+} tail accepted a policy name containing characters AWS rejects.
+     */
+    private static final Pattern MANAGED_POLICY_ARN = Pattern.compile(
+            "arn:aws(?:-[a-z]{1,5}){0,3}:iam::aws:policy((?:/[A-Za-z0-9\\.,\\+@=_-]+)*)"
+                    + "/(?:[A-Za-z0-9\\.,\\+=@_-]+)");
     private static final Pattern CUSTOMER_MANAGED_POLICY_NAME = Pattern.compile("[\\w+=,.@-]+");
     private static final Pattern CUSTOMER_MANAGED_POLICY_PATH = Pattern.compile("((/[A-Za-z0-9\\.,\\+@=_-]+)*)/");
     private static final Pattern REGION_NAME = Pattern.compile("([a-z]+-){2,3}\\d");

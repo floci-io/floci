@@ -6,7 +6,9 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link AwsArnUtils} is the emulator's shared ARN helper and had no test of its own, despite
@@ -159,6 +161,43 @@ class AwsArnUtilsTest {
         assertEquals("arn:aws-cn:secretsmanager:us-east-1:000000000000:secret:s",
                 new AwsArnUtils.Arn("aws-cn", "secretsmanager", "us-east-1", "000000000000",
                         "secret:s").toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws:sqs:us-east-1:000000000000:my-queue",
+            "arn:aws-us-gov:sqs:us-gov-west-1:000000000000:my-queue",
+            "arn:aws-cn:s3:::bucket",
+            "arn:aws:lambda:us-east-1:000000000000:function:f:PROD"})
+    void isArnAcceptsAnyPartition(String value) {
+        assertTrue(AwsArnUtils.isArn(value));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"my-queue", "arn:aws:sqs:us-east-1:000000000000", "arn:", "", "  "})
+    void isArnRejectsNonArns(String value) {
+        assertFalse(AwsArnUtils.isArn(value));
+    }
+
+    @Test
+    void isArnRejectsNullRatherThanThrowing() {
+        assertFalse(AwsArnUtils.isArn(null));
+    }
+
+    /**
+     * The shape the {@code startsWith("arn:aws:dynamodb:")} probes were reaching for: is this
+     * identifier an ARN for my service, whatever partition it came from.
+     */
+    @Test
+    void isArnForMatchesTheServiceInAnyPartition() {
+        assertTrue(AwsArnUtils.isArnFor("arn:aws:dynamodb:us-east-1:000000000000:table/t",
+                "dynamodb"));
+        assertTrue(AwsArnUtils.isArnFor("arn:aws-cn:dynamodb:cn-north-1:000000000000:table/t",
+                "dynamodb"));
+        assertFalse(AwsArnUtils.isArnFor("arn:aws:kinesis:us-east-1:000000000000:stream/s",
+                "dynamodb"));
+        assertFalse(AwsArnUtils.isArnFor("my-table", "dynamodb"));
+        assertFalse(AwsArnUtils.isArnFor(null, "dynamodb"));
     }
 
     @Test

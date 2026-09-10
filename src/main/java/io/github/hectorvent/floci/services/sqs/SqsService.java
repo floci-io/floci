@@ -870,7 +870,7 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     private String queueUrlFromArn(String arn, String region) {
-        if (arn == null || !arn.startsWith("arn:aws:sqs:")) {
+        if (!AwsArnUtils.isArnFor(arn, "sqs")) {
             return null;
         }
         try {

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -421,7 +422,7 @@ public class EcsContainerManager {
         String value;
         String jsonKey = null;
         try {
-            if (valueFrom != null && valueFrom.startsWith("arn:aws:secretsmanager:")) {
+            if (AwsArnUtils.isArnFor(valueFrom, "secretsmanager")) {
                 // The valueFrom may carry the ECS selector suffix
                 // (:json-key:version-stage:version-id); the parser strips it so the base ARN
                 // reaches SecretsManagerService intact, keeping its partial-ARN fallback working.
@@ -479,7 +480,7 @@ public class EcsContainerManager {
     }
 
     private String ssmParameterName(String valueFrom) {
-        if (valueFrom != null && valueFrom.startsWith("arn:aws:ssm:")) {
+        if (AwsArnUtils.isArnFor(valueFrom, "ssm")) {
             int parameterMarker = valueFrom.indexOf(":parameter");
             if (parameterMarker >= 0) {
                 return valueFrom.substring(parameterMarker + ":parameter".length());

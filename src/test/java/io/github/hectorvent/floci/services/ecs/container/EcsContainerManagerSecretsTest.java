@@ -113,6 +113,40 @@ class EcsContainerManagerSecretsTest {
         verify(ssmService).getParameter("/foo/bar", "us-east-1");
     }
 
+    /**
+     * Both {@code valueFrom} guards required a literal {@code arn:aws:}. Outside the commercial
+     * partition a Secrets Manager ARN fell through to the SSM branch and a parameter ARN was
+     * passed along whole as a parameter name, so the task died at launch with ParameterNotFound
+     * rather than reading its own configuration.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "us-gov-west-1, aws-us-gov",
+            "cn-north-1,    aws-cn",
+            "us-isob-east-1, aws-iso-b"})
+    void resolvesSecretsAndParametersInAnyPartition(String region, String partition) {
+        String ssmArn = "arn:" + partition + ":ssm:" + region + ":000000000000:parameter/app/token";
+        String secretArn = "arn:" + partition + ":secretsmanager:" + region + ":000000000000:secret:db-AbCdEf";
+        when(ssmService.getParameter("/app/token", region))
+                .thenReturn(new Parameter("/app/token", "ssm-value", "String"));
+        when(secretsManagerService.getSecretValue(secretArn, null, null, region))
+                .thenReturn(secretVersion("sm-value"));
+
+        manager.startTask(task(), taskDef(containerDef("app", List.of(
+                new Secret("TOKEN", ssmArn),
+                new Secret("PASSWORD", secretArn)))),
+                List.of(), region);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withEnv(envCaptor.capture());
+
+        List<String> env = envCaptor.getValue();
+        assertTrue(env.contains("TOKEN=ssm-value"), "SSM ARN in " + partition + " did not resolve: " + env);
+        assertTrue(env.contains("PASSWORD=sm-value"),
+                "Secrets Manager ARN in " + partition + " did not resolve: " + env);
+    }
+
     @Test
     void crossRegionArnResolvesAgainstArnRegionNotTaskRegion() {
         String ssmArn = "arn:aws:ssm:eu-west-1:000000000000:parameter/app/token";

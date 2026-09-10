@@ -90,6 +90,33 @@ class IamAuthValidatorTest {
         assertEquals("test", identity.get("user"));
     }
 
+    /**
+     * These two build the resource the policy evaluator matches against, and the ARN a customer
+     * writes their policy from is the one AppSync minted, which carries the region's partition.
+     * A pinned {@code aws} here meant a GovCloud policy naming its own API never matched and the
+     * request was denied with nothing saying why.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "us-east-1,      arn:aws:appsync:",
+            "us-gov-west-1,  arn:aws-us-gov:appsync:",
+            "cn-north-1,     arn:aws-cn:appsync:",
+            "us-isob-east-1, arn:aws-iso-b:appsync:"})
+    void resourceArnsCarryTheRegionsPartition(String region, String expectedPrefix) {
+        assertTrue(IamAuthValidator.requestArn(region, "000000000000", "api-1").startsWith(expectedPrefix),
+                IamAuthValidator.requestArn(region, "000000000000", "api-1"));
+        assertTrue(IamAuthValidator.fieldArn(region, "000000000000", "api-1", "Query", "hello")
+                        .startsWith(expectedPrefix),
+                IamAuthValidator.fieldArn(region, "000000000000", "api-1", "Query", "hello"));
+    }
+
+    /** A null or blank region keeps the commercial partition, as every global ARN does. */
+    @Test
+    void aBlankRegionStaysCommercial() {
+        assertEquals("arn:aws:appsync::000000000000:apis/api-1/*",
+                IamAuthValidator.requestArn(null, "000000000000", "api-1"));
+    }
+
     @Test
     void fieldArnDenyDetected() {
         when(iamService.resolveCallerContext("AKIAGOOD")).thenReturn(CallerContext.of(List.of(FIELD_DENY)));

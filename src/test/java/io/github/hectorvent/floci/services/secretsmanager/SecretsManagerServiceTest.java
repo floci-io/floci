@@ -678,6 +678,39 @@ class SecretsManagerServiceTest {
         assertEquals("db-pass", version.getSecretString());
     }
 
+    /**
+     * A secret name may contain colons, and the partial-ARN fallback used to preserve them by
+     * splitting the ARN tail with an explicit limit. Reading the name off the parsed resource has
+     * to keep that property: strip only the leading "secret:", never split again.
+     */
+    @Test
+    void getSecretValueByPartialArnWithColonsInNameSucceeds() {
+        Secret secret = service.createSecret("team:app:db", "colon-pass", null, null, null, null, REGION);
+        String partialArn = secret.getArn().substring(0, secret.getArn().length() - 7);
+
+        SecretVersion version = service.getSecretValue(partialArn, null, null, REGION);
+        assertEquals("colon-pass", version.getSecretString());
+    }
+
+    /**
+     * The partial-ARN fallback matched a literal "arn:aws:secretsmanager:", so outside the
+     * commercial partition a secret's own ARN, minus the random suffix AWS lets clients omit,
+     * resolved to nothing. Round trip through the ARN the emulator itself minted.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "us-east-1,      arn:aws:secretsmanager:",
+            "us-gov-west-1,  arn:aws-us-gov:secretsmanager:",
+            "cn-north-1,     arn:aws-cn:secretsmanager:"})
+    void getSecretValueByPartialArnSucceedsInAnyPartition(String region, String expectedArnPrefix) {
+        Secret secret = service.createSecret("p-secret", "value", null, null, null, null, region);
+
+        assertTrue(secret.getArn().startsWith(expectedArnPrefix), "minted ARN was " + secret.getArn());
+
+        String partialArn = secret.getArn().substring(0, secret.getArn().length() - 7);
+        assertEquals("value", service.getSecretValue(partialArn, null, null, region).getSecretString());
+    }
+
     @Test
     void getSecretValueByFullArnStillWorks() {
         Secret secret = service.createSecret("my-secret", "value", null, null, null, null, REGION);

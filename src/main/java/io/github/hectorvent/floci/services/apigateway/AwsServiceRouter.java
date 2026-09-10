@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
@@ -22,7 +23,6 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Routes API Gateway AWS integration requests to the correct internal service handler.
@@ -82,13 +82,6 @@ public class AwsServiceRouter {
         this.acmHandler = acmHandler;
     }
 
-    private static final Pattern ACTION_URI_PATTERN = Pattern.compile(
-            "^arn:aws:apigateway:([^:]+):([^:]+):action/(.+)$"
-    );
-    private static final Pattern PATH_URI_PATTERN = Pattern.compile(
-            "^arn:aws:apigateway:([^:]+):([^:]+):path/(.+)$"
-    );
-
     /**
      * Parsed components of an API Gateway AWS integration URI.
      */
@@ -113,7 +106,7 @@ public class AwsServiceRouter {
      * @return parsed target, or null if the URI format is not recognized
      */
     public IntegrationTarget parseIntegrationUri(String uri) {
-        if (uri == null || !uri.startsWith("arn:aws:apigateway:")) {
+        if (!AwsArnUtils.isArnFor(uri, "apigateway")) {
             return null;
         }
         // arn:aws:apigateway:{region}:{service}:{action/{Action}|path/{resourcePath}}

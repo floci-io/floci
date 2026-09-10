@@ -780,6 +780,73 @@ class SqsServiceTest {
         assertEquals(25, task.maxNumberOfMessagesPerSecond());
     }
 
+    /**
+     * The DLQ redrive path resolves a queue URL from the {@code deadLetterTargetArn} a client read
+     * back out of GetQueueAttributes, and SQS mints that ARN with the region's own partition. The
+     * resolver used to require a literal {@code arn:aws:sqs:}, so in GovCloud or China it returned
+     * null, the move block was skipped, and messages stayed on the source queue with nothing
+     * logged. A silent redrive failure is the worst shape this bug takes.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "us-east-1,      arn:aws:sqs:us-east-1:000000000000:",
+            "us-gov-west-1,  arn:aws-us-gov:sqs:us-gov-west-1:000000000000:",
+            "cn-north-1,     arn:aws-cn:sqs:cn-north-1:000000000000:"})
+    void startMessageMoveTask_acceptsAQueueArnFromAnyPartition(String region, String arnPrefix) {
+        sqsService.createQueue("p-dlq", null, region);
+        String dlqArn = arnPrefix + "p-dlq";
+        sqsService.createQueue("p-src",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"), region);
+        sqsService.createQueue("p-dest", null, region);
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, arnPrefix + "p-dest", 5, region);
+
+        assertNotNull(taskHandle);
+        assertEquals(dlqArn, sqsService.listMessageMoveTasks(dlqArn, region).get(0).sourceArn());
+    }
+
+    /**
+     * The ARN the emulator itself hands back must be the one it accepts. This is the assertion
+     * that ties the two halves together rather than trusting a hand-written prefix.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"us-east-1", "us-gov-west-1", "cn-north-1"})
+    void startMessageMoveTask_acceptsTheQueueArnGetQueueAttributesReturned(String region) {
+        sqsService.createQueue("rt-dlq", null, region);
+        String dlqArn = sqsService.getQueueAttributes(
+                sqsService.getQueueUrl("rt-dlq", region), List.of("QueueArn"), region).get("QueueArn");
+        sqsService.createQueue("rt-src",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"), region);
+        sqsService.createQueue("rt-dest", null, region);
+        String destArn = sqsService.getQueueAttributes(
+                sqsService.getQueueUrl("rt-dest", region), List.of("QueueArn"), region).get("QueueArn");
+
+        assertNotNull(sqsService.startMessageMoveTask(dlqArn, destArn, 5, region));
+    }
+
+    /**
+     * Widening the partition must not turn "queue does not exist" into something softer: an ARN
+     * naming a queue nobody created is still ResourceNotFound, exactly as a commercial one is.
+     *
+     * <p>Note the resolver takes only the account and queue name out of the ARN and looks them up
+     * in the caller's region, so the ARN's own region is not enforced. That is pre-existing and
+     * already applied to a cross-region commercial ARN; this change does not alter it.
+     */
+    @Test
+    void startMessageMoveTask_foreignPartitionQueueThatDoesNotExistIsNotFound() {
+        sqsService.createQueue("fp-dlq", null, "us-east-1");
+        String dlqArn = queueArn("fp-dlq");
+        sqsService.createQueue("fp-src",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"), "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> sqsService.startMessageMoveTask(
+                dlqArn, "arn:aws-cn:sqs:cn-north-1:000000000000:never-created", 0, "us-east-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
     @Test
     void startMessageMoveTask_destinationDoesNotExist_throwsResourceNotFound() {
         sqsService.createQueue("a-dlq", null, "us-east-1");
