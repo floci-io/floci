@@ -326,4 +326,30 @@ class AthenaTest {
             }
         }
     }
+
+    /**
+     * github.com/floci-io/floci/issues/2791: terraform-provider-aws's read/refresh for
+     * aws_athena_workgroup calls ListTagsForResource unconditionally. Round-trips through the
+     * real AthenaClient (rather than raw JSON) to validate the request/response shapes.
+     */
+    @Test
+    @Order(10)
+    @DisplayName("listTagsForResource returns the tags set on workgroup creation")
+    void listTagsForResourceReturnsTagsSetOnCreation() {
+        String groupName = "sdk-tags-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        athena.createWorkGroup(CreateWorkGroupRequest.builder()
+                .name(groupName)
+                .tags(software.amazon.awssdk.services.athena.model.Tag.builder()
+                        .key("env").value("prod").build())
+                .build());
+
+        ListTagsForResourceResponse response = athena.listTagsForResource(
+                ListTagsForResourceRequest.builder()
+                        .resourceARN("arn:aws:athena:us-east-1:000000000000:workgroup/" + groupName)
+                        .build());
+
+        assertThat(response.tags()).hasSize(1);
+        assertThat(response.tags().get(0).key()).isEqualTo("env");
+        assertThat(response.tags().get(0).value()).isEqualTo("prod");
+    }
 }

@@ -11,7 +11,14 @@ COPY pom.xml .
 RUN mvn dependency:go-offline -B
 COPY src ./src
 
-RUN mvn clean package -Dnative -DskipTests -B
+# Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
+# REST invokers for AwsQueryController.dispatch and AwsJson11Controller.handle are each the
+# single call site of a very large method; inlined, the method outgrows the aarch64
+# conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
+# The flag only exists on Mandrel, so it is passed here rather than in application.yml,
+# the same way the workflow native builds pass it.
+RUN mvn clean package -Dnative -DskipTests -B \
+    -Dquarkus.native.additional-build-args-append=-H:-AOTSingleCallsiteInline
 
 # Stage 2: Minimal runtime. Same base and user setup as Dockerfile.native-package.
 FROM registry.access.redhat.com/ubi9-micro:9.7
@@ -31,6 +38,9 @@ ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
+# The builder image has no zlib-static, so native-image links zlib dynamically and the
+# runner needs libz.so.1, which ubi9-micro does not ship. Take it from the builder image.
+COPY --from=build /usr/lib64/libz.so.1 /usr/lib64/libz.so.1
 COPY --chmod=755 --from=build /app/target/*-runner /app/application
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bin/

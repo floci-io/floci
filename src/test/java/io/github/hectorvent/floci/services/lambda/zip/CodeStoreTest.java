@@ -122,12 +122,13 @@ class CodeStoreTest {
     @Test
     void aVersionDirectoryCannotCollideWithAnotherFunctionsOwnDirectory(@TempDir Path baseDir)
             throws IOException {
-        // Floci does not restrict the character set of FunctionName today, only that it is
-        // non-blank, so "foo.v1" is a function a user can genuinely create. A "<name>.v<n>" sibling
-        // naming scheme handed it the exact directory version 1 of "foo" would claim, so deleting
-        // either function silently corrupted the other. The suffix used instead is outside the
-        // character set sanitizeName can emit, which makes the two namespaces disjoint by
-        // construction rather than by a prefix match that has to guess where the name ends.
+        // A dot is an accepted character in a function name: LambdaArnUtils validates against
+        // [a-zA-Z0-9-_.]+, which is wider than the live service (issue #3238), so "foo.v1" is a
+        // function a user can genuinely create. A "<name>.v<n>" sibling naming scheme handed it the
+        // exact directory version 1 of "foo" would claim, so deleting either function silently
+        // corrupted the other. The suffix used instead is outside the character set sanitizeName
+        // can emit, which makes the two namespaces disjoint by construction rather than by a prefix
+        // match that has to guess where the name ends.
         CodeStore store = new CodeStore(baseDir);
         writeHandler(store.getVersionCodePath(ACCOUNT_A, REGION, "foo", "1"), "foo-v1");
         writeHandler(store.getCodePath(ACCOUNT_A, REGION, "foo.v1"), "other-function");

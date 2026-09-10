@@ -399,6 +399,11 @@ public class AcmJsonHandler {
                     rrNode.put("Value", dv.resourceRecord().value());
                     dvNode.set("ResourceRecord", rrNode);
                 }
+                if (dv.validationEmails() != null && !dv.validationEmails().isEmpty()) {
+                    ArrayNode emails = objectMapper.createArrayNode();
+                    dv.validationEmails().forEach(emails::add);
+                    dvNode.set("ValidationEmails", emails);
+                }
                 validations.add(dvNode);
             }
             node.set("DomainValidationOptions", validations);

@@ -7,11 +7,16 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.amp.AmpClient;
+import software.amazon.awssdk.services.amp.model.CreateRuleGroupsNamespaceResponse;
 import software.amazon.awssdk.services.amp.model.CreateWorkspaceResponse;
+import software.amazon.awssdk.services.amp.model.DescribeRuleGroupsNamespaceResponse;
 import software.amazon.awssdk.services.amp.model.DescribeWorkspaceResponse;
+import software.amazon.awssdk.services.amp.model.ListRuleGroupsNamespacesResponse;
 import software.amazon.awssdk.services.amp.model.ListWorkspacesResponse;
 import software.amazon.awssdk.services.amp.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.amp.model.RuleGroupsNamespaceStatusCode;
 import software.amazon.awssdk.services.amp.model.WorkspaceStatusCode;
 
 import java.util.Map;
@@ -114,6 +119,48 @@ class AmpTest {
 
     @Test
     @Order(6)
+    void ruleGroupsNamespaceLifecycle() {
+        SdkBytes rules = SdkBytes.fromUtf8String("groups:\n- name: alerts\n  rules: []\n");
+
+        CreateRuleGroupsNamespaceResponse created = amp.createRuleGroupsNamespace(r -> r
+                .workspaceId(workspaceId)
+                .name("alerts")
+                .data(rules)
+                .tags(Map.of("team", "devops")));
+
+        assertThat(created.name()).isEqualTo("alerts");
+        assertThat(created.arn()).contains(":rulegroupsnamespace/" + workspaceId + "/alerts");
+        assertThat(created.status().statusCode()).isEqualTo(RuleGroupsNamespaceStatusCode.ACTIVE);
+        assertThat(created.tags()).containsEntry("team", "devops");
+
+        DescribeRuleGroupsNamespaceResponse described = amp.describeRuleGroupsNamespace(r -> r
+                .workspaceId(workspaceId).name("alerts"));
+
+        assertThat(described.ruleGroupsNamespace().arn()).isEqualTo(created.arn());
+        assertThat(described.ruleGroupsNamespace().data()).isEqualTo(rules);
+        assertThat(described.ruleGroupsNamespace().createdAt()).isNotNull();
+        assertThat(described.ruleGroupsNamespace().modifiedAt()).isNotNull();
+
+        ListRuleGroupsNamespacesResponse listed = amp.listRuleGroupsNamespaces(r -> r
+                .workspaceId(workspaceId).name("ale"));
+        assertThat(listed.ruleGroupsNamespaces())
+                .anySatisfy(n -> assertThat(n.name()).isEqualTo("alerts"));
+
+        SdkBytes updated = SdkBytes.fromUtf8String("groups:\n- name: updated\n  rules: []\n");
+        amp.putRuleGroupsNamespace(r -> r.workspaceId(workspaceId).name("alerts").data(updated));
+
+        assertThat(amp.describeRuleGroupsNamespace(r -> r.workspaceId(workspaceId).name("alerts"))
+                .ruleGroupsNamespace().data()).isEqualTo(updated);
+
+        amp.deleteRuleGroupsNamespace(r -> r.workspaceId(workspaceId).name("alerts"));
+
+        assertThatThrownBy(() -> amp.describeRuleGroupsNamespace(r -> r
+                .workspaceId(workspaceId).name("alerts")))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    @Order(7)
     void deleteWorkspaceThenDescribeThrowsResourceNotFound() {
         amp.deleteWorkspace(r -> r.workspaceId(workspaceId));
 

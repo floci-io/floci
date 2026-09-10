@@ -45,12 +45,29 @@ public final class CfnRollback {
     public static final String PIPE_UPDATE_SNAPSHOT_ATTR = "__FlociPipeUpdateSnapshot";
 
     /**
+     * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
+     * with the rule name, bus and region needed to address them again, so a failed stack update can
+     * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
+     * by its {@code rollbackUpdate}. The rule name alone does not address a target: a rule on a
+     * custom bus is keyed by that bus, and the rollback hook is handed the stack resource alone.
+     */
+    public static final String RULE_TARGETS_SNAPSHOT_ATTR = "__FlociRuleTargetsSnapshot";
+
+    /**
      * Holds the settings an event invoke configuration carried before an in-place update changed
      * them, in the request shape a put takes, so a failed stack update can put them back. Written
      * by {@code LambdaEventInvokeConfigCfnProvisioner} before its update call and spent by its
      * {@code rollbackUpdate}.
      */
     public static final String EVENT_INVOKE_CONFIG_SNAPSHOT_ATTR = "__FlociEventInvokeConfigSnapshot";
+
+    /**
+     * Holds the body and tags a dashboard carried before an in-place update changed them, or the
+     * fact that it did not exist, so a failed stack update can put it back. Written by
+     * {@code CloudWatchDashboardCfnProvisioner} before its first mutating call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
     /**
      * Holds the pipe a rename displaced: the name it still lives under, the region that addresses

@@ -3,10 +3,10 @@
 **Protocol:** REST JSON
 **Endpoint:** `http://localhost:4566`
 
-Floci implements the AMP **workspace** lifecycle — the surface Terraform's and Pulumi's
-`aws_prometheus_workspace` resource uses — plus tagging through the shared
-`/tags/{resourceArn}` dispatcher. Alert manager definitions, rule groups namespaces, scrapers
-and logging configurations are not implemented.
+Floci implements the AMP **workspace** and **rule groups namespace** lifecycles — the surface
+Terraform's and Pulumi's `aws_prometheus_workspace` and `aws_prometheus_rule_group_namespace`
+resources use — plus tagging through the shared `/tags/{resourceArn}` dispatcher. Alert manager
+definitions, scrapers and logging configurations are not implemented.
 
 ## Emulation notes
 
@@ -22,6 +22,27 @@ and logging configurations are not implemented.
   `alias_prefix` data-source argument.
 - `clientToken` on `CreateWorkspace` is accepted and ignored: creates are not deduplicated.
 - `kmsKeyArn` is stored and echoed back but no encryption is performed.
+- A rule groups namespace is **ACTIVE from birth** for the same reason, so the provider's
+  create (`CREATING` → `ACTIVE`) and update (`UPDATING` → `ACTIVE`) waiters complete on their
+  first poll.
+- The `data` blob is stored and returned byte for byte. Floci does not parse or validate the
+  Prometheus rules it contains, so an invalid rule file is accepted.
+- Rule groups namespaces live inside their workspace: `DeleteWorkspace` deletes the namespaces
+  it holds, and every namespace operation on an unknown workspace returns
+  `ResourceNotFoundException` (404).
+- Creating a namespace whose name already exists in the workspace returns `ConflictException`
+  (409). `PutRuleGroupsNamespace` requires an existing namespace and returns
+  `ResourceNotFoundException` (404) otherwise.
+- The `name` parameter of `ListRuleGroupsNamespaces` is a **prefix** filter, like `alias` on
+  `ListWorkspaces`.
+- Namespace names are validated against AMP's documented constraints (1 to 128 characters
+  matching `.*[0-9A-Za-z][-.0-9A-Z_a-z]*.*`). Floci additionally rejects `/`, because the
+  namespace is addressed as a single path segment.
+- `clientToken` on `CreateRuleGroupsNamespace` is accepted and ignored, the same as on
+  `CreateWorkspace`: creates are not deduplicated.
+- The shared tags dispatcher rejects an ARN whose service, region or account does not match the
+  request with `ValidationException` (400), rather than resolving it against the request's own
+  region.
 
 ## Supported Operations
 
@@ -31,7 +52,12 @@ and logging configurations are not implemented.
 | `DescribeWorkspace` | `GET /workspaces/{workspaceId}` | Returns the workspace description including `prometheusEndpoint` |
 | `ListWorkspaces` | `GET /workspaces` | Lists workspaces; `alias` prefix filter, `maxResults`/`nextToken` pagination |
 | `UpdateWorkspaceAlias` | `POST /workspaces/{workspaceId}/alias` | Updates the alias (`204`) |
-| `DeleteWorkspace` | `DELETE /workspaces/{workspaceId}` | Deletes the workspace (`202`) |
-| `ListTagsForResource` | `GET /tags/{resourceArn}` | Lists workspace tags (shared tags dispatcher) |
-| `TagResource` | `POST /tags/{resourceArn}` | Adds or overwrites workspace tags (`200`) |
-| `UntagResource` | `DELETE /tags/{resourceArn}?tagKeys=...` | Removes workspace tags (`200`) |
+| `DeleteWorkspace` | `DELETE /workspaces/{workspaceId}` | Deletes the workspace and its rule groups namespaces (`202`) |
+| `CreateRuleGroupsNamespace` | `POST /workspaces/{workspaceId}/rulegroupsnamespaces` | Creates a namespace (`202`); returns `name`, `arn`, `status`, `tags` |
+| `DescribeRuleGroupsNamespace` | `GET /workspaces/{workspaceId}/rulegroupsnamespaces/{name}` | Returns the namespace description including `data` |
+| `ListRuleGroupsNamespaces` | `GET /workspaces/{workspaceId}/rulegroupsnamespaces` | Lists namespaces; `name` prefix filter, `maxResults`/`nextToken` pagination |
+| `PutRuleGroupsNamespace` | `PUT /workspaces/{workspaceId}/rulegroupsnamespaces/{name}` | Replaces the namespace `data` (`202`) |
+| `DeleteRuleGroupsNamespace` | `DELETE /workspaces/{workspaceId}/rulegroupsnamespaces/{name}` | Deletes the namespace (`202`) |
+| `ListTagsForResource` | `GET /tags/{resourceArn}` | Lists workspace or namespace tags (shared tags dispatcher) |
+| `TagResource` | `POST /tags/{resourceArn}` | Adds or overwrites workspace or namespace tags (`200`) |
+| `UntagResource` | `DELETE /tags/{resourceArn}?tagKeys=...` | Removes workspace or namespace tags (`200`) |

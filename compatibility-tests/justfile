@@ -100,13 +100,13 @@ setup-bats:
 test-cdk:
     ./lib/run-bats-with-junit.sh compat-cdk/test/ compat-cdk/test-results/junit.xml
 
-# Run Terraform compatibility tests (JUnit XML output via bats)
+# Run Terraform compatibility tests (one JUnit XML per bats file, files run concurrently)
 test-terraform:
-    ./lib/run-bats-with-junit.sh compat-terraform/test/ compat-terraform/test-results/junit.xml
+    ./compat-terraform/run.sh
 
-# Run OpenTofu compatibility tests (JUnit XML output via bats)
+# Run OpenTofu compatibility tests (one JUnit XML per bats file, files run concurrently)
 test-opentofu:
-    ./lib/run-bats-with-junit.sh compat-opentofu/test/ compat-opentofu/test-results/junit.xml
+    ./compat-opentofu/run.sh
 
 # Run all IaC compatibility tests (continues on failure)
 test-compat:

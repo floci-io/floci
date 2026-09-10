@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
@@ -40,6 +42,7 @@ import java.time.Instant;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -87,6 +90,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     private final Map<String, EcsTaskHandle> taskHandles = new ConcurrentHashMap<>();
     // region::clusterName/serviceName → EcsServiceModel
     private Map<String, EcsServiceModel> services = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<EcsServiceModel> servicesStore;
 
     public static final String DEFAULT_SCHEDULING_STRATEGY = "REPLICA";
     public static final String SCHEDULING_DAEMON = "DAEMON";
@@ -141,8 +145,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 new TypeReference<Map<String, TaskDefinition>>() {});
         this.latestRevisions = storageBacked("ecs-latest-revisions.json",
                 new TypeReference<Map<String, Integer>>() {});
-        this.services = storageBacked("ecs-services.json",
+        this.servicesStore = storageFactory.create("ecs", "ecs-services.json",
                 new TypeReference<Map<String, EcsServiceModel>>() {});
+        this.services = new StorageBackedMap<>(this.servicesStore);
         this.capacityProviders = storageBacked("ecs-capacity-providers.json",
                 new TypeReference<Map<String, CapacityProvider>>() {});
         this.attributes = storageBacked("ecs-attributes.json",
@@ -1576,18 +1581,62 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     // ── Service Reconciliation ────────────────────────────────────────────────
 
     void reconcile() {
-        reconcileTasks();
-        reconcileServices();
+        try {
+            reconcileTasks();
+        } catch (Exception e) {
+            LOG.warnv(e, "ECS task reconciliation tick failed: {0}", e.getMessage());
+        }
+        for (String accountId : reconcilableAccountIds()) {
+            RequestScopes.runAs(accountId, () -> {
+                try {
+                    reconcileServices();
+                } catch (Exception e) {
+                    LOG.warnv(e, "ECS service reconciliation tick failed for account {0}: {1}",
+                            accountId, e.getMessage());
+                }
+            });
+        }
+    }
+
+    private Set<String> reconcilableAccountIds() {
+        Set<String> accountIds = new LinkedHashSet<>();
+        accountIds.add(regionResolver.getAccountId());
+        if (servicesStore != null) {
+            try {
+                for (AccountAwareStorageBackend.AccountEntry<EcsServiceModel> entry
+                        : servicesStore.scanAllAccountEntries(key -> true)) {
+                    accountIds.add(entry.accountId());
+                }
+            } catch (Exception e) {
+                LOG.warnv(e, "Could not enumerate ECS service accounts: {0}", e.getMessage());
+            }
+        }
+        return accountIds;
     }
 
     private void reconcileTasks() {
         for (String taskArn : taskHandles.keySet()) {
-            try {
-                reconcileTask(taskArn);
-            } catch (Exception e) {
-                LOG.debugv("Error reconciling ECS task {0}: {1}", taskArn, e.getMessage());
-            }
+            RequestScopes.runAs(taskAccountId(taskArn), () -> {
+                try {
+                    reconcileTask(taskArn);
+                } catch (Exception e) {
+                    LOG.debugv("Error reconciling ECS task {0}: {1}", taskArn, e.getMessage());
+                }
+            });
         }
+    }
+
+    private String taskAccountId(String taskArn) {
+        try {
+            String accountId = AwsArnUtils.parse(taskArn).accountId();
+            if (accountId != null && !accountId.isBlank()) {
+                return accountId;
+            }
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Could not parse an account from ECS task ARN {0}, reconciling it in the default account: {1}",
+                    taskArn, e.getMessage());
+        }
+        return regionResolver.getAccountId();
     }
 
     private void reconcileTask(String taskArn) {

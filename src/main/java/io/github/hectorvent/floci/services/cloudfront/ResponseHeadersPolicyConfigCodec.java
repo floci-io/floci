@@ -29,9 +29,11 @@ import java.util.regex.Pattern;
  * the wire), so it round-trips through describe without a bespoke model, and the serving path reads
  * the same shape to compute the headers to apply.
  */
-final class ResponseHeadersPolicyConfigCodec {
+public final class ResponseHeadersPolicyConfigCodec {
 
     private static final Logger LOG = Logger.getLogger(ResponseHeadersPolicyConfigCodec.class);
+    private static final List<String> CORS_LISTS = List.of("AccessControlAllowOrigins",
+            "AccessControlAllowHeaders", "AccessControlAllowMethods", "AccessControlExposeHeaders");
 
     private ResponseHeadersPolicyConfigCodec() {
     }
@@ -87,6 +89,57 @@ final class ResponseHeadersPolicyConfigCodec {
             config.put("ServerTimingHeadersConfig", scalarChildren(serverTiming));
         }
         return config;
+    }
+
+    /**
+     * Converts a config in the structured shape CloudFormation and the JSON SDKs use, where every
+     * list block is wrapped as {@code {Items: [...]}} and {@code RemoveHeadersConfig} items are
+     * {@code {Header: name}} objects, into the nested shape {@link #parse(String)} produces: the
+     * lists unwrapped, remove-header items reduced to their names, scalars already text. Blocks
+     * this codec does not know are passed through for the validator to refuse.
+     */
+    public static Map<String, Object> fromItemsTree(Map<String, Object> tree) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> block : tree.entrySet()) {
+            Object value = switch (block.getKey()) {
+                case "CorsConfig" -> unwrapCorsLists(block.getValue());
+                case "CustomHeadersConfig" -> unwrapItems(block.getValue());
+                case "RemoveHeadersConfig" -> removeHeaderNames(unwrapItems(block.getValue()));
+                default -> block.getValue();
+            };
+            config.put(block.getKey(), value);
+        }
+        return config;
+    }
+
+    private static Object unwrapCorsLists(Object cors) {
+        if (!(cors instanceof Map<?, ?> blocks)) {
+            return cors;
+        }
+        Map<String, Object> map = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : blocks.entrySet()) {
+            String key = String.valueOf(e.getKey());
+            map.put(key, CORS_LISTS.contains(key) ? unwrapItems(e.getValue()) : e.getValue());
+        }
+        return map;
+    }
+
+    private static Object unwrapItems(Object block) {
+        if (block instanceof Map<?, ?> map && map.containsKey("Items")) {
+            return map.get("Items");
+        }
+        return block;
+    }
+
+    private static Object removeHeaderNames(Object items) {
+        if (!(items instanceof List<?> list)) {
+            return items;
+        }
+        List<Object> names = new ArrayList<>();
+        for (Object item : list) {
+            names.add(item instanceof Map<?, ?> map && map.containsKey("Header") ? map.get("Header") : item);
+        }
+        return names;
     }
 
     private static Map<String, Object> parseCors(XmlElement cors) {

@@ -349,4 +349,20 @@ class DynamoDbPartiQLTest {
                             .isEqualTo("NextToken does not match request");
                 });
     }
+
+    @Test
+    @Order(20)
+    void executeStatementReadsEveryAttributeThroughAllProjectionIndex() {
+        // status-index projects ALL, so a qualified read returns attributes that
+        // belong to no key, and naming one explicitly stays legal.
+        ExecuteStatementResponse all = ddb.executeStatement(r -> r
+                .statement("SELECT * FROM \"" + INDEX_TABLE + "\".\"status-index\" WHERE status = 'active'"));
+        assertThat(all.items()).hasSize(2);
+        assertThat(all.items().get(0)).containsKey("alternate");
+
+        ExecuteStatementResponse explicit = ddb.executeStatement(r -> r
+                .statement("SELECT alternate FROM \"" + INDEX_TABLE + "\".\"status-index\" WHERE status = 'active'"));
+        assertThat(explicit.items()).hasSize(2);
+        assertThat(explicit.items().get(0).get("alternate").s()).startsWith("alt-");
+    }
 }

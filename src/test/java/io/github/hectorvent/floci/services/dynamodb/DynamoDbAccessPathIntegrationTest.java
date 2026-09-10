@@ -23,6 +23,7 @@ class DynamoDbAccessPathIntegrationTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String TABLE = "access-path-validation";
     private static final String SIBLING_TABLE = "access-path-validation-sibling";
+    private static final String ALL_PROJECTION_TABLE = "access-path-validation-all-projection";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -748,6 +749,85 @@ class DynamoDbAccessPathIntegrationTest {
                 .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
                 .contentType(CONTENT_TYPE)
                 .body("{\"TableName\":\"" + SIBLING_TABLE + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(29)
+    void executeStatementReadsEveryAttributeThroughAllProjectionIndex() {
+        // An ALL projection stores every base attribute, so a qualified read
+        // returns them all and an explicit non-key column stays legal. Query
+        // and Scan already skip the projection trim for ALL; ExecuteStatement
+        // kept only the key attributes, so a caller reading its own data
+        // through an ALL-projection index silently lost every non-key
+        // attribute.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "TableName":"%s",
+                  "AttributeDefinitions":[
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"runId","AttributeType":"S"}
+                  ],
+                  "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                  "GlobalSecondaryIndexes":[{
+                    "IndexName":"all-projection-index",
+                    "KeySchema":[{"AttributeName":"runId","KeyType":"HASH"}],
+                    "Projection":{"ProjectionType":"ALL"}
+                  }],
+                  "BillingMode":"PAY_PER_REQUEST"
+                }
+                """.formatted(ALL_PROJECTION_TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        try {
+            request("DynamoDB_20120810.PutItem", """
+                    {
+                      "TableName":"%s",
+                      "Item":{"pk":{"S":"p1"},"runId":{"S":"run-1"},"rowsInserted":{"N":"7"}}
+                    }
+                    """.formatted(ALL_PROJECTION_TABLE))
+                .statusCode(200);
+
+            request("DynamoDB_20120810.ExecuteStatement", """
+                    {"Statement":"SELECT * FROM \\"%s\\".\\"all-projection-index\\" WHERE runId = 'run-1'"}
+                    """.formatted(ALL_PROJECTION_TABLE))
+                .statusCode(200)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].rowsInserted.N", equalTo("7"));
+
+            request("DynamoDB_20120810.ExecuteStatement", """
+                    {"Statement":"SELECT rowsInserted FROM \\"%s\\".\\"all-projection-index\\" WHERE runId = 'run-1'"}
+                    """.formatted(ALL_PROJECTION_TABLE))
+                .statusCode(200)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].rowsInserted.N", equalTo("7"));
+
+            // Query over the same index is the behaviour ExecuteStatement must match.
+            request("DynamoDB_20120810.Query", """
+                    {
+                      "TableName":"%s",
+                      "IndexName":"all-projection-index",
+                      "KeyConditionExpression":"runId = :r",
+                      "ExpressionAttributeValues":{":r":{"S":"run-1"}}
+                    }
+                    """.formatted(ALL_PROJECTION_TABLE))
+                .statusCode(200)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].rowsInserted.N", equalTo("7"));
+        } finally {
+            given()
+                .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+                .contentType(CONTENT_TYPE)
+                .body("{\"TableName\":\"" + ALL_PROJECTION_TABLE + "\"}")
             .when()
                 .post("/")
             .then()

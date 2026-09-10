@@ -27,9 +27,14 @@ AWS::Batch::JobQueue	LEGACY_SWITCH
 AWS::CDK::Metadata	CdkMetadataCfnProvisioner
 AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	LEGACY_SWITCH
+AWS::CloudFront::CachePolicy	CloudFrontCfnProvisioner
 AWS::CloudFront::Distribution	LEGACY_SWITCH
+AWS::CloudFront::OriginAccessControl	CloudFrontCfnProvisioner
+AWS::CloudFront::OriginRequestPolicy	CloudFrontCfnProvisioner
+AWS::CloudFront::ResponseHeadersPolicy	CloudFrontCfnProvisioner
 AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
 AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
+AWS::CloudWatch::Dashboard	CloudWatchDashboardCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
 AWS::CodePipeline::Pipeline	CodePipelineCfnProvisioner
@@ -71,9 +76,9 @@ AWS::ElasticLoadBalancingV2::Listener	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::ListenerRule	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::LoadBalancer	ElbV2CfnProvisioner
 AWS::ElasticLoadBalancingV2::TargetGroup	ElbV2CfnProvisioner
-AWS::Events::EventBus	LEGACY_SWITCH
-AWS::Events::EventBusPolicy	LEGACY_SWITCH
-AWS::Events::Rule	LEGACY_SWITCH
+AWS::Events::EventBus	EventsCfnProvisioner
+AWS::Events::EventBusPolicy	EventsCfnProvisioner
+AWS::Events::Rule	EventsCfnProvisioner
 AWS::IAM::AccessKey	LEGACY_SWITCH
 AWS::IAM::InstanceProfile	LEGACY_SWITCH
 AWS::IAM::ManagedPolicy	LEGACY_SWITCH

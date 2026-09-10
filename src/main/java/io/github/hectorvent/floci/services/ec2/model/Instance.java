@@ -64,6 +64,14 @@ public class Instance {
     // Docker backing fields (not serialised to AWS wire format)
     private String dockerContainerId;
     private String containerBridgeIp;
+    /**
+     * The container's default-bridge address, kept alongside {@code containerBridgeIp} when the
+     * instance is also attached to its VPC's Docker network. IMDS identifies a caller by the
+     * source address of its request, and that is whichever interface carries the container's
+     * default route, the bridge, while the address Floci reports is the VPC one. Both are
+     * registered so metadata answers either way.
+     */
+    private String imdsSourceIp;
     private String userData;
     private int sshHostPort;
     private long terminatedAt;
@@ -186,6 +194,9 @@ public class Instance {
 
     public String getContainerBridgeIp() { return containerBridgeIp; }
     public void setContainerBridgeIp(String containerBridgeIp) { this.containerBridgeIp = containerBridgeIp; }
+
+    public String getImdsSourceIp() { return imdsSourceIp; }
+    public void setImdsSourceIp(String imdsSourceIp) { this.imdsSourceIp = imdsSourceIp; }
 
     public Map<Integer, Integer> getPublishedPorts() {
         if (publishedPorts == null) {

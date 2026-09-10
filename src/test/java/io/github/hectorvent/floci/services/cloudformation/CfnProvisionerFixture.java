@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFrontCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
@@ -30,9 +31,11 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkCfnProvisioner;
@@ -67,6 +70,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResour
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
@@ -164,6 +168,7 @@ final class CfnProvisionerFixture {
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
         private FlowLogService flowLogService;
+        private CloudWatchDashboardsService cloudWatchDashboardsService;
         private IotDomainConfigurationService iotDomainConfigurationService;
         private IotService iotService;
         private LambdaMicrovmsService lambdaMicrovmsService;
@@ -232,6 +237,9 @@ final class CfnProvisionerFixture {
             if (cognitoService != null) {
                 discovered.add(new CognitoCfnProvisioner(cognitoService));
             }
+            if (cloudFrontService != null) {
+                discovered.add(new CloudFrontCfnProvisioner(cloudFrontService));
+            }
             if (firehoseService != null) {
                 discovered.add(new FirehoseCfnProvisioner(firehoseService));
             }
@@ -243,6 +251,9 @@ final class CfnProvisionerFixture {
             }
             if (cloudWatchMetricsService != null) {
                 discovered.add(new CloudWatchCfnProvisioner(cloudWatchMetricsService));
+            }
+            if (cloudWatchDashboardsService != null) {
+                discovered.add(new CloudWatchDashboardCfnProvisioner(cloudWatchDashboardsService));
             }
             if (iamService != null) {
                 discovered.add(new IamRoleCfnProvisioner(iamService));
@@ -297,6 +308,9 @@ final class CfnProvisionerFixture {
             }
             if (backupService != null) {
                 discovered.add(new BackupVaultCfnProvisioner(backupService));
+            }
+            if (eventBridgeService != null) {
+                discovered.add(new EventsCfnProvisioner(eventBridgeService));
             }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));
@@ -507,6 +521,11 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder cloudWatchDashboards(CloudWatchDashboardsService v) {
+            this.cloudWatchDashboardsService = v;
+            return this;
+        }
+
         public Builder iotDomainConfiguration(IotDomainConfigurationService v) {
             this.iotDomainConfigurationService = v;
             return this;
@@ -590,7 +609,6 @@ final class CfnProvisionerFixture {
                     ssmService,
                     kmsService,
                     secretsManagerService,
-                    eventBridgeService,
                     apiGatewayService,
                     apiGatewayV2Service,
                     ecrService,

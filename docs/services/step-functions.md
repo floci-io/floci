@@ -510,11 +510,12 @@ of every account are swept, each written back under its own account. Executions 
 reached a terminal status are left untouched, and so is the status and `stopDate` of one this sweep
 aborted on an earlier boot.
 
-Execution histories are held in memory, not in storage. The events recorded before the restart are
-gone, so the execution cannot be resumed, and `GetExecutionHistory` reports a single
-`ExecutionAborted` event, with an empty `executionAbortedEventDetails`, only for the boot that
-aborted it: after a further restart the execution is already terminal, no event is written, and the
-history is empty while `DescribeExecution` still reports the status and `stopDate`.
+Execution history is stored with the execution. While an execution is running, the current history
+is checkpointed every 100 events and when the execution reaches a terminal state. A graceful
+shutdown flushes the current execution state before the emulator stops. On restart, persisted
+history is retained, and a previously running execution is marked `ABORTED` with one
+`ExecutionAborted` event appended. After a further restart, the execution is already terminal, so
+no additional event is written.
 
 ## Configuration
 

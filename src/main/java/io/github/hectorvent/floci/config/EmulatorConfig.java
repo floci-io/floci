@@ -1172,6 +1172,31 @@ public interface EmulatorConfig {
 
         @WithDefault("rabbitmq:3-management")
         String defaultImage();
+
+        /**
+         * Host port range the AMQP listener (container port 5672) is published on, one
+         * port per broker. Published in both topologies: no Floci-internal proxy fronts
+         * the broker, so the Docker host-port binding is the only way a client outside
+         * the Docker network (e.g. on the host, with Floci itself containerized) can
+         * reach it (#3240). Env: FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_BASE
+         */
+        @WithDefault("5672")
+        int amqpHostPortBase();
+
+        /** Env: FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_MAX */
+        @WithDefault("5699")
+        int amqpHostPortMax();
+
+        /**
+         * Host port range the RabbitMQ management console (container port 15672) is
+         * published on. Env: FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_BASE
+         */
+        @WithDefault("15672")
+        int consoleHostPortBase();
+
+        /** Env: FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_MAX */
+        @WithDefault("15699")
+        int consoleHostPortMax();
     }
 
     interface KinesisAnalyticsServiceConfig {
@@ -2238,6 +2263,43 @@ public interface EmulatorConfig {
         /** When true, instances go straight to RUNNING without launching Docker containers. */
         @WithDefault("false")
         boolean mock();
+
+        /** Docker-network backing for VPCs and subnets. */
+        VpcNetworksConfig vpcNetworks();
+    }
+
+    /**
+     * Backs each VPC with a real Docker network so instances get private addresses drawn from
+     * the CIDR the caller declared, and instances in different VPCs cannot route to each other.
+     */
+    interface VpcNetworksConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Private range that substituted CIDRs are allocated from, used when a declared VPC CIDR
+         * is absent, malformed, outside RFC 1918, or already claimed on the Docker daemon. Must
+         * itself be RFC 1918. The default sits high in 10/8, away from both Docker's default
+         * pools (172.17-172.31, 192.168) and the low 10.x ranges corporate VPNs favour.
+         */
+        @WithDefault("10.240.0.0/12")
+        String fallbackPool();
+
+        /** Prefix length of each block handed out of {@link #fallbackPool}. */
+        @WithDefault("16")
+        int fallbackPrefixLength();
+
+        /**
+         * When true, VPC networks left behind by a previous run of this same Floci instance are
+         * removed at startup. Scoped by the emulator's API port, so instances sharing a Docker
+         * daemon never reconcile each other's networks.
+         */
+        @WithDefault("true")
+        boolean reconcileOnStartup();
+
+        /** Docker network driver for VPC networks. */
+        @WithDefault("bridge")
+        String driver();
     }
 
     interface AppConfigServiceConfig {

@@ -77,8 +77,7 @@ describe('CloudWatch Metrics', () => {
   });
 
   it('should put metric data with statistic values', async () => {
-    const now = new Date();
-    const start = new Date(now.getTime() - 3600000);
+    const start = new Date(Date.now() - 3600000);
 
     // Put metric data with pre-calculated statistics
     await cw.send(
@@ -100,12 +99,13 @@ describe('CloudWatch Metrics', () => {
     );
 
     // Query back the statistics
+    const end = new Date();
     const response = await cw.send(
       new GetMetricStatisticsCommand({
         Namespace: namespace,
         MetricName: 'AggregatedMetric',
         StartTime: start,
-        EndTime: now,
+        EndTime: end,
         Period: 3600,
         Statistics: ['Sum', 'Average', 'Minimum', 'Maximum', 'SampleCount'],
       })

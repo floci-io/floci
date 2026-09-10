@@ -291,6 +291,9 @@ resource "aws_elasticache_replication_group" "compat" {
   # port it would hand out anyway, so pinning it asserts nothing. A non-default port is
   # what actually exercises CreateReplicationGroup's Port input, and a mismatch shows up
   # as permanent drift because Terraform treats the port as replacement-forcing.
+  #
+  # It must also stay above the block the cluster-mode fixture allocates: the bats files
+  # run concurrently and that fixture takes one port per node from the base of the range.
   port                 = 6395
 }
 

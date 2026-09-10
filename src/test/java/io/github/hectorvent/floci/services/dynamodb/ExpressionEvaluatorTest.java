@@ -660,6 +660,20 @@ class ExpressionEvaluatorTest {
             assertEquals(400, serialization.getHttpStatus());
         }
 
+        // Checked against real DynamoDB (ap-northeast-1, 2026-09-10): a FilterExpression
+        // comparing against a binary that is not base64 fails the request with a 400
+        // SerializationException, so the comparison itself must never decode blindly.
+        @Test
+        void binaryComparisonRejectsMalformedBase64() {
+            var valid = mapper.createObjectNode().put("B", "AQID");
+            var malformed = mapper.createObjectNode().put("B", "not base64!!");
+
+            var e = assertThrows(AwsException.class,
+                    () -> ExpressionEvaluator.compareAttributeValues(valid, malformed));
+            assertEquals("SerializationException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+        }
+
         // A FilterExpression carries the same text without the envelope on AWS.
         @Test
         void filterExpressionReportsTheReversedBoundsWithoutTheEnvelope() {

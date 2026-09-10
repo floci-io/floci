@@ -1246,6 +1246,113 @@ class S3MultipartIntegrationTest {
     }
 
     @Test
+    @Order(36)
+    void uploadPartCopyPreservesDestinationServerSideEncryption() {
+        given()
+            .body("KMS-SOURCE-DATA")
+        .when()
+            .put("/" + BUCKET + "/kms-source-for-copy.bin")
+        .then()
+            .statusCode(200);
+
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/test-key";
+        String copyUploadId = given()
+            .header("x-amz-server-side-encryption", "aws:kms")
+            .header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId)
+        .when()
+            .post("/" + BUCKET + "/kms-copy-dest.bin?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        // UploadPartCopy doesn't take x-amz-server-side-encryption headers
+        // itself, a part always inherits the destination multipart upload's
+        // own encryption settings, captured at CreateMultipartUpload above.
+        // The CopyPartResult response must reflect those, not come back bare.
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/kms-source-for-copy.bin")
+        .when()
+            .put("/" + BUCKET + "/kms-copy-dest.bin?uploadId=" + copyUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CopyPartResult"))
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
+
+        given()
+            .when()
+                .delete("/" + BUCKET + "/kms-copy-dest.bin?uploadId=" + copyUploadId)
+            .then()
+                .statusCode(204);
+    }
+
+    @Test
+    @Order(37)
+    void completeMultipartUploadPreservesSseKmsKeyId() {
+        String key = "kms-multipart-complete.bin";
+        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/complete-test-key";
+        String completeUploadId = given()
+            .header("x-amz-server-side-encryption", "aws:kms")
+            .header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId)
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        String eTag = given()
+            .body("KMS-COMPLETE-PART-DATA")
+        .when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + completeUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .extract().header("ETag");
+
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(eTag);
+
+        // The CompleteMultipartUpload response itself must reflect the upload's SSE-KMS
+        // settings, captured at CreateMultipartUpload, not come back bare like the
+        // CopyObject/UploadPartCopy responses did before this was fixed.
+        given()
+            .contentType("application/xml")
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + completeUploadId)
+        .then()
+            .statusCode(200)
+            .body(containsString("<CompleteMultipartUploadResult"))
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
+
+        // The completed object itself must carry the key id too, so a later GET/HEAD
+        // (not just the completion response) reports it.
+        given()
+        .when()
+            .get("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
+
+        given()
+        .when()
+            .head("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("aws:kms"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
     @Order(40)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/copy-of-multipart.bin").then().statusCode(204);
@@ -1258,6 +1365,7 @@ class S3MultipartIntegrationTest {
         given().when().delete("/" + BUCKET + "/copy-dest.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/sse-c-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/sse-c-source-for-copy.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/kms-source-for-copy.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/checksum-match-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/checksum-type-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/completion-validation.bin").then().statusCode(204);

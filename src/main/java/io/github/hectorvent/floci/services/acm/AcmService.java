@@ -156,6 +156,8 @@ public class AcmService implements ResourceProvider {
             status = validationWaitSeconds > 0 ? CertificateStatus.PENDING_VALIDATION : CertificateStatus.ISSUED;
         }
 
+        ValidationMethod method = validationMethod != null ? validationMethod : ValidationMethod.DNS;
+
         // A server leaf signed by the local CA, so Certificate plus CertificateChain from
         // GetCertificate validate the way an ACM certificate and its chain do on AWS.
         CertificateGenerator.GeneratedCertificate generated = certificateAuthority.issueServerCertificate(
@@ -177,7 +179,7 @@ public class AcmService implements ResourceProvider {
 
         cert.setStatus(status);
         cert.setType(type);
-        cert.setValidationMethod(validationMethod != null ? validationMethod : ValidationMethod.DNS);
+        cert.setValidationMethod(method);
         cert.setCreatedAt(now);
         cert.setIssuedAt(status == CertificateStatus.ISSUED ? now : null);
         cert.setNotBefore(generated.notBefore());
@@ -198,7 +200,7 @@ public class AcmService implements ResourceProvider {
         List<DomainValidation> validations = new ArrayList<>();
         for (String san : allSans) {
             validations.add(generateDomainValidation(san, requestedValidationDomains.get(san.toLowerCase(Locale.ROOT)),
-                validationMethod, status));
+                method, status));
         }
         cert.setDomainValidationOptions(validations);
 
@@ -777,11 +779,25 @@ public class AcmService implements ResourceProvider {
      * Generates a domain validation entry whose status follows the certificate: an ISSUED
      * certificate has validated every domain, a PENDING_VALIDATION one has not yet.
      *
+     * <p>The artefacts follow the validation method, as on AWS: DNS validation carries the CNAME
+     * record to publish under {@code _<token>.<domain>}, EMAIL validation carries instead the
+     * addresses the approval mail went to, the five conventional mailboxes of the validation
+     * domain. Real ACM also mails the WHOIS contacts, which the emulator cannot know.</p>
+     *
      * @param requestedValidationDomain the {@code ValidationDomain} the caller asked for, or {@code null}
-     *                                  to validate the domain against itself
+     *                                  to validate the domain against itself (a wildcard against its base
+     *                                  domain for EMAIL, since there is no mailbox at {@code *.})
      */
     private DomainValidation generateDomainValidation(String domain, String requestedValidationDomain,
                                                       ValidationMethod method, CertificateStatus status) {
+        String validationStatus = status == CertificateStatus.ISSUED ? "SUCCESS" : "PENDING_VALIDATION";
+
+        if (method == ValidationMethod.EMAIL) {
+            String validationDomain = requestedValidationDomain != null ? requestedValidationDomain : baseDomain(domain);
+            return new DomainValidation(domain, validationDomain, validationStatus, method.name(), null,
+                validationEmails(validationDomain));
+        }
+
         String validationToken = generateValidationToken(domain);
         String recordBase = baseDomain(domain);
         ResourceRecord resourceRecord = new ResourceRecord(
@@ -789,17 +805,21 @@ public class AcmService implements ResourceProvider {
             "CNAME",
             "_" + validationToken.substring(32) + ".acm-validations.aws."
         );
-
-        String validationStatus = status == CertificateStatus.ISSUED ? "SUCCESS" : "PENDING_VALIDATION";
-
         return new DomainValidation(
             domain,
             requestedValidationDomain != null ? requestedValidationDomain : domain,
             validationStatus,
-            method != null ? method.name() : "DNS",
+            method.name(),
             resourceRecord,
             null
         );
+    }
+
+    /** The mailboxes ACM always sends the approval mail to, in the order the console lists them. */
+    static List<String> validationEmails(String validationDomain) {
+        String domain = validationDomain.toLowerCase(Locale.ROOT);
+        return List.of("admin@" + domain, "administrator@" + domain, "hostmaster@" + domain,
+            "postmaster@" + domain, "webmaster@" + domain);
     }
 
     private String generateValidationToken(String domain) {

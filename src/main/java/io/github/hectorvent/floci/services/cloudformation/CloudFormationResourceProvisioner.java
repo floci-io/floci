@@ -20,9 +20,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResour
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
-import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
-import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
@@ -43,10 +41,16 @@ import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.rds.RdsService;
@@ -126,13 +130,6 @@ public class CloudFormationResourceProvisioner {
     private static final String INLINE_CLEANUP_GROUP_TARGETS_ATTR = "__FlociInlineCleanupGroupTargets";
     private static final String SFN_NAME_MODE_ATTR = "FlociStepFunctionsNameMode";
     static final String SFN_UPDATE_SNAPSHOT_ATTR = "__FlociStepFunctionsUpdateSnapshot";
-    private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
-    private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
-    private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
-    private static final Set<String> EVENT_BUS_SUPPORTED_PROPERTIES =
-            Set.of("Name", "Description", "Tags", "Policy");
-    private static final Pattern EVENT_BUS_TAG_PATTERN =
-            Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
     private static final int GENERATED_NAME_SUFFIX_LENGTH = 12;
@@ -177,8 +174,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::ApiGatewayV2::Authorizer",
             "AWS::CloudFormation::CustomResource",
             "AWS::EKS::Nodegroup",
-            "AWS::Events::EventBus",
-            "AWS::Events::Rule",
             "AWS::IAM::ManagedPolicy",
             "AWS::IAM::Policy",
             "AWS::SecretsManager::SecretTargetAttachment",
@@ -210,9 +205,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::EC2::SecurityGroup",
             "AWS::EKS::Cluster",
             "AWS::EKS::Nodegroup",
-            "AWS::Events::EventBus",
-            "AWS::Events::EventBusPolicy",
-            "AWS::Events::Rule",
             "AWS::IAM::AccessKey",
             "AWS::IAM::InstanceProfile",
             "AWS::IAM::ManagedPolicy",
@@ -247,7 +239,6 @@ public class CloudFormationResourceProvisioner {
     private final LambdaService lambdaService;
     private final IamService iamService;
     private final SecretsManagerService secretsManagerService;
-    private final EventBridgeService eventBridgeService;
     private final ApiGatewayService apiGatewayService;
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final LambdaLayerService lambdaLayerService;
@@ -275,7 +266,6 @@ public class CloudFormationResourceProvisioner {
                                              LambdaService lambdaService, IamService iamService,
                                              SsmService ssmService, KmsService kmsService,
                                              SecretsManagerService secretsManagerService,
-                                             EventBridgeService eventBridgeService,
                                              ApiGatewayService apiGatewayService,
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              EcrService ecrService,
@@ -305,7 +295,6 @@ public class CloudFormationResourceProvisioner {
         this.lambdaService = lambdaService;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
-        this.eventBridgeService = eventBridgeService;
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaLayerService = lambdaLayerService;
@@ -379,9 +368,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::SecretsManager::SecretTargetAttachment" ->
                         provisionSecretTargetAttachment(resource, properties, engine, region, stackName);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
-                case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
-                case "AWS::Events::EventBus" -> provisionEventBridgeEventBus(resource, properties, engine, region);
-                case "AWS::Events::EventBusPolicy" -> provisionEventBusPolicy(resource, properties, engine, region);
                 case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
                 case "AWS::ApiGateway::Authorizer" -> provisionApiGatewayAuthorizer(resource, properties, engine, region);
@@ -600,14 +586,6 @@ public class CloudFormationResourceProvisioner {
             }
             return;
         }
-        // Rule deletion needs the rule's event bus (stored as an attribute at provision time),
-        // which the type/physicalId delete path can't provide; a custom-bus rule looked up under
-        // the default bus would silently no-op and leave the rule (and its bus) live.
-        if ("AWS::Events::Rule".equals(resourceType)) {
-            deleteEventBridgeRuleSafe(resource.getPhysicalId(),
-                    resource.getAttributes().get("EventBusName"), region);
-            return;
-        }
         // Authorizer deletion needs the api id (a stored attribute, not the physical id, which is
         // the authorizer id) — same shape as the Nodegroup case above. Without this, the generic
         // type/physicalId delete path has no case for this type at all and silently no-ops,
@@ -633,10 +611,6 @@ public class CloudFormationResourceProvisioner {
         // policy before IAM's DeletePolicy operation. The type/physicalId path lacks that state.
         if ("AWS::IAM::ManagedPolicy".equals(resourceType)) {
             deleteManagedPolicy(resource);
-            return;
-        }
-        if ("AWS::Events::EventBus".equals(resourceType)) {
-            deleteEventBusSafe(resource, region);
             return;
         }
         throw new IllegalStateException("DELETE_NEEDS_STACK_RESOURCE lists " + resourceType
@@ -673,9 +647,6 @@ public class CloudFormationResourceProvisioner {
                     "SecretTargetAttachment deletion requires the StackResource metadata that records its managed fields.",
                     400);
             // No bus context on the type/physicalId path (e.g. CREATE-rollback); targets the default bus.
-            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
-            case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
-            case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
             case "AWS::StepFunctions::StateMachine" -> stepFunctionsService.deleteStateMachine(physicalId);
@@ -737,7 +708,13 @@ public class CloudFormationResourceProvisioner {
             description = "Managed by CloudFormation";
         }
         String vpcId = resolveOptional(props, "VpcId", engine);
-        var sg = ec2Service.createSecurityGroup(region, groupName, description, vpcId);
+        // provision() re-runs for every resource on every update. Re-creating an unchanged group
+        // would mint a new group id (and collide on the name whenever the VPC id is stable), so
+        // reuse the group this resource already points at.
+        var reconciled = existingSecurityGroupToReconcile(r.getPhysicalId(), groupName, description, vpcId, region);
+        final SecurityGroup sg = reconciled != null
+                ? reconciled
+                : ec2Service.createSecurityGroup(region, groupName, description, vpcId);
         // Ref on AWS::EC2::SecurityGroup returns the group id for VPC security groups.
         r.setPhysicalId(sg.getGroupId());
         r.getAttributes().put("GroupId", sg.getGroupId());
@@ -748,17 +725,24 @@ public class CloudFormationResourceProvisioner {
         // Inline rule properties — previously dropped, leaving the group empty. The mapping is
         // shared with the standalone SecurityGroupIngress/Egress resource types, which live in
         // Ec2SecurityGroupRuleCfnProvisioner; this arm joins them when it is extracted.
+        // Authorize appends without a duplicate check, so re-running this on a reused group would
+        // stack another copy of every inline rule on each update. Only authorize what the group
+        // does not already carry.
+        //
+        // Deliberately additive: a rule dropped from the template is not revoked here. Revoking
+        // the difference would mean revoking permissions this resource cannot prove it owns - a
+        // group can also carry rules from standalone AWS::EC2::SecurityGroupIngress/Egress
+        // resources, and clearing them on an unrelated update would close ports another stack
+        // resource is responsible for. Removing a rule the template no longer declares needs the
+        // provisioner to record what it authorized; noted as a follow-up.
+        var peerGroupId = peerGroupIdResolver(region, sg.getVpcId());
         if (props != null && props.has("SecurityGroupIngress")) {
-            for (JsonNode rule : props.get("SecurityGroupIngress")) {
-                ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(),
-                        List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
-            }
+            authorizeMissing(props.get("SecurityGroupIngress"), sg.getIpPermissions(), engine, peerGroupId,
+                    perms -> ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), perms));
         }
         if (props != null && props.has("SecurityGroupEgress")) {
-            for (JsonNode rule : props.get("SecurityGroupEgress")) {
-                ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(),
-                        List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
-            }
+            authorizeMissing(props.get("SecurityGroupEgress"), sg.getIpPermissionsEgress(), engine, peerGroupId,
+                    perms -> ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), perms));
         }
     }
 
@@ -1240,6 +1224,120 @@ public class CloudFormationResourceProvisioner {
         }
         r.setPhysicalId(group.getDbClusterParameterGroupName());
         r.getAttributes().put("DBClusterParameterGroupName", group.getDbClusterParameterGroupName());
+    }
+
+    /** The VPC a security group would land in for this template value: the default when omitted. */
+    private String effectiveVpcId(String vpcId, String region) {
+        return vpcId != null && !vpcId.isEmpty() ? vpcId : String.valueOf(ec2Service.resolveDefaultVpcId(region));
+    }
+
+    /**
+     * Authorizes each declared rule that the group does not already carry, one call per rule so a
+     * rejected rule cannot take its siblings down with it.
+     */
+    private void authorizeMissing(JsonNode declared, List<IpPermission> existing,
+                                  CloudFormationTemplateEngine engine,
+                                  java.util.function.UnaryOperator<String> peerGroupId,
+                                  java.util.function.Consumer<List<IpPermission>> authorize) {
+        Set<String> present = existing.stream()
+                .map(p -> permissionKey(p, peerGroupId))
+                .collect(java.util.stream.Collectors.toSet());
+        for (JsonNode rule : declared) {
+            IpPermission perm = Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine);
+            if (present.add(permissionKey(perm, peerGroupId))) {
+                authorize.accept(List.of(perm));
+            }
+        }
+    }
+
+    /**
+     * Resolves a peer group's name to its id, the same lookup {@code Ec2Service} performs when it
+     * stores an authorized rule. Group names are unique per VPC rather than per region, so the
+     * search is confined to the group being authorized. A name matching nothing there stays a
+     * name, which is also what the service does.
+     */
+    private java.util.function.UnaryOperator<String> peerGroupIdResolver(String region, String vpcId) {
+        return groupName -> ec2Service.describeSecurityGroups(region, List.of(), List.of(groupName), Map.of())
+                .stream()
+                .filter(peer -> Objects.equals(vpcId, peer.getVpcId()))
+                .map(SecurityGroup::getGroupId)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(groupName);
+    }
+
+    /**
+     * Identity of a permission for duplicate detection. {@link IpPermission} and the range types
+     * it holds define no {@code equals}, so compare a canonical rendering instead. Descriptions
+     * are left out: AWS treats a rule differing only by description as the same rule.
+     */
+    private static String permissionKey(IpPermission p, java.util.function.UnaryOperator<String> peerGroupId) {
+        return String.join("|",
+                String.valueOf(p.getIpProtocol()),
+                String.valueOf(p.getFromPort()),
+                String.valueOf(p.getToPort()),
+                p.getIpRanges().stream().map(IpRange::getCidrIp).filter(Objects::nonNull).sorted()
+                        .collect(java.util.stream.Collectors.joining(",")),
+                p.getIpv6Ranges().stream().map(Ipv6Range::getCidrIpv6).filter(Objects::nonNull).sorted()
+                        .collect(java.util.stream.Collectors.joining(",")),
+                p.getUserIdGroupPairs().stream()
+                        .map(g -> peerIdentity(g, peerGroupId))
+                        .filter(Objects::nonNull).sorted()
+                        .collect(java.util.stream.Collectors.joining(",")),
+                p.getPrefixListIds().stream().map(PrefixListId::getPrefixListId)
+                        .filter(Objects::nonNull).sorted()
+                        .collect(java.util.stream.Collectors.joining(",")));
+    }
+
+    /**
+     * How a peer group is identified when two permissions are compared: its id whenever one can be
+     * had. A stored pair already carries one, because authorize resolves the name as it records the
+     * rule, while a pair straight from the template carries only the name it was declared with.
+     * Keying a resolved id against an unresolved name never matches, which re-authorized a rule
+     * naming its peer through {@code SourceSecurityGroupName} on every single update.
+     */
+    private static String peerIdentity(UserIdGroupPair pair,
+                                       java.util.function.UnaryOperator<String> peerGroupId) {
+        if (pair.getGroupId() != null) {
+            return pair.getGroupId();
+        }
+        return pair.getGroupName() == null ? null : peerGroupId.apply(pair.getGroupName());
+    }
+
+    /**
+     * The security group this stack resource already points at, when an UpdateStack re-invocation
+     * left it unchanged. Unlike most resources the physical id here is the group <em>id</em>, not
+     * the name, so the rename check compares the stored group's name against the template's.
+     *
+     * <p>Returns {@code null} for a fresh create, a group deleted out of band, or any change AWS
+     * treats as a replacement: GroupName, GroupDescription and VpcId are all immutable on a
+     * security group, so a template that changes one wants a new group, not an edit to this one.
+     * The caller then creates.
+     */
+    private SecurityGroup existingSecurityGroupToReconcile(String priorPhysicalId, String groupName,
+                                                           String description, String vpcId, String region) {
+        if (priorPhysicalId == null || priorPhysicalId.isBlank()) {
+            return null;
+        }
+        try {
+            return ec2Service.describeSecurityGroups(region, List.of(priorPhysicalId), List.of(), Map.of())
+                    .stream()
+                    .filter(existing -> groupName == null || groupName.equals(existing.getGroupName()))
+                    .filter(existing -> description == null || description.equals(existing.getDescription()))
+                    // Compare the VpcId the template would actually get, not the raw property.
+                    // createSecurityGroup resolves an omitted VpcId to the region's default VPC,
+                    // so the stored group always has one: comparing against a null property would
+                    // either force a replacement on every update, or - the bug - let a template
+                    // that drops VpcId keep a group sitting in the explicit VPC it named before.
+                    .filter(existing -> effectiveVpcId(vpcId, region).equals(existing.getVpcId()))
+                    .findFirst()
+                    .orElse(null);
+        } catch (AwsException notFound) {
+            // Expected when the group was deleted out of band since the prior update.
+            LOG.debugv(notFound, "No existing security group {0} found on file, falling back to create",
+                    priorPhysicalId);
+            return null;
+        }
     }
 
     /**
@@ -3306,474 +3404,6 @@ public class CloudFormationResourceProvisioner {
         return password;
     }
 
-    // ── EventBridge ─────────────────────────────────────────────────────────
-
-    private void provisionEventBridgeRule(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                          String region, String stackName) {
-        String ruleName = resolveOptional(props, "Name", engine);
-        if (ruleName == null || ruleName.isBlank()) {
-            ruleName = generatePhysicalName(stackName, r.getLogicalId(), 64, false);
-        }
-
-        String busName = resolveOptional(props, "EventBusName", engine);
-        String description = resolveOptional(props, "Description", engine);
-        String roleArn = resolveOptional(props, "RoleArn", engine);
-        String scheduleExpression = resolveOptional(props, "ScheduleExpression", engine);
-
-        String eventPattern = null;
-        if (props != null && props.has("EventPattern") && !props.get("EventPattern").isNull()) {
-            JsonNode patternNode = engine.resolveNode(props.get("EventPattern"));
-            eventPattern = patternNode.toString();
-        }
-
-        String stateStr = resolveOptional(props, "State", engine);
-        RuleState state = "DISABLED".equals(stateStr) ? RuleState.DISABLED : RuleState.ENABLED;
-
-        var rule = eventBridgeService.putRule(ruleName, busName, eventPattern, scheduleExpression,
-                state, description, roleArn, Map.of(), region);
-        r.setPhysicalId(ruleName);
-        r.getAttributes().put("Arn", rule.getArn());
-        // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
-        // the right bus (the physical id is only the rule name, which resolves to the default bus).
-        if (busName != null && !busName.isBlank()) {
-            r.getAttributes().put("EventBusName", busName);
-        }
-
-        // Provision inline targets
-        if (props != null && props.has("Targets")) {
-            List<Target> targets = new ArrayList<>();
-            for (JsonNode targetNode : props.get("Targets")) {
-                JsonNode resolved = engine.resolveNode(targetNode);
-                String targetId = resolved.path("Id").asText(null);
-                String targetArn = resolved.path("Arn").asText(null);
-                String input = resolved.path("Input").asText(null);
-                String inputPath = resolved.path("InputPath").asText(null);
-                if (targetId != null && targetArn != null) {
-                    Target target = new Target(targetId, targetArn, input, inputPath);
-                    target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
-                    JsonNode sqsParamsNode = resolved.path("SqsParameters");
-                    if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
-                        String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);
-                        if (messageGroupId != null) {
-                            SqsParameters sqsParameters = new SqsParameters();
-                            sqsParameters.setMessageGroupId(messageGroupId);
-                            target.setSqsParameters(sqsParameters);
-                        }
-                    }
-                    JsonNode batchParamsNode = resolved.path("BatchParameters");
-                    if (!batchParamsNode.isMissingNode() && batchParamsNode.isObject()) {
-                        JsonNode arrayProperties = batchParamsNode.path("ArrayProperties");
-                        BatchParameters batchParameters = new BatchParameters();
-                        batchParameters.setJobDefinition(batchParamsNode.path("JobDefinition").asText(null));
-                        batchParameters.setJobName(batchParamsNode.path("JobName").asText(null));
-                        if (arrayProperties.isObject()) {
-                            batchParameters.setArrayProperties(jsonObjectToMap(arrayProperties));
-                        }
-                        if (batchParamsNode.has("RetryStrategy")) {
-                            batchParameters.setRetryStrategy(batchParamsNode.get("RetryStrategy"));
-                        }
-                        target.setBatchParameters(batchParameters);
-                    }
-                    targets.add(target);
-                }
-            }
-            if (!targets.isEmpty()) {
-                eventBridgeService.putTargets(ruleName, busName, targets, region);
-            }
-        }
-    }
-
-    /**
-     * Provisions an {@code AWS::Events::EventBus} (a custom EventBridge event bus). Without this the
-     * resource would fall through to the generic stub, which assigns a physical id but never registers
-     * the bus with the EventBridge service — so any {@code AWS::Events::Rule} (or PutEvents) targeting
-     * the bus fails "EventBus not found". Per the AWS spec, {@code Ref} returns the bus <em>name</em>
-     * (not the ARN), so the physical id is the name; {@code Fn::GetAtt "Arn"} exposes the ARN.
-     */
-    private void provisionEventBridgeEventBus(StackResource r, JsonNode props,
-                                              CloudFormationTemplateEngine engine, String region) {
-        validateEventBusProperties(props);
-        String existingBusName = r.getPhysicalId();
-        String busName = resolveOptional(props, "Name", engine);
-        validateEventBusName(busName);
-        if (existingBusName != null && !existingBusName.equals(busName)) {
-            throw new AwsException("ValidationError",
-                    "Updating EventBus Name requires resource replacement, which is not supported.", 400);
-        }
-        String description = resolveOptional(props, "Description", engine);
-        if (description != null && description.length() > 512) {
-            throw new AwsException("ValidationError",
-                    "AWS::Events::EventBus Description must not exceed 512 characters.", 400);
-        }
-        Map<String, String> tags = parseEventBusTags(
-                props != null ? props.get("Tags") : null, engine);
-        JsonNode policy = resolveEventBusPolicy(props, engine);
-
-        EventBus bus;
-        boolean createdBus = false;
-        try {
-            bus = eventBridgeService.createEventBus(busName, description, tags, region);
-            createdBus = true;
-            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
-        } catch (AwsException e) {
-            boolean stackAlreadyOwnsBus = existingBusName != null && existingBusName.equals(busName);
-            if (!stackAlreadyOwnsBus || !"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
-                throw e;
-            }
-            bus = eventBridgeService.describeEventBus(busName, region);
-            // A missing created-time means ownership was never tracked, not that it changed: stacks
-            // provisioned before this attribute existed are restored without it. Refusing there would
-            // wedge every later UpdateStack, including no-op ones. Only a recorded time that actually
-            // disagrees means the bus was recreated out of band and belongs to its new owner.
-            String existingCreatedTime = r.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
-            String actualCreatedTime = eventBusCreatedTime(bus);
-            if (existingCreatedTime != null && !existingCreatedTime.equals(actualCreatedTime)) {
-                r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-                throw e;
-            }
-            validateEventBusMutablePropertiesUnchanged(r, bus, description, tags, policy);
-        }
-
-        // Record identity before applying the policy: rollbackCreatedResources skips any resource
-        // whose physicalId is still null, so a putPermission failure after the bus exists would
-        // otherwise orphan it with no way for rollback to find it.
-        r.setPhysicalId(busName);              // Ref → EventBus name (AWS-faithful)
-        r.getAttributes().put("Arn", bus.getArn());
-        r.getAttributes().put("Name", busName);
-        r.getAttributes().put(EVENT_BUS_CREATED_TIME_ATTR, eventBusCreatedTime(bus));
-        recordEventBusManagedTagKeys(r, tags.keySet());
-        recordEventBusManagedPolicy(r, policy);
-
-        // Apply an optional inline resource policy only during creation. Updating it is rejected by
-        // validateEventBusMutablePropertiesUnchanged until stack updates can roll back live resource
-        // mutations transactionally.
-        if (createdBus && !policy.isNull()) {
-            eventBridgeService.putPermission(busName, null, null, null, null, policy.toString(), region);
-        }
-    }
-
-    private void validateEventBusProperties(JsonNode props) {
-        if (props == null || props.isNull()) {
-            return;
-        }
-        if (!props.isObject()) {
-            throw new AwsException("ValidationError",
-                    "AWS::Events::EventBus Properties must be an object.", 400);
-        }
-        List<String> unsupported = new ArrayList<>();
-        props.fieldNames().forEachRemaining(name -> {
-            if (!EVENT_BUS_SUPPORTED_PROPERTIES.contains(name)) {
-                unsupported.add(name);
-            }
-        });
-        if (!unsupported.isEmpty()) {
-            Collections.sort(unsupported);
-            throw new AwsException("ValidationError",
-                    "Unsupported AWS::Events::EventBus properties: "
-                            + String.join(", ", unsupported), 400);
-        }
-    }
-
-    private void validateEventBusName(String busName) {
-        if (busName == null || busName.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "Name is required for AWS::Events::EventBus.", 400);
-        }
-        if (busName.length() > 256
-                || !busName.matches("[.\\-_A-Za-z0-9]+")
-                || "default".equals(busName)) {
-            throw new AwsException("ValidationError",
-                    "Invalid custom event bus Name: " + busName, 400);
-        }
-    }
-
-    private Map<String, String> parseEventBusTags(
-            JsonNode tagsNode, CloudFormationTemplateEngine engine) {
-        if (tagsNode == null || tagsNode.isNull()) {
-            return Map.of();
-        }
-        JsonNode resolvedTags = engine.resolveNode(tagsNode);
-        if (!resolvedTags.isArray()) {
-            throw new AwsException("ValidationError",
-                    "AWS::Events::EventBus Tags must be an array.", 400);
-        }
-        if (resolvedTags.size() > 50) {
-            throw new AwsException("ValidationError",
-                    "AWS::Events::EventBus supports at most 50 tags.", 400);
-        }
-        Map<String, String> tags = new LinkedHashMap<>();
-        for (JsonNode entry : resolvedTags) {
-            if (!entry.isObject()) {
-                throw new AwsException("ValidationError",
-                        "Each AWS::Events::EventBus tag must be an object.", 400);
-            }
-            String key = entry.path("Key").asText(null);
-            String value = entry.path("Value").asText(null);
-            if (key == null || key.isEmpty() || key.length() > 128) {
-                throw new AwsException("ValidationError",
-                        "Event bus tag Key must contain 1 to 128 characters.", 400);
-            }
-            if (key.regionMatches(true, 0, "aws:", 0, 4)) {
-                throw new AwsException("ValidationError",
-                        "Event bus tag Key must not use the reserved aws: prefix.", 400);
-            }
-            if (!EVENT_BUS_TAG_PATTERN.matcher(key).matches()) {
-                throw new AwsException("ValidationError",
-                        "Event bus tag Key contains unsupported characters.", 400);
-            }
-            if (value == null || value.length() > 256) {
-                throw new AwsException("ValidationError",
-                        "Event bus tag Value must contain at most 256 characters.", 400);
-            }
-            if (!EVENT_BUS_TAG_PATTERN.matcher(value).matches()) {
-                throw new AwsException("ValidationError",
-                        "Event bus tag Value contains unsupported characters.", 400);
-            }
-            if (tags.putIfAbsent(key, value) != null) {
-                throw new AwsException("ValidationError",
-                        "Duplicate event bus tag Key: " + key, 400);
-            }
-        }
-        return tags;
-    }
-
-    private void validateEventBusMutablePropertiesUnchanged(
-            StackResource resource, EventBus bus, String requestedDescription,
-            Map<String, String> requestedTags, JsonNode requestedPolicy) {
-        if (!Objects.equals(bus.getDescription(), requestedDescription)) {
-            throw unsupportedEventBusMutableUpdate();
-        }
-
-        // Stacks persisted by the older EventBus provisioner have no managed-key metadata. There
-        // is no reliable way to distinguish their CloudFormation tags from tags added out of band,
-        // so allow this one-time adoption and start tracking the requested keys afterwards.
-        if (resource.getAttributes().containsKey(EVENT_BUS_MANAGED_TAG_KEYS_ATTR)) {
-            Map<String, String> currentManagedTags = new LinkedHashMap<>();
-            for (String key : eventBusManagedTagKeys(resource)) {
-                if (bus.getTags().containsKey(key)) {
-                    currentManagedTags.put(key, bus.getTags().get(key));
-                }
-            }
-            if (!currentManagedTags.equals(requestedTags)) {
-                throw unsupportedEventBusMutableUpdate();
-            }
-        }
-
-        String managedPolicy = resource.getAttributes().get(EVENT_BUS_MANAGED_POLICY_ATTR);
-        JsonNode policyToCompare = managedPolicy != null
-                ? parseEventBusPolicy(managedPolicy, "stored CloudFormation metadata")
-                : parseEventBusPolicy(bus.getPolicy(), "the existing event bus");
-        if (managedPolicy != null || !requestedPolicy.isNull()) {
-            if (!policyToCompare.equals(requestedPolicy)) {
-                throw unsupportedEventBusMutableUpdate();
-            }
-        }
-    }
-
-    private JsonNode resolveEventBusPolicy(JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("Policy") || props.get("Policy").isNull()) {
-            return JsonNodeFactory.instance.nullNode();
-        }
-        return engine.resolveNode(props.get("Policy"));
-    }
-
-    private JsonNode parseEventBusPolicy(String policy, String source) {
-        if (policy == null) {
-            return JsonNodeFactory.instance.nullNode();
-        }
-        try {
-            JsonNode parsed = objectMapper.readTree(policy);
-            return parsed != null ? parsed : JsonNodeFactory.instance.nullNode();
-        } catch (Exception e) {
-            throw new AwsException("InternalFailure",
-                    "Invalid EventBus policy in " + source + ": " + e.getMessage(), 500);
-        }
-    }
-
-    private void recordEventBusManagedPolicy(StackResource resource, JsonNode policy) {
-        try {
-            resource.getAttributes().put(EVENT_BUS_MANAGED_POLICY_ATTR,
-                    objectMapper.writeValueAsString(policy));
-        } catch (Exception e) {
-            throw new AwsException("InternalFailure",
-                    "Failed to store EventBus managed-policy metadata: " + e.getMessage(), 500);
-        }
-    }
-
-    private AwsException unsupportedEventBusMutableUpdate() {
-        return new AwsException("ValidationError",
-                "Updating AWS::Events::EventBus Description, Tags, or Policy is not supported "
-                        + "until transactional rollback is available.", 400);
-    }
-
-    private Set<String> eventBusManagedTagKeys(StackResource resource) {
-        String value = resource.getAttributes().get(EVENT_BUS_MANAGED_TAG_KEYS_ATTR);
-        if (value == null || value.isBlank()) {
-            return Set.of();
-        }
-        try {
-            JsonNode keys = objectMapper.readTree(value);
-            if (!keys.isArray()) {
-                throw new IllegalArgumentException("managed tag keys are not an array");
-            }
-            Set<String> result = new HashSet<>();
-            keys.forEach(key -> result.add(key.asText()));
-            return result;
-        } catch (Exception e) {
-            throw new AwsException("InternalFailure",
-                    "Invalid stored EventBus managed-tag metadata: " + e.getMessage(), 500);
-        }
-    }
-
-    private void recordEventBusManagedTagKeys(StackResource resource, Set<String> keys) {
-        try {
-            resource.getAttributes().put(
-                    EVENT_BUS_MANAGED_TAG_KEYS_ATTR,
-                    objectMapper.writeValueAsString(new TreeSet<>(keys)));
-        } catch (Exception e) {
-            throw new AwsException("InternalFailure",
-                    "Failed to store EventBus managed-tag metadata: " + e.getMessage(), 500);
-        }
-    }
-
-    private String eventBusCreatedTime(EventBus bus) {
-        return bus.getCreatedTime() != null ? bus.getCreatedTime().toString() : "";
-    }
-
-    private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
-        try {
-            // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
-            var targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
-            if (!targets.isEmpty()) {
-                List<String> targetIds = targets.stream().map(Target::getId).toList();
-                eventBridgeService.removeTargets(ruleName, busName, targetIds, region);
-            }
-            eventBridgeService.deleteRule(ruleName, busName, region);
-        } catch (AwsException e) {
-            // An already-deleted rule is the one failure that genuinely means "done". Anything else
-            // is a real error worth surfacing rather than hiding behind a debug line.
-            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("EventBridge rule already gone, treating as deleted: {0}", ruleName);
-        } catch (Exception e) {
-            throw new AwsException("InternalFailure",
-                    "Could not delete EventBridge rule " + ruleName + ": " + e.getMessage(), 500);
-        }
-    }
-
-    private void deleteEventBusSafe(String busName, String region) {
-        try {
-            eventBridgeService.deleteEventBus(busName, region);
-        } catch (AwsException e) {
-            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("Event bus already gone, treating as deleted: {0}", busName);
-        }
-    }
-
-    private void deleteEventBusSafe(StackResource resource, String region) {
-        String busName = resource.getPhysicalId();
-        EventBus bus;
-        try {
-            bus = eventBridgeService.describeEventBus(busName, region);
-        } catch (AwsException e) {
-            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
-                LOG.debugv("Event bus already gone, treating as deleted: {0}", busName);
-                return;
-            }
-            throw e;
-        }
-
-        // A missing attribute means ownership was never tracked, not that it changed: stacks
-        // provisioned before this attribute existed are restored from cloudformation-stacks.json
-        // without it. Refusing there would leave every such stack permanently in DELETE_FAILED, so
-        // fall back to the pre-tracking behaviour of deleting what the stack recorded it created.
-        String expectedCreatedTime = resource.getAttributes().get(EVENT_BUS_CREATED_TIME_ATTR);
-        if (expectedCreatedTime != null && !expectedCreatedTime.equals(eventBusCreatedTime(bus))) {
-            throw new AwsException("ValidationError",
-                    "EventBus ownership changed; refusing to delete: " + busName, 400);
-        }
-        deleteEventBusSafe(busName, region);
-    }
-
-
-    private void provisionEventBusPolicy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                         String region) {
-        String busName = resolveOrDefault(props, "EventBusName", engine, "default");
-        String statementId = resolveOptional(props, "StatementId", engine);
-        if (statementId == null || statementId.isBlank()) {
-            throw new AwsException("ValidationException", "EventBusPolicy StatementId is required.", 400);
-        }
-
-        if (props != null && props.has("Statement") && props.get("Statement").isObject()) {
-            // Statement form: merge the full statement into the bus policy, keyed by Sid,
-            // so multiple EventBusPolicy resources on the same bus coexist.
-            try {
-                ObjectNode statement = (ObjectNode) engine.resolveNode(props.get("Statement")).deepCopy();
-                statement.put("Sid", statementId);
-
-                EventBus bus = eventBridgeService.describeEventBus(busName, region);
-                ObjectNode policy;
-                String current = bus.getPolicy();
-                if (current != null && !current.isBlank()) {
-                    policy = (ObjectNode) objectMapper.readTree(current);
-                } else {
-                    policy = objectMapper.createObjectNode();
-                    policy.put("Version", "2012-10-17");
-                    policy.putArray("Statement");
-                }
-                ArrayNode statements = policy.withArray("Statement");
-                for (int i = 0; i < statements.size(); i++) {
-                    if (statementId.equals(statements.get(i).path("Sid").asText(null))) {
-                        statements.remove(i);
-                        break;
-                    }
-                }
-                statements.add(statement);
-                eventBridgeService.putPermission(busName, null, null, statementId, null,
-                        objectMapper.writeValueAsString(policy), region);
-            } catch (AwsException e) {
-                throw e;
-            } catch (Exception e) {
-                throw new AwsException("ValidationException",
-                        "Invalid EventBusPolicy Statement: " + e.getMessage(), 400);
-            }
-            r.setPhysicalId(busName + "|" + statementId);
-            return;
-        }
-
-        // Individual form: Action + Principal (+ optional Condition {Type, Key, Value}).
-        String action = resolveOptional(props, "Action", engine);
-        String principal = resolveOptional(props, "Principal", engine);
-        String conditionJson = null;
-        if (props != null && props.has("Condition") && !props.get("Condition").isNull()) {
-            JsonNode c = engine.resolveNode(props.get("Condition"));
-            String type = c.path("Type").asText(null);
-            String key = c.path("Key").asText(null);
-            String value = c.path("Value").asText(null);
-            if (type != null && key != null && value != null) {
-                ObjectNode condition = objectMapper.createObjectNode();
-                condition.set(type, objectMapper.createObjectNode().put(key, value));
-                conditionJson = condition.toString();
-            }
-        }
-        eventBridgeService.putPermission(busName, action, principal, statementId, conditionJson, null, region);
-
-        r.setPhysicalId(busName + "|" + statementId);
-    }
-
-    private void removeEventBusPolicySafe(String physicalId, String region) {
-        try {
-            int sep = physicalId.lastIndexOf('|');
-            String busName = sep >= 0 ? physicalId.substring(0, sep) : "default";
-            String statementId = sep >= 0 ? physicalId.substring(sep + 1) : physicalId;
-            eventBridgeService.removePermission(busName, statementId, false, region);
-        } catch (Exception e) {
-            LOG.debugv("Could not remove event bus policy {0}: {1}", physicalId, e.getMessage());
-        }
-    }
 
     // ── Batch ────────────────────────────────────────────────────────────────
 

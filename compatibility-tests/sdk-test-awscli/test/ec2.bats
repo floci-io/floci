@@ -12,9 +12,13 @@ setup() {
     TGW_ATTACHMENT_ID=""
     TGW_VPC_ID=""
     TGW_ROUTE_TABLE_ID=""
+    MONITOR_INSTANCE_ID=""
 }
 
 teardown() {
+    if [ -n "$MONITOR_INSTANCE_ID" ]; then
+        aws_cmd ec2 terminate-instances --instance-ids "$MONITOR_INSTANCE_ID" >/dev/null 2>&1 || true
+    fi
     if [ -n "$PREFIX_LIST_ID" ]; then
         aws_cmd ec2 delete-managed-prefix-list --prefix-list-id "$PREFIX_LIST_ID" >/dev/null 2>&1 || true
     fi
@@ -605,4 +609,53 @@ create_attachment_fixture() {
     assert_success
     count=$(json_get "$output" '.Routes | length')
     [ "$count" = "2" ]
+}
+
+# Monitoring goes through the SDK, not just the raw Query wire, because that is the
+# path aws_instance takes: `monitoring = true` calls MonitorInstances, and the SDK
+# parses the response rather than reading the XML we happen to emit. AGENTS.md asks
+# for management APIs to be validated with SDK clients and not only handcrafted HTTP.
+
+launch_monitor_instance() {
+    run aws_cmd ec2 run-instances \
+        --image-id ami-0abcdef1234567890 --instance-type t3.micro \
+        --count 1
+    assert_success
+    MONITOR_INSTANCE_ID=$(json_get "$output" '.Instances[0].InstanceId')
+    [ -n "$MONITOR_INSTANCE_ID" ]
+}
+
+@test "EC2: monitor-instances reports enabled and the state survives to describe" {
+    launch_monitor_instance
+
+    run aws_cmd ec2 monitor-instances --instance-ids "$MONITOR_INSTANCE_ID"
+    assert_success
+    [ "$(json_get "$output" '.InstanceMonitorings[0].InstanceId')" = "$MONITOR_INSTANCE_ID" ]
+    [ "$(json_get "$output" '.InstanceMonitorings[0].Monitoring.State')" = "enabled" ]
+
+    # Read it back rather than trusting the mutating call's own response: the bug this
+    # guards against was answering "enabled" while every later read still said disabled.
+    run aws_cmd ec2 describe-instances --instance-ids "$MONITOR_INSTANCE_ID"
+    assert_success
+    [ "$(json_get "$output" '.Reservations[0].Instances[0].Monitoring.State')" = "enabled" ]
+}
+
+@test "EC2: unmonitor-instances reports disabled and the state survives to describe" {
+    launch_monitor_instance
+    run aws_cmd ec2 monitor-instances --instance-ids "$MONITOR_INSTANCE_ID"
+    assert_success
+
+    run aws_cmd ec2 unmonitor-instances --instance-ids "$MONITOR_INSTANCE_ID"
+    assert_success
+    [ "$(json_get "$output" '.InstanceMonitorings[0].Monitoring.State')" = "disabled" ]
+
+    run aws_cmd ec2 describe-instances --instance-ids "$MONITOR_INSTANCE_ID"
+    assert_success
+    [ "$(json_get "$output" '.Reservations[0].Instances[0].Monitoring.State')" = "disabled" ]
+}
+
+@test "EC2: monitor-instances rejects an instance that does not exist" {
+    run aws_cmd ec2 monitor-instances --instance-ids i-1234567890abcdef0
+    assert_failure
+    [[ "$output" == *"InvalidInstanceID.NotFound"* ]]
 }

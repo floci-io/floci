@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -23,9 +23,11 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -49,6 +51,7 @@ public class CloudTrailLogWriter {
 
     private static final DateTimeFormatter PATH_DATE = DateTimeFormatter.ofPattern("yyyy/MM/dd");
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmm'Z'");
+    static final int MAX_RECORDS_PER_LOG_FILE = 1_000;
     private static final String FILENAME_RAND_ALPHABET =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -58,6 +61,7 @@ public class CloudTrailLogWriter {
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final SecureRandom rng = new SecureRandom();
+    private final ConcurrentHashMap<CloudTrailService.TrailKey, FlushLock> flushLocks = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService executor;
 
@@ -110,7 +114,7 @@ public class CloudTrailLogWriter {
         try {
             for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
                 try {
-                    flushTrail(key);
+                    flushTrailBatches(key);
                 } catch (RuntimeException e) {
                     LOG.warnv(e, "CloudTrail log flush failed for trail {0} in {1}",
                             key.trailName(), key.region());
@@ -121,17 +125,50 @@ public class CloudTrailLogWriter {
         }
     }
 
-    private void flushTrail(CloudTrailService.TrailKey key) {
+    private void flushTrailBatches(CloudTrailService.TrailKey key) {
+        FlushLock lock = flushLocks.compute(key, (ignored, existing) -> {
+            FlushLock result = existing != null ? existing : new FlushLock();
+            result.users++;
+            return result;
+        });
+        lock.mutex.lock();
+        try {
+            int remaining = cloudTrailService.pendingRecordCount(key);
+            while (remaining > 0) {
+                int flushed = flushTrail(key);
+                if (flushed == 0) {
+                    return;
+                }
+                remaining -= flushed;
+            }
+        } finally {
+            lock.mutex.unlock();
+            flushLocks.computeIfPresent(key, (ignored, current) -> {
+                if (current != lock) {
+                    return current;
+                }
+                current.users--;
+                return current.users == 0 ? null : current;
+            });
+        }
+    }
+
+    private static final class FlushLock {
+        private final ReentrantLock mutex = new ReentrantLock();
+        private int users;
+    }
+
+    private int flushTrail(CloudTrailService.TrailKey key) {
         Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
         if (trail == null) {
-            // Trail was deleted while records were pending — drop them.
-            cloudTrailService.drainPendingRecords(key);
-            return;
+            // Trail was deleted while records were pending. Drop only the
+            // records that existed when this flush cycle started.
+            return cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE).size();
         }
 
-        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key);
+        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE);
         if (records.isEmpty()) {
-            return;
+            return 0;
         }
 
         byte[] payload;
@@ -181,19 +218,22 @@ public class CloudTrailLogWriter {
             LOG.warnv(e, "CloudTrail self-delivery event emission failed for trail {0} "
                     + "(write already succeeded, records not re-queued)", key.trailName());
         }
+        return records.size();
     }
 
     private byte[] serializeAndGzip(List<ObjectNode> records) {
-        ObjectNode envelope = mapper.createObjectNode();
-        ArrayNode arr = envelope.putArray("Records");
-        for (ObjectNode r : records) {
-            arr.add(r);
-        }
         try {
-            byte[] json = mapper.writeValueAsBytes(envelope);
-            ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(64, json.length / 4));
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
             try (GZIPOutputStream gz = new GZIPOutputStream(baos)) {
-                gz.write(json);
+                try (JsonGenerator generator = mapper.getFactory().createGenerator(gz)) {
+                    generator.writeStartObject();
+                    generator.writeArrayFieldStart("Records");
+                    for (ObjectNode record : records) {
+                        generator.writeTree(record);
+                    }
+                    generator.writeEndArray();
+                    generator.writeEndObject();
+                }
             }
             return baos.toByteArray();
         } catch (Exception e) {

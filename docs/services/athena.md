@@ -23,6 +23,7 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `ListDatabases` | - |
 | `ListTableMetadata` | - |
 | `GetTableMetadata` | - |
+| `ListTagsForResource` | Returns the tags on a workgroup |
 | `DeleteWorkGroup` | Deletes a workgroup |
 <!-- floci:actions:end -->
 

@@ -25,6 +25,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,6 +38,8 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final Logger LOG = Logger.getLogger(SqsService.class);
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
     private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
+    private static final int MAX_TERMINAL_MOVE_TASKS = 10;
+    private static final Duration TERMINAL_MOVE_TASK_TTL = Duration.ofHours(1);
 
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;
@@ -45,7 +49,7 @@ public class SqsService implements Resettable, ResourceProvider {
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
     /** Move tasks keyed by opaque task handle. */
-    private final ConcurrentHashMap<String, MoveTask> moveTasksByHandle = new ConcurrentHashMap<>();
+    private final MoveTaskStore moveTasksByHandle;
     /** Per-task cancellation flag the move worker polls between iterations. */
     private final ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean> moveTaskCancellation =
             new ConcurrentHashMap<>();
@@ -70,16 +74,98 @@ public class SqsService implements Resettable, ResourceProvider {
                            long startedTimestampMillis, String failureReason) {
     }
 
+    private static final class MoveTaskStore {
+        private final Map<String, Entry> entries = new HashMap<>();
+        private final Clock clock;
+        private long terminalSequence;
+
+        private MoveTaskStore(Clock clock) {
+            this.clock = clock;
+        }
+
+        private synchronized MoveTask get(String taskHandle) {
+            cleanup();
+            Entry entry = entries.get(taskHandle);
+            return entry == null ? null : entry.task();
+        }
+
+        private synchronized MoveTask getCurrentOrDefault(String taskHandle, MoveTask fallback) {
+            Entry entry = entries.get(taskHandle);
+            MoveTask task = entry == null ? null : entry.task();
+            return task == null ? fallback : task;
+        }
+
+        private synchronized Collection<MoveTask> values() {
+            cleanup();
+            return entries.values().stream().map(Entry::task).toList();
+        }
+
+        private synchronized void put(String taskHandle, MoveTask task) {
+            boolean terminal = !"RUNNING".equals(task.status());
+            Long terminalAtMillis = terminal ? clock.millis() : null;
+            long sequence = terminal ? ++terminalSequence : 0;
+            entries.put(taskHandle, new Entry(task, terminalAtMillis, sequence));
+            if (terminal) {
+                cleanup();
+                evictOldestTerminalTasks();
+            }
+        }
+
+        private synchronized void clear() {
+            entries.clear();
+        }
+
+        private void cleanup() {
+            long now = clock.millis();
+            entries.entrySet().removeIf(entry -> {
+                Long terminalAtMillis = entry.getValue().terminalAtMillis();
+                return terminalAtMillis != null
+                        && now >= terminalAtMillis
+                        && now - terminalAtMillis >= TERMINAL_MOVE_TASK_TTL.toMillis();
+            });
+        }
+
+        private void evictOldestTerminalTasks() {
+            Set<String> sourceArns = entries.values().stream()
+                    .filter(Entry::terminal)
+                    .map(entry -> entry.task().sourceArn())
+                    .collect(java.util.stream.Collectors.toSet());
+            for (String sourceArn : sourceArns) {
+                List<Map.Entry<String, Entry>> terminalEntries = entries.entrySet().stream()
+                        .filter(entry -> entry.getValue().terminal()
+                                && Objects.equals(sourceArn, entry.getValue().task().sourceArn()))
+                        .sorted(Map.Entry.comparingByValue(Comparator.comparingLong(Entry::terminalSequence)))
+                        .toList();
+                int excess = terminalEntries.size() - MAX_TERMINAL_MOVE_TASKS;
+                for (int i = 0; i < excess; i++) {
+                    entries.remove(terminalEntries.get(i).getKey());
+                }
+            }
+        }
+
+        private record Entry(MoveTask task, Long terminalAtMillis, long terminalSequence) {
+            private boolean terminal() {
+                return terminalAtMillis != null;
+            }
+        }
+    }
+
     private final int defaultVisibilityTimeout;
     private final int maxMessageSize;
     private final String baseUrl;
     private final RegionResolver regionResolver;
     private final boolean clearFifoDeduplicationCacheOnPurge;
     private final SnsService snsService;
+    private final Clock clock;
+
+    public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                      SnsService snsService) {
+        this(storageFactory, config, regionResolver, snsService, Clock.systemUTC());
+    }
 
     @Inject
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                      SnsService snsService) {
+                      SnsService snsService, Clock clock) {
         this(
                 storageFactory.create("sqs", "sqs-queues.json",
                         new TypeReference<Map<String, Queue>>() {
@@ -95,7 +181,8 @@ public class SqsService implements Resettable, ResourceProvider {
                 config.effectiveBaseUrl(),
                 regionResolver,
                 config.services().sqs().clearFifoDeduplicationCacheOnPurge(),
-                snsService
+                snsService,
+                clock
         );
     }
 
@@ -106,6 +193,12 @@ public class SqsService implements Resettable, ResourceProvider {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl) {
         this(queueStore, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
                 new RegionResolver("us-east-1", "000000000000"), false, null);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl, Clock clock) {
+        this(queueStore, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
@@ -121,6 +214,15 @@ public class SqsService implements Resettable, ResourceProvider {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService) {
+        this(queueStore, messageStore, dedupStore, defaultVisibilityTimeout, maxMessageSize, baseUrl,
+                regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, Clock.systemUTC());
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, Clock clock) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -130,6 +232,8 @@ public class SqsService implements Resettable, ResourceProvider {
         this.regionResolver = regionResolver;
         this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
         this.snsService = snsService;
+        this.clock = clock;
+        this.moveTasksByHandle = new MoveTaskStore(clock);
         loadPersistedMessages();
         loadPersistedDedup();
     }
@@ -893,7 +997,7 @@ public class SqsService implements Resettable, ResourceProvider {
         // the additional 1-second window covers the small gap between StartMessageMoveTask
         // returning and the worker flipping the task to RUNNING (so back-to-back start
         // calls that AWS would reject can't slip through).
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         for (MoveTask existing : moveTasksByHandle.values()) {
             if (!sourceArn.equals(existing.sourceArn())) {
                 continue;
@@ -928,7 +1032,7 @@ public class SqsService implements Resettable, ResourceProvider {
         moveTasksByHandle.put(taskHandle, new MoveTask(
                 taskHandle, sourceArn, destinationArn,
                 maxNumberOfMessagesPerSecond, "RUNNING",
-                0L, toMove, System.currentTimeMillis(), null));
+                0L, toMove, clock.millis(), null));
         var cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
         moveTaskCancellation.put(taskHandle, cancelled);
 
@@ -1025,6 +1129,7 @@ public class SqsService implements Resettable, ResourceProvider {
                         moved, cur.approximateNumberOfMessagesToMove(),
                         cur.startedTimestampMillis(), cur.failureReason()));
             }
+            moveTaskCancellation.remove(taskHandle, cancelled);
             LOG.infov("Move task {0} {1}: moved {2} messages from {3} to {4}", taskHandle,
                     cancelled.get() ? "cancelled" : "completed", moved, sourceArn,
                     destinationArn != null ? destinationArn : "original source");
@@ -1072,7 +1177,7 @@ public class SqsService implements Resettable, ResourceProvider {
         if (flag != null) {
             flag.set(true);
         }
-        return moveTasksByHandle.getOrDefault(taskHandle, task).approximateNumberOfMessagesMoved();
+        return moveTasksByHandle.getCurrentOrDefault(taskHandle, task).approximateNumberOfMessagesMoved();
     }
 
     private boolean isDeadLetterQueue(String queueArn, String region) {

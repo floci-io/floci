@@ -467,6 +467,9 @@ public class S3Service implements Resettable, ResourceProvider {
         object.setContentDisposition(effectiveOptions.getContentDisposition());
         object.setCacheControl(effectiveOptions.getCacheControl());
         object.setServerSideEncryption(normalizedServerSideEncryption);
+        object.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption)
+                ? effectiveOptions.getSseKmsKeyId()
+                : null);
         if (sseCustomerKey != null) {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
             object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
@@ -2306,7 +2309,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                                    Map<String, String> metadata, String storageClass,
                                                    String contentDisposition, String serverSideEncryption, String acl) {
         return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
-                serverSideEncryption, acl, null, null, null, null);
+                serverSideEncryption, acl, null, null, null, null, null, null, null);
     }
 
     public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
@@ -2315,8 +2318,8 @@ public class S3Service implements Resettable, ResourceProvider {
                                                    String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
                                                    String checksumAlgorithm) {
         return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
-                serverSideEncryption, acl, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5,
-                checksumAlgorithm, null);
+                serverSideEncryption, acl, null, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5,
+                checksumAlgorithm, null, null);
     }
 
     public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
@@ -2325,13 +2328,25 @@ public class S3Service implements Resettable, ResourceProvider {
                                                    String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
                                                    String checksumAlgorithm, Map<String, String> tagging) {
         return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
-                serverSideEncryption, acl, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5,
+                serverSideEncryption, acl, null, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5,
                 checksumAlgorithm, null, tagging);
     }
 
     public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
                                                    Map<String, String> metadata, String storageClass,
                                                    String contentDisposition, String serverSideEncryption, String acl,
+                                                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
+                                                   String checksumAlgorithm, String checksumType,
+                                                   Map<String, String> tagging) {
+        return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
+                serverSideEncryption, acl, null, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5,
+                checksumAlgorithm, checksumType, tagging);
+    }
+
+    public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
+                                                   Map<String, String> metadata, String storageClass,
+                                                   String contentDisposition, String serverSideEncryption, String acl,
+                                                   String sseKmsKeyId,
                                                    String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5,
                                                    String checksumAlgorithm, String checksumType,
                                                    Map<String, String> tagging) {
@@ -2349,6 +2364,7 @@ public class S3Service implements Resettable, ResourceProvider {
         upload.setStorageClass(ObjectAttributeName.normalizeStorageClass(storageClass));
         upload.setContentDisposition(contentDisposition);
         upload.setServerSideEncryption(normalizedServerSideEncryption);
+        upload.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption) ? sseKmsKeyId : null);
         if (customerKey != null) {
             upload.setSseCustomerAlgorithm(customerKey.algorithm());
             upload.setSseCustomerKeyMd5(customerKey.keyMd5());
@@ -2541,6 +2557,7 @@ public class S3Service implements Resettable, ResourceProvider {
                             .withStorageClass(upload.getStorageClass())
                             .withContentDisposition(upload.getContentDisposition())
                             .withServerSideEncryption(upload.getServerSideEncryption())
+                            .withSseKmsKeyId(upload.getSseKmsKeyId())
                             .withAcl(upload.getAcl())
                             .withTagging(upload.getTagging()));
             if (upload.getSseCustomerAlgorithm() != null) {
@@ -3675,6 +3692,7 @@ public class S3Service implements Resettable, ResourceProvider {
         copy.setContentDisposition(source.getContentDisposition());
         copy.setCacheControl(source.getCacheControl());
         copy.setServerSideEncryption(source.getServerSideEncryption());
+        copy.setSseKmsKeyId(source.getSseKmsKeyId());
         copy.setSseCustomerAlgorithm(source.getSseCustomerAlgorithm());
         copy.setSseCustomerKeyMd5(source.getSseCustomerKeyMd5());
         copy.setSize(source.getSize());
@@ -4110,6 +4128,11 @@ public class S3Service implements Resettable, ResourceProvider {
         String effectiveServerSideEncryption = destinationCustomerKey != null
                 ? null
                 : (normalizedServerSideEncryption != null ? normalizedServerSideEncryption : source.getServerSideEncryption());
+        String effectiveSseKmsKeyId = "aws:kms".equals(effectiveServerSideEncryption)
+                ? (normalizedServerSideEncryption != null
+                    ? effectiveOptions.getSseKmsKeyId()
+                    : source.getSseKmsKeyId())
+                : null;
         boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
         Map<String, String> effectiveTags = replaceTags
                 ? effectiveOptions.getReplacementTagging()
@@ -4135,6 +4158,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         .withContentDisposition(effectiveContentDisposition)
                         .withCacheControl(effectiveCacheControl)
                         .withServerSideEncryption(effectiveServerSideEncryption)
+                        .withSseKmsKeyId(effectiveSseKmsKeyId)
                         .withSseCustomerAlgorithm(effectiveOptions.getSseCustomerAlgorithm())
                         .withSseCustomerKey(effectiveOptions.getSseCustomerKey())
                         .withSseCustomerKeyMd5(effectiveOptions.getSseCustomerKeyMd5())

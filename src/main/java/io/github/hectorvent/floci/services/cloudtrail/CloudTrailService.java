@@ -27,10 +27,11 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.function.Supplier;
 
 @ApplicationScoped
@@ -47,7 +48,7 @@ public class CloudTrailService {
     private final ObjectMapper mapper;
 
     /** Per-trail pending record buffers — ephemeral, never persisted. */
-    private final ConcurrentHashMap<TrailKey, ConcurrentLinkedQueue<ObjectNode>> pendingRecordsByTrail =
+    private final ConcurrentHashMap<TrailKey, ConcurrentLinkedDeque<ObjectNode>> pendingRecordsByTrail =
             new ConcurrentHashMap<>();
 
     /**
@@ -364,25 +365,45 @@ public class CloudTrailService {
     }
 
     public void requeueRecords(TrailKey key, List<ObjectNode> records) {
-        if (!records.isEmpty()) {
-            queueFor(key).addAll(records);
+        if (records.isEmpty()) {
+            return;
+        }
+        ConcurrentLinkedDeque<ObjectNode> q = queueFor(key);
+        ListIterator<ObjectNode> it = records.listIterator(records.size());
+        // Add in reverse so the first failed record remains first.
+        while (it.hasPrevious()) {
+            q.addFirst(it.previous());
         }
     }
 
     public List<ObjectNode> drainPendingRecords(TrailKey key) {
-        ConcurrentLinkedQueue<ObjectNode> q = pendingRecordsByTrail.get(key);
-        if (q == null) return List.of();
+        return drainPendingRecords(key, Integer.MAX_VALUE);
+    }
+
+    public List<ObjectNode> drainPendingRecords(TrailKey key, int maxRecords) {
+        if (maxRecords <= 0) {
+            return List.of();
+        }
+        ConcurrentLinkedDeque<ObjectNode> q = pendingRecordsByTrail.get(key);
+        if (q == null) {
+            return List.of();
+        }
         List<ObjectNode> drained = new ArrayList<>();
         ObjectNode r;
-        while ((r = q.poll()) != null) {
+        while (drained.size() < maxRecords && (r = q.pollFirst()) != null) {
             drained.add(r);
         }
         return drained;
     }
 
+    public int pendingRecordCount(TrailKey key) {
+        ConcurrentLinkedDeque<ObjectNode> q = pendingRecordsByTrail.get(key);
+        return q == null ? 0 : q.size();
+    }
+
     public List<TrailKey> trailsWithPendingRecords() {
         List<TrailKey> result = new ArrayList<>();
-        for (Map.Entry<TrailKey, ConcurrentLinkedQueue<ObjectNode>> e : pendingRecordsByTrail.entrySet()) {
+        for (Map.Entry<TrailKey, ConcurrentLinkedDeque<ObjectNode>> e : pendingRecordsByTrail.entrySet()) {
             if (!e.getValue().isEmpty()) {
                 result.add(e.getKey());
             }
@@ -396,8 +417,8 @@ public class CloudTrailService {
                 .orElse(null);
     }
 
-    private ConcurrentLinkedQueue<ObjectNode> queueFor(TrailKey key) {
-        return pendingRecordsByTrail.computeIfAbsent(key, k -> new ConcurrentLinkedQueue<>());
+    private ConcurrentLinkedDeque<ObjectNode> queueFor(TrailKey key) {
+        return pendingRecordsByTrail.computeIfAbsent(key, k -> new ConcurrentLinkedDeque<>());
     }
 
     /**

@@ -389,6 +389,18 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_MSK_MOCK` | `false` | When `true`, clusters are created instantly without a real Redpanda container |
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` | Docker image for Kafka/Redpanda brokers |
 
+### Amazon MQ
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_AMAZONMQ_ENABLED` | `true` | Enable the Amazon MQ service |
+| `FLOCI_SERVICES_AMAZONMQ_MOCK` | `false` | When `true`, brokers are created instantly without a real RabbitMQ container |
+| `FLOCI_SERVICES_AMAZONMQ_DEFAULT_IMAGE` | `rabbitmq:3-management` | Docker image for RabbitMQ broker containers |
+| `FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_BASE` | `5672` | First host port in the range the AMQP listener is published on |
+| `FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_MAX` | `5699` | Last host port in the AMQP range |
+| `FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_BASE` | `15672` | First host port in the range the management console is published on |
+| `FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_MAX` | `15699` | Last host port in the console range |
+
 ### Managed Service for Apache Flink (Kinesis Analytics V2)
 
 | Variable | Default | Description |

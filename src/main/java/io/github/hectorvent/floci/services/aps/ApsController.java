@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.aps.model.PrometheusWorkspace;
+import io.github.hectorvent.floci.services.aps.model.RuleGroupsNamespace;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.inject.Inject;
@@ -12,6 +13,7 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -26,8 +28,9 @@ import java.util.Map;
 
 /**
  * Amazon Managed Service for Prometheus (Smithy restJson1, SigV4 scope {@code aps}) — the
- * workspace lifecycle only: create/describe/list/delete plus alias update. Tagging goes through
- * the shared {@code /tags/{resourceArn}} dispatcher, which routes {@code arn:aws:aps:...} to
+ * workspace lifecycle (create/describe/list/delete plus alias update) and rule groups namespaces
+ * (create/describe/list/put/delete). Tagging goes through the shared
+ * {@code /tags/{resourceArn}} dispatcher, which routes {@code arn:aws:aps:...} to
  * {@link ApsService}'s TagHandler implementation.
  *
  * <p>The literal {@code /workspaces} path segment takes JAX-RS precedence over S3's
@@ -120,6 +123,100 @@ public class ApsController {
         String alias = asString(body.get("alias"), "alias");
         service.updateWorkspaceAlias(regionResolver.resolveRegion(headers), workspaceId, alias);
         return Response.status(204).build();
+    }
+
+    @POST
+    @Path("/workspaces/{workspaceId}/rulegroupsnamespaces")
+    public Response createRuleGroupsNamespace(@Context HttpHeaders headers,
+                                              @PathParam("workspaceId") String workspaceId,
+                                              Map<String, Object> request) {
+        Map<String, Object> body = request != null ? request : Map.of();
+        RuleGroupsNamespace namespace = service.createRuleGroupsNamespace(
+                regionResolver.resolveRegion(headers), workspaceId,
+                asString(body.get("name"), "name"), asString(body.get("data"), "data"),
+                asStringMap(body.get("tags"), "tags"));
+        return Response.status(202).entity(toNamespaceMutationResponse(namespace)).build();
+    }
+
+    @GET
+    @Path("/workspaces/{workspaceId}/rulegroupsnamespaces")
+    public Response listRuleGroupsNamespaces(@Context HttpHeaders headers,
+                                             @PathParam("workspaceId") String workspaceId,
+                                             @QueryParam("name") String name,
+                                             @QueryParam("maxResults") String maxResultsParam,
+                                             @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<RuleGroupsNamespace> result = service.listRuleGroupsNamespaces(
+                regionResolver.resolveRegion(headers), workspaceId, name,
+                Pagination.parseMaxResults(maxResultsParam, "ValidationException"), nextToken);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("ruleGroupsNamespaces", result.items().stream().map(this::toNamespaceSummary).toList());
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}")
+    public Response describeRuleGroupsNamespace(@Context HttpHeaders headers,
+                                                @PathParam("workspaceId") String workspaceId,
+                                                @PathParam("name") String name) {
+        RuleGroupsNamespace namespace = service.describeRuleGroupsNamespace(
+                regionResolver.resolveRegion(headers), workspaceId, name);
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode description = toNamespaceSummary(namespace);
+        description.put("data", namespace.getEncodedData());
+        response.set("ruleGroupsNamespace", description);
+        return Response.ok(response).build();
+    }
+
+    @PUT
+    @Path("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}")
+    public Response putRuleGroupsNamespace(@Context HttpHeaders headers,
+                                           @PathParam("workspaceId") String workspaceId,
+                                           @PathParam("name") String name,
+                                           Map<String, Object> request) {
+        Map<String, Object> body = request != null ? request : Map.of();
+        RuleGroupsNamespace namespace = service.putRuleGroupsNamespace(
+                regionResolver.resolveRegion(headers), workspaceId, name,
+                asString(body.get("data"), "data"));
+        return Response.status(202).entity(toNamespaceMutationResponse(namespace)).build();
+    }
+
+    @DELETE
+    @Path("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}")
+    public Response deleteRuleGroupsNamespace(@Context HttpHeaders headers,
+                                              @PathParam("workspaceId") String workspaceId,
+                                              @PathParam("name") String name) {
+        service.deleteRuleGroupsNamespace(regionResolver.resolveRegion(headers), workspaceId, name);
+        return Response.status(202).build();
+    }
+
+    private ObjectNode toNamespaceMutationResponse(RuleGroupsNamespace namespace) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("name", namespace.getName());
+        node.put("arn", namespace.getArn());
+        node.set("status", namespaceStatusNode(namespace));
+        node.set("tags", objectMapper.valueToTree(namespace.getTags()));
+        return node;
+    }
+
+    private ObjectNode toNamespaceSummary(RuleGroupsNamespace namespace) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("arn", namespace.getArn());
+        node.put("name", namespace.getName());
+        node.set("status", namespaceStatusNode(namespace));
+        node.set("tags", objectMapper.valueToTree(namespace.getTags()));
+        node.put("createdAt", namespace.getCreatedAt().toEpochMilli() / 1000.0);
+        node.put("modifiedAt", namespace.getModifiedAt().toEpochMilli() / 1000.0);
+        return node;
+    }
+
+    private ObjectNode namespaceStatusNode(RuleGroupsNamespace namespace) {
+        ObjectNode status = objectMapper.createObjectNode();
+        status.put("statusCode", namespace.getStatus());
+        return status;
     }
 
     private ObjectNode toWorkspaceDescription(PrometheusWorkspace workspace) {

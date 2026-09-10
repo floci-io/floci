@@ -540,7 +540,9 @@ is a permanent diff rather than a cosmetic omission.
 `[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any
 `LogFormat` but are only ever stored — and therefore only ever returned — when the
 resolved format is `JSON`; supplying them with `LogFormat=Text` is not an error, it is
-simply a no-op, matching the fact that the response never surfaces them for Text.
+simply a no-op. That is Floci's own call rather than probed AWS behaviour: it keeps the
+request path consistent with Floci's response shape, which never surfaces the levels for
+Text.
 
 `VpcConfig` is omitted entirely while the function is not attached to a VPC.
 Subnets that EC2 does not know about are still accepted and returned; only `VpcId`
