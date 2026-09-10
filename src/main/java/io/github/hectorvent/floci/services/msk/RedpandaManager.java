@@ -298,8 +298,8 @@ public class RedpandaManager {
     private Path legacyCompatibleHostPath(MskCluster cluster) {
         Path scopedPath = ContainerStorageHelper.hostResourcePath(config, "msk", clusterStorageId(cluster));
         Path legacyPath = ContainerStorageHelper.hostResourcePath(config, "msk", cluster.getClusterName());
-        return Files.exists(scopedPath) || !Files.exists(legacyPath)
-                ? scopedPath
-                : legacyPath;
+        return cluster.getResourceRegion() == null && Files.exists(legacyPath)
+                ? legacyPath
+                : scopedPath;
     }
 }

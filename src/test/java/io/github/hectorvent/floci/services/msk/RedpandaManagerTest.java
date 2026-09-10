@@ -259,16 +259,40 @@ class RedpandaManagerTest {
         when(portAllocator.allocate(9300, 9399)).thenReturn(54321);
         Files.createDirectories(tempDir.resolve("msk").resolve("test-cluster"));
 
+        MskCluster cluster = newCluster();
+        cluster.setResourceRegion(null);
         ContainerInfo info = new ContainerInfo("container-legacy",
                 Map.of(KAFKA_PORT, new EndpointInfo("localhost", 54321)));
         when(lifecycleManager.createAndStart(any())).thenReturn(info);
 
         ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        manager.startContainer(newCluster());
+        manager.startContainer(cluster);
 
         verify(lifecycleManager).createAndStart(specCaptor.capture());
         assertEquals(tempDir.resolve("msk").resolve("test-cluster").toAbsolutePath(),
                 Path.of(specCaptor.getValue().binds().get(0).getPath()).toAbsolutePath());
+    }
+
+    @Test
+    void startContainerDoesNotReuseLegacyPathForScopedCluster() throws Exception {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(54321);
+        Files.createDirectories(tempDir.resolve("msk").resolve("test-cluster"));
+
+        MskCluster cluster = newCluster();
+        cluster.setResourceRegion("us-east-1");
+        ContainerInfo info = new ContainerInfo("container-scoped",
+                Map.of(KAFKA_PORT, new EndpointInfo("localhost", 54321)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        assertTrue(Path.of(specCaptor.getValue().binds().get(0).getPath()).toAbsolutePath()
+                .toString().contains("000000000000"));
+        assertTrue(Path.of(specCaptor.getValue().binds().get(0).getPath()).toAbsolutePath()
+                .toString().contains("us-east-1"));
     }
 
     @Test
