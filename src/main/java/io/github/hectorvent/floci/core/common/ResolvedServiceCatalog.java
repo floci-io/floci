@@ -624,6 +624,12 @@ public class ResolvedServiceCatalog {
                         "globalaccelerator", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("GlobalAccelerator_V20180706."), Set.of("globalaccelerator"), Set.of(), Set.of()),
+                // DataSync's Smithy service shape is FmrsService, so that is the target prefix
+                // the SDK sends, not the service name.
+                descriptor("datasync", "datasync", config.services().datasync().enabled(), true,
+                        "datasync", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("FmrsService."), Set.of("datasync"), Set.of(), Set.of()),
                 descriptor("network-firewall", "networkfirewall", config.services().networkfirewall().enabled(), true,
                         "networkfirewall", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

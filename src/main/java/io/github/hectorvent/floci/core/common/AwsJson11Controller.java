@@ -52,6 +52,7 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHand
 import io.github.hectorvent.floci.services.organizations.OrganizationsJsonHandler;
 import io.github.hectorvent.floci.services.cognitoidentity.CognitoIdentityJsonHandler;
 import io.github.hectorvent.floci.services.globalaccelerator.GlobalAcceleratorJsonHandler;
+import io.github.hectorvent.floci.services.datasync.DataSyncJsonHandler;
 import io.github.hectorvent.floci.services.route53resolver.Route53ResolverJsonHandler;
 import io.github.hectorvent.floci.services.networkfirewall.NetworkFirewallJsonHandler;
 import io.github.hectorvent.floci.services.servicecatalog.ServiceCatalogJsonHandler;
@@ -125,6 +126,7 @@ public class AwsJson11Controller {
     private final Route53ResolverJsonHandler route53ResolverJsonHandler;
     private final CognitoIdentityJsonHandler cognitoIdentityJsonHandler;
     private final GlobalAcceleratorJsonHandler globalAcceleratorJsonHandler;
+    private final DataSyncJsonHandler dataSyncJsonHandler;
     private final NetworkFirewallJsonHandler networkFirewallJsonHandler;
     private final ServiceCatalogJsonHandler serviceCatalogJsonHandler;
     private final CloudControlJsonHandler cloudControlJsonHandler;
@@ -178,6 +180,7 @@ public class AwsJson11Controller {
                                Route53ResolverJsonHandler route53ResolverJsonHandler,
                                CognitoIdentityJsonHandler cognitoIdentityJsonHandler,
                                GlobalAcceleratorJsonHandler globalAcceleratorJsonHandler,
+                               DataSyncJsonHandler dataSyncJsonHandler,
                                NetworkFirewallJsonHandler networkFirewallJsonHandler,
                                ServiceCatalogJsonHandler serviceCatalogJsonHandler,
                                CloudControlJsonHandler cloudControlJsonHandler,
@@ -235,6 +238,7 @@ public class AwsJson11Controller {
         this.route53ResolverJsonHandler = route53ResolverJsonHandler;
         this.cognitoIdentityJsonHandler = cognitoIdentityJsonHandler;
         this.globalAcceleratorJsonHandler = globalAcceleratorJsonHandler;
+        this.dataSyncJsonHandler = dataSyncJsonHandler;
         this.networkFirewallJsonHandler = networkFirewallJsonHandler;
         this.serviceCatalogJsonHandler = serviceCatalogJsonHandler;
         this.cloudControlJsonHandler = cloudControlJsonHandler;
@@ -327,6 +331,7 @@ public class AwsJson11Controller {
                 // segment and are never partitioned by the region the caller signed with, so the
                 // handler takes no region.
                 case "globalaccelerator" -> globalAcceleratorJsonHandler.handle(action, request);
+                case "datasync" -> dataSyncJsonHandler.handle(action, request, region);
                 case "network-firewall" -> networkFirewallJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 case "servicecatalog" -> serviceCatalogJsonHandler.handle(

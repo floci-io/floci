@@ -194,6 +194,7 @@ nav:
     - AWS IoT Core: services/iot.md
     - AppSync: services/appsync.md
     - Transfer Family: services/transfer.md
+    - DataSync: services/datasync.md
     - AWS Config: services/config.md
     - EMR: services/emr.md
     - EMR Serverless: services/emr-serverless.md

@@ -91,6 +91,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
       - --initialize-at-run-time=graphql.util.IdGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
@@ -686,6 +687,8 @@ floci:
     cognitoidentity:
       enabled: true
     globalaccelerator:
+      enabled: true
+    datasync:
       enabled: true
     aps:
       enabled: true

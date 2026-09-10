@@ -424,6 +424,8 @@ floci:
       enabled: true
     globalaccelerator:
       enabled: true
+    datasync:
+      enabled: true
     aps:
       enabled: true
     lakeformation:

@@ -285,6 +285,10 @@ services:
     doc: docs/services/globalaccelerator.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/globalaccelerator/GlobalAcceleratorJsonHandler.java, mode: switch }
+  - service: datasync
+    doc: docs/services/datasync.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/datasync/DataSyncJsonHandler.java, mode: switch }
   - service: route53
     doc: docs/services/route53.md
     sources:
