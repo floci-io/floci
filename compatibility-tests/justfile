@@ -47,7 +47,7 @@ test-java:
 # Run Go SDK tests (JUnit XML output via gotestsum)
 [working-directory: 'sdk-test-go']
 test-go:
-    gotestsum --junitfile test-results.xml ./tests/...
+    gotestsum --junitfile test-results.xml ./tests/... ./internal/testutil/...
 
 # Install all test dependencies
 setup: setup-python setup-typescript setup-awscli setup-java setup-go

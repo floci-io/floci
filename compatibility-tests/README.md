@@ -61,6 +61,7 @@ Per-module requirements:
 | `sdk-test-awscli` | AWS CLI v2, bash, jq                |
 | `sdk-test-java`   | Java 17+, Maven                     |
 | `sdk-test-go`     | Go 1.24+                            |
+| `compat-cdk`      | Node.js 20+, npm, Python 3, bats-core |
 
 ## Setup
 
