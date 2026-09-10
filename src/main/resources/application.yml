@@ -681,6 +681,8 @@ floci:
       enabled: true
     connect:
       enabled: true
+    appintegrations:
+      enabled: true
     cognitoidentity:
       enabled: true
     aps:

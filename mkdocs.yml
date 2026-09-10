@@ -157,6 +157,7 @@ nav:
     - Managed Prometheus (AMP): services/managed-prometheus.md
     - GuardDuty: services/guardduty.md
     - Connect: services/connect.md
+    - AppIntegrations: services/appintegrations.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md

@@ -125,6 +125,19 @@ services:
     rename_actions:
       GetControl: GetControl
       ListControls: ListControls
+  - service: appintegrations
+    doc: docs/services/appintegrations.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/appintegrations/AppIntegrationsController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: connect
     doc: docs/services/connect.md
     sources:
