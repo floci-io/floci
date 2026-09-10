@@ -167,7 +167,7 @@ public class RedpandaManager {
                     "/var/lib/redpanda/data");
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
-            String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "msk", cluster.getClusterName())
+            String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "msk", clusterStorageId(cluster))
                     .toAbsolutePath().toString();
             if (!containerDetector.isRunningInContainer()) {
                 ContainerStorageHelper.ensureHostDir(hostDataPath);
@@ -204,8 +204,9 @@ public class RedpandaManager {
         String logStream = logStreamer.generateLogStreamName(shortId);
         String region = AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion());
 
-        Closeable logHandle = logStreamer.attach(
-                info.containerId(), logGroup, logStream, region, "msk:" + cluster.getClusterName());
+        String account = AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getDefaultAccountId());
+        Closeable logHandle = logStreamer.attachForAccount(
+                account, info.containerId(), logGroup, logStream, region, "msk:" + cluster.getClusterName());
         if (logHandle != null) {
             logStreams.put(clusterIdentityKey(cluster), logHandle);
         }
@@ -285,5 +286,12 @@ public class RedpandaManager {
 
     private String clusterIdentityKey(MskCluster cluster) {
         return cluster.getClusterArn() != null ? cluster.getClusterArn() : cluster.getClusterName();
+    }
+
+    private String clusterStorageId(MskCluster cluster) {
+        String account = AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getDefaultAccountId());
+        String region = AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion());
+        return ContainerStorageHelper.dockerName(config,
+                "msk-" + account + "-" + region + "-" + cluster.getClusterName());
     }
 }
