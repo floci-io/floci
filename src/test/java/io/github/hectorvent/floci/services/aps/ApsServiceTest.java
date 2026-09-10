@@ -4,12 +4,17 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.aps.model.PrometheusWorkspace;
+import io.github.hectorvent.floci.services.aps.model.RuleGroupsNamespace;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -20,14 +25,22 @@ class ApsServiceTest {
 
     private static final String US_EAST_1 = "us-east-1";
     private static final String EU_WEST_1 = "eu-west-1";
+    private static final String RULES = Base64.getEncoder().encodeToString(
+            "groups:\n- name: alerts\n  rules: []\n".getBytes(StandardCharsets.UTF_8));
 
     private ApsService service;
+    private final Map<String, StorageBackend<String, ?>> backendsByFile = new HashMap<>();
 
     @BeforeEach
     void setUp() {
+        backendsByFile.clear();
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
+                .thenAnswer(invocation -> {
+                    StorageBackend<String, ?> backend = AccountAwareStorageBackend.inMemory("000000000000");
+                    backendsByFile.put(invocation.getArgument(1), backend);
+                    return backend;
+                });
 
         service = new ApsService(storageFactory, new RegionResolver(US_EAST_1, "000000000000"));
     }
@@ -200,5 +213,146 @@ class ApsServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.listTags(US_EAST_1, "arn:aws:aps:us-east-1:000000000000:workspace"));
         assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    private String workspaceWithNamespace(String namespaceName) {
+        String workspaceId = service.createWorkspace(US_EAST_1, "rules", null, null).getWorkspaceId();
+        service.createRuleGroupsNamespace(US_EAST_1, workspaceId, namespaceName, RULES, null);
+        return workspaceId;
+    }
+
+    @Test
+    void createRuleGroupsNamespaceIsActiveWithArnAndRoundTripsData() {
+        String workspaceId = service.createWorkspace(US_EAST_1, "rules", null, null).getWorkspaceId();
+
+        RuleGroupsNamespace namespace = service.createRuleGroupsNamespace(
+                US_EAST_1, workspaceId, "alerts", RULES, Map.of("team", "devops"));
+
+        assertEquals("alerts", namespace.getName());
+        assertEquals("ACTIVE", namespace.getStatus());
+        assertEquals("arn:aws:aps:us-east-1:000000000000:rulegroupsnamespace/" + workspaceId + "/alerts",
+                namespace.getArn());
+        assertEquals(RULES, namespace.getEncodedData());
+        assertNotNull(namespace.getCreatedAt());
+        assertNotNull(namespace.getModifiedAt());
+        assertEquals("devops", namespace.getTags().get("team"));
+    }
+
+    @Test
+    void createRuleGroupsNamespaceUnknownWorkspaceThrowsResourceNotFound() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createRuleGroupsNamespace(US_EAST_1, "ws-missing", "alerts", RULES, null));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void createRuleGroupsNamespaceRejectsDuplicateNameWithConflict() {
+        String workspaceId = workspaceWithNamespace("alerts");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createRuleGroupsNamespace(US_EAST_1, workspaceId, "alerts", RULES, null));
+        assertEquals("ConflictException", ex.getErrorCode());
+        assertEquals(409, ex.getHttpStatus());
+    }
+
+    @Test
+    void createRuleGroupsNamespaceRejectsMissingData() {
+        String workspaceId = service.createWorkspace(US_EAST_1, "rules", null, null).getWorkspaceId();
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createRuleGroupsNamespace(US_EAST_1, workspaceId, "alerts", null, null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void putRuleGroupsNamespaceReplacesTheStoredData() {
+        String workspaceId = workspaceWithNamespace("alerts");
+        String updated = Base64.getEncoder().encodeToString(
+                "groups:\n- name: updated\n  rules: []\n".getBytes(StandardCharsets.UTF_8));
+
+        service.putRuleGroupsNamespace(US_EAST_1, workspaceId, "alerts", updated);
+
+        assertEquals(updated,
+                service.describeRuleGroupsNamespace(US_EAST_1, workspaceId, "alerts").getEncodedData());
+    }
+
+    @Test
+    void putRuleGroupsNamespaceUnknownNameThrowsResourceNotFound() {
+        String workspaceId = workspaceWithNamespace("alerts");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putRuleGroupsNamespace(US_EAST_1, workspaceId, "missing", RULES));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void listRuleGroupsNamespacesFiltersByNamePrefixAndPaginates() {
+        String workspaceId = workspaceWithNamespace("prod-alerts");
+        service.createRuleGroupsNamespace(US_EAST_1, workspaceId, "prod-records", RULES, null);
+        service.createRuleGroupsNamespace(US_EAST_1, workspaceId, "staging-alerts", RULES, null);
+
+        assertEquals(3, service.listRuleGroupsNamespaces(US_EAST_1, workspaceId, null, null, null)
+                .items().size());
+        assertEquals(2, service.listRuleGroupsNamespaces(US_EAST_1, workspaceId, "prod-", null, null)
+                .items().size());
+
+        PaginatedResult<RuleGroupsNamespace> firstPage =
+                service.listRuleGroupsNamespaces(US_EAST_1, workspaceId, null, 2, null);
+        assertEquals(2, firstPage.items().size());
+        assertNotNull(firstPage.nextToken());
+        assertEquals(1, service.listRuleGroupsNamespaces(US_EAST_1, workspaceId, null, 2,
+                firstPage.nextToken()).items().size());
+    }
+
+    @Test
+    void ruleGroupsNamespacesAreScopedToTheirWorkspace() {
+        String workspaceId = workspaceWithNamespace("alerts");
+        String otherWorkspaceId =
+                service.createWorkspace(US_EAST_1, "other", null, null).getWorkspaceId();
+
+        assertEquals(0, service.listRuleGroupsNamespaces(US_EAST_1, otherWorkspaceId, null, null, null)
+                .items().size());
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.describeRuleGroupsNamespace(US_EAST_1, otherWorkspaceId, "alerts"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("alerts",
+                service.describeRuleGroupsNamespace(US_EAST_1, workspaceId, "alerts").getName());
+    }
+
+    @Test
+    void deleteRuleGroupsNamespaceThenDescribeThrowsResourceNotFound() {
+        String workspaceId = workspaceWithNamespace("alerts");
+
+        service.deleteRuleGroupsNamespace(US_EAST_1, workspaceId, "alerts");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.describeRuleGroupsNamespace(US_EAST_1, workspaceId, "alerts"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteWorkspaceRemovesItsRuleGroupsNamespaces() {
+        String workspaceId = workspaceWithNamespace("alerts");
+        service.createRuleGroupsNamespace(US_EAST_1, workspaceId, "records", RULES, null);
+
+        service.deleteWorkspace(US_EAST_1, workspaceId);
+
+        assertTrue(backendsByFile.get("aps-rule-groups-namespaces.json").scan(k -> true).isEmpty());
+    }
+
+    @Test
+    void tagHandlerRoundTripsRuleGroupsNamespaceTagsByArn() {
+        String workspaceId = service.createWorkspace(US_EAST_1, "rules", null, null).getWorkspaceId();
+        String arn = service.createRuleGroupsNamespace(
+                US_EAST_1, workspaceId, "alerts", RULES, Map.of("env", "test")).getArn();
+
+        assertEquals(Map.of("env", "test"), service.listTags(US_EAST_1, arn));
+
+        service.tagResource(US_EAST_1, arn, Map.of("team", "devops"));
+        assertEquals(Map.of("env", "test", "team", "devops"), service.listTags(US_EAST_1, arn));
+
+        service.untagResource(US_EAST_1, arn, List.of("env"));
+        assertEquals(Map.of("team", "devops"), service.listTags(US_EAST_1, arn));
     }
 }
