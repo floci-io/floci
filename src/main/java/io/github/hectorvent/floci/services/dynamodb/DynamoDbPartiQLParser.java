@@ -169,6 +169,7 @@ public class DynamoDbPartiQLParser {
     }
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
+        parameters.forEach(DynamoDbAttributeValueValidator::validate);
         return new DynamoDbPartiQLParser(tokenize(statement.trim()), parameters).parseStmt();
     }
 
@@ -259,9 +260,6 @@ public class DynamoDbPartiQLParser {
         return conds;
     }
 
-    // Types a parameter can carry that no PartiQL literal can express.
-    private static final List<String> NON_LITERAL_TYPES = List.of("B", "SS", "NS", "BS", "L", "M");
-
     // S, N and B are the only types DynamoDB gives an ordering.
     private static final Set<String> ORDERED_TYPES = Set.of("S", "N", "B");
 
@@ -347,14 +345,14 @@ public class DynamoDbPartiQLParser {
             throw validationEx("Not enough parameters supplied for ? placeholders");
         }
         JsonNode p = parameters.get(paramIdx++);
-        if (p.has("S"))    return new PVal.Str(p.get("S").asText());
-        if (p.has("N"))    return new PVal.Num(p.get("N").asText());
-        if (p.has("BOOL")) return new PVal.Bool(p.get("BOOL").asBoolean());
-        if (p.has("NULL")) return new PVal.Null();
-        for (String type : NON_LITERAL_TYPES) {
-            if (p.has(type)) return new PVal.Av(type, p);
-        }
-        throw validationEx("Unsupported parameter type in parameters array");
+        var type = DynamoDbAttributeValueValidator.typeOf(p);
+        return switch (type) {
+            case "S"    -> new PVal.Str(p.get("S").asText());
+            case "N"    -> new PVal.Num(p.get("N").asText());
+            case "BOOL" -> new PVal.Bool(p.get("BOOL").asBoolean());
+            case "NULL" -> new PVal.Null();
+            default     -> new PVal.Av(type, p);
+        };
     }
 
     private String expectIdent() {

@@ -1096,8 +1096,8 @@ final class ExpressionEvaluator {
             }
         }
         if (a.has("B") && b.has("B")) {
-            byte[] aBytes = Base64.getDecoder().decode(a.get("B").asText());
-            byte[] bBytes = Base64.getDecoder().decode(b.get("B").asText());
+            var aBytes = decodeBinaryBound(a);
+            var bBytes = decodeBinaryBound(b);
             int minLen = Math.min(aBytes.length, bBytes.length);
             for (int i = 0; i < minLen; i++) {
                 int diff = (aBytes[i] & 0xFF) - (bBytes[i] & 0xFF);

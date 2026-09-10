@@ -53,10 +53,71 @@ class DynamoDbPartiQLParserTest {
         assertEquals(json(param), assertInstanceOf(PVal.Av.class, val).node());
     }
 
+    // Parameter shape and base64 rules below were checked against real DynamoDB
+    // (ap-northeast-1, 2026-09-10).
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"Q\":\"x\"}", "{}"})
+    void rejectsAParameterCarryingNoRecognisedType(String param) {
+        var e = assertThrows(AwsException.class, () -> firstCond(SELECT + "= ?", param));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals("Supplied AttributeValue is empty, must contain exactly one of the supported datatypes",
+                e.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"S\":\"a\",\"N\":\"1\"}",
+            "{\"B\":\"AQID\",\"SS\":[\"a\"]}",
+            "{\"L\":[{\"S\":\"a\",\"N\":\"1\"}]}",
+            "{\"M\":{\"k\":{\"S\":\"a\",\"N\":\"1\"}}}"
+    })
+    void rejectsAParameterCarryingMoreThanOneType(String param) {
+        var e = assertThrows(AwsException.class, () -> firstCond(SELECT + "= ?", param));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals("Supplied AttributeValue has more than one datatypes set, "
+                + "must contain exactly one of the supported datatypes", e.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"B\":\"not base64!!\"}",
+            "{\"BS\":[\"AQID\",\"not base64!!\"]}",
+            "{\"L\":[{\"B\":\"not base64!!\"}]}",
+            "{\"M\":{\"k\":{\"B\":\"not base64!!\"}}}",
+            "{\"B\":123}"
+    })
+    void rejectsABinaryParameterThatIsNotBase64(String param) {
+        var e = assertThrows(AwsException.class, () -> firstCond(SELECT + "= ?", param));
+
+        assertEquals("SerializationException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
     @Test
-    void rejectsAParameterCarryingNoRecognisedType() {
-        assertEquals("Unsupported parameter type in parameters array",
-                assertThrows(AwsException.class, () -> firstCond(SELECT + "= ?", "{\"Q\":\"x\"}")).getMessage());
+    void namesTheLengthOfBase64ThatIsNotAMultipleOfFour() {
+        var e = assertThrows(AwsException.class, () -> firstCond(SELECT + "= ?", "{\"B\":\"AQI\"}"));
+
+        assertEquals("SerializationException", e.getErrorCode());
+        assertEquals("Base64 encoded length is expected a multiple of 4 bytes but found: 3", e.getMessage());
+    }
+
+    @Test
+    void acceptsAnEmptyBinaryParameter() {
+        var cond = firstCond(SELECT + "= ?", "{\"B\":\"\"}");
+
+        assertInstanceOf(PVal.Av.class, assertInstanceOf(Cond.Eq.class, cond).val());
+    }
+
+    // AWS reads every parameter before it looks at the statement, so one past the
+    // last placeholder still fails the request.
+    @Test
+    void rejectsAMalformedParameterBeyondThePlaceholders() {
+        var e = assertThrows(AwsException.class,
+                () -> firstCond(SELECT + "= ?", "{\"S\":\"a\"}", "{\"B\":\"not base64!!\"}"));
+
+        assertEquals("SerializationException", e.getErrorCode());
     }
 
     @ParameterizedTest

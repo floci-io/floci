@@ -3781,6 +3781,107 @@ given()
         deleteTable(tableName);
     }
 
+    // Checked against real DynamoDB (ap-northeast-1, 2026-09-10): a binary that is not
+    // base64 fails the request as a SerializationException before anything runs, and an
+    // AttributeValue with zero or several type keys is a ValidationException.
+    @Test
+    void partiqlRejectsAParameterThatIsNotAWellFormedAttributeValue() {
+        var tableName = "PartiqlParameterShapeTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "row"}, "raw": {"B": "AQID"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        for (var op : List.of("=", "<")) {
+            given()
+                .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND raw %s ?",
+                        "Parameters": [{"S": "row"}, {"B": "not base64!!"}]
+                    }
+                    """.formatted(tableName, op))
+            .when().post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", containsString("SerializationException"));
+        }
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND raw = ?",
+                    "Parameters": [{"S": "row"}, {"B": "AQID", "SS": ["a"]}]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Supplied AttributeValue has more than one datatypes set, "
+                    + "must contain exactly one of the supported datatypes"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND raw = ?",
+                    "Parameters": [{"S": "row"}, {}]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Supplied AttributeValue is empty, "
+                    + "must contain exactly one of the supported datatypes"));
+
+        // The same decode guards a FilterExpression, which reaches the comparison directly.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "#r < :v",
+                    "ExpressionAttributeNames": {"#r": "raw"},
+                    "ExpressionAttributeValues": {":v": {"B": "not base64!!"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("SerializationException"));
+
+        deleteTable(tableName);
+    }
+
     @Test
     void partiqlSelectWithoutWhereClausePerformsScan() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
