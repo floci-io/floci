@@ -102,7 +102,14 @@ if [[ "$status" -eq 0 ]]; then
   exit 1
 fi
 
-for suite in compat-terraform compat-opentofu; do
+for suite in "${expected_suites[@]}"; do
+  if [[ "$suite" == "compat-cdk" ]]; then
+    grep -q "run:$suite" "$LOG_FILE" && {
+      echo "failed image build should not run suite: $suite" >&2
+      exit 1
+    }
+    continue
+  fi
   grep -q "run:$suite" "$LOG_FILE" || {
     echo "expected suite to run after failed image build: $suite" >&2
     exit 1
