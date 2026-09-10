@@ -29,6 +29,8 @@ import java.util.function.Function;
 public class BatchCfnProvisioner implements CfnResourceProvisioner {
 
     private static final int NAME_MAX_LENGTH = 128;
+    private static final int PRIORITY_MIN = 0;
+    private static final int PRIORITY_MAX = 1000;
 
     // Held rather than injected: AGENTS.md has a provisioner inject only the service it wraps, and
     // the snapshot below needs nothing the configured mapper adds.
@@ -312,6 +314,7 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         String name = stableName(r, ctx, props, "JobQueueName");
         String priority = ctx.resolveOptional(props, "Priority");
         require("AWS::Batch::JobQueue", "Priority", priority);
+        int priorityValue = requireInt("AWS::Batch::JobQueue", "Priority", priority);
 
         String arn;
         if (reusesPriorEntity(r, ctx, name, "JobQueueName")) {
@@ -323,14 +326,14 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             ObjectNode update = JsonNodeFactory.instance.objectNode();
             update.put("jobQueue", ctx.priorPhysicalId());
             putResolvedText(update, "state", props, "State", ctx);
-            update.put("priority", Integer.parseInt(priority));
+            update.put("priority", priorityValue);
             update.set("computeEnvironmentOrder", computeEnvironmentOrder(props, ctx));
             batchService.updateJobQueue(update);
             arn = ctx.priorPhysicalId();
         } else {
             ObjectNode req = JsonNodeFactory.instance.objectNode();
             req.put("jobQueueName", name);
-            req.put("priority", Integer.parseInt(priority));
+            req.put("priority", priorityValue);
             putResolvedText(req, "state", props, "State", ctx);
             putResolvedText(req, "jobQueueType", props, "JobQueueType", ctx);
             req.set("computeEnvironmentOrder", computeEnvironmentOrder(props, ctx));
@@ -407,6 +410,28 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
         if (value == null || value.isBlank()) {
             throw new AwsException("ValidationError", type + " requires " + property, 400);
         }
+    }
+
+    /**
+     * A template value the schema types as a bounded integer. Template properties arrive as text,
+     * so a non-numeric one reached {@code Integer.parseInt} and left as an uncaught
+     * NumberFormatException, which the stack reported as a 500 rather than the failed validation
+     * it is. The bounds are the registry schema's own: AWS::Batch::JobQueue Priority is
+     * {@code integer, minimum 0, maximum 1000}.
+     */
+    private static int requireInt(String type, String property, String value) {
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value.trim());
+        } catch (NumberFormatException notAnInteger) {
+            throw new AwsException("ValidationError",
+                    type + " " + property + " must be an integer, but was '" + value + "'", 400);
+        }
+        if (parsed < PRIORITY_MIN || parsed > PRIORITY_MAX) {
+            throw new AwsException("ValidationError", type + " " + property + " must be between "
+                    + PRIORITY_MIN + " and " + PRIORITY_MAX + ", but was " + parsed, 400);
+        }
+        return parsed;
     }
 
     /**

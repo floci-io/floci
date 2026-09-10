@@ -392,6 +392,20 @@ class BatchCfnProvisionerTest {
 
     // ── replacement cleanup ──────────────────────────────────────────────────
 
+    private ObjectNode detail(String key, String arn, java.util.Map<String, Object> fields) {
+        ObjectNode out = mapper.createObjectNode();
+        ObjectNode item = out.putArray(key).addObject();
+        item.put("arn", arn);
+        fields.forEach((k, v) -> {
+            if (v instanceof Integer i) {
+                item.put(k, i);
+            } else {
+                item.put(k, String.valueOf(v));
+            }
+        });
+        return out;
+    }
+
     @Test
     void renamingAComputeEnvironmentRecordsTheDisplacedOneForCleanup() {
         // The leak this closes: the rename created the replacement, but the engine was never told
@@ -478,20 +492,6 @@ class BatchCfnProvisionerTest {
 
         assertTrue(provisioner.hasReplacementUpdate(r), "a changed name replaces the definition");
         assertEquals(JD_ARN, provisioner.updateCleanupPhysicalId(r));
-    }
-
-    private ObjectNode detail(String key, String arn, java.util.Map<String, Object> fields) {
-        ObjectNode out = mapper.createObjectNode();
-        ObjectNode item = out.putArray(key).addObject();
-        item.put("arn", arn);
-        fields.forEach((k, v) -> {
-            if (v instanceof Integer i) {
-                item.put(k, i);
-            } else {
-                item.put(k, String.valueOf(v));
-            }
-        });
-        return out;
     }
 
     // ── update rollback ──────────────────────────────────────────────────────
@@ -589,5 +589,54 @@ class BatchCfnProvisionerTest {
 
         assertFalse(r.getAttributes().containsKey(CfnRollback.BATCH_UPDATE_SNAPSHOT_ATTR));
         assertFalse(provisioner.rollbackUpdate(r), "a spent snapshot cannot be replayed");
+    }
+
+    // ── Priority validation ──────────────────────────────────────────────────
+
+    @Test
+    void aNonNumericPriorityFailsValidationInsteadOfThrowingNumberFormatException() {
+        // It used to reach Integer.parseInt unguarded and escape as a 500 rather than the failed
+        // validation it is.
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "high");
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertEquals(400, thrown.getHttpStatus());
+        assertTrue(thrown.getMessage().contains("must be an integer"));
+        verify(batch, never()).createJobQueue(any(), anyString());
+    }
+
+    @Test
+    void anOutOfRangePriorityFailsValidation() {
+        // The registry schema types Priority as integer, minimum 0, maximum 1000.
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "1001");
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("between 0 and 1000"));
+        verify(batch, never()).createJobQueue(any(), anyString());
+    }
+
+    @Test
+    void aNonNumericPriorityIsRejectedOnTheUpdatePathToo() {
+        StackResource r = resource("AWS::Batch::JobQueue", "Queue");
+        r.getAttributes().put("JobQueueName", "queue");
+        ObjectNode props = mapper.createObjectNode();
+        props.put("JobQueueName", "queue");
+        props.put("Priority", "high");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, updateCtx(JQ_ARN)));
+
+        verify(batch, never()).updateJobQueue(any());
     }
 }
