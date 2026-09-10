@@ -236,6 +236,7 @@ mysql -h 127.0.0.1 -P 7002 -u root -psecret123
 | `mariadb` | `mariadb:11` |
 
 Override the image per-instance with the `--engine-version` flag or globally via environment variables.
+Aurora MySQL versions such as `8.0.mysql_aurora.3.08.0` use the MySQL version in front, so that example runs `mysql:8.0`.
 
 ## Option Groups
 

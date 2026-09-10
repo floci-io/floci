@@ -212,6 +212,18 @@ class RdsServiceTest {
     }
 
     @Test
+    void auroraMysqlImageUsesTheMysqlVersionInFrontOfTheAuroraSuffix() {
+        assertEquals("mysql:8.0",
+                RdsService.imageForRequestedVersion("mysql:8.0", "8.0.mysql_aurora.3.08.0"));
+        assertEquals("mysql:5.7",
+                RdsService.imageForRequestedVersion("mysql:8.0", "5.7.mysql_aurora.2.12.5"));
+        assertEquals("mysql:8.4",
+                RdsService.imageForRequestedVersion("mysql:8.0", "8.4.mysql_aurora.3.10.0"));
+        assertEquals("mysql:8.0.36",
+                RdsService.imageForRequestedVersion("mysql:8.0", "8.0.36"));
+    }
+
+    @Test
     void createDbClusterRejectsADuplicateIdentifier() {
         rdsService.createDbCluster("dup-cluster", "postgres", "17.5",
                 "admin", "password", "dbname", false, null, null, null, false);
