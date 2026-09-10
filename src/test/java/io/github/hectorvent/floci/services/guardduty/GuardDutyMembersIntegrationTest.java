@@ -34,6 +34,7 @@ class GuardDutyMembersIntegrationTest {
                     .body("{\"adminAccountId\":\"444444444444\"}")
                     .post("/admin/disable")
                     .then().statusCode(200);
+            enabledOrganizationAdmin = false;
         }
     }
 
