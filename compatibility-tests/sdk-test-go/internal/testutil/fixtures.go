@@ -5,7 +5,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -177,18 +179,15 @@ func CognitoClient() *cognitoidentityprovider.Client {
 // ProxyHost returns the host to use for direct TCP connections to RDS/ElastiCache proxies.
 func ProxyHost() string {
 	ep := Endpoint()
-	// Strip scheme — ep is "http://host:port" or "http://host"
-	if len(ep) > 7 && ep[:7] == "http://" {
-		ep = ep[7:]
+	parsed, err := url.Parse(ep)
+	if err != nil {
+		return ep
 	}
-	// Strip port if present
-	if i := len(ep) - 1; i > 0 {
-		for i >= 0 && ep[i] != ':' {
-			i--
-		}
-		if i > 0 {
-			return ep[:i]
-		}
+	if parsed.Hostname() == "" && !strings.Contains(ep, "://") {
+		parsed, err = url.Parse("//" + ep)
+	}
+	if err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
 	}
 	return ep
 }
