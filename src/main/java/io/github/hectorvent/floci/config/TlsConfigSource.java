@@ -45,6 +45,14 @@ public class TlsConfigSource implements ConfigSource {
 
     private static final Logger LOG = Logger.getLogger(TlsConfigSource.class);
 
+    /**
+     * Internal ports Quarkus binds when TLS is enabled. {@link TlsProxyServer} listens on the
+     * public Floci port and routes to these by protocol, so the two classes must agree; they are
+     * declared here, next to the properties that set them, and referenced from the proxy.
+     */
+    static final int HTTP_INTERNAL_PORT = 4510;
+    static final int HTTPS_INTERNAL_PORT = 4511;
+
     private static final String SERVER_CERT_NAME = "floci-server.crt";
     private static final String SERVER_KEY_NAME = "floci-server.key";
     private static final String SERVER_METADATA_NAME = "floci-server.metadata.json";
@@ -136,8 +144,8 @@ public class TlsConfigSource implements ConfigSource {
         // and does protocol detection to route HTTP and HTTPS to the correct backend.
         properties.put("quarkus.http.insecure-requests", "enabled");
         properties.put("quarkus.http.host", "127.0.0.1");
-        properties.put("quarkus.http.port", "4510");
-        properties.put("quarkus.http.ssl-port", "4511");
+        properties.put("quarkus.http.port", String.valueOf(HTTP_INTERNAL_PORT));
+        properties.put("quarkus.http.ssl-port", String.valueOf(HTTPS_INTERNAL_PORT));
 
         LOG.infov("TLS: HTTPS enabled, proxy will listen on port {0} (HTTP+HTTPS), cert={1}",
                 resolveProperty("floci.port", "4566"), certPath);

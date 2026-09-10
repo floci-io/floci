@@ -51,8 +51,8 @@ public class TlsProxyServer {
     /** TLS record content type for Handshake (ClientHello). */
     private static final byte TLS_HANDSHAKE = 0x16;
 
-    private static final int HTTP_BACKEND_PORT = 4510;
-    private static final int HTTPS_BACKEND_PORT = 4511;
+    private static final int HTTP_BACKEND_PORT = TlsConfigSource.HTTP_INTERNAL_PORT;
+    private static final int HTTPS_BACKEND_PORT = TlsConfigSource.HTTPS_INTERNAL_PORT;
 
     private final Vertx vertx;
     private final EmulatorConfig config;
