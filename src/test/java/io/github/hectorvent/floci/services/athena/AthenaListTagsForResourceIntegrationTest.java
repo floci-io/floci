@@ -126,12 +126,14 @@ class AthenaListTagsForResourceIntegrationTest {
 
     @Test
     void listTagsForResourceRejectsUnsupportedResourceType() {
+        // Athena tags a workgroup or a data catalog and nothing else, so a capacity
+        // reservation ARN is rejected even though it is a well-formed Athena ARN.
         given()
             .header("X-Amz-Target", "AmazonAthena.ListTagsForResource")
             .contentType(CONTENT_TYPE)
             .body("""
                 {
-                  "ResourceARN": "arn:aws:athena:us-east-1:000000000000:datacatalog/AwsDataCatalog"
+                  "ResourceARN": "arn:aws:athena:us-east-1:000000000000:capacityreservation/reserved"
                 }
                 """)
         .when()

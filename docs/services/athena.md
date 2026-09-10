@@ -18,12 +18,17 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `GetWorkGroup` | Returns information about a workgroup |
 | `ListWorkGroups` | Lists all workgroups |
 | `CreateWorkGroup` | Creates a new workgroup |
-| `ListDataCatalogs` | - |
-| `GetDataCatalog` | - |
+| `ListDataCatalogs` | Lists the built-in `AwsDataCatalog` plus every registered data catalog |
+| `GetDataCatalog` | Returns one data catalog, or `InvalidRequestException` when it does not exist |
+| `CreateDataCatalog` | Registers a `LAMBDA`, `GLUE`, `HIVE` or `FEDERATED` data catalog |
+| `UpdateDataCatalog` | Replaces the type, description and parameters of a data catalog |
+| `DeleteDataCatalog` | Deletes a data catalog and returns the record it removed |
+| `TagResource` | Adds tags to a workgroup or data catalog ARN |
+| `UntagResource` | Removes tags from a workgroup or data catalog ARN |
 | `ListDatabases` | - |
 | `ListTableMetadata` | - |
 | `GetTableMetadata` | - |
-| `ListTagsForResource` | Returns the tags on a workgroup |
+| `ListTagsForResource` | Returns the tags on a workgroup or data catalog |
 | `DeleteWorkGroup` | Deletes a workgroup |
 <!-- floci:actions:end -->
 

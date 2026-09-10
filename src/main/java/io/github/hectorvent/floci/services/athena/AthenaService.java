@@ -37,6 +37,13 @@ public class AthenaService {
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
     private static final String DEFAULT_ENGINE_VERSION = "Athena engine version 3";
+    private static final String WORKGROUP_RESOURCE = "workgroup/";
+    private static final String DATA_CATALOG_RESOURCE = "datacatalog/";
+    private static final Set<String> CATALOG_TYPES = Set.of("LAMBDA", "GLUE", "HIVE", "FEDERATED");
+    private static final Set<String> CONNECTION_TYPES = Set.of(
+            "DYNAMODB", "MYSQL", "POSTGRESQL", "REDSHIFT", "ORACLE", "SYNAPSE", "SQLSERVER", "DB2",
+            "OPENSEARCH", "BIGQUERY", "GOOGLECLOUDSTORAGE", "HBASE", "DOCUMENTDB", "CMDB", "TPCDS",
+            "TIMESTREAM", "SAPHANA", "SNOWFLAKE", "DATALAKEGEN2", "DB2AS400");
     private static final Pattern CREATE_DATABASE_PATTERN = Pattern.compile(
             "^\\s*CREATE\\s+(?:DATABASE|SCHEMA)\\s+"
                     + "(IF\\s+NOT\\s+EXISTS\\s+)?"
@@ -57,6 +64,7 @@ public class AthenaService {
 
     private final StorageBackend<String, QueryExecution> queryStore;
     private final StorageBackend<String, WorkGroup> workGroupStore;
+    private final StorageBackend<String, DataCatalog> dataCatalogStore;
     private final FlociDuckClient duckClient;
     private final GlueService glueService;
     private final S3Service s3Service;
@@ -75,6 +83,8 @@ public class AthenaService {
         this.queryStore = storageFactory.create("athena", "queries.json",
                 new TypeReference<>() {});
         this.workGroupStore = storageFactory.create("athena", "workgroups.json",
+                new TypeReference<>() {});
+        this.dataCatalogStore = storageFactory.create("athena", "data-catalogs.json",
                 new TypeReference<>() {});
         this.duckClient = duckClient;
         this.glueService = glueService;
@@ -197,10 +207,7 @@ public class AthenaService {
         if (DEFAULT_WORKGROUP.equals(resolved)) {
             return primaryWorkGroupSummary();
         }
-        WorkGroup workGroup = workGroupStore.get(workGroupKey(region, resolved))
-                .orElseThrow(() -> new AwsException("InvalidRequestException",
-                        "WorkGroup " + resolved + " is not found.", 400));
-        return toWorkGroupDetail(workGroup);
+        return toWorkGroupDetail(requireWorkGroup(region, resolved));
     }
 
     public void deleteWorkGroup(String name, String region) {
@@ -209,36 +216,62 @@ public class AthenaService {
 
     /**
      * github.com/floci-io/floci/issues/2791: terraform-provider-aws calls this on every
-     * aws_athena_workgroup refresh, tags or not. Only workgroup ARNs are supported - the
-     * primary workgroup can't be tagged and always answers with an empty list, matching a live
-     * account (CreateWorkGroup already rejects "primary", so it can never carry real tags).
+     * aws_athena_workgroup refresh, tags or not. Athena tags a workgroup or a data catalog and
+     * nothing else, so any other resource type is rejected. The built-in primary workgroup and
+     * AwsDataCatalog are synthesized rather than stored here and always answer with an empty
+     * list (CreateWorkGroup and CreateDataCatalog both reject those names, so neither can ever
+     * carry real tags).
      */
     public List<WorkGroupTag> listTagsForResource(String resourceArn) {
-        if (resourceArn == null || resourceArn.isBlank()) {
-            throw new AwsException("InvalidRequestException", "ResourceARN is required.", 400);
+        AwsArnUtils.Arn arn = parseAthenaResourceArn(resourceArn);
+        if (arn.resource().startsWith(WORKGROUP_RESOURCE)) {
+            String name = arn.resource().substring(WORKGROUP_RESOURCE.length());
+            if (DEFAULT_WORKGROUP.equals(name)) {
+                return List.of();
+            }
+            return requireWorkGroup(arn.region(), name).getTags();
         }
-        AwsArnUtils.Arn arn;
-        try {
-            arn = AwsArnUtils.parse(resourceArn);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidRequestException", "Invalid ResourceARN: " + resourceArn, 400);
-        }
-        // pgermosen (review, #3242): without this, an ARN naming a completely different
-        // service (e.g. a Neptune workgroup/-shaped resource that coincidentally shares this
-        // region and name) would resolve instead of being rejected the way a live account
-        // rejects a ResourceARN naming the wrong service.
-        if (!"athena".equals(arn.service()) || !arn.resource().startsWith("workgroup/")) {
-            throw new AwsException("InvalidRequestException",
-                    "Unsupported resource type for ListTagsForResource: " + resourceArn, 400);
-        }
-        String name = arn.resource().substring("workgroup/".length());
-        if (DEFAULT_WORKGROUP.equals(name)) {
+        String name = arn.resource().substring(DATA_CATALOG_RESOURCE.length());
+        if (DEFAULT_CATALOG.equals(name)) {
             return List.of();
         }
-        WorkGroup workGroup = workGroupStore.get(workGroupKey(arn.region(), name))
-                .orElseThrow(() -> new AwsException("InvalidRequestException",
-                        "WorkGroup " + name + " is not found.", 400));
-        return workGroup.getTags();
+        return requireTaggedDataCatalog(arn.region(), name, resourceArn).getTags();
+    }
+
+    public synchronized void tagResource(String resourceArn, List<WorkGroupTag> tags) {
+        if (tags == null || tags.isEmpty()) {
+            throw new AwsException("InvalidRequestException", "Tags is required.", 400);
+        }
+        AwsArnUtils.Arn arn = parseAthenaResourceArn(resourceArn);
+        if (arn.resource().startsWith(WORKGROUP_RESOURCE)) {
+            String name = requireTaggableWorkGroupName(arn.resource());
+            WorkGroup workGroup = requireWorkGroup(arn.region(), name);
+            workGroup.setTags(mergeTags(workGroup.getTags(), tags));
+            workGroupStore.put(workGroupKey(arn.region(), name), workGroup);
+            return;
+        }
+        String name = requireTaggableCatalogName(arn.resource());
+        DataCatalog catalog = requireTaggedDataCatalog(arn.region(), name, resourceArn);
+        catalog.setTags(mergeTags(catalog.getTags(), tags));
+        dataCatalogStore.put(catalogKey(arn.region(), name), catalog);
+    }
+
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
+        if (tagKeys == null || tagKeys.isEmpty()) {
+            throw new AwsException("InvalidRequestException", "TagKeys is required.", 400);
+        }
+        AwsArnUtils.Arn arn = parseAthenaResourceArn(resourceArn);
+        if (arn.resource().startsWith(WORKGROUP_RESOURCE)) {
+            String name = requireTaggableWorkGroupName(arn.resource());
+            WorkGroup workGroup = requireWorkGroup(arn.region(), name);
+            workGroup.setTags(removeTags(workGroup.getTags(), tagKeys));
+            workGroupStore.put(workGroupKey(arn.region(), name), workGroup);
+            return;
+        }
+        String name = requireTaggableCatalogName(arn.resource());
+        DataCatalog catalog = requireTaggedDataCatalog(arn.region(), name, resourceArn);
+        catalog.setTags(removeTags(catalog.getTags(), tagKeys));
+        dataCatalogStore.put(catalogKey(arn.region(), name), catalog);
     }
 
     public List<Map<String, Object>> listWorkGroups(String region) {
@@ -251,12 +284,92 @@ public class AthenaService {
         return workGroups;
     }
 
-    public List<Map<String, Object>> listDataCatalogs() {
-        return List.of(Map.of("CatalogName", DEFAULT_CATALOG, "Type", "GLUE"));
+    /**
+     * The account's built-in Glue catalog first, then the catalogs registered through
+     * {@code CreateDataCatalog}, sorted by name.
+     */
+    public List<Map<String, Object>> listDataCatalogs(String region) {
+        List<Map<String, Object>> summaries = new ArrayList<>();
+        summaries.add(Map.of("CatalogName", DEFAULT_CATALOG, "Type", "GLUE"));
+        summaries.addAll(dataCatalogStore.scan(k -> k.startsWith(region + ":")).stream()
+                .sorted(Comparator.comparing(DataCatalog::getName))
+                .map(this::toCatalogSummary)
+                .toList());
+        return summaries;
     }
 
-    public Map<String, Object> getDataCatalog(String name) {
-        return Map.of("Name", name == null || name.isBlank() ? DEFAULT_CATALOG : name, "Type", "GLUE");
+    public Map<String, Object> getDataCatalog(String region, String name) {
+        String resolved = name == null || name.isBlank() ? DEFAULT_CATALOG : name;
+        if (DEFAULT_CATALOG.equals(resolved)) {
+            return Map.of("Name", DEFAULT_CATALOG, "Type", "GLUE");
+        }
+        return toCatalogDetail(requireDataCatalog(region, resolved));
+    }
+
+    public Map<String, Object> createDataCatalog(String region,
+                                                 String name,
+                                                 String type,
+                                                 String description,
+                                                 Map<String, String> parameters,
+                                                 List<WorkGroupTag> tags) {
+        validateCatalogName(name);
+        if (DEFAULT_CATALOG.equals(name)) {
+            throw new AwsException("InvalidRequestException",
+                    DEFAULT_CATALOG + " is a reserved data catalog name.", 400);
+        }
+        validateCatalogType(type);
+        if (dataCatalogStore.get(catalogKey(region, name)).isPresent()) {
+            throw new AwsException("InvalidRequestException",
+                    "DataCatalog " + name + " already exists.", 400);
+        }
+
+        DataCatalog catalog = new DataCatalog();
+        catalog.setName(name);
+        catalog.setType(type);
+        catalog.setDescription(description);
+        catalog.setParameters(normalizeParameters(parameters));
+        // AWS creates LAMBDA, GLUE and HIVE catalogs synchronously and FEDERATED ones
+        // asynchronously. Registration is instantaneous here, so all four report the terminal
+        // status rather than a CREATE_IN_PROGRESS that no worker would ever advance.
+        catalog.setStatus("CREATE_COMPLETE");
+        catalog.setConnectionType(resolveConnectionType(type, catalog.getParameters()));
+        catalog.setTags(normalizeTags(tags));
+        dataCatalogStore.put(catalogKey(region, name), catalog);
+        return toCatalogDetail(catalog);
+    }
+
+    /**
+     * UpdateDataCatalog replaces Type, Description and Parameters wholesale, the way AWS does.
+     * Tags are untouched: they move only through TagResource and UntagResource.
+     */
+    public void updateDataCatalog(String region,
+                                  String name,
+                                  String type,
+                                  String description,
+                                  Map<String, String> parameters) {
+        validateCatalogName(name);
+        if (DEFAULT_CATALOG.equals(name)) {
+            throw new AwsException("InvalidRequestException",
+                    DEFAULT_CATALOG + " cannot be modified.", 400);
+        }
+        validateCatalogType(type);
+        DataCatalog catalog = requireDataCatalog(region, name);
+        catalog.setType(type);
+        catalog.setDescription(description);
+        catalog.setParameters(normalizeParameters(parameters));
+        catalog.setConnectionType(resolveConnectionType(type, catalog.getParameters()));
+        dataCatalogStore.put(catalogKey(region, name), catalog);
+    }
+
+    public Map<String, Object> deleteDataCatalog(String region, String name) {
+        validateCatalogName(name);
+        if (DEFAULT_CATALOG.equals(name)) {
+            throw new AwsException("InvalidRequestException",
+                    DEFAULT_CATALOG + " cannot be deleted.", 400);
+        }
+        DataCatalog catalog = requireDataCatalog(region, name);
+        dataCatalogStore.delete(catalogKey(region, name));
+        return toCatalogDetail(catalog);
     }
 
     public List<Map<String, Object>> listDatabases(String catalog) {
@@ -522,6 +635,177 @@ public class AthenaService {
                 .filter(Objects::nonNull)
                 .map(tag -> new WorkGroupTag(tag.getKey(), tag.getValue()))
                 .toList();
+    }
+
+    private List<WorkGroupTag> mergeTags(List<WorkGroupTag> current, List<WorkGroupTag> added) {
+        Map<String, String> merged = currentTagsByKey(current);
+        for (WorkGroupTag tag : added) {
+            if (tag == null || tag.getKey() == null || tag.getKey().isBlank()) {
+                throw new AwsException("InvalidRequestException", "Tag keys must not be empty.", 400);
+            }
+            merged.put(tag.getKey(), tag.getValue() == null ? "" : tag.getValue());
+        }
+        return toTagList(merged);
+    }
+
+    private List<WorkGroupTag> removeTags(List<WorkGroupTag> current, List<String> tagKeys) {
+        Map<String, String> remaining = currentTagsByKey(current);
+        tagKeys.forEach(remaining::remove);
+        return toTagList(remaining);
+    }
+
+    private Map<String, String> currentTagsByKey(List<WorkGroupTag> current) {
+        Map<String, String> byKey = new LinkedHashMap<>();
+        for (WorkGroupTag tag : normalizeTags(current)) {
+            if (tag.getKey() != null && !tag.getKey().isBlank()) {
+                byKey.put(tag.getKey(), tag.getValue());
+            }
+        }
+        return byKey;
+    }
+
+    private List<WorkGroupTag> toTagList(Map<String, String> values) {
+        List<WorkGroupTag> tags = new ArrayList<>();
+        values.forEach((key, value) -> tags.add(new WorkGroupTag(key, value)));
+        return tags;
+    }
+
+    /**
+     * Parses a ResourceARN for the tag operations and rejects anything Athena does not tag.
+     *
+     * <p>pgermosen (review, #3242): the service check matters. Without it, an ARN naming a
+     * completely different service (a Neptune workgroup/-shaped resource that happens to share
+     * this region and name, say) would resolve instead of being rejected the way a live account
+     * rejects a ResourceARN naming the wrong service.
+     */
+    private AwsArnUtils.Arn parseAthenaResourceArn(String resourceArn) {
+        if (resourceArn == null || resourceArn.isBlank()) {
+            throw new AwsException("InvalidRequestException", "ResourceARN is required.", 400);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidRequestException", "Invalid ResourceARN: " + resourceArn, 400);
+        }
+        boolean taggable = "athena".equals(arn.service())
+                && (arn.resource().startsWith(WORKGROUP_RESOURCE)
+                        || arn.resource().startsWith(DATA_CATALOG_RESOURCE));
+        if (!taggable) {
+            throw new AwsException("InvalidRequestException",
+                    "ResourceARN " + resourceArn + " is not an Athena workgroup or data catalog.", 400);
+        }
+        return arn;
+    }
+
+    private WorkGroup requireWorkGroup(String region, String name) {
+        return workGroupStore.get(workGroupKey(region, name))
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "WorkGroup " + name + " is not found.", 400));
+    }
+
+    private DataCatalog requireDataCatalog(String region, String name) {
+        return dataCatalogStore.get(catalogKey(region, name))
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "DataCatalog " + name + " was not found.", 400));
+    }
+
+    /**
+     * The tag operations answer ResourceNotFoundException, which is the error the Athena API
+     * model declares for them. GetDataCatalog, UpdateDataCatalog and DeleteDataCatalog declare
+     * only InvalidRequestException, so they keep {@link #requireDataCatalog}.
+     */
+    private DataCatalog requireTaggedDataCatalog(String region, String name, String resourceArn) {
+        return dataCatalogStore.get(catalogKey(region, name))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Resource " + resourceArn + " was not found.", 400));
+    }
+
+    private String requireTaggableWorkGroupName(String resource) {
+        String name = resource.substring(WORKGROUP_RESOURCE.length());
+        if (DEFAULT_WORKGROUP.equals(name)) {
+            throw new AwsException("InvalidRequestException",
+                    "The " + DEFAULT_WORKGROUP + " workgroup cannot be tagged.", 400);
+        }
+        return name;
+    }
+
+    private String requireTaggableCatalogName(String resource) {
+        String name = resource.substring(DATA_CATALOG_RESOURCE.length());
+        if (DEFAULT_CATALOG.equals(name)) {
+            throw new AwsException("InvalidRequestException",
+                    DEFAULT_CATALOG + " cannot be tagged.", 400);
+        }
+        return name;
+    }
+
+    private Map<String, Object> toCatalogSummary(DataCatalog catalog) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("CatalogName", catalog.getName());
+        summary.put("Type", catalog.getType());
+        summary.put("Status", catalog.getStatus());
+        if (catalog.getConnectionType() != null) {
+            summary.put("ConnectionType", catalog.getConnectionType());
+        }
+        return summary;
+    }
+
+    private Map<String, Object> toCatalogDetail(DataCatalog catalog) {
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("Name", catalog.getName());
+        detail.put("Type", catalog.getType());
+        detail.put("Status", catalog.getStatus());
+        if (catalog.getDescription() != null) {
+            detail.put("Description", catalog.getDescription());
+        }
+        detail.put("Parameters", catalog.getParameters() == null ? Map.of() : catalog.getParameters());
+        if (catalog.getConnectionType() != null) {
+            detail.put("ConnectionType", catalog.getConnectionType());
+        }
+        return detail;
+    }
+
+    private static Map<String, String> normalizeParameters(Map<String, String> parameters) {
+        return parameters == null ? new LinkedHashMap<>() : new LinkedHashMap<>(parameters);
+    }
+
+    /**
+     * A FEDERATED catalog carries its connection type in the {@code connection-type} parameter.
+     * The other catalog types have none.
+     */
+    private static String resolveConnectionType(String type, Map<String, String> parameters) {
+        if (!"FEDERATED".equals(type) || parameters == null) {
+            return null;
+        }
+        String connectionType = parameters.get("connection-type");
+        if (connectionType == null) {
+            return null;
+        }
+        String normalized = connectionType.toUpperCase(Locale.ROOT);
+        return CONNECTION_TYPES.contains(normalized) ? normalized : null;
+    }
+
+    private static void validateCatalogName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidRequestException", "Name is required.", 400);
+        }
+        if (name.length() > 256) {
+            throw new AwsException("InvalidRequestException", "Name must be 1 to 256 characters.", 400);
+        }
+    }
+
+    private static void validateCatalogType(String type) {
+        if (type == null || type.isBlank()) {
+            throw new AwsException("InvalidRequestException", "Type is required.", 400);
+        }
+        if (!CATALOG_TYPES.contains(type)) {
+            throw new AwsException("InvalidRequestException",
+                    "Invalid data catalog type: " + type + ". Valid values are " + CATALOG_TYPES + ".", 400);
+        }
+    }
+
+    private String catalogKey(String region, String name) {
+        return region + ":" + name;
     }
 
     private String workGroupKey(String region, String name) {
