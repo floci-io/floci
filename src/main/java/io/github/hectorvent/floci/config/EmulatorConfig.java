@@ -740,6 +740,7 @@ public interface EmulatorConfig {
         ControlTowerServiceConfig controltower();
         ConnectServiceConfig connect();
         CognitoIdentityServiceConfig cognitoidentity();
+        GlobalAcceleratorServiceConfig globalaccelerator();
 
         ApsServiceConfig aps();
 
@@ -755,6 +756,11 @@ public interface EmulatorConfig {
     }
 
     interface CognitoIdentityServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface GlobalAcceleratorServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

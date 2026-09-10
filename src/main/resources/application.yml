@@ -683,6 +683,8 @@ floci:
       enabled: true
     cognitoidentity:
       enabled: true
+    globalaccelerator:
+      enabled: true
     aps:
       enabled: true
     lakeformation:

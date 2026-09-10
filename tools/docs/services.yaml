@@ -267,6 +267,10 @@ services:
     doc: docs/services/cognitoidentity.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/cognitoidentity/CognitoIdentityJsonHandler.java, mode: switch }
+  - service: globalaccelerator
+    doc: docs/services/globalaccelerator.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/globalaccelerator/GlobalAcceleratorJsonHandler.java, mode: switch }
   - service: route53
     doc: docs/services/route53.md
     sources:
