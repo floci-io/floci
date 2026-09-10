@@ -513,6 +513,8 @@ floci:
       # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
       # Set an absolute http:// or https:// URL here only to override that derivation.
       insecure-skip-tls-verify: false
+    bedrock:
+      enabled: true
     bedrock-runtime:
       enabled: true
       backend: stub

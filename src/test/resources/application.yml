@@ -280,6 +280,8 @@ floci:
       enabled: true
     ui:
       enabled: true
+    bedrock:
+      enabled: true
     bedrock-runtime:
       enabled: true
     eks:
