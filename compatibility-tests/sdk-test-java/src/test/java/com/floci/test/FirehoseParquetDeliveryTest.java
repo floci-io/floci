@@ -211,8 +211,9 @@ class FirehoseParquetDeliveryTest {
             try {
                 firehose.deleteDeliveryStream(DeleteDeliveryStreamRequest.builder()
                         .deliveryStreamName(streamName).build());
-            } catch (Exception ignored) {
+            } catch (Exception e) {
                 // Best effort: a stream that never got created must not fail the run.
+                System.out.println("Cleanup of delivery stream " + streamName + " failed: " + e);
             }
             firehose.close();
         }
@@ -220,8 +221,9 @@ class FirehoseParquetDeliveryTest {
             try {
                 glue.deleteTable(DeleteTableRequest.builder().databaseName(database).name(TABLE).build());
                 glue.deleteDatabase(DeleteDatabaseRequest.builder().name(database).build());
-            } catch (Exception ignored) {
+            } catch (Exception e) {
                 // Best effort cleanup of the probe schema.
+                System.out.println("Cleanup of Glue database " + database + " failed: " + e);
             }
             glue.close();
         }
@@ -231,8 +233,9 @@ class FirehoseParquetDeliveryTest {
                         .forEach(object -> s3.deleteObject(DeleteObjectRequest.builder()
                                 .bucket(bucket).key(object.key()).build()));
                 s3.deleteBucket(builder -> builder.bucket(bucket));
-            } catch (Exception ignored) {
+            } catch (Exception e) {
                 // Best effort cleanup of the probe bucket.
+                System.out.println("Cleanup of bucket " + bucket + " failed: " + e);
             }
             s3.close();
         }

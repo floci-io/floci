@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -844,6 +845,17 @@ public class FirehoseService implements ResourceProvider {
             return;
         }
 
+        // Every store this delivery touches, Glue and S3 included, reads the account
+        // from the request context, and a scheduled flush has none. Without this the
+        // work would run as the default account rather than the stream's owner: the
+        // stream's Glue table would be missed and its objects would land in the wrong
+        // partition. The sidecar follows the same context, so both sides stay together.
+        RequestScopes.runAs(stream.getAccountId(),
+                () -> deliverBuffer(streamName, stream, toFlush, checkpoint));
+    }
+
+    private void deliverBuffer(String streamName, DeliveryStreamDescription stream,
+                               List<byte[]> toFlush, Map<String, String> checkpoint) {
         try {
             String bucket = resolveBucket(stream);
             S3Destination s3 = stream.s3Destination();
