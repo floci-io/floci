@@ -342,14 +342,6 @@ public class MwaaEnvironmentManager {
      *  daemon (via {@code FLOCI_DOCKER_RESOURCE_NAMESPACE}) don't collide, same as every other
      *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
      *  that as "no namespace configured" and returns the base name unchanged. */
-    static String dbContainerName(EmulatorConfig config, String environmentName) {
-        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentName + "-db");
-    }
-
-    static String airflowContainerName(EmulatorConfig config, String environmentName) {
-        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentName + "-airflow");
-    }
-
     static String dbContainerName(EmulatorConfig config, Environment environment) {
         return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentIdentity(environment) + "-db");
     }
@@ -360,16 +352,16 @@ public class MwaaEnvironmentManager {
     }
 
     private static String environmentIdentity(Environment environment) {
-        return environmentAccount(environment) + "-" + environmentRegion(environment) + "-" + environment.getName();
+        return environmentAccount(environment) + "." + environmentRegion(environment) + "." + environment.getName();
     }
 
-    private static String environmentAccount(Environment environment) {
+    static String environmentAccount(Environment environment) {
         return environment.getAccountId() != null
                 ? environment.getAccountId()
                 : AwsArnUtils.accountOrDefault(environment.getArn(), "000000000000");
     }
 
-    private static String environmentRegion(Environment environment) {
+    static String environmentRegion(Environment environment) {
         return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1");
     }
 

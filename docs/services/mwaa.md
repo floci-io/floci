@@ -30,8 +30,11 @@ Environment metadata is stored in-process. No Docker containers are started. The
 
 Floci starts two containers per environment:
 
-- `floci-mwaa-<name>-db` — a private `postgres` metadata database, never given a published host port; it's only ever reached by the sibling Airflow container over the Docker network.
-- `floci-mwaa-<name>-airflow` — a real `apache/airflow` container running **LocalExecutor** (webserver + scheduler in one process tree). `AirflowVersion` genuinely selects the image tag (`apache/airflow:<version>-python3.12`), validated against `supported-versions` — unlike some Floci services where a requested version is echoed back but not actually applied, MWAA always runs the exact Airflow version requested.
+- `floci-mwaa-<account>.<region>.<name>-db` — a private `postgres` metadata database, never given a published host port; it's only ever reached by the sibling Airflow container over the Docker network.
+- `floci-mwaa-<account>.<region>.<name>-airflow` — a real `apache/airflow` container running **LocalExecutor** (webserver + scheduler in one process tree). `AirflowVersion` genuinely selects the image tag (`apache/airflow:<version>-python3.12`), validated against `supported-versions` — unlike some Floci services where a requested version is echoed back but not actually applied, MWAA always runs the exact Airflow version requested.
+
+Legacy environments retain the region recorded in their ARN. A request in another region does not
+adopt that environment; recreate it in the requested region instead.
 
 Once Airflow's unauthenticated `/health` endpoint reports both `metadatabase` and `scheduler` as `"healthy"`, the environment transitions to `AVAILABLE`.
 

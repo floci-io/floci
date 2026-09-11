@@ -234,22 +234,21 @@ class MwaaEnvironmentManagerTest {
     }
 
     @Test
-    void containerNamingMatchesThePlan() {
-        assertEquals("floci-mwaa-my-env-db", MwaaEnvironmentManager.dbContainerName(null, "my-env"));
-        assertEquals("floci-mwaa-my-env-airflow", MwaaEnvironmentManager.airflowContainerName(null, "my-env"));
-    }
-
-    @Test
     void containerNamingAppliesTheConfiguredResourceNamespace() {
         EmulatorConfig.DockerConfig dockerConfig = Mockito.mock(EmulatorConfig.DockerConfig.class);
         when(dockerConfig.resourceNamespace()).thenReturn(Optional.of("ns1"));
         EmulatorConfig namespacedConfig = Mockito.mock(EmulatorConfig.class);
         when(namespacedConfig.docker()).thenReturn(dockerConfig);
 
-        assertEquals("floci-ns1-mwaa-my-env-db",
-                MwaaEnvironmentManager.dbContainerName(namespacedConfig, "my-env"));
-        assertEquals("floci-ns1-mwaa-my-env-airflow",
-                MwaaEnvironmentManager.airflowContainerName(namespacedConfig, "my-env"));
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setAccountId("000000000000");
+        environment.setArn("arn:aws:airflow:us-east-1:000000000000:environment/my-env");
+
+        assertEquals("floci-ns1-mwaa-000000000000.us-east-1.my-env-db",
+                MwaaEnvironmentManager.dbContainerName(namespacedConfig, environment));
+        assertEquals("floci-ns1-mwaa-000000000000.us-east-1.my-env-airflow",
+                MwaaEnvironmentManager.airflowContainerName(namespacedConfig, environment));
     }
 
     @Test

@@ -214,6 +214,9 @@ public class MwaaService implements TagHandler {
     public List<String> listEnvironments() {
         String accountId = regionResolver.getAccountId();
         String region = regionResolver.getRegion();
+        if (storage instanceof AccountAwareStorageBackend<Environment> aware) {
+            migrateLegacyEnvironments(aware, accountId, region);
+        }
         List<Environment> environments = storage instanceof AccountAwareStorageBackend<Environment> aware
                 ? aware.scanForAccount(accountId, k -> true)
                 : storage.scan(k -> true);
@@ -412,6 +415,11 @@ public class MwaaService implements TagHandler {
                     || !"airflow".equals(arn.service())) {
                 throw new IllegalArgumentException("not an MWAA environment ARN");
             }
+            if (!arn.accountId().equals(regionResolver.getAccountId())
+                    || !arn.region().equals(regionResolver.getRegion())) {
+                throw new AwsException("ResourceNotFoundException",
+                        "No environment found for name: " + name, 404);
+            }
             return getStoredEnvironment(arn.accountId(), arn.region(), name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "No environment found for name: " + name, 404));
@@ -555,10 +563,14 @@ public class MwaaService implements TagHandler {
         return storage.scan(k -> true);
     }
 
-    private void putEnvironment(Environment environment) {
+    void putEnvironment(Environment environment) {
         String key = environmentKey(environmentRegion(environment), environment.getName());
         String accountId = environmentAccount(environment);
         if (accountId != null && storage instanceof AccountAwareStorageBackend<Environment> aware) {
+            aware.getForAccountMigratingLegacyKeys(accountId, key, List.of(environment.getName()),
+                    candidate -> accountId.equals(environmentAccount(candidate))
+                            && environmentRegion(environment).equals(environmentRegion(candidate)),
+                    isDefaultScope(accountId, environmentRegion(environment)));
             aware.putForAccount(accountId, key, environment);
         } else {
             storage.put(key, environment);
@@ -580,9 +592,42 @@ public class MwaaService implements TagHandler {
         if (storage instanceof AccountAwareStorageBackend<Environment> aware) {
             return aware.getForAccountMigratingLegacyKeys(accountId, key, List.of(name),
                     environment -> accountId.equals(environmentAccount(environment))
-                            && region.equals(environmentRegion(environment)));
+                            && region.equals(environmentRegion(environment)),
+                    isDefaultScope(accountId, region));
         }
         return storage.get(key);
+    }
+
+    private void migrateLegacyEnvironments(AccountAwareStorageBackend<Environment> aware,
+                                           String accountId, String region) {
+        for (Environment legacy : aware.scanUnscopedLegacy(environment ->
+                accountId.equals(environmentAccount(environment))
+                        && region.equals(environmentRegion(environment)))) {
+            migrateLegacyEnvironment(aware, accountId, region, legacy);
+        }
+        for (String legacyKey : aware.keysForAccount(accountId)) {
+            if (legacyKey.contains("/")) {
+                continue;
+            }
+            aware.getForAccount(accountId, legacyKey)
+                    .filter(environment -> accountId.equals(environmentAccount(environment))
+                            && region.equals(environmentRegion(environment)))
+                    .ifPresent(environment -> migrateLegacyEnvironment(aware, accountId, region, environment));
+        }
+    }
+
+    private void migrateLegacyEnvironment(AccountAwareStorageBackend<Environment> aware,
+                                          String accountId, String region, Environment environment) {
+        String key = environmentKey(region, environment.getName());
+        aware.getForAccountMigratingLegacyKeys(accountId, key, List.of(environment.getName()),
+                candidate -> accountId.equals(environmentAccount(candidate))
+                        && region.equals(environmentRegion(candidate)),
+                isDefaultScope(accountId, region)).ifPresent(value -> aware.putForAccount(accountId, key, value));
+    }
+
+    private boolean isDefaultScope(String accountId, String region) {
+        return accountId.equals(regionResolver.getDefaultAccountId())
+                && region.equals(regionResolver.getDefaultRegion());
     }
 
     private static String environmentKey(String region, String name) {
@@ -594,22 +639,11 @@ public class MwaaService implements TagHandler {
     }
 
     private static String environmentAccount(Environment environment) {
-        if (environment.getAccountId() != null) {
-            return environment.getAccountId();
-        }
-        try {
-            return AwsArnUtils.parse(environment.getArn()).accountId();
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
+        return MwaaEnvironmentManager.environmentAccount(environment);
     }
 
     private static String environmentRegion(Environment environment) {
-        try {
-            return AwsArnUtils.parse(environment.getArn()).region();
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
+        return MwaaEnvironmentManager.environmentRegion(environment);
     }
 
 }

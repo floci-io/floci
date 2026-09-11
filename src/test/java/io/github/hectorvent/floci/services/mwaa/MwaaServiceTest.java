@@ -147,6 +147,38 @@ class MwaaServiceTest {
         assertThrows(AwsException.class, () -> mwaaService.getEnvironment("foreign-env"));
     }
 
+    @Test
+    void listMigratesMatchingLegacyEnvironmentAndRemovesTheOldKey() {
+        Environment legacy = new Environment();
+        legacy.setName("legacy-list-env");
+        legacy.setArn("arn:aws:airflow:us-east-1:111111111111:environment/legacy-list-env");
+        environmentStorage.putForAccount("111111111111", "legacy-list-env", legacy);
+
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+
+        assertEquals(List.of("legacy-list-env"), mwaaService.listEnvironments());
+        assertTrue(environmentStorage.getForAccount("111111111111", "legacy-list-env").isEmpty());
+        assertTrue(environmentStorage.getForAccount("111111111111", "us-east-1/legacy-list-env").isPresent());
+    }
+
+    @Test
+    void promotionDoesNotLeaveASecondLegacyEnvironmentEntry() {
+        Environment legacy = new Environment();
+        legacy.setName("promoted-env");
+        legacy.setArn("arn:aws:airflow:us-east-1:111111111111:environment/promoted-env");
+        legacy.setStatus(EnvironmentStatus.CREATING);
+        environmentStorage.putForAccount("111111111111", "promoted-env", legacy);
+
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+        legacy.setStatus(EnvironmentStatus.AVAILABLE);
+        mwaaService.putEnvironment(legacy);
+
+        assertEquals(List.of("promoted-env"), mwaaService.listEnvironments());
+        assertTrue(environmentStorage.getForAccount("111111111111", "promoted-env").isEmpty());
+    }
+
     private EmulatorConfig testConfig() {
         EmulatorConfig.MwaaServiceConfig mwaaConfig = proxy(EmulatorConfig.MwaaServiceConfig.class,
                 (proxy, method, args) -> switch (method.getName()) {
@@ -379,7 +411,7 @@ class MwaaServiceTest {
     }
 
     @Test
-    void taggingUsesTheAccountAndRegionInTheResourceArn() {
+    void taggingRejectsAResourceArnOutsideTheRequestScope() {
         currentAccount = "111111111111";
         currentRegion = "us-east-1";
         Environment first = mwaaService.createEnvironment("shared-name",
@@ -389,11 +421,9 @@ class MwaaServiceTest {
         currentRegion = "eu-west-1";
         mwaaService.createEnvironment("shared-name", createRequest("arn:aws:s3:::second-bucket", "dags"));
 
-        mwaaService.tagResource(null, first.getArn(), Map.of("owner", "first"));
-
-        assertEquals(Map.of("owner", "first"), mwaaService.listTags(null, first.getArn()));
-        assertTrue(mwaaService.listTags(null,
-                "arn:aws:airflow:eu-west-1:222222222222:environment/shared-name").isEmpty());
+        AwsException exception = assertThrows(AwsException.class,
+                () -> mwaaService.tagResource(null, first.getArn(), Map.of("owner", "first")));
+        assertEquals("ResourceNotFoundException", exception.getErrorCode());
     }
 
     @Test
