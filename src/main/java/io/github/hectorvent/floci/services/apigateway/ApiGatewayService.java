@@ -738,7 +738,11 @@ public class ApiGatewayService {
             String prefix = path.substring(1, path.length() - suffix.length());
             int lastSlash = prefix.lastIndexOf('/');
             if (lastSlash < 0) return;
-            String resourcePath = prefix.substring(0, lastSlash);
+            // AWS escapes the resource path's slashes as ~1 in the patch path ("/~1pets/GET/...")
+            // but reports the setting keyed by the plain path ("pets/GET"), so normalise both the
+            // escaped and unescaped spellings onto that one key.
+            String resourcePath = prefix.substring(0, lastSlash).replace("~1", "/");
+            if (resourcePath.startsWith("/")) resourcePath = resourcePath.substring(1);
             String httpMethod = prefix.substring(lastSlash + 1);
             String methodKey = resourcePath + "/" + httpMethod;
 

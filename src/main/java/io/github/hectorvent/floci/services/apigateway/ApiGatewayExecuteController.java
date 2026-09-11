@@ -53,6 +53,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -391,7 +392,16 @@ public class ApiGatewayExecuteController {
         LOG.debugv("execute-api: {0} {1}/{2}{3} → {4}", httpMethod, apiId, stageName, path,
                 integration.getType());
 
-        return switch (integration.getType().toUpperCase()) {
+        // An OpenAPI import whose x-amazon-apigateway-integration omits "type" leaves this null;
+        // report it rather than failing with an NPE inside the switch.
+        String integrationType = integration.getType();
+        if (integrationType == null || integrationType.isBlank()) {
+            return Response.status(500)
+                    .entity(jsonMessage("No integration type configured"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
+        return switch (integrationType.toUpperCase(Locale.ROOT)) {
             case "AWS_PROXY" -> invokeProxy(region, apiId, httpMethod, path, proxy, stageName,
                     matched, stage, integration, headers, uriInfo, body, authorizerResult, resolvedApiKey,
                     iamIdentity);
@@ -1268,7 +1278,9 @@ public class ApiGatewayExecuteController {
 
         // Apply response parameter mapping (header mapping from responseParameters config).
         if (matchedResponse != null && matchedResponse.responseParameters() != null) {
-            Map<String, String> serviceResponseHeaders = new HashMap<>();
+            // Case-insensitive: an integration.response.header.X-Foo mapping must resolve
+            // regardless of the casing the backend or client library used for the header name.
+            Map<String, String> serviceResponseHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
             if (serviceResponse != null) {
                 for (Map.Entry<String, List<String>> e : serviceResponse.getStringHeaders().entrySet()) {
                     if (!e.getValue().isEmpty()) serviceResponseHeaders.put(e.getKey(), e.getValue().get(0));

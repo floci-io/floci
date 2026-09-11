@@ -1984,6 +1984,19 @@ public class ApiGatewayController {
         node.put("httpMethod", i.getHttpMethod());
         node.put("uri", i.getUri());
         node.put("passthroughBehavior", i.getPassthroughBehavior());
+        if (!i.getRequestParameters().isEmpty()) {
+            ObjectNode params = node.putObject("requestParameters");
+            i.getRequestParameters().forEach(params::put);
+        }
+        if (!i.getRequestTemplates().isEmpty()) {
+            ObjectNode templates = node.putObject("requestTemplates");
+            i.getRequestTemplates().forEach(templates::put);
+        }
+        if (!i.getIntegrationResponses().isEmpty()) {
+            ObjectNode responses = node.putObject("integrationResponses");
+            i.getIntegrationResponses().forEach((status, ir) ->
+                    responses.set(status, toIntegrationResponseNode(ir)));
+        }
         return node;
     }
 
@@ -1991,6 +2004,14 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("statusCode", r.statusCode());
         node.put("selectionPattern", r.selectionPattern());
+        if (r.responseParameters() != null && !r.responseParameters().isEmpty()) {
+            ObjectNode params = node.putObject("responseParameters");
+            r.responseParameters().forEach(params::put);
+        }
+        if (r.responseTemplates() != null && !r.responseTemplates().isEmpty()) {
+            ObjectNode templates = node.putObject("responseTemplates");
+            r.responseTemplates().forEach(templates::put);
+        }
         return node;
     }
 
