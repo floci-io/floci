@@ -15,6 +15,9 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.OrcSerDe;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.OutputFormatConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ParquetSerDe;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Processor;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessorParameter;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.SchemaConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Serializer;
@@ -23,6 +26,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.HashMap;
@@ -59,6 +63,7 @@ class FirehoseDataFormatConversionTest {
 
     private FirehoseService service;
     private FirehoseParquetConverter parquetConverter;
+    private FirehoseLambdaTransformer lambdaTransformer;
     private S3Service s3Service;
 
     @BeforeEach
@@ -81,10 +86,11 @@ class FirehoseDataFormatConversionTest {
         when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         parquetConverter = Mockito.mock(FirehoseParquetConverter.class);
+        lambdaTransformer = Mockito.mock(FirehoseLambdaTransformer.class);
         s3Service = Mockito.mock(S3Service.class);
         service = new FirehoseService(storageFactory, s3Service,
                 Mockito.mock(KinesisService.class), regionResolver, new MutableClock(), config,
-                parquetConverter);
+                parquetConverter, lambdaTransformer);
     }
 
     private static SchemaConfiguration schema() {
@@ -542,6 +548,57 @@ class FirehoseDataFormatConversionTest {
         Mockito.verify(parquetConverter, Mockito.never()).deliver(any(), anyString(), any(), any());
         Mockito.verify(s3Service).putObject(Mockito.eq("results"), anyString(),
                 any(byte[].class), anyString(), Mockito.anyMap(), any());
+    }
+
+    /**
+     * A stream configured for both has to convert what the transform returned, not what
+     * was put: the two were wired in separately, so nothing else would catch a delivery
+     * that passed the original bytes to the converter.
+     */
+    @Test
+    void conversionOfATransformingStreamConvertsWhatTheTransformReturned() {
+        Mockito.when(lambdaTransformer.transform(any(), anyString(), any(), any()))
+                .thenReturn(new FirehoseLambdaTransformer.Outcome(
+                        List.of("{\"ticker\": \"BBB\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                        0, 0, null));
+        Mockito.when(parquetConverter.deliver(any(), anyString(), any(), any()))
+                .thenReturn(new FirehoseParquetConverter.Outcome(1, 0, "data/key.parquet", null));
+        service.createDeliveryStream("stream", destination(s3 -> s3.setProcessingConfiguration(lambdaProcessing())));
+        service.putRecord("stream", record("{\"ticker\": \"AAA\"}"));
+
+        service.flush("stream");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<byte[]>> converted = ArgumentCaptor.forClass(List.class);
+        Mockito.verify(parquetConverter).deliver(any(), Mockito.eq("results"), converted.capture(), any());
+        assertEquals(1, converted.getValue().size());
+        assertEquals("{\"ticker\": \"BBB\"}",
+                new String(converted.getValue().get(0), java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void aTransformThatKeptNothingNeverReachesTheConverter() {
+        Mockito.when(lambdaTransformer.transform(any(), anyString(), any(), any()))
+                .thenReturn(new FirehoseLambdaTransformer.Outcome(List.of(), 1, 0, null));
+        service.createDeliveryStream("stream", destination(s3 -> s3.setProcessingConfiguration(lambdaProcessing())));
+        service.putRecord("stream", record("{\"ticker\": \"AAA\"}"));
+
+        service.flush("stream");
+
+        Mockito.verify(parquetConverter, Mockito.never()).deliver(any(), anyString(), any(), any());
+    }
+
+    private static ProcessingConfiguration lambdaProcessing() {
+        ProcessorParameter lambdaArn = new ProcessorParameter();
+        lambdaArn.setParameterName("LambdaArn");
+        lambdaArn.setParameterValue("arn:aws:lambda:us-east-1:000000000000:function:transform");
+        Processor processor = new Processor();
+        processor.setType("Lambda");
+        processor.setParameters(List.of(lambdaArn));
+        ProcessingConfiguration processing = new ProcessingConfiguration();
+        processing.setEnabled(true);
+        processing.setProcessors(List.of(processor));
+        return processing;
     }
 
     private static io.github.hectorvent.floci.services.firehose.model.Record record(String json) {

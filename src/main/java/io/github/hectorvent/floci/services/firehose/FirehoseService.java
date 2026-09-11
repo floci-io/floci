@@ -102,6 +102,7 @@ public class FirehoseService implements ResourceProvider {
     // commits exactly the position that snapshot covered.
     private final Map<String, Map<String, String>> pendingSourceIterators = new ConcurrentHashMap<>();
     private final FirehoseParquetConverter parquetConverter;
+    private final FirehoseLambdaTransformer lambdaTransformer;
     private final Clock clock;
     private final long tickIntervalSeconds;
     private final int flushRecordCount;
@@ -187,7 +188,8 @@ public class FirehoseService implements ResourceProvider {
     @Inject
     public FirehoseService(StorageFactory storageFactory, S3Service s3Service, KinesisService kinesisService,
                            RegionResolver regionResolver, Clock clock, EmulatorConfig config,
-                           FirehoseParquetConverter parquetConverter) {
+                           FirehoseParquetConverter parquetConverter,
+                           FirehoseLambdaTransformer lambdaTransformer) {
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.sourceIteratorStore = storageFactory.create("firehose", "source-iterators.json",
@@ -196,6 +198,7 @@ public class FirehoseService implements ResourceProvider {
         this.kinesisService = kinesisService;
         this.regionResolver = regionResolver;
         this.parquetConverter = parquetConverter;
+        this.lambdaTransformer = lambdaTransformer;
         this.clock = clock;
         this.tickIntervalSeconds = Math.max(1, config.services().firehose().tickIntervalSeconds());
         this.flushRecordCount = Math.max(0, config.services().firehose().flushRecordCount());
@@ -313,7 +316,6 @@ public class FirehoseService implements ResourceProvider {
         if (s3Config != null) {
             s3Config.canonicalizeProcessors();
         }
-        warnIfProcessingEnabled(name, s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", region, accountId,
                 "deliverystream/" + name).toString();
         // CreateDeliveryStream's KinesisStreamSourceConfiguration carries only the ARN and
@@ -392,7 +394,6 @@ public class FirehoseService implements ResourceProvider {
         stream.setLastUpdateTimestamp(java.time.Instant.now());
         streamPut(streamKey, stream);
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
-        warnIfProcessingEnabled(name, stream.s3Destination());
     }
 
     public void startDeliveryStreamEncryption(String name, String keyType, String keyArn) {
@@ -461,20 +462,6 @@ public class FirehoseService implements ResourceProvider {
             throw new AwsException("InvalidArgumentException",
                     "If you specify a value for SizeInMBs, you must also specify a value for IntervalInSeconds, and vice versa.",
                     400);
-        }
-    }
-
-    /**
-     * Says, where the configuration is set, that the transformation will not be applied.
-     * Fires on create and on every update that leaves it enabled, so a caller who keeps
-     * changing the destination keeps being told. Deliberately not in the flush path,
-     * which runs on every buffered delivery: create and update are caller-driven and are
-     * the moments a caller can act on the warning.
-     */
-    private static void warnIfProcessingEnabled(String name, S3Destination s3) {
-        if (s3 != null && s3.isProcessingEnabled()) {
-            LOG.warnv("Delivery stream {0} enables a record transformation, which Floci does not"
-                    + " apply yet; its records will be delivered untransformed", name);
         }
     }
 
@@ -893,10 +880,26 @@ public class FirehoseService implements ResourceProvider {
         try {
             String bucket = resolveBucket(stream);
             S3Destination s3 = stream.s3Destination();
+            List<byte[]> records = toFlush;
+            if (s3 != null && s3.isProcessingEnabled()) {
+                ensureBucket(bucket);
+                FirehoseLambdaTransformer.Outcome transformed =
+                        lambdaTransformer.transform(stream, bucket, records, clock.instant());
+                LOG.infov("Transformed {0} records from stream {1} ({2} dropped, {3} failed)",
+                        records.size(), streamName, transformed.droppedRecords(), transformed.failedRecords());
+                records = transformed.records();
+                if (records.isEmpty()) {
+                    // Nothing survived the transform. The batch is accounted for, dropped
+                    // records deliberately leaving no trace and failed ones already in the
+                    // error output, so the source may advance past it.
+                    commitSourceIterators(streamName, checkpoint);
+                    return;
+                }
+            }
             if (s3 != null && s3.isDataFormatConversionEnabled()) {
                 ensureBucket(bucket);
                 FirehoseParquetConverter.Outcome outcome =
-                        parquetConverter.deliver(stream, bucket, toFlush, clock.instant());
+                        parquetConverter.deliver(stream, bucket, records, clock.instant());
                 LOG.infov("Converted {0} records ({1} failed) from stream {2} to s3://{3}/{4}",
                         outcome.convertedRecords(), outcome.failedRecords(), streamName, bucket,
                         outcome.dataKey() != null ? outcome.dataKey() : outcome.errorKey());
@@ -917,7 +920,7 @@ public class FirehoseService implements ResourceProvider {
             // (verified: three "abc" records arrive as the 9 bytes "abcabcabc").
             // See the deviation noted in docs/services/firehose.md.
             ByteArrayOutputStream payload = new ByteArrayOutputStream();
-            for (byte[] data : toFlush) {
+            for (byte[] data : records) {
                 payload.writeBytes(data);
                 if (data.length > 0 && data[data.length - 1] != '\n') {
                     payload.write('\n');
@@ -928,7 +931,7 @@ public class FirehoseService implements ResourceProvider {
             s3Service.putObject(bucket, key, body, "application/octet-stream", Map.of(),
                     new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
             LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3} ({4})",
-                    toFlush.size(), streamName, bucket, key, compression.wireValue());
+                    records.size(), streamName, bucket, key, compression.wireValue());
             // Only now: the records these iterators were read past are durable.
             commitSourceIterators(streamName, checkpoint);
         } catch (Exception e) {

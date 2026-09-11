@@ -85,15 +85,19 @@ An omitted `Enabled` counts as enabled; `Enabled: false` stores and merges the c
 
 ## Record transformation
 
-`ProcessingConfiguration` on the extended S3 destination is modelled, validated and echoed, but **not applied**: a stream that enables a transformation is accepted and delivers its records untransformed, and create and update log a warning saying so. Validation follows AWS, down to the messages and the order they are reported in.
+`ProcessingConfiguration` on the extended S3 destination is applied at delivery: a flushed buffer goes to the Lambda processor's function as one invocation, `Ok` records deliver the returned data, and `Dropped` records leave no trace. Any other per-record outcome goes to the error output while the rest of the batch still delivers, one NDJSON line each under the `ErrorOutputPrefix` with `!{firehose:error-output-type}` resolving to `processing-failed`.
 
-Two behaviors are worth knowing because they differ from the conversion block above. `UpdateDestination` replaces this block whole rather than merging it member-wise, so an update carrying only `{"Enabled": false}` leaves no processors behind, and each update is validated against its own content rather than the merged result. And a stored Lambda processor is echoed with `NumberOfRetries` and `RoleArn` filled in and its parameters reordered, as AWS returns them.
+A function that errors is retried `NumberOfRetries` more times and then fails the whole batch as `Lambda.FunctionError`; a response the function returned successfully is final however malformed it is. The transformation runs before data format conversion, so a stream configured for both converts what the function returned.
+
+Two behaviors invert what the conversion block above does, both probed rather than assumed: `UpdateDestination` replaces this block whole instead of merging it member-wise, so an update carrying only `{"Enabled": false}` leaves no processors behind and is validated against its own content; and an omitted `Enabled` leaves the transformation **disabled**, where on the conversion block it means enabled. A stored Lambda processor is echoed with `NumberOfRetries`, `RoleArn`, `BufferSizeInMBs` and `BufferIntervalInSeconds` filled in and reordered, as AWS returns them; the two buffer values default to 1 and 60, the processor's own defaults rather than anything `BufferingHints` says.
 
 ### Known deviations from AWS
 
-- The transformation is not applied. A transform function is never invoked, so records reach the destination exactly as they were put, which is what makes a local test of one pass where AWS would not.
-- Two checks AWS itself does not make are deliberately absent: `NumberOfRetries` is not range-checked, despite the documented 1 to 8, and the function a `LambdaArn` names is not required to exist.
-- A null entry in `Processors` or `Parameters`, which a raw JSON client can send, is ignored rather than reported. Real AWS answers `InternalFailure` there, a fault of its own that is not worth reproducing; skipping the entry leaves the same configuration as omitting it would.
+- Only the `Lambda` processor type is applied; the others are stored and echoed.
+- The whole buffer is one invocation, so the processor's buffering parameters do not re-buffer and no payload size limit is enforced.
+- `recordId` is a UUID rather than AWS's longer sequence token, and every timestamp is the delivery time: Floci tracks no per-record arrival.
+- Neither `NumberOfRetries` nor the existence of the function a `LambdaArn` names is checked at configuration time, as on AWS. At delivery an ARN naming nothing fails as `Lambda.FunctionError`, and a `NumberOfRetries` above 100 is capped, a bound AWS does not impose so that one flush cannot occupy the flusher indefinitely.
+- A null entry in `Processors` or `Parameters`, which a raw JSON client can send, is ignored rather than reported; real AWS answers `InternalFailure` there, a fault of its own not worth reproducing.
 
 ## S3 object keys
 

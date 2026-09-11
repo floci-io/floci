@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Processor;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessorParameter;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.BufferingHints;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -26,6 +27,7 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -70,7 +72,8 @@ class FirehoseProcessingConfigurationTest {
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         service = new FirehoseService(storageFactory, mock(S3Service.class),
                 Mockito.mock(KinesisService.class), regionResolver, new MutableClock(), config,
-                Mockito.mock(FirehoseParquetConverter.class));
+                Mockito.mock(FirehoseParquetConverter.class),
+                Mockito.mock(FirehoseLambdaTransformer.class));
     }
 
     private static ProcessorParameter parameter(String name, String value) {
@@ -92,6 +95,20 @@ class FirehoseProcessingConfigurationTest {
 
     private static ProcessingConfiguration lambdaProcessing(ProcessorParameter... parameters) {
         return processing("Lambda", parameters);
+    }
+
+    private static Processor lambdaProcessor(ProcessorParameter... parameters) {
+        Processor processor = new Processor();
+        processor.setType("Lambda");
+        processor.setParameters(new ArrayList<>(List.of(parameters)));
+        return processor;
+    }
+
+    private static BufferingHints hints(int sizeInMBs, int intervalInSeconds) {
+        BufferingHints hints = new BufferingHints();
+        hints.setSizeInMBs(sizeInMBs);
+        hints.setIntervalInSeconds(intervalInSeconds);
+        return hints;
     }
 
     private static S3Destination destination(Consumer<S3Destination> customizer) {
@@ -329,7 +346,51 @@ class FirehoseProcessingConfigurationTest {
         service.updateDestination("stream", currentVersion("stream"), DESTINATION_ID,
                 destination(s3 -> s3.setPrefix("changed/")));
 
-        assertEquals(List.of("LambdaArn", "NumberOfRetries", "RoleArn"), storedParameterNames("stream"));
+        assertEquals(List.of("LambdaArn", "NumberOfRetries", "RoleArn", "BufferSizeInMBs",
+                "BufferIntervalInSeconds"), storedParameterNames("stream"));
+    }
+
+    /**
+     * Probed 2026-09-11: DescribeDeliveryStream echoes an omitted Enabled back as false
+     * here, where the conversion block echoes it as true, so the two cannot share a rule.
+     */
+    @Test
+    void anOmittedEnabledIsStoredAsDisabled() {
+        ProcessingConfiguration processing = new ProcessingConfiguration();
+        processing.setProcessors(List.of(lambdaProcessor(parameter("LambdaArn", LAMBDA_ARN))));
+        service.createDeliveryStream("stream",
+                destination(s3 -> s3.setProcessingConfiguration(processing)));
+
+        S3Destination stored = service.describeDeliveryStream("stream").s3Destination();
+        assertEquals(false, stored.getProcessingConfiguration().getEnabled());
+        assertFalse(stored.isProcessingEnabled());
+    }
+
+    /**
+     * The two buffer parameters are the Lambda processor's own defaults, not the
+     * destination's BufferingHints: probed, a destination buffering 5 MiB over 300s still
+     * echoes 1 and 60 on the processor.
+     */
+    @Test
+    void aProcessorWithoutBufferParametersGainsTheLambdaDefaults() {
+        service.createDeliveryStream("stream", destination(s3 -> {
+            s3.setBufferingHints(hints(5, 300));
+            s3.setProcessingConfiguration(lambdaProcessing(parameter("LambdaArn", LAMBDA_ARN)));
+        }));
+
+        List<ProcessorParameter> stored = service.describeDeliveryStream("stream").s3Destination()
+                .getProcessingConfiguration().getProcessors().get(0).getParameters();
+        assertEquals("1", parameterValue(stored, "BufferSizeInMBs"));
+        assertEquals("60", parameterValue(stored, "BufferIntervalInSeconds"));
+    }
+
+    private static String parameterValue(List<ProcessorParameter> parameters, String name) {
+        for (ProcessorParameter parameter : parameters) {
+            if (name.equals(parameter.getParameterName())) {
+                return parameter.getParameterValue();
+            }
+        }
+        return null;
     }
 
     // Validation runs against the update's own content, since the update replaces the

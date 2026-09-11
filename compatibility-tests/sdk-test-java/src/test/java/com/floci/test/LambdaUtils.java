@@ -33,6 +33,33 @@ public final class LambdaUtils {
     }
 
     /**
+     * ZIP containing a Node.js handler shaped like a Firehose transform: it uppercases each
+     * record, drops one whose payload says DROP, and reports one whose payload says FAIL,
+     * so a single invocation exercises all three result values.
+     */
+    public static byte[] firehoseTransformZip() {
+        String code = """
+                exports.handler = async (event) => ({
+                    records: (event.records || []).map((r) => {
+                        const data = Buffer.from(r.data, 'base64').toString('utf8');
+                        if (data.includes('DROP')) {
+                            return { recordId: r.recordId, result: 'Dropped' };
+                        }
+                        if (data.includes('FAIL')) {
+                            return { recordId: r.recordId, result: 'ProcessingFailed' };
+                        }
+                        return {
+                            recordId: r.recordId,
+                            result: 'Ok',
+                            data: Buffer.from(data.toUpperCase(), 'utf8').toString('base64')
+                        };
+                    })
+                });
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
      * ZIP containing a Ruby handler that greets by name.
      */
     public static byte[] rubyZip() {

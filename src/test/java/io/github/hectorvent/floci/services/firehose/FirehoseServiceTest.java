@@ -91,7 +91,8 @@ class FirehoseServiceTest {
         // sees what a GetRecords consumer sees, and a stubbed one could not show that.
         kinesisService = new KinesisService(storageFactory, regionResolver);
         return new FirehoseService(storageFactory, s3Service, kinesisService,
-                regionResolver, clock, config, mock(FirehoseParquetConverter.class));
+                regionResolver, clock, config, mock(FirehoseParquetConverter.class),
+                mock(FirehoseLambdaTransformer.class));
     }
 
     private static S3Destination destination(String bucketArn, String compressionFormat) {

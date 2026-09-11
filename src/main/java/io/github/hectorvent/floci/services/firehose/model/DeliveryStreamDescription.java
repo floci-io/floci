@@ -263,17 +263,18 @@ public class DeliveryStreamDescription {
         }
 
         /**
-         * True when a transformation applies to deliveries. An omitted Enabled is taken
-         * as enabled, following the conversion block, where that was probed; the
-         * processing block's own behavior for an omitted Enabled was not, and nothing
-         * but the "not applied yet" warning reads this today.
+         * True when a transformation applies to deliveries: the configuration is present
+         * and Enabled is explicitly true. An omitted Enabled leaves it disabled, the
+         * opposite of the conversion block below. Probed rather than carried over from
+         * there (2026-09-11): DescribeDeliveryStream echoes an omitted Enabled as false
+         * here and as true on the conversion block.
          *
          * Ignored for serialization for the same reason as the accessor below.
          */
         @JsonIgnore
         public boolean isProcessingEnabled() {
             return processingConfiguration != null
-                    && !Boolean.FALSE.equals(processingConfiguration.getEnabled());
+                    && Boolean.TRUE.equals(processingConfiguration.getEnabled());
         }
 
         /**
@@ -330,9 +331,13 @@ public class DeliveryStreamDescription {
 
         /**
          * Real AWS answers with more than the caller sent: a Lambda processor comes back
-         * with NumberOfRetries defaulted to 3 and RoleArn filled from the delivery
-         * stream's role, and the parameters are echoed in a fixed order whatever order
-         * they arrived in (probed 2026-09-10).
+         * with NumberOfRetries defaulted to 3, RoleArn filled from the delivery stream's
+         * role, and BufferSizeInMBs and BufferIntervalInSeconds defaulted to 1 and 60,
+         * and the parameters are echoed in a fixed order whatever order they arrived in
+         * (probed 2026-09-10 and 2026-09-11). The two buffer defaults are the Lambda
+         * processor's own, not the destination's BufferingHints: a destination buffering
+         * 5 MiB over 300s still echoes 1 and 60 here. An omitted Enabled is stored as
+         * false, which is what leaves the transformation disabled.
          *
          * Called as a destination is written, not as it is read. Doing it on the way out
          * would mutate what storage handed back, so whether a Describe had happened would
@@ -340,7 +345,13 @@ public class DeliveryStreamDescription {
          * role was current at the time of the read.
          */
         public void canonicalizeProcessors() {
-            if (processingConfiguration == null || processingConfiguration.getProcessors() == null) {
+            if (processingConfiguration == null) {
+                return;
+            }
+            if (processingConfiguration.getEnabled() == null) {
+                processingConfiguration.setEnabled(false);
+            }
+            if (processingConfiguration.getProcessors() == null) {
                 return;
             }
             for (Processor processor : processingConfiguration.getProcessors()) {
@@ -360,6 +371,8 @@ public class DeliveryStreamDescription {
                 if (roleArn != null) {
                     byName.putIfAbsent("RoleArn", roleArn);
                 }
+                byName.putIfAbsent("BufferSizeInMBs", "1");
+                byName.putIfAbsent("BufferIntervalInSeconds", "60");
                 List<ProcessorParameter> ordered = new ArrayList<>(byName.size());
                 for (String name : LAMBDA_PARAMETER_ORDER) {
                     if (byName.containsKey(name)) {
