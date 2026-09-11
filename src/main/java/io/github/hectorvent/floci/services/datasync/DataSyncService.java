@@ -52,6 +52,11 @@ public class DataSyncService {
     public static final String AGENT_STATUS_ONLINE = "ONLINE";
     public static final String TASK_STATUS_AVAILABLE = "AVAILABLE";
     public static final String DEFAULT_TASK_MODE = "BASIC";
+    public static final String TASK_MODE_ENHANCED = "ENHANCED";
+    public static final String VERIFY_MODE_POINT_IN_TIME_CONSISTENT = "POINT_IN_TIME_CONSISTENT";
+    public static final String VERIFY_MODE_ONLY_FILES_TRANSFERRED = "ONLY_FILES_TRANSFERRED";
+
+    private static final Set<String> TASK_MODES = Set.of(DEFAULT_TASK_MODE, TASK_MODE_ENHANCED);
 
     /** Reported by DescribeAgent and ListAgents; floci runs no agent software. */
     public static final String AGENT_PLATFORM_VERSION = "1.0.0";
@@ -231,11 +236,12 @@ public class DataSyncService {
         task.setTaskArn(regionResolver.buildArn("datasync", region, "task/task-" + randomResourceId()));
         task.setName(request.path("Name").asText(""));
         task.setStatus(TASK_STATUS_AVAILABLE);
-        task.setTaskMode(request.path("TaskMode").asText(DEFAULT_TASK_MODE));
+        String taskMode = requestedTaskMode(request);
+        task.setTaskMode(taskMode);
         task.setSourceLocationArn(sourceArn);
         task.setDestinationLocationArn(destinationArn);
         task.setCloudWatchLogGroupArn(optionalText(request, "CloudWatchLogGroupArn"));
-        task.setOptions(mergedOptions(request.get("Options")));
+        task.setOptions(mergedOptions(request.get("Options"), taskMode));
         task.setExcludes(filterList(request.get("Excludes")));
         task.setIncludes(filterList(request.get("Includes")));
         task.setSchedule(copyOrNull(request.get("Schedule")));
@@ -266,7 +272,7 @@ public class DataSyncService {
             task.setCloudWatchLogGroupArn(request.get("CloudWatchLogGroupArn").asText());
         }
         if (request.hasNonNull("Options")) {
-            task.setOptions(mergedOptions(request.get("Options")));
+            task.setOptions(mergedOptions(request.get("Options"), taskModeOf(task)));
         }
         if (request.hasNonNull("Excludes")) {
             task.setExcludes(filterList(request.get("Excludes")));
@@ -598,9 +604,9 @@ public class DataSyncService {
 
     // ---- Helpers ----
 
-    private JsonNode mergedOptions(JsonNode requested) {
+    private JsonNode mergedOptions(JsonNode requested, String taskMode) {
         ObjectNode options = mapper.createObjectNode();
-        options.put("VerifyMode", "POINT_IN_TIME_CONSISTENT");
+        options.put("VerifyMode", defaultVerifyMode(taskMode));
         options.put("OverwriteMode", "ALWAYS");
         options.put("Atime", "BEST_EFFORT");
         options.put("Mtime", "PRESERVE");
@@ -618,7 +624,40 @@ public class DataSyncService {
         if (requested != null && requested.isObject()) {
             requested.properties().forEach(member -> options.set(member.getKey(), member.getValue().deepCopy()));
         }
+        requireSupportedVerifyMode(options.path("VerifyMode").asText(), taskMode);
         return options;
+    }
+
+    private static String requestedTaskMode(JsonNode request) {
+        String taskMode = request.path("TaskMode").asText(DEFAULT_TASK_MODE);
+        if (!TASK_MODES.contains(taskMode)) {
+            throw new AwsException("InvalidRequestException",
+                    "TaskMode " + taskMode + " is not a supported task mode. Supported modes are "
+                            + DEFAULT_TASK_MODE + " and " + TASK_MODE_ENHANCED + ".", 400);
+        }
+        return taskMode;
+    }
+
+    /**
+     * The mode a stored task was created with. {@code UpdateTaskRequest} carries no
+     * {@code TaskMode}, so a task keeps the mode it was created with for life.
+     */
+    private static String taskModeOf(DataSyncTask task) {
+        return task.getTaskMode() != null ? task.getTaskMode() : DEFAULT_TASK_MODE;
+    }
+
+    private static String defaultVerifyMode(String taskMode) {
+        return TASK_MODE_ENHANCED.equals(taskMode)
+                ? VERIFY_MODE_ONLY_FILES_TRANSFERRED
+                : VERIFY_MODE_POINT_IN_TIME_CONSISTENT;
+    }
+
+    private static void requireSupportedVerifyMode(String verifyMode, String taskMode) {
+        if (TASK_MODE_ENHANCED.equals(taskMode) && VERIFY_MODE_POINT_IN_TIME_CONSISTENT.equals(verifyMode)) {
+            throw new AwsException("InvalidRequestException",
+                    "VerifyMode " + VERIFY_MODE_POINT_IN_TIME_CONSISTENT + " is not supported for "
+                            + TASK_MODE_ENHANCED + " mode tasks.", 400);
+        }
     }
 
     private JsonNode filterList(JsonNode requested) {

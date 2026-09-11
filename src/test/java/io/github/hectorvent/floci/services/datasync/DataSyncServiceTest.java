@@ -262,6 +262,109 @@ class DataSyncServiceTest {
         assertEquals("InvalidRequestException", error.getErrorCode());
     }
 
+    private JsonNode taskRequest(String extraMembers) {
+        DataSyncLocation source = createLocation(DataSyncLocationType.NFS, """
+                {"Subdirectory": "/export", "ServerHostname": "nfs.example.com",
+                 "OnPremConfig": {"AgentArns": ["agent"]}}
+                """);
+        DataSyncLocation destination = createLocation(DataSyncLocationType.S3, """
+                {"S3BucketArn": "arn:aws:s3:::floci-bucket",
+                 "S3Config": {"BucketAccessRoleArn": "arn:aws:iam::000000000000:role/datasync"}}
+                """);
+        return json("""
+                {"SourceLocationArn": "%s", "DestinationLocationArn": "%s", "Name": "nightly"%s}
+                """.formatted(source.getLocationArn(), destination.getLocationArn(), extraMembers));
+    }
+
+    @Test
+    void createTaskWithoutATaskModeIsBasicAndVerifiesPointInTime() {
+        DataSyncTask task = service.createTask(taskRequest(""), REGION);
+
+        assertEquals(DataSyncService.DEFAULT_TASK_MODE, task.getTaskMode());
+        assertEquals(DataSyncService.VERIFY_MODE_POINT_IN_TIME_CONSISTENT,
+                task.getOptions().path("VerifyMode").asText());
+    }
+
+    @Test
+    void createBasicTaskDefaultsToPointInTimeConsistentVerification() {
+        DataSyncTask task = service.createTask(taskRequest(", \"TaskMode\": \"BASIC\""), REGION);
+
+        assertEquals("BASIC", task.getTaskMode());
+        assertEquals(DataSyncService.VERIFY_MODE_POINT_IN_TIME_CONSISTENT,
+                task.getOptions().path("VerifyMode").asText());
+    }
+
+    @Test
+    void createEnhancedTaskDefaultsToOnlyFilesTransferredVerification() {
+        DataSyncTask task = service.createTask(taskRequest(", \"TaskMode\": \"ENHANCED\""), REGION);
+
+        assertEquals(DataSyncService.TASK_MODE_ENHANCED, task.getTaskMode());
+        assertEquals(DataSyncService.VERIFY_MODE_ONLY_FILES_TRANSFERRED,
+                task.getOptions().path("VerifyMode").asText());
+    }
+
+    @Test
+    void createBasicTaskKeepsAnExplicitVerifyMode() {
+        DataSyncTask task = service.createTask(
+                taskRequest(", \"Options\": {\"VerifyMode\": \"ONLY_FILES_TRANSFERRED\"}"), REGION);
+
+        assertEquals(DataSyncService.VERIFY_MODE_ONLY_FILES_TRANSFERRED,
+                task.getOptions().path("VerifyMode").asText());
+    }
+
+    @Test
+    void createEnhancedTaskKeepsAnExplicitVerifyModeItSupports() {
+        DataSyncTask task = service.createTask(taskRequest(
+                ", \"TaskMode\": \"ENHANCED\", \"Options\": {\"VerifyMode\": \"NONE\"}"), REGION);
+
+        assertEquals("NONE", task.getOptions().path("VerifyMode").asText());
+    }
+
+    @Test
+    void createEnhancedTaskRejectsPointInTimeConsistentVerification() {
+        JsonNode request = taskRequest(
+                ", \"TaskMode\": \"ENHANCED\", \"Options\": {\"VerifyMode\": \"POINT_IN_TIME_CONSISTENT\"}");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createTask(request, REGION));
+
+        assertEquals("InvalidRequestException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("POINT_IN_TIME_CONSISTENT"), error.getMessage());
+    }
+
+    @Test
+    void createTaskRejectsAnUnknownTaskMode() {
+        JsonNode request = taskRequest(", \"TaskMode\": \"TURBO\"");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createTask(request, REGION));
+
+        assertEquals("InvalidRequestException", error.getErrorCode());
+    }
+
+    @Test
+    void updateTaskKeepsTheVerifyModeDefaultOfTheModeTheTaskWasCreatedWith() {
+        DataSyncTask task = service.createTask(taskRequest(", \"TaskMode\": \"ENHANCED\""), REGION);
+
+        DataSyncTask updated = service.updateTask(json("""
+                {"TaskArn": "%s", "Options": {"LogLevel": "TRANSFER"}}
+                """.formatted(task.getTaskArn())));
+
+        assertEquals(DataSyncService.TASK_MODE_ENHANCED, updated.getTaskMode());
+        assertEquals(DataSyncService.VERIFY_MODE_ONLY_FILES_TRANSFERRED,
+                updated.getOptions().path("VerifyMode").asText());
+    }
+
+    @Test
+    void updateTaskRejectsAVerifyModeTheStoredTaskModeDoesNotSupport() {
+        DataSyncTask task = service.createTask(taskRequest(", \"TaskMode\": \"ENHANCED\""), REGION);
+        JsonNode request = json("""
+                {"TaskArn": "%s", "Options": {"VerifyMode": "POINT_IN_TIME_CONSISTENT"}}
+                """.formatted(task.getTaskArn()));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateTask(request));
+
+        assertEquals("InvalidRequestException", error.getErrorCode());
+    }
+
     @Test
     void listLocationsFiltersByLocationType() {
         DataSyncLocation nfs = createLocation(DataSyncLocationType.NFS, """

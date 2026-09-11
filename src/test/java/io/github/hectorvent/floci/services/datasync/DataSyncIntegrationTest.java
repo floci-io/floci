@@ -579,6 +579,52 @@ class DataSyncIntegrationTest {
                 .body("Tags.Key", hasItem("owner"));
     }
 
+    @Test
+    @Order(35)
+    void enhancedTaskDefaultsToOnlyFilesTransferredAndRejectsPointInTimeConsistent() {
+        String enhancedTaskArn = awsAction(TARGET, "CreateTask", """
+                {
+                  "SourceLocationArn": "%s",
+                  "DestinationLocationArn": "%s",
+                  "Name": "floci-task-enhanced",
+                  "TaskMode": "ENHANCED"
+                }
+                """.formatted(nfsLocationArn, s3LocationArn))
+                .then()
+                .statusCode(200)
+                .extract().path("TaskArn");
+
+        awsAction(TARGET, "DescribeTask", "{\"TaskArn\": \"" + enhancedTaskArn + "\"}")
+                .then()
+                .statusCode(200)
+                .body("TaskMode", equalTo("ENHANCED"))
+                .body("Options.VerifyMode", equalTo("ONLY_FILES_TRANSFERRED"));
+
+        awsAction(TARGET, "UpdateTask", """
+                {"TaskArn": "%s", "Options": {"VerifyMode": "POINT_IN_TIME_CONSISTENT"}}
+                """.formatted(enhancedTaskArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", containsString("POINT_IN_TIME_CONSISTENT"));
+
+        awsAction(TARGET, "CreateTask", """
+                {
+                  "SourceLocationArn": "%s",
+                  "DestinationLocationArn": "%s",
+                  "TaskMode": "ENHANCED",
+                  "Options": {"VerifyMode": "POINT_IN_TIME_CONSISTENT"}
+                }
+                """.formatted(nfsLocationArn, s3LocationArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"));
+
+        awsAction(TARGET, "DeleteTask", "{\"TaskArn\": \"" + enhancedTaskArn + "\"}")
+                .then()
+                .statusCode(200);
+    }
+
     // ---- Data plane and teardown ----
 
     @Test

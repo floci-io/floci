@@ -92,6 +92,13 @@ block size 128 MiB with replication factor 3 and `PRIVACY` QOP, EFS `InTransitEn
 `NONE`, and the full `Options` block on a task. `DescribeLocationFsxOntap` derives
 `FsxFilesystemArn` from the storage virtual machine ARN, as AWS does.
 
+A task's `VerifyMode` default follows its `TaskMode`. A `BASIC` task, which is what
+`CreateTask` assumes when the request omits `TaskMode`, defaults to
+`POINT_IN_TIME_CONSISTENT`. An `ENHANCED` task defaults to `ONLY_FILES_TRANSFERRED` and
+cannot use `POINT_IN_TIME_CONSISTENT` at all, so asking for that combination fails with
+`InvalidRequestException`. `UpdateTaskRequest` carries no `TaskMode`, so a task keeps the
+mode it was created with and `UpdateTask` applies the same rule against that stored mode.
+
 ## Not emulated
 
 The task-execution data plane (`StartTaskExecution`, `DescribeTaskExecution`,
