@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -58,6 +59,8 @@ class DynamoDbStreamsEventSourcePollerTest {
     private EsmStore esmStore;
     private EmulatorConfig config;
     private PipesFilterMatcher filterMatcher;
+    private io.github.hectorvent.floci.services.sqs.SqsService sqsService;
+    private io.github.hectorvent.floci.services.sns.SnsService snsService;
 
     @BeforeEach
     void setUp() {
@@ -67,18 +70,21 @@ class DynamoDbStreamsEventSourcePollerTest {
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambdaConfig);
         when(lambdaConfig.pollIntervalMs()).thenReturn(1000L);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
         streamService = mock(DynamoDbStreamService.class);
         executorService = mock(LambdaExecutorService.class);
         functionStore = mock(LambdaFunctionStore.class);
         esmStore = new EsmStore(new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT_ID));
         filterMatcher = new PipesFilterMatcher(OBJECT_MAPPER);
+        sqsService = mock(io.github.hectorvent.floci.services.sqs.SqsService.class);
+        snsService = mock(io.github.hectorvent.floci.services.sns.SnsService.class);
 
         // A mocked Vertx makes setPeriodic a no-op, so startPolling registers no live timer and
         // the tests drive pollAndInvoke deterministically.
         poller = new DynamoDbStreamsEventSourcePoller(
                 mock(Vertx.class), streamService, executorService, functionStore,
-                esmStore, OBJECT_MAPPER, config, filterMatcher);
+                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService);
     }
 
     private EventSourceMapping persistedStreamsEsmWithStaleCheckpoint() {
@@ -152,7 +158,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     private DynamoDbStreamsEventSourcePoller pollerWith(EsmStore store) {
         return new DynamoDbStreamsEventSourcePoller(
                 mock(Vertx.class), streamService, executorService, functionStore,
-                store, OBJECT_MAPPER, config, filterMatcher);
+                store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService);
     }
 
     /**
@@ -391,6 +397,165 @@ class DynamoDbStreamsEventSourcePollerTest {
         verify(executorService, never()).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
         verify(store, never()).saveForAccount(anyString(), any());
         assertEquals(STALE_CHECKPOINT, esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    @Test
+    void maxRetryAttemptsExhaustedDeliversToSqsOnFailureDestinationAndAdvancesCheckpoint() throws Exception {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        InvokeResult err = new InvokeResult();
+        err.setFunctionError("Unhandled");
+        err.setStatusCode(200);
+        err.setRequestId("req-123");
+        err.setExecutedVersion("$LATEST");
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(err);
+
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRetryAttempts(1); // 1 retry attempt allowed, 2nd error exhausts retries
+
+        String sqsArn = "arn:aws:sqs:us-east-1:000000000000:my-dlq";
+        EventSourceMapping.DestinationConfig destConfig = new EventSourceMapping.DestinationConfig();
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination(sqsArn);
+        destConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destConfig);
+
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        // First poll: attempt 1 (initial failure, retries left)
+        p.pollAndInvoke(esm);
+        // Verify invoke was called for attempt 1
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        // Wait for poll 1 to finish by ensuring activePolls is released
+        long deadline = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline) {
+            if (p.activePolls.isEmpty()) {
+                break;
+            }
+            Thread.sleep(25);
+        }
+        // After 1st failure: checkpoint not advanced, no DLQ delivery
+        verify(store, never()).saveForAccount(anyString(), any());
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+
+        // Second poll: attempt 2 (retry 1, which exceeds maxRetryAttempts=1 -> exhausted!)
+        p.pollAndInvoke(esm);
+
+        // Checkpoint advanced to "s1"
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+
+        // SQS delivery invoked
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        String expectedQueueUrl = "http://localhost:4566/000000000000/my-dlq";
+        verify(sqsService, timeout(2000)).sendMessage(eq(expectedQueueUrl), bodyCaptor.capture(), eq(0), eq("us-east-1"));
+
+        JsonNode dlqPayload = OBJECT_MAPPER.readTree(bodyCaptor.getValue());
+        assertEquals("1.0", dlqPayload.path("version").asText());
+        assertEquals("RetryAttemptsExhausted", dlqPayload.path("requestContext").path("condition").asText());
+        assertEquals(2, dlqPayload.path("requestContext").path("approximateInvokeCount").asInt());
+        assertEquals("req-123", dlqPayload.path("requestContext").path("requestId").asText());
+        assertEquals("Unhandled", dlqPayload.path("responseContext").path("functionError").asText());
+        assertEquals(DynamoDbStreamService.SHARD_ID, dlqPayload.path("DDBStreamBatchInfo").path("shardId").asText());
+        assertEquals("s1", dlqPayload.path("DDBStreamBatchInfo").path("startSequenceNumber").asText());
+        assertEquals("s1", dlqPayload.path("DDBStreamBatchInfo").path("endSequenceNumber").asText());
+        assertEquals(1, dlqPayload.path("DDBStreamBatchInfo").path("batchSize").asInt());
+        assertEquals(STREAM_ARN, dlqPayload.path("DDBStreamBatchInfo").path("streamArn").asText());
+        assertTrue(dlqPayload.path("DDBStreamBatchInfo").has("approximateArrivalOfFirstRecord"));
+        assertTrue(dlqPayload.path("DDBStreamBatchInfo").has("approximateArrivalOfLastRecord"));
+        assertFalse(dlqPayload.has("hasBeenTruncated"));
+    }
+
+    @Test
+    void maxRetryAttemptsExhaustedDeliversToSnsOnFailureDestination() {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        InvokeResult err = new InvokeResult();
+        err.setFunctionError("Handled");
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(err);
+
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRetryAttempts(0); // 0 retries allowed, 1st error exhausts immediately
+
+        String snsArn = "arn:aws:sns:us-east-1:000000000000:my-dlq-topic";
+        EventSourceMapping.DestinationConfig destConfig = new EventSourceMapping.DestinationConfig();
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination(snsArn);
+        destConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destConfig);
+
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.pollAndInvoke(esm);
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+
+        verify(snsService, timeout(2000)).publish(eq(snsArn), any(), anyString(), eq("ESM OnFailure"), eq("us-east-1"));
+    }
+
+    @Test
+    void maxRetryAttemptsExhaustedTracksRetriesAcrossExpandingBatchWindow() throws Exception {
+        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
+                eq("TRIM_HORIZON"), any())).thenReturn("it-1", "it-2");
+        when(streamService.getRecords(eq("it-1"), anyInt())).thenReturn(
+                new DynamoDbStreamService.GetRecordsResult(
+                        List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-1"));
+        when(streamService.getRecords(eq("it-2"), anyInt())).thenReturn(
+                new DynamoDbStreamService.GetRecordsResult(
+                        List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-2"));
+
+        InvokeResult err = new InvokeResult();
+        err.setFunctionError("Unhandled");
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(err);
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRetryAttempts(1); // 1 retry allowed, 2nd error exhausts
+
+        String sqsArn = "arn:aws:sqs:us-east-1:000000000000:my-dlq";
+        EventSourceMapping.DestinationConfig destConfig = new EventSourceMapping.DestinationConfig();
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination(sqsArn);
+        destConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destConfig);
+
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.pollAndInvoke(esm);
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+
+        long deadline = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline) {
+            if (p.activePolls.isEmpty()) {
+                break;
+            }
+            Thread.sleep(25);
+        }
+
+        p.pollAndInvoke(esm);
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        String expectedQueueUrl = "http://localhost:4566/000000000000/my-dlq";
+        verify(sqsService, timeout(2000)).sendMessage(eq(expectedQueueUrl), bodyCaptor.capture(), eq(0), eq("us-east-1"));
+
+        JsonNode dlqPayload = OBJECT_MAPPER.readTree(bodyCaptor.getValue());
+        assertEquals("1.0", dlqPayload.path("version").asText());
+        assertEquals(2, dlqPayload.path("requestContext").path("approximateInvokeCount").asInt());
+        assertEquals("s1", dlqPayload.path("DDBStreamBatchInfo").path("startSequenceNumber").asText());
+        assertEquals("s2", dlqPayload.path("DDBStreamBatchInfo").path("endSequenceNumber").asText());
+        assertEquals(2, dlqPayload.path("DDBStreamBatchInfo").path("batchSize").asInt());
+        assertFalse(dlqPayload.has("hasBeenTruncated"));
     }
 
     private JsonNode readRecords(byte[] payload) {

@@ -1290,6 +1290,8 @@ public class LambdaService implements ResourceProvider {
                 ? b
                 : null;
 
+        Integer maximumRetryAttempts = parseMaximumRetryAttempts(request);
+
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
         EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
@@ -1315,6 +1317,7 @@ public class LambdaService implements ResourceProvider {
         esm.setScalingConfig(scalingConfig);
         esm.setFunctionResponseTypes(functionResponseTypes);
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
+        esm.setMaximumRetryAttempts(maximumRetryAttempts);
         esm.setDestinationConfig(destinationConfig);
         esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
@@ -1698,6 +1701,28 @@ public class LambdaService implements ResourceProvider {
         return (int) value;
     }
 
+    private Integer parseMaximumRetryAttempts(Map<String, Object> request) {
+        Object raw = request.get("MaximumRetryAttempts");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Number)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be a numeric value", 400);
+        }
+        double d = ((Number) raw).doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be an integer", 400);
+        }
+        long value = ((Number) raw).longValue();
+        if (value < -1 || value > 10000) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be between -1 and 10000 (got " + value + ")", 400);
+        }
+        return (int) value;
+    }
+
     private void startPollingHelper(EventSourceMapping esm) {
         if (esm.getEventSourceArn() == null) {
             return;
@@ -1767,6 +1792,10 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("BisectBatchOnFunctionError")) {
             Object raw = request.get("BisectBatchOnFunctionError");
             esm.setBisectBatchOnFunctionError(raw instanceof Boolean b ? b : null);
+        }
+
+        if (request.containsKey("MaximumRetryAttempts")) {
+            esm.setMaximumRetryAttempts(parseMaximumRetryAttempts(request));
         }
 
         if (request.containsKey("DestinationConfig")) {
