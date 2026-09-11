@@ -41,12 +41,18 @@ final class DynamoDbAttributeValueValidator {
 
     // AWS counts a top-level attribute as level 1 and allows a leaf down to level 32.
     static void requireNestingWithinLimit(JsonNode attributes) {
+        requireNestingWithinLimit(attributes, true);
+    }
+
+    // Batch and transact writes report the limit without the validation envelope.
+    static void requireNestingWithinLimit(JsonNode attributes, boolean inValidationEnvelope) {
         if (attributes == null || !attributes.isObject()) {
             return;
         }
         for (var value : attributes) {
             if (depthOf(value) > MAX_NESTING_LEVELS) {
-                throw validationEx("1 validation error detected: Nesting Levels have exceeded supported limits: "
+                throw validationEx((inValidationEnvelope ? "1 validation error detected: " : "")
+                        + "Nesting Levels have exceeded supported limits: "
                         + "Attributes in the item have nested levels beyond supported limit");
             }
         }

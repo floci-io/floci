@@ -4,8 +4,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.nio.charset.StandardCharsets;
 
-// AWS counts the raw expression text, before placeholders are resolved. Write APIs wrap
-// the error in the validation envelope, read APIs do not, and only Scan reports the size.
+// AWS counts the raw expression text, before placeholders are resolved. Single-item write
+// APIs wrap the error in the validation envelope, the others do not, and only the Scan
+// FilterExpression and TransactWriteItems conditions report the size.
 final class DynamoDbExpressionSize {
 
     static final int MAX_BYTES = 4096;
@@ -26,9 +27,9 @@ final class DynamoDbExpressionSize {
         }
     }
 
-    static void checkScanFilter(String expression) {
+    static void checkReadWithSize(String expression, String exprType) {
         if (exceeds(expression)) {
-            throw validationEx("Invalid FilterExpression: " + EXCEEDED
+            throw validationEx("Invalid " + exprType + ": " + EXCEEDED
                     + " expression size: " + byteLength(expression));
         }
     }

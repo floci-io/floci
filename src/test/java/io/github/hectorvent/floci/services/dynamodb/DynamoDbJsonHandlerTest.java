@@ -1321,4 +1321,72 @@ class DynamoDbJsonHandlerTest {
                 () -> handler.handle("UpdateItem", request, "eu-west-1"));
         assertEquals(NESTING_MESSAGE, ex.getMessage());
     }
+
+    private ObjectNode transactWrite(String action, ObjectNode op) {
+        op.put("TableName", "Users");
+        var member = mapper.createObjectNode();
+        member.set(action, op);
+        var request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(member));
+        return request;
+    }
+
+    @Test
+    void transactWriteItemsRejectsAConditionExpressionOver4096BytesWithTheSizeBeforeTheTableLookup() {
+        var put = mapper.createObjectNode();
+        put.set("Item", item("userId", "u1"));
+        put.put("ConditionExpression", "attribute_not_exists(" + nameOfBytes(4075) + ")");
+        var request = transactWrite("Put", put);
+        ((ObjectNode) request.get("TransactItems").get(0).get("Put")).put("TableName", "Missing");
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ConditionExpression: Expression size has exceeded the maximum allowed size; "
+                + "expression size: 4097", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRejectsAnUpdateExpressionOver4096Bytes() {
+        createUsersTable("eu-west-1");
+        var update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "SET " + nameOfBytes(4088) + " = :v");
+        update.set("ExpressionAttributeValues", singleValue(":v"));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: Expression size has exceeded the maximum allowed size;",
+                ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRejectsAPutItemWithALeafAtLevel33() {
+        createUsersTable("eu-west-1");
+        var put = mapper.createObjectNode();
+        var item = item("userId", "u1");
+        item.set("data", nestedMaps(32));
+        put.set("Item", item);
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Put", put), "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
+    }
+
+    @Test
+    void batchWriteItemRejectsAPutItemWithALeafAtLevel33BeforeTheTableLookup() {
+        var item = item("userId", "u1");
+        item.set("data", nestedMaps(32));
+        var putRequest = mapper.createObjectNode();
+        putRequest.set("PutRequest", mapper.createObjectNode().set("Item", item));
+        var request = mapper.createObjectNode();
+        request.set("RequestItems", mapper.createObjectNode().set("Missing", mapper.createArrayNode().add(putRequest)));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("BatchWriteItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
+    }
 }

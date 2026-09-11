@@ -1114,7 +1114,7 @@ public class DynamoDbJsonHandler {
                     + "Segment: " + segment + " is not less than TotalSegments: " + totalSegments, 400);
         }
 
-        DynamoDbExpressionSize.checkScanFilter(filterExpr);
+        DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
@@ -1203,6 +1203,8 @@ public class DynamoDbJsonHandler {
             var entry = tables.next();
             List<JsonNode> writes = new ArrayList<>();
             for (JsonNode writeReq : entry.getValue()) {
+                DynamoDbAttributeValueValidator.requireNestingWithinLimit(
+                        writeReq.path("PutRequest").get("Item"), false);
                 writes.add(writeReq);
             }
             items.put(entry.getKey(), writes);
@@ -1694,6 +1696,15 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + transactItemsNode + "' at 'transactItems' failed to satisfy constraint: "
                     + "Member must have length less than or equal to 100", 400);
+        }
+
+        for (JsonNode txItem : transactItemsNode) {
+            for (JsonNode op : txItem) {
+                DynamoDbExpressionSize.checkRead(op.path("UpdateExpression").textValue(), "UpdateExpression");
+                DynamoDbExpressionSize.checkReadWithSize(op.path("ConditionExpression").textValue(),
+                        "ConditionExpression");
+                DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
+            }
         }
 
         // Check 4MB total item size limit
