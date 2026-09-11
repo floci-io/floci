@@ -2,12 +2,14 @@ package com.floci.test;
 
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.DescribeSpotPriceHistoryRequest;
 import software.amazon.awssdk.services.ec2.model.InstanceType;
 
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class Ec2DescribeSpotPriceHistoryTest {
 
@@ -24,6 +26,20 @@ class Ec2DescribeSpotPriceHistoryTest {
                     .build());
 
             assertThat(response.spotPriceHistory()).isEmpty();
+            assertThat(response.nextToken()).isEmpty();
+        }
+    }
+
+    @Test
+    void describeSpotPriceHistoryHonorsDryRun() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            Ec2Exception exception = assertThrows(Ec2Exception.class,
+                    () -> ec2.describeSpotPriceHistory(DescribeSpotPriceHistoryRequest.builder()
+                            .dryRun(true)
+                            .build()));
+
+            assertThat(exception.statusCode()).isEqualTo(412);
+            assertThat(exception.awsErrorDetails().errorCode()).isEqualTo("DryRunOperation");
         }
     }
 }

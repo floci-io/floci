@@ -5380,9 +5380,11 @@ public class Ec2QueryHandler {
      * clients such as Karpenter to distinguish an empty result from an unsupported action.</p>
      */
     private Response handleDescribeSpotPriceHistory(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSpotPriceHistoryResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
+                .elem("nextToken", "")
                 .start("spotPriceHistorySet")
                 .end("spotPriceHistorySet")
                 .end("DescribeSpotPriceHistoryResponse");
