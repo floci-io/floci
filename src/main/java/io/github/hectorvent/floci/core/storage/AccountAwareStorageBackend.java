@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -161,6 +162,47 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                     result.add(new AccountEntry<>(accountId, logicalKey, value)));
         }
         return result;
+    }
+
+    /**
+     * Migrates legacy entries owned by {@code accountId} to account-relative destination keys.
+     * The source key is deleted exactly, including for unprefixed gen-0 entries.
+     */
+    public synchronized void migrateLegacyEntries(
+            String accountId,
+            Predicate<String> legacyKeyFilter,
+            Function<V, String> destinationKey,
+            Predicate<V> legacyOwner) {
+        for (String rawKey : new ArrayList<>(delegate.keys())) {
+            boolean prefixed = hasAccountPrefix(rawKey);
+            String owner = prefixed ? rawKey.substring(0, 12) : defaultAccountId;
+            if (!accountId.equals(owner)) {
+                continue;
+            }
+
+            String logicalKey = prefixed ? rawKey.substring(13) : rawKey;
+            if (!legacyKeyFilter.test(logicalKey)) {
+                continue;
+            }
+
+            Optional<V> value = delegate.get(rawKey);
+            if (value.isEmpty() || !legacyOwner.test(value.get())) {
+                continue;
+            }
+
+            String newLogicalKey = destinationKey.apply(value.get());
+            if (newLogicalKey == null) {
+                continue;
+            }
+
+            String destination = accountId + "/" + newLogicalKey;
+            if (!destination.equals(rawKey) && delegate.get(destination).isEmpty()) {
+                delegate.put(destination, value.get());
+            }
+            if (!destination.equals(rawKey)) {
+                delegate.delete(rawKey);
+            }
+        }
     }
 
     /**
