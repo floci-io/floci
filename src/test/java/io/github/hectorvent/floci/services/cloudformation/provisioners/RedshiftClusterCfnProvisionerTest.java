@@ -17,6 +17,8 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -182,5 +185,111 @@ class RedshiftClusterCfnProvisionerTest {
 
         assertThrows(AwsException.class,
                 () -> p.delete("AWS::Redshift::Cluster", "my-cluster", "us-east-1"));
+    }
+
+    @Test
+    void updateInPlaceCallsModifyCluster() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.modifyCluster(eq("my-cluster"), eq("ra3.4xlarge"), isNull(), eq("NewSecret9"),
+                isNull(), anyList())).thenReturn(availableCluster("my-cluster"));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("W");
+        p.provision(r, json("""
+            {"ClusterIdentifier":"my-cluster","NodeType":"ra3.4xlarge","MasterUsername":"admin",
+             "MasterUserPassword":"NewSecret9"}"""), ctx("my-cluster"));
+
+        verify(service).modifyCluster(eq("my-cluster"), eq("ra3.4xlarge"), isNull(), eq("NewSecret9"),
+                isNull(), anyList());
+        verify(service, never()).createCluster(anyString(), anyString(), anyString(), anyString(), any(), anyList());
+    }
+
+    @Test
+    void replacementCreatesNewClusterAndReportsOldIdForCleanup() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.createCluster(eq("new-name"), anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn(availableCluster("new-name"));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("W");
+        // prior id "old-name" differs from the template's new ClusterIdentifier "new-name"
+        p.provision(r, json("""
+            {"ClusterIdentifier":"new-name","NodeType":"ra3.large","MasterUsername":"admin",
+             "MasterUserPassword":"Secret123"}"""), ctx("old-name"));
+
+        assertEquals("new-name", r.getPhysicalId());
+        assertEquals("old-name", p.updateCleanupPhysicalId(r));
+        assertTrue(p.hasReplacementUpdate(r));
+
+        when(service.deleteCluster("old-name")).thenReturn(null);
+        UpdateCleanupResult result = p.completeUpdate(r);
+        verify(service).deleteCluster("old-name");
+        assertEquals(new UpdateCleanupResult(true, true, "old-name", 0, null), result);
+    }
+
+    @Test
+    void replacementCleanupToleratesAlreadyDeletedOldCluster() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.createCluster(anyString(), anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn(availableCluster("new-name"));
+        doThrow(new AwsException("ClusterNotFound", "gone", 404)).when(service).deleteCluster("old-name");
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("W");
+        p.provision(r, json("""
+            {"ClusterIdentifier":"new-name","NodeType":"ra3.large","MasterUsername":"admin",
+             "MasterUserPassword":"Secret123"}"""), ctx("old-name"));
+
+        assertDoesNotThrow(() -> p.completeUpdate(r));
+    }
+
+    @Test
+    void clearUpdateDropsCleanupRecord() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.createCluster(eq("new-name"), anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn(availableCluster("new-name"));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("W");
+        p.provision(r, json("""
+            {"ClusterIdentifier":"new-name","NodeType":"ra3.large","MasterUsername":"admin",
+             "MasterUserPassword":"Secret123"}"""), ctx("old-name"));
+
+        assertTrue(p.hasReplacementUpdate(r));
+        p.completeUpdate(r);
+        p.clearUpdate(r);
+        assertFalse(p.hasReplacementUpdate(r));
+        assertNull(p.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void rollbackUpdateRestoresPriorPhysicalIdAndDeletesReplacement() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.createCluster(eq("new-name"), anyString(), anyString(), anyString(), any(), anyList()))
+                .thenReturn(availableCluster("new-name"));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("W");
+        r.setPhysicalId("old-name");
+        r.getAttributes().put("Id", "old-name");
+
+        p.provision(r, json("""
+            {"ClusterIdentifier":"new-name","NodeType":"ra3.large","MasterUsername":"admin",
+             "MasterUserPassword":"Secret123"}"""), ctx("old-name"));
+
+        assertEquals("new-name", r.getPhysicalId());
+        assertTrue(p.rollbackUpdate(r));
+        assertEquals("old-name", r.getPhysicalId());
+        verify(service).deleteCluster("new-name");
     }
 }

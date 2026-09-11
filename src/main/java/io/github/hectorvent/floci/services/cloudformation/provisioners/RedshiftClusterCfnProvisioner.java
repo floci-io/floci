@@ -43,11 +43,38 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         if (CLUSTER.equals(r.getResourceType())) {
+            Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
             provisionCluster(r, props, ctx);
+            ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
         }
         throw new IllegalStateException(
                 "RedshiftClusterCfnProvisioner cannot provision " + r.getResourceType());
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return ReplacementCleanup.rollback(resource, this::delete);
     }
 
     private void provisionCluster(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -70,7 +97,7 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         warnUnsupported(props, ctx, id);
 
         // provision() is the update path too. A same-id cluster already on file is reconciled;
-        // a derived id that differs from the prior physical id is a replacement (handled in Task 2).
+        // a derived id that differs from the prior physical id is a replacement handled via ReplacementCleanup.
         Cluster cluster = ctx.reusesPriorEntity(id)
                 ? redshiftService.modifyCluster(id, nodeType, numberOfNodes(props, ctx),
                         masterUserPassword, ctx.resolveOptional(props, "ClusterParameterGroupName"),
