@@ -46,6 +46,7 @@ class SsoAdminServiceTest {
     private InMemoryStorage<String, ApplicationAccessScope> applicationAccessScopes;
     private InMemoryStorage<String, ApplicationAuthenticationMethod> applicationAuthenticationMethods;
     private InMemoryStorage<String, ApplicationGrant> applicationGrants;
+    private InMemoryStorage<String, SsoInstance> instances;
 
     @BeforeEach
     void setUp() {
@@ -54,6 +55,7 @@ class SsoAdminServiceTest {
         applicationAccessScopes = new InMemoryStorage<>();
         applicationAuthenticationMethods = new InMemoryStorage<>();
         applicationGrants = new InMemoryStorage<>();
+        instances = new InMemoryStorage<>();
         service = new SsoAdminService(
                 new InMemoryStorage<String, PermissionSet>(),
                 new InMemoryStorage<String, Assignment>(),
@@ -72,7 +74,7 @@ class SsoAdminServiceTest {
                 applicationGrants,
                 new InMemoryStorage<String, String>(),
                 new InMemoryStorage<String, Map<String, String>>(),
-                new InMemoryStorage<String, SsoInstance>(),
+                instances,
                 new InMemoryStorage<String, InstanceUpdateState>(),
                 new InMemoryStorage<String, String>(),
                 new InMemoryStorage<String, Boolean>(),
@@ -85,6 +87,19 @@ class SsoAdminServiceTest {
                 ACCOUNT_ID,
                 "us-east-1");
         service.ensureBootstrapInstance(ACCOUNT_ID, "us-east-1");
+    }
+
+    @Test
+    void hasIdentityStoreSelfHealsAfterStorageFactoryClearsInstancesPostReset() {
+        // Mirrors EmulatorInfoController.performReset(): every Resettable.clear() (including
+        // this service's, which re-seeds the bootstrap instance) runs, then
+        // StorageFactory.clearAll() wipes every backing store again, including `instances`.
+        service.clear();
+        instances.clear();
+        assertTrue(instances.get(ACCOUNT_ID).isEmpty());
+
+        assertTrue(service.hasIdentityStore(service.getIdentityStoreId()));
+        assertTrue(instances.get(ACCOUNT_ID).isPresent());
     }
 
     @Test

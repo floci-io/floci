@@ -224,6 +224,9 @@ public class SsoAdminService implements Resettable {
         if (identityStoreId == null) {
             return false;
         }
+        // Self-heals like listInstances(): storageFactory.clearAll() wipes `instances` right after
+        // clear() re-seeds it, so /state/reset otherwise leaves the bootstrap instance missing.
+        ensureBootstrapInstance(defaultAccountId, defaultRegion);
         if (instances.scan(key -> true).stream()
                 .anyMatch(instance -> identityStoreId.equals(instance.identityStoreId()))) {
             return true;
