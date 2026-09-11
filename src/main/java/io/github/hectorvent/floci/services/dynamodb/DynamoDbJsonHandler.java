@@ -411,6 +411,7 @@ public class DynamoDbJsonHandler {
                     n + " validation error" + (n > 1 ? "s" : "") + " detected: "
                     + String.join("; ", validationErrors), 400);
         }
+        DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
         String conditionalOperator = request.has("ConditionalOperator")
@@ -482,6 +483,7 @@ public class DynamoDbJsonHandler {
 
         // Validate ProjectionExpression syntax and reserved words before item lookup
         if (projectionExpression != null) {
+            DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
             ProjectionEvaluator.validateSyntax(projectionExpression, "ProjectionExpression");
             DynamoDbReservedWords.check(projectionExpression, "ProjectionExpression");
         }
@@ -539,6 +541,7 @@ public class DynamoDbJsonHandler {
                     n + " validation error" + (n > 1 ? "s" : "") + " detected: "
                     + String.join("; ", delValidationErrors), 400);
         }
+        DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
 
         // EAN/EAV with no expression to reference them: AWS reports "can only be specified
         // when using expressions", not the "unused in expressions" wording (#2893).
@@ -602,6 +605,8 @@ public class DynamoDbJsonHandler {
                     + "failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]", 400);
         }
+        DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
+        DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
         JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
@@ -933,6 +938,9 @@ public class DynamoDbJsonHandler {
                     "Invalid KeyConditionExpression: The expression can not be empty;", 400);
         }
 
+        DynamoDbExpressionSize.checkRead(keyConditionExpr, "KeyConditionExpression");
+        DynamoDbExpressionSize.checkRead(filterExpr, "FilterExpression");
+        DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
         ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpression);
@@ -1101,6 +1109,8 @@ public class DynamoDbJsonHandler {
                     + "Segment: " + segment + " is not less than TotalSegments: " + totalSegments, 400);
         }
 
+        DynamoDbExpressionSize.checkScanFilter(filterExpr);
+        DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpressionScan);
 
@@ -1285,6 +1295,10 @@ public class DynamoDbJsonHandler {
 
         // Per-table check: max 100 keys
         for (Map.Entry<String, JsonNode> entry : items.entrySet()) {
+            var projection = entry.getValue().path("ProjectionExpression");
+            if (projection.isTextual()) {
+                DynamoDbExpressionSize.checkRead(projection.asText(), "ProjectionExpression");
+            }
             JsonNode keysNode = entry.getValue().has("Keys") ? entry.getValue().get("Keys") : null;
             if (keysNode != null && keysNode.size() > 100) {
                 throw new AwsException("ValidationException",
@@ -1793,6 +1807,7 @@ public class DynamoDbJsonHandler {
             if (get == null) continue;
             String pe = get.has("ProjectionExpression") ? get.get("ProjectionExpression").asText() : null;
             if (pe != null) {
+                DynamoDbExpressionSize.checkRead(pe, "ProjectionExpression");
                 ProjectionEvaluator.validateSyntax(pe, "ProjectionExpression");
             }
         }

@@ -1173,4 +1173,94 @@ class DynamoDbJsonHandlerTest {
         assertTrue(ex.getMessage().startsWith("1 validation error detected:"), ex.getMessage());
         assertTrue(ex.getMessage().contains("'returnValues'"), ex.getMessage());
     }
+
+    private static String nameOfBytes(int bytes) {
+        return "a".repeat(bytes);
+    }
+
+    private ObjectNode singleValue(String placeholder) {
+        return (ObjectNode) mapper.createObjectNode().set(placeholder, attributeValue("S", "x"));
+    }
+
+    @Test
+    void updateItemRejectsAnUpdateExpressionOver4096BytesBeforeTheTableLookup() {
+        var request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", "SET " + nameOfBytes(4088) + " = :v");
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: "
+                + "Expression size has exceeded the maximum allowed size;", ex.getMessage());
+    }
+
+    @Test
+    void updateItemAcceptsAnUpdateExpressionOfExactly4096Bytes() throws Exception {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "SET " + nameOfBytes(4087) + " = :v");
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        var response = handler.handle("UpdateItem", request, "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void putItemRejectsAConditionExpressionOver4096Bytes() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.set("Item", item("userId", "u1"));
+        request.put("ConditionExpression", "attribute_not_exists(" + nameOfBytes(4075) + ")");
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid ConditionExpression: "
+                + "Expression size has exceeded the maximum allowed size;", ex.getMessage());
+    }
+
+    @Test
+    void queryRejectsAFilterExpressionOver4096Bytes() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.put("KeyConditionExpression", "userId = :pk");
+        request.put("FilterExpression", nameOfBytes(4092) + " = :v");
+        var values = singleValue(":pk");
+        values.set(":v", attributeValue("S", "x"));
+        request.set("ExpressionAttributeValues", values);
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("Query", request, "eu-west-1"));
+        assertEquals("Invalid FilterExpression: Expression size has exceeded the maximum allowed size;",
+                ex.getMessage());
+    }
+
+    @Test
+    void scanRejectsAFilterExpressionOver4096BytesAndReportsTheSize() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.put("FilterExpression", nameOfBytes(4092) + " = :v");
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("Scan", request, "eu-west-1"));
+        assertEquals("Invalid FilterExpression: Expression size has exceeded the maximum allowed size; "
+                + "expression size: 4097", ex.getMessage());
+    }
+
+    @Test
+    void getItemRejectsAProjectionExpressionOver4096Bytes() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("ProjectionExpression", nameOfBytes(4097));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("GetItem", request, "eu-west-1"));
+        assertEquals("Invalid ProjectionExpression: Expression size has exceeded the maximum allowed size;",
+                ex.getMessage());
+    }
 }
