@@ -46,6 +46,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.InvalidPathException;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.PathNotFoundException;
+import com.jayway.jsonpath.spi.json.JacksonJsonNodeJsonProvider;
+import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
 
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.impl.NoStackTraceTimeoutException;
@@ -213,6 +219,7 @@ public class AslExecutor {
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
     private final ObjectMapper objectMapper;
+    private final Configuration jsonPathConfiguration;
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
     private final WebClient webClient;
@@ -253,6 +260,12 @@ public class AslExecutor {
         this.schedulerService = schedulerService;
         this.schedulerController = schedulerController;
         this.objectMapper = objectMapper;
+        this.jsonPathConfiguration = objectMapper == null
+                ? null
+                : Configuration.builder()
+                        .jsonProvider(new JacksonJsonNodeJsonProvider(objectMapper))
+                        .mappingProvider(new JacksonMappingProvider(objectMapper))
+                        .build();
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
         this.config = config;
@@ -3139,6 +3152,9 @@ public class AslExecutor {
         if (!path.startsWith("$.") && !path.startsWith("$[")) {
             return MissingNode.getInstance();
         }
+        if (isAdvancedJsonPath(path)) {
+            return resolveAdvancedJsonPath(path, root);
+        }
         return walkPath(splitPathSegments(path), 0, root);
     }
 
@@ -3172,6 +3188,13 @@ public class AslExecutor {
         if (!path.startsWith("$.") && !path.startsWith("$[")) {
             return NullNode.getInstance();
         }
+        if (isAdvancedJsonPath(path)) {
+            JsonNode value = resolveAdvancedJsonPath(path, searchRoot);
+            if (!value.isMissingNode()) {
+                return value;
+            }
+            throw unresolvedPayloadTemplateReference(path, fieldKey, reportedInput);
+        }
         String[] parts = splitPathSegments(path);
         if (containsWildcard(parts)) {
             JsonNode value = walkPath(parts, 0, searchRoot);
@@ -3184,7 +3207,50 @@ public class AslExecutor {
         if (lookup.outOfRangeArrayIndex) {
             return NullNode.getInstance();
         }
-        throw new FailStateException("States.Runtime",
+        throw unresolvedPayloadTemplateReference(path, fieldKey, reportedInput);
+    }
+
+    private static boolean isAdvancedJsonPath(String path) {
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = 0; i < path.length(); i++) {
+            char current = path.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"') {
+                quote = current;
+            } else if (current == '.' && i + 1 < path.length() && path.charAt(i + 1) == '.') {
+                return true;
+            } else if (current == '[' && i + 2 < path.length()
+                    && path.charAt(i + 1) == '?' && path.charAt(i + 2) == '(') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private JsonNode resolveAdvancedJsonPath(String path, JsonNode root) {
+        try {
+            Object result = JsonPath.using(jsonPathConfiguration).parse(root).read(path);
+            return result instanceof JsonNode jsonNode ? jsonNode : objectMapper.valueToTree(result);
+        } catch (PathNotFoundException e) {
+            return MissingNode.getInstance();
+        } catch (InvalidPathException e) {
+            throw new FailStateException("States.Runtime", "Invalid JSONPath '" + path + "': " + e.getMessage());
+        }
+    }
+
+    private static FailStateException unresolvedPayloadTemplateReference(String path, String fieldKey,
+                                                                           JsonNode reportedInput) {
+        return new FailStateException("States.Runtime",
                 "The JSONPath '" + path + "' specified for the field '" + fieldKey
                         + "' could not be found in the input '" + reportedInput + "'");
     }

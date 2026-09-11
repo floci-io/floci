@@ -101,10 +101,49 @@ class AslExecutorPathIntrinsicsTest {
 
     @Test
     void bracketQuotedMembersSupportNamesOutsideDotShorthand() throws Exception {
-        JsonNode root = mapper.readTree("{\"config\":{\"max-limit\":2},\"a.b\":3}");
+        JsonNode root = mapper.readTree(
+                "{\"config\":{\"max-limit\":2},\"a.b\":3,\"a..b\":4,\"[?(\":5}");
 
         assertEquals(2, executor.resolvePath("$['config']['max-limit']", root).asInt());
         assertEquals(3, executor.resolvePath("$['a.b']", root).asInt());
+        assertEquals(4, executor.resolvePath("$['a..b']", root).asInt());
+        assertEquals(5, executor.resolvePath("$['[?(']", root).asInt());
+    }
+
+    @Test
+    void filterExpressionsSupportExistenceAndComparisonPredicates() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"list":[{"keep":true,"id":1},{"keep":false,"id":2},{"id":3}]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"keep\":true,\"id\":1},{\"keep\":false,\"id\":2}]"),
+                executor.resolvePath("$.list[?(@.keep)]", root));
+        assertEquals(mapper.readTree("[{\"keep\":true,\"id\":1}]"),
+                executor.resolvePath("$.list[?(@.keep == true)]", root));
+    }
+
+    @Test
+    void recursiveDescentPreservesAndFlattensNestedArrayMatches() throws Exception {
+        JsonNode root = mapper.readTree("{\"d\":{\"x\":{\"a\":[1,2]}}}");
+
+        assertEquals(mapper.readTree("[[1,2]]"), executor.resolvePath("$.d..a", root));
+        assertEquals(mapper.readTree("[1,2]"), executor.resolvePath("$.d..a[*]", root));
+    }
+
+    @Test
+    void advancedPathsWorkInPayloadTemplatesAndIntrinsics() throws Exception {
+        JsonNode root = mapper.readTree("{\"list\":[1,null,2]}");
+        JsonNode parameters = mapper.readTree("""
+                {
+                  "filtered.$": "$.list[?(@ != null)]",
+                  "count.$": "States.ArrayLength($.list[?(@ != null)])"
+                }
+                """);
+
+        JsonNode resolved = executor.resolveParameters(parameters, root, mapper.createObjectNode());
+
+        assertEquals(mapper.readTree("[1,2]"), resolved.path("filtered"));
+        assertEquals(2, resolved.path("count").asInt());
     }
 
     @Test

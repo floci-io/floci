@@ -123,6 +123,16 @@ class AslExecutorStatePathTest {
     }
 
     @Test
+    void passOutputPathSupportsFilterExpressions() throws Exception {
+        assertOutput("""
+                {"StartAt":"Pass","States":{
+                  "Pass":{"Type":"Pass","OutputPath":"$.Payload[?(@.title)]","End":true}}}
+                """,
+                "{\"Payload\":[{\"title\":\"first\"},{\"title\":false},{\"other\":1}]}",
+                "[{\"title\":\"first\"},{\"title\":false}]");
+    }
+
+    @Test
     void succeedAppliesInputPathBeforeOutputPath() throws Exception {
         assertOutput("""
                 {"StartAt":"Done","States":{
