@@ -2004,7 +2004,7 @@ public class AslExecutor {
         JsonNode effectiveInput = applyInputPath(stateDef, input);
         JsonNode choices = stateDef.path("Choices");
         for (JsonNode choice : choices) {
-            if (evaluateCondition(choice, effectiveInput)) {
+            if (evaluateCondition(choice, effectiveInput, context)) {
                 JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
                 return new StateResult(output, choice.path("Next").asText());
             }
@@ -2018,13 +2018,13 @@ public class AslExecutor {
         throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
     }
 
-    private boolean evaluateCondition(JsonNode rule, JsonNode input) throws Exception {
+    private boolean evaluateCondition(JsonNode rule, JsonNode input, JsonNode context) throws Exception {
         // Comparator inventory, type-strict evaluation, and the missing-path/unknown-operator rules
         // live in ChoiceOperators so the runtime and the CreateStateMachine validator share one source
         // of truth. An undefined reference path or an unsupported comparator is a runtime error on AWS,
         // not a silently-false fallthrough to the Default branch.
         try {
-            return ChoiceOperators.evaluate(rule, path -> resolvePathNode(path, input));
+            return ChoiceOperators.evaluate(rule, path -> resolvePathNode(path, input, context));
         } catch (ChoiceOperators.ChoiceEvaluationException e) {
             throw new FailStateException("States.Runtime", e.getMessage());
         }
@@ -2746,7 +2746,8 @@ public class AslExecutor {
         }
 
         JsonNode itemsPath = stateDef.path("ItemsPath");
-        return new ResolvedMapItems(itemsPath.isMissingNode() ? input : resolvePath(itemsPath.asText("$"), input),
+        return new ResolvedMapItems(
+                itemsPath.isMissingNode() ? input : resolvePath(itemsPath.asText("$"), input, context),
                 MapItemsSource.DEFAULT);
     }
 
@@ -3115,7 +3116,7 @@ public class AslExecutor {
      * (returns a {@link NullNode}) and a missing/absent path (returns a {@link MissingNode}).
      * {@link #resolvePath} collapses both to null; only callers that care about presence
      * (e.g. {@code IsPresent}) should use this variant. When {@code context} is non-null it is the
-     * Context Object ({@code $$}) available to {@code States.*} intrinsic arguments.
+     * Context Object available to direct {@code $$} references and {@code States.*} intrinsic arguments.
      */
     JsonNode resolvePathNode(String path, JsonNode root, JsonNode context) {
         if (path == null || "$".equals(path)) {
@@ -3123,6 +3124,16 @@ public class AslExecutor {
         }
         if (path.startsWith("States.")) {
             return evaluateIntrinsic(path, root, context);
+        }
+        if ("$$".equals(path)) {
+            return context == null ? MissingNode.getInstance() : context;
+        }
+        if (path.startsWith("$$.") || path.startsWith("$$[")) {
+            if (context == null || !ChoiceOperators.isReferencePath(path)) {
+                return MissingNode.getInstance();
+            }
+            path = "$" + path.substring(2);
+            root = context;
         }
         // Support dotted ($.a.b) and root-bracket ($[*], $[0]) forms; anything else is unsupported.
         if (!path.startsWith("$.") && !path.startsWith("$[")) {

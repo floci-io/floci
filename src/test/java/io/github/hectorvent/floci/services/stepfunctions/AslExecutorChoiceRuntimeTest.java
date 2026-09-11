@@ -93,6 +93,54 @@ class AslExecutorChoiceRuntimeTest {
     }
 
     @Test
+    void contextObjectVariableRoutesUsingOriginalExecutionInput() {
+        Execution exec = run("""
+                {
+                  "StartAt": "Pick",
+                  "States": {
+                    "Pick": {
+                      "Type": "Choice",
+                      "InputPath": "$.scoped",
+                      "Choices": [{
+                        "Variable": "$$.Execution.Input.token",
+                        "StringEquals": "keep",
+                        "Next": "TAKEN"
+                      }],
+                      "Default": "FELL"
+                    },
+                    "TAKEN": {"Type": "Pass", "End": true},
+                    "FELL": {"Type": "Fail", "Error": "FELL"}
+                  }
+                }
+                """, "{\"token\":\"keep\",\"scoped\":{\"token\":\"wrong\"}}");
+        assertEquals("SUCCEEDED", exec.getStatus());
+    }
+
+    @Test
+    void contextObjectPathOperandRoutesUsingOriginalExecutionInput() {
+        Execution exec = run("""
+                {
+                  "StartAt": "Pick",
+                  "States": {
+                    "Pick": {
+                      "Type": "Choice",
+                      "InputPath": "$.scoped",
+                      "Choices": [{
+                        "Variable": "$.district_id",
+                        "StringEqualsPath": "$$.Execution.Input.expected_district_id",
+                        "Next": "TAKEN"
+                      }],
+                      "Default": "FELL"
+                    },
+                    "TAKEN": {"Type": "Pass", "End": true},
+                    "FELL": {"Type": "Fail", "Error": "FELL"}
+                  }
+                }
+                """, "{\"expected_district_id\":\"42\",\"scoped\":{\"district_id\":\"42\"}}");
+        assertEquals("SUCCEEDED", exec.getStatus());
+    }
+
+    @Test
     void unknownComparatorFailsExecutionWithStatesRuntime() {
         // executeSync bypasses create-time validation, so the runtime backstop must fire loudly.
         Execution exec = run("""

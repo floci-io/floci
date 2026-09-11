@@ -166,6 +166,21 @@ class AslExecutorStatePathTest {
     }
 
     @Test
+    void mapItemsPathCanReadOriginalExecutionInputFromContext() throws Exception {
+        assertOutput("""
+                {"StartAt":"Each","States":{
+                  "Each":{"Type":"Map","InputPath":"$.scoped",
+                    "ItemsPath":"$$.Execution.Input.ids","MaxConcurrency":1,
+                    "ItemSelector":{"id.$":"$$.Map.Item.Value"},
+                    "Iterator":{"StartAt":"Pass","States":{
+                      "Pass":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """,
+                "{\"ids\":[1,2],\"scoped\":{\"ignored\":true}}",
+                "[{\"id\":1},{\"id\":2}]");
+    }
+
+    @Test
     void parallelInputPathFeedsBranchesAndResultPathStillMergesIntoOriginalInput() throws Exception {
         assertOutput("""
                 {"StartAt":"Parallel","States":{
