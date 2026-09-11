@@ -543,6 +543,15 @@ public class CognitoService implements ResourceProvider {
         String prefix = id + "::";
         groupStore.scan(k -> k.startsWith(prefix))
                 .forEach(g -> groupStore.delete(groupKey(id, g.getGroupName())));
+        // github.com/floci-io/floci/issues/2864: a pool id can be pinned with the
+        // floci:override-id tag, so it can be reused after delete - unlike real AWS, where a
+        // pool id is never reused and this situation can't arise. Without this, a pool
+        // recreated on the same id inherited the deleted pool's users (password hashes and
+        // all) and resource servers.
+        userStore.scan(k -> k.startsWith(prefix))
+                .forEach(u -> userStore.delete(userKey(id, u.getUsername())));
+        resourceServerStore.scan(k -> k.startsWith(prefix))
+                .forEach(r -> resourceServerStore.delete(resourceServerKey(id, r.getIdentifier())));
         // Same lock as the provider mutations: a create or update that interleaves with
         // this cascade would otherwise reinstate a provider for a pool that is going away.
         synchronized (identityProviderLock) {
