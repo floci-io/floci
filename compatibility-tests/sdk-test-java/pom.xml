@@ -555,6 +555,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appintegrations</artifactId>
         </dependency>
+        <!-- DataSync client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>datasync</artifactId>
+        </dependency>
         <!-- JDBC drivers for RDS data-plane tests -->
         <dependency>
             <groupId>org.postgresql</groupId>
