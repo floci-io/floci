@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,6 +32,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class RedshiftClusterCfnProvisionerTest {
@@ -71,18 +73,176 @@ class RedshiftClusterCfnProvisionerTest {
     }
 
     @Test
-    void resourceTypesReturnsRedshiftCluster() {
+    void resourceTypesCoversAllFour() {
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(mock(RedshiftService.class));
-        assertEquals(Set.of("AWS::Redshift::Cluster"), p.resourceTypes());
+        assertEquals(Set.of("AWS::Redshift::Cluster", "AWS::Redshift::ClusterParameterGroup",
+                "AWS::Redshift::ClusterSubnetGroup", "AWS::Redshift::ClusterSecurityGroup"),
+                p.resourceTypes());
     }
 
     @Test
     void provisionThrowsOnUnknownResourceType() {
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(mock(RedshiftService.class));
         StackResource r = new StackResource();
-        r.setResourceType("AWS::Redshift::ClusterParameterGroup");
-        r.setLogicalId("ParamGroup");
+        r.setResourceType("AWS::Redshift::UnknownType");
+        r.setLogicalId("Unknown");
         assertThrows(IllegalStateException.class, () -> p.provision(r, json("{}"), ctx(null)));
+    }
+
+    @Test
+    void provisionParameterGroupMapsToService() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterParameterGroup");
+        r.setLogicalId("Params");
+
+        p.provision(r, json("""
+            {"ParameterGroupName":"pg1","ParameterGroupFamily":"redshift-1.0","Description":"d"}"""), ctx(null));
+
+        verify(service).createClusterParameterGroup("pg1", "redshift-1.0", "d");
+        assertEquals("pg1", r.getPhysicalId());
+    }
+
+    @Test
+    void provisionParameterGroupWithGeneratedNameAndTags() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterParameterGroup");
+        r.setLogicalId("Params");
+
+        p.provision(r, json("""
+            {"ParameterGroupFamily":"redshift-1.0","Description":"d",
+             "Tags":[{"Key":"env","Value":"test"}]}"""), ctx(null));
+
+        assertNotNull(r.getPhysicalId());
+        verify(service).createClusterParameterGroup(eq(r.getPhysicalId()), eq("redshift-1.0"), eq("d"));
+        verify(service).createTags(r.getPhysicalId(), Map.of("env", "test"));
+    }
+
+    @Test
+    void provisionParameterGroupReusesPriorEntityWithoutCallingCreate() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterParameterGroup");
+        r.setLogicalId("Params");
+
+        p.provision(r, json("""
+            {"ParameterGroupName":"pg1","ParameterGroupFamily":"redshift-1.0","Description":"d",
+             "Parameters":[{"ParameterName":"wlm_json_configuration","ParameterValue":"[]"}]}"""), ctx("pg1"));
+
+        verify(service, never()).createClusterParameterGroup(anyString(), anyString(), anyString());
+        assertEquals("pg1", r.getPhysicalId());
+    }
+
+    @Test
+    void deleteParameterGroupToleratesNotFound() {
+        RedshiftService service = mock(RedshiftService.class);
+        doThrow(new AwsException("ClusterParameterGroupNotFound", "gone", 404))
+                .when(service).deleteClusterParameterGroup("pg1");
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        assertDoesNotThrow(() -> p.delete("AWS::Redshift::ClusterParameterGroup", "pg1", "us-east-1"));
+    }
+
+    @Test
+    void deleteParameterGroupAndSubnetGroupTolerateFaultSuffix() {
+        RedshiftService service = mock(RedshiftService.class);
+        doThrow(new AwsException("ClusterParameterGroupNotFoundFault", "gone", 404))
+                .when(service).deleteClusterParameterGroup("pg1");
+        doThrow(new AwsException("ClusterSubnetGroupNotFoundFault", "gone", 404))
+                .when(service).deleteClusterSubnetGroup("sg1");
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        assertDoesNotThrow(() -> p.delete("AWS::Redshift::ClusterParameterGroup", "pg1", "us-east-1"));
+        assertDoesNotThrow(() -> p.delete("AWS::Redshift::ClusterSubnetGroup", "sg1", "us-east-1"));
+    }
+
+    @Test
+    void deleteParameterGroupPropagatesUnexpectedError() {
+        RedshiftService service = mock(RedshiftService.class);
+        doThrow(new AwsException("InternalFailure", "boom", 500))
+                .when(service).deleteClusterParameterGroup("pg1");
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        assertThrows(AwsException.class,
+                () -> p.delete("AWS::Redshift::ClusterParameterGroup", "pg1", "us-east-1"));
+    }
+
+    @Test
+    void provisionSubnetGroupMapsToServiceAndReconcilesOnUpdate() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterSubnetGroup");
+        r.setLogicalId("Subnets");
+
+        p.provision(r, json("""
+            {"ClusterSubnetGroupName":"sg1","Description":"d","SubnetIds":["subnet-a","subnet-b"]}"""), ctx(null));
+        verify(service).createClusterSubnetGroup("sg1", "d", null, List.of("subnet-a", "subnet-b"));
+        assertEquals("sg1", r.getPhysicalId());
+        assertEquals("sg1", r.getAttributes().get("ClusterSubnetGroupName"));
+
+        p.provision(r, json("""
+            {"ClusterSubnetGroupName":"sg1","Description":"d2","SubnetIds":["subnet-a"]}"""), ctx("sg1"));
+        verify(service).modifyClusterSubnetGroup("sg1", "d2", List.of("subnet-a"));
+        assertEquals("sg1", r.getPhysicalId());
+    }
+
+    @Test
+    void provisionSubnetGroupWithGeneratedName() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterSubnetGroup");
+        r.setLogicalId("Subnets");
+
+        p.provision(r, json("""
+            {"Description":"d","SubnetIds":["subnet-1"]}"""), ctx(null));
+
+        assertNotNull(r.getPhysicalId());
+        assertEquals(r.getPhysicalId(), r.getAttributes().get("ClusterSubnetGroupName"));
+        verify(service).createClusterSubnetGroup(eq(r.getPhysicalId()), eq("d"), isNull(), eq(List.of("subnet-1")));
+    }
+
+    @Test
+    void deleteSubnetGroupToleratesNotFound() {
+        RedshiftService service = mock(RedshiftService.class);
+        doThrow(new AwsException("ClusterSubnetGroupNotFound", "gone", 404))
+                .when(service).deleteClusterSubnetGroup("sg1");
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        assertDoesNotThrow(() -> p.delete("AWS::Redshift::ClusterSubnetGroup", "sg1", "us-east-1"));
+    }
+
+    @Test
+    void deleteSubnetGroupPropagatesUnexpectedError() {
+        RedshiftService service = mock(RedshiftService.class);
+        doThrow(new AwsException("InternalFailure", "boom", 500))
+                .when(service).deleteClusterSubnetGroup("sg1");
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        assertThrows(AwsException.class,
+                () -> p.delete("AWS::Redshift::ClusterSubnetGroup", "sg1", "us-east-1"));
+    }
+
+    @Test
+    void provisionSecurityGroupIsAcceptOnly() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::ClusterSecurityGroup");
+        r.setLogicalId("SecGroup");
+
+        p.provision(r, json("""
+            {"Description":"sg desc"}"""), ctx(null));
+
+        assertNotNull(r.getPhysicalId());
+        assertTrue(r.getAttributes().isEmpty());
+        verifyNoInteractions(service);
+        assertDoesNotThrow(() -> p.delete("AWS::Redshift::ClusterSecurityGroup", r.getPhysicalId(), "us-east-1"));
     }
 
     @Test

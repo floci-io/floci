@@ -27,7 +27,11 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(RedshiftClusterCfnProvisioner.class);
 
     private static final String CLUSTER = "AWS::Redshift::Cluster";
+    private static final String PARAMETER_GROUP = "AWS::Redshift::ClusterParameterGroup";
+    private static final String SUBNET_GROUP = "AWS::Redshift::ClusterSubnetGroup";
+    private static final String SECURITY_GROUP = "AWS::Redshift::ClusterSecurityGroup";
     private static final int IDENTIFIER_MAX_LENGTH = 63;
+    private static final int METADATA_NAME_MAX_LENGTH = 255;
 
     private final RedshiftService redshiftService;
 
@@ -38,19 +42,23 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(CLUSTER);
+        return Set.of(CLUSTER, PARAMETER_GROUP, SUBNET_GROUP, SECURITY_GROUP);
     }
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        if (CLUSTER.equals(r.getResourceType())) {
-            Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
-            provisionCluster(r, props, ctx, attributesBefore);
-            ReplacementCleanup.record(r, ctx, attributesBefore);
-            return;
+        switch (r.getResourceType()) {
+            case CLUSTER -> {
+                Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
+                provisionCluster(r, props, ctx, attributesBefore);
+                ReplacementCleanup.record(r, ctx, attributesBefore);
+            }
+            case PARAMETER_GROUP -> provisionParameterGroup(r, props, ctx);
+            case SUBNET_GROUP -> provisionSubnetGroup(r, props, ctx);
+            case SECURITY_GROUP -> provisionSecurityGroup(r, props, ctx);
+            default -> throw new IllegalStateException(
+                    "RedshiftClusterCfnProvisioner cannot provision " + r.getResourceType());
         }
-        throw new IllegalStateException(
-                "RedshiftClusterCfnProvisioner cannot provision " + r.getResourceType());
     }
 
     @Override
@@ -169,11 +177,68 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    private void provisionParameterGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String explicitName = ctx.resolveOptional(props, "ParameterGroupName");
+        String id = ctx.stablePhysicalName(explicitName, r.getLogicalId(), METADATA_NAME_MAX_LENGTH, false);
+        String family = ctx.resolveOptional(props, "ParameterGroupFamily");
+        String description = ctx.resolveOptional(props, "Description");
+
+        if (!ctx.reusesPriorEntity(id)) {
+            redshiftService.createClusterParameterGroup(id, family, description);
+        } else {
+            JsonNode params = props != null ? props.get("Parameters") : null;
+            if (params != null && !params.isEmpty()) {
+                LOG.warnv("Cluster parameter group {0}: parameter updates on update are not emulated", id);
+            }
+        }
+
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        if (!tags.isEmpty()) {
+            redshiftService.createTags(id, tags);
+        }
+
+        r.setPhysicalId(id);
+    }
+
+    private void provisionSubnetGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String explicitName = ctx.resolveOptional(props, "ClusterSubnetGroupName");
+        String id = ctx.stablePhysicalName(explicitName, r.getLogicalId(), METADATA_NAME_MAX_LENGTH, false);
+        String description = ctx.resolveOptional(props, "Description");
+        List<String> subnetIds = ctx.resolveStringList(props, "SubnetIds");
+
+        if (ctx.reusesPriorEntity(id)) {
+            redshiftService.modifyClusterSubnetGroup(id, description, subnetIds);
+        } else {
+            redshiftService.createClusterSubnetGroup(id, description, null, subnetIds);
+        }
+
+        r.setPhysicalId(id);
+        r.getAttributes().put("ClusterSubnetGroupName", id);
+    }
+
+    private void provisionSecurityGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        r.setPhysicalId(ctx.stablePhysicalName(null, r.getLogicalId(), METADATA_NAME_MAX_LENGTH, false));
+    }
+
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        if (CLUSTER.equals(resourceType)) {
-            CfnDeletes.safeDelete("Redshift cluster", physicalId,
+        if (resourceType == null || physicalId == null) {
+            return;
+        }
+        switch (resourceType) {
+            case CLUSTER -> CfnDeletes.safeDelete("Redshift cluster", physicalId,
                     () -> redshiftService.deleteCluster(physicalId), "ClusterNotFound");
+            case PARAMETER_GROUP -> CfnDeletes.safeDelete("Redshift parameter group", physicalId,
+                    () -> redshiftService.deleteClusterParameterGroup(physicalId),
+                    "ClusterParameterGroupNotFound", "ClusterParameterGroupNotFoundFault");
+            case SUBNET_GROUP -> CfnDeletes.safeDelete("Redshift subnet group", physicalId,
+                    () -> redshiftService.deleteClusterSubnetGroup(physicalId),
+                    "ClusterSubnetGroupNotFound", "ClusterSubnetGroupNotFoundFault");
+            case SECURITY_GROUP -> {
+                // Accept-only, delete is a no-op
+            }
+            default -> {
+            }
         }
     }
 
