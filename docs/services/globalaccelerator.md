@@ -84,6 +84,12 @@ case) pins those addresses instead.
   `ClientAffinity`, `HealthCheckProtocol`, `TrafficDialPercentage` (0 to 100),
   `HealthCheckIntervalSeconds` (10 to 30), `ThresholdCount` (1 to 10) and `Weight` (0 to 255).
   A value outside its range returns `InvalidArgumentException`.
+- List members are capped at the maximums the API model declares. `PortRanges`,
+  `EndpointConfigurations` and `PortOverrides` accept at most 10 entries per request, and
+  `IpAddresses` at most 2. A longer list returns `InvalidArgumentException`.
+- `HealthCheckPath` must match the model's pattern. It begins with `/`, is at most 255
+  characters, and carries only URL path characters. Anything else returns
+  `InvalidArgumentException`.
 
 ## Defaults
 

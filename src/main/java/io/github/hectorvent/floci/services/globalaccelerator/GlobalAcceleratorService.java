@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Pattern;
 
 /**
  * AWS Global Accelerator management plane.
@@ -61,6 +62,14 @@ public class GlobalAcceleratorService {
     private static final Set<String> CLIENT_AFFINITIES = Set.of("NONE", "SOURCE_IP");
     private static final Set<String> HEALTH_CHECK_PROTOCOLS = Set.of("TCP", "HTTP", "HTTPS");
 
+    private static final int MAX_PORT_RANGES = 10;
+    private static final int MAX_ENDPOINT_CONFIGURATIONS = 10;
+    private static final int MAX_PORT_OVERRIDES = 10;
+    private static final int MAX_IP_ADDRESSES = 2;
+    private static final int MAX_HEALTH_CHECK_PATH_LENGTH = 255;
+    private static final Pattern HEALTH_CHECK_PATH_PATTERN =
+            Pattern.compile("^/[-a-zA-Z0-9@:%_\\+.~#?&/=]*$");
+
     private final StorageBackend<String, Accelerator> accelerators;
     private final StorageBackend<String, AcceleratorAttributes> acceleratorAttributes;
     private final StorageBackend<String, Listener> listeners;
@@ -89,6 +98,7 @@ public class GlobalAcceleratorService {
         requireArgument(name, "Name");
         String resolvedIpAddressType = ipAddressType != null ? ipAddressType : "IPV4";
         requireIpAddressType(resolvedIpAddressType);
+        validateIpAddresses(ipAddresses);
 
         long now = Instant.now().getEpochSecond();
         String dnsPrefix = "a" + randomHex(16);
@@ -129,6 +139,7 @@ public class GlobalAcceleratorService {
         if (ipAddressType != null) {
             requireIpAddressType(ipAddressType);
         }
+        validateIpAddresses(ipAddresses);
         if (name != null) {
             accelerator.setName(name);
         }
@@ -272,6 +283,7 @@ public class GlobalAcceleratorService {
         Listener listener = describeListener(listenerArn);
         requireArgument(endpointGroupRegion, "EndpointGroupRegion");
         validateHealthCheck(healthCheckProtocol, healthCheckPort, healthCheckIntervalSeconds, thresholdCount);
+        validateHealthCheckPath(healthCheckPath);
         validateTrafficDial(trafficDialPercentage);
         validatePortOverrides(portOverrides);
         boolean regionTaken = endpointGroupsOf(listenerArn).stream()
@@ -312,6 +324,7 @@ public class GlobalAcceleratorService {
                                              List<PortOverride> portOverrides) {
         EndpointGroup group = describeEndpointGroup(endpointGroupArn);
         validateHealthCheck(healthCheckProtocol, healthCheckPort, healthCheckIntervalSeconds, thresholdCount);
+        validateHealthCheckPath(healthCheckPath);
         validateTrafficDial(trafficDialPercentage);
         validatePortOverrides(portOverrides);
         if (endpointConfigurations != null && endpointConfigurations.isArray()) {
@@ -439,6 +452,7 @@ public class GlobalAcceleratorService {
         if (endpointConfigurations == null || !endpointConfigurations.isArray()) {
             return descriptions;
         }
+        requireAtMost(endpointConfigurations.size(), MAX_ENDPOINT_CONFIGURATIONS, "EndpointConfigurations");
         for (JsonNode configuration : endpointConfigurations) {
             EndpointDescription description = new EndpointDescription();
             String endpointId = configuration.path("EndpointId").asText(null);
@@ -470,6 +484,7 @@ public class GlobalAcceleratorService {
         if (portRanges == null || portRanges.isEmpty()) {
             throw new AwsException("InvalidArgumentException", "PortRanges is required.", 400);
         }
+        requireAtMost(portRanges.size(), MAX_PORT_RANGES, "PortRanges");
         for (PortRange range : portRanges) {
             Integer from = range.getFromPort();
             Integer to = range.getToPort();
@@ -485,6 +500,7 @@ public class GlobalAcceleratorService {
         if (portOverrides == null) {
             return;
         }
+        requireAtMost(portOverrides.size(), MAX_PORT_OVERRIDES, "PortOverrides");
         for (PortOverride override : portOverrides) {
             if (!isPort(override.getListenerPort()) || !isPort(override.getEndpointPort())) {
                 throw new AwsException("InvalidPortRangeException",
@@ -515,6 +531,34 @@ public class GlobalAcceleratorService {
         if (thresholdCount != null && (thresholdCount < 1 || thresholdCount > 10)) {
             throw new AwsException("InvalidArgumentException",
                     "ThresholdCount must be between 1 and 10.", 400);
+        }
+    }
+
+    private static void validateHealthCheckPath(String healthCheckPath) {
+        if (healthCheckPath == null) {
+            return;
+        }
+        if (healthCheckPath.length() > MAX_HEALTH_CHECK_PATH_LENGTH) {
+            throw new AwsException("InvalidArgumentException",
+                    "HealthCheckPath must not exceed " + MAX_HEALTH_CHECK_PATH_LENGTH + " characters.", 400);
+        }
+        if (!HEALTH_CHECK_PATH_PATTERN.matcher(healthCheckPath).matches()) {
+            throw new AwsException("InvalidArgumentException",
+                    "HealthCheckPath must begin with / and contain only URL path characters.", 400);
+        }
+    }
+
+    private static void validateIpAddresses(List<String> ipAddresses) {
+        if (ipAddresses == null) {
+            return;
+        }
+        requireAtMost(ipAddresses.size(), MAX_IP_ADDRESSES, "IpAddresses");
+    }
+
+    private static void requireAtMost(int size, int max, String field) {
+        if (size > max) {
+            throw new AwsException("InvalidArgumentException",
+                    field + " must not contain more than " + max + " members.", 400);
         }
     }
 

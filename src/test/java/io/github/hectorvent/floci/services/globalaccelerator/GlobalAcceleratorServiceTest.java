@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.globalaccelerator.model.PortRange;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -346,11 +347,229 @@ class GlobalAcceleratorServiceTest {
         assertEquals("InvalidArgumentException", failure.getErrorCode());
     }
 
+    @Test
+    void listenerAcceptsTenPortRanges() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRanges(10), "TCP", null);
+
+        assertEquals(10, listener.getPortRanges().size());
+    }
+
+    @Test
+    void listenerRejectsMoreThanTenPortRanges() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.createListener(accelerator.getAcceleratorArn(), portRanges(11), "TCP", null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("PortRanges"), failure.getMessage());
+    }
+
+    @Test
+    void updateListenerRejectsMoreThanTenPortRanges() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.updateListener(listener.getListenerArn(), portRanges(11), null, null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+    }
+
+    @Test
+    void endpointGroupAcceptsTenEndpointConfigurations() {
+        EndpointGroup group = endpointGroup("us-west-2", endpointConfigurations(10));
+
+        assertEquals(10, group.getEndpointDescriptions().size());
+    }
+
+    @Test
+    void endpointGroupRejectsMoreThanTenEndpointConfigurations() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.createEndpointGroup(listener.getListenerArn(), "us-west-2",
+                        json(endpointConfigurations(11)), null, null, null, null, null, null, null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("EndpointConfigurations"), failure.getMessage());
+    }
+
+    @Test
+    void addEndpointsRejectsMoreThanTenEndpointConfigurations() {
+        EndpointGroup group = endpointGroup("us-west-2", "[]");
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.addEndpoints(group.getEndpointGroupArn(), json(endpointConfigurations(11))));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+    }
+
+    @Test
+    void endpointGroupAcceptsTenPortOverrides() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+
+        EndpointGroup group = service.createEndpointGroup(listener.getListenerArn(), "us-west-2", null,
+                null, null, null, null, null, null, portOverrides(10));
+
+        assertEquals(10, group.getPortOverrides().size());
+    }
+
+    @Test
+    void endpointGroupRejectsMoreThanTenPortOverrides() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.createEndpointGroup(listener.getListenerArn(), "us-west-2", null,
+                        null, null, null, null, null, null, portOverrides(11)));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("PortOverrides"), failure.getMessage());
+    }
+
+    @Test
+    void createAcceleratorAcceptsTwoByoipAddresses() {
+        Accelerator accelerator = service.createAccelerator("edge", null,
+                List.of("192.0.2.1", "192.0.2.2"), null, null);
+
+        assertEquals(List.of("192.0.2.1", "192.0.2.2"), accelerator.getIpSets().get(0).getIpAddresses());
+    }
+
+    @Test
+    void createAcceleratorRejectsMoreThanTwoByoipAddresses() {
+        AwsException failure = assertThrows(AwsException.class, () -> service.createAccelerator("edge", null,
+                List.of("192.0.2.1", "192.0.2.2", "192.0.2.3"), null, null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("IpAddresses"), failure.getMessage());
+    }
+
+    @Test
+    void updateAcceleratorRejectsMoreThanTwoByoipAddresses() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.updateAccelerator(accelerator.getAcceleratorArn(), null, null,
+                        List.of("192.0.2.1", "192.0.2.2", "192.0.2.3"), null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+    }
+
+    @Test
+    void endpointGroupAcceptsAHealthCheckPathOfTwoHundredFiftyFiveCharacters() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+        String path = "/" + "a".repeat(254);
+
+        EndpointGroup group = service.createEndpointGroup(listener.getListenerArn(), "us-west-2", null,
+                null, null, "HTTP", path, null, null, null);
+
+        assertEquals(path, group.getHealthCheckPath());
+    }
+
+    @Test
+    void endpointGroupRejectsAHealthCheckPathLongerThanTwoHundredFiftyFiveCharacters() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.createEndpointGroup(listener.getListenerArn(), "us-west-2", null,
+                        null, null, "HTTP", "/" + "a".repeat(255), null, null, null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("HealthCheckPath"), failure.getMessage());
+    }
+
+    @Test
+    void endpointGroupRejectsAHealthCheckPathThatDoesNotStartWithASlash() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.createEndpointGroup(listener.getListenerArn(), "us-west-2", null,
+                        null, null, "HTTP", "health", null, null, null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+    }
+
+    @Test
+    void endpointGroupRejectsAHealthCheckPathWithCharactersOutsideTheModelPattern() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.createEndpointGroup(listener.getListenerArn(), "us-west-2", null,
+                        null, null, "HTTP", "/health check", null, null, null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+    }
+
+    @Test
+    void endpointGroupAcceptsTheUrlPathCharactersTheModelAllows() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
+        Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
+        String path = "/health-check_v2/status.json?deep=1&x=a+b~c#frag@host:8080%20";
+
+        EndpointGroup group = service.createEndpointGroup(listener.getListenerArn(), "us-west-2", null,
+                null, null, "HTTP", path, null, null, null);
+
+        assertEquals(path, group.getHealthCheckPath());
+    }
+
+    @Test
+    void updateEndpointGroupRejectsAnInvalidHealthCheckPath() {
+        EndpointGroup group = endpointGroup("us-west-2", "[]");
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.updateEndpointGroup(group.getEndpointGroupArn(), null, null, null,
+                        null, "health", null, null, null));
+
+        assertEquals("InvalidArgumentException", failure.getErrorCode());
+    }
+
     private EndpointGroup endpointGroup(String region, String endpointConfigurations) {
         Accelerator accelerator = service.createAccelerator("edge", null, null, null, null);
         Listener listener = service.createListener(accelerator.getAcceleratorArn(), portRange(80, 80), "TCP", null);
         return service.createEndpointGroup(listener.getListenerArn(), region, json(endpointConfigurations),
                 null, null, null, null, null, null, null);
+    }
+
+    private static List<PortRange> portRanges(int count) {
+        List<PortRange> ranges = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            PortRange range = new PortRange();
+            range.setFromPort(1000 + i);
+            range.setToPort(1000 + i);
+            ranges.add(range);
+        }
+        return ranges;
+    }
+
+    private static List<PortOverride> portOverrides(int count) {
+        List<PortOverride> overrides = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            PortOverride override = new PortOverride();
+            override.setListenerPort(1000 + i);
+            override.setEndpointPort(2000 + i);
+            overrides.add(override);
+        }
+        return overrides;
+    }
+
+    private static String endpointConfigurations(int count) {
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                builder.append(',');
+            }
+            builder.append("{\"EndpointId\":\"i-").append(i).append("\"}");
+        }
+        return builder.append(']').toString();
     }
 
     private static List<PortRange> portRange(int from, int to) {
