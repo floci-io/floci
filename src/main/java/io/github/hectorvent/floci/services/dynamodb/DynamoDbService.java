@@ -1095,6 +1095,14 @@ public class DynamoDbService implements ResourceProvider {
                             JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                             JsonNode scanFilter, Integer limit, JsonNode exclusiveStartKey,
                             String indexName, String region) {
+        return scan(tableName, filterExpression, expressionAttrNames, expressionAttrValues,
+                scanFilter, limit, exclusiveStartKey, indexName, null, null, region);
+    }
+
+    public ScanResult scan(String tableName, String filterExpression,
+                            JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                            JsonNode scanFilter, Integer limit, JsonNode exclusiveStartKey,
+                            String indexName, Integer segment, Integer totalSegments, String region) {
         DynamoDbReservedWords.check(filterExpression, "FilterExpression");
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
@@ -1139,6 +1147,12 @@ public class DynamoDbService implements ResourceProvider {
             if (indexScan && !(hasNonNullAttribute(item, lekPkName)
                     && (lekSkName == null || hasNonNullAttribute(item, lekSkName)))) {
                 continue;
+            }
+            if (segment != null && totalSegments != null && totalSegments > 1) {
+                JsonNode pkAttr = item.get(lekPkName);
+                if (computeSegment(pkAttr, totalSegments) != segment) {
+                    continue;
+                }
             }
             // Stop at whichever boundary the read reaches first: the 1 MB cap or
             // Limit. The size check comes first — per the API reference, "if the
@@ -3267,6 +3281,27 @@ public class DynamoDbService implements ResourceProvider {
             }
         }
         return keyNode;
+    }
+
+    int computeSegment(JsonNode pkAttr, int totalSegments) {
+        if (totalSegments <= 1 || pkAttr == null) {
+            return 0;
+        }
+        String scalar = extractScalarValue(pkAttr);
+        if (scalar == null) {
+            return 0;
+        }
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(scalar.getBytes(StandardCharsets.UTF_8));
+            long val = ((long) (digest[0] & 0xFF) << 24)
+                    | ((long) (digest[1] & 0xFF) << 16)
+                    | ((long) (digest[2] & 0xFF) << 8)
+                    | ((long) (digest[3] & 0xFF));
+            return (int) (val % totalSegments);
+        } catch (NoSuchAlgorithmException e) {
+            return Math.floorMod(scalar.hashCode(), totalSegments);
+        }
     }
 
     private String extractScalarValue(JsonNode attrValue) {

@@ -18,8 +18,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -953,5 +956,153 @@ class DynamoDbJsonHandlerTest {
                 {"TableName": "Users", "Segment": 0, "TotalSegments": 1000000}
                 """), "eu-west-1");
         assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void parallelScanSegmentsAreStableWhenItemsDeleted() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        for (int i = 0; i < 10; i++) {
+            service.putItem("Users", item("userId", "item-" + i), region);
+        }
+
+        int totalSegments = 10;
+        int totalDeleted = 0;
+        for (int segment = 0; segment < totalSegments; segment++) {
+            var scanReq = mapper.createObjectNode();
+            scanReq.put("TableName", "Users");
+            scanReq.put("Segment", segment);
+            scanReq.put("TotalSegments", totalSegments);
+
+            var response = handler.handle("Scan", scanReq, region);
+            assertEquals(200, response.getStatus());
+            var entity = mapper.readTree(response.getEntity().toString());
+            var items = entity.get("Items");
+            for (var item : items) {
+                totalDeleted++;
+                String key = item.get("userId").get("S").asText();
+                service.deleteItem("Users", item("userId", key), region);
+            }
+        }
+
+        assertEquals(10, totalDeleted, "All 10 items should have been returned and deleted across segments");
+
+        var checkResponse = handler.handle("Scan", json("""
+                {"TableName": "Users", "Select": "COUNT"}
+                """), region);
+        var checkEntity = mapper.readTree(checkResponse.getEntity().toString());
+        assertEquals(0, checkEntity.get("Count").asInt(), "No remaining items should be in the table");
+    }
+
+    @Test
+    void parallelScanPaginationWithLimit() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        for (int i = 0; i < 20; i++) {
+            service.putItem("Users", item("userId", "user-" + i), region);
+        }
+
+        int totalSegments = 4;
+        Set<String> collectedKeys = new HashSet<>();
+        for (int segment = 0; segment < totalSegments; segment++) {
+            JsonNode exclusiveStartKey = null;
+            do {
+                var scanReq = mapper.createObjectNode();
+                scanReq.put("TableName", "Users");
+                scanReq.put("Segment", segment);
+                scanReq.put("TotalSegments", totalSegments);
+                scanReq.put("Limit", 2);
+                if (exclusiveStartKey != null) {
+                    scanReq.set("ExclusiveStartKey", exclusiveStartKey);
+                }
+
+                var response = handler.handle("Scan", scanReq, region);
+                assertEquals(200, response.getStatus());
+                var entity = mapper.readTree(response.getEntity().toString());
+                var items = entity.get("Items");
+                assertTrue(items.size() <= 2, "Page size must not exceed limit");
+                for (var item : items) {
+                    String key = item.get("userId").get("S").asText();
+                    assertTrue(collectedKeys.add(key), "Item must not be returned multiple times: " + key);
+                }
+                exclusiveStartKey = entity.get("LastEvaluatedKey");
+            } while (exclusiveStartKey != null && !exclusiveStartKey.isNull());
+        }
+
+        assertEquals(20, collectedKeys.size(), "All 20 items must be collected across paginated segments");
+    }
+
+    @Test
+    void parallelScanSelectCount() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        for (int i = 0; i < 15; i++) {
+            service.putItem("Users", item("userId", "id-" + i), region);
+        }
+
+        int totalSegments = 5;
+        int sumCount = 0;
+        int sumScannedCount = 0;
+        for (int segment = 0; segment < totalSegments; segment++) {
+            var scanReq = mapper.createObjectNode();
+            scanReq.put("TableName", "Users");
+            scanReq.put("Segment", segment);
+            scanReq.put("TotalSegments", totalSegments);
+            scanReq.put("Select", "COUNT");
+
+            var response = handler.handle("Scan", scanReq, region);
+            assertEquals(200, response.getStatus());
+            var entity = mapper.readTree(response.getEntity().toString());
+            sumCount += entity.get("Count").asInt();
+            sumScannedCount += entity.get("ScannedCount").asInt();
+        }
+
+        assertEquals(15, sumCount, "Sum of Count across segments must equal total items");
+        assertEquals(15, sumScannedCount, "Sum of ScannedCount across segments must equal total items");
+    }
+
+    @Test
+    void parallelScanSamePartitionKeySameSegment() throws Exception {
+        String region = "eu-west-1";
+        service.createTable("Orders",
+                List.of(
+                        new KeySchemaElement("userId", "HASH"),
+                        new KeySchemaElement("orderId", "RANGE")),
+                List.of(
+                        new AttributeDefinition("userId", "S"),
+                        new AttributeDefinition("orderId", "S")),
+                5L, 5L, region);
+
+        for (int i = 0; i < 5; i++) {
+            service.putItem("Orders", item("userId", "alice", "orderId", "ord-" + i), region);
+            service.putItem("Orders", item("userId", "bob", "orderId", "ord-" + i), region);
+        }
+
+        int totalSegments = 10;
+        Map<String, Set<Integer>> userSegments = new HashMap<>();
+        userSegments.put("alice", new HashSet<>());
+        userSegments.put("bob", new HashSet<>());
+
+        for (int segment = 0; segment < totalSegments; segment++) {
+            var scanReq = mapper.createObjectNode();
+            scanReq.put("TableName", "Orders");
+            scanReq.put("Segment", segment);
+            scanReq.put("TotalSegments", totalSegments);
+
+            var response = handler.handle("Scan", scanReq, region);
+            assertEquals(200, response.getStatus());
+            var entity = mapper.readTree(response.getEntity().toString());
+            var items = entity.get("Items");
+            for (var item : items) {
+                String userId = item.get("userId").get("S").asText();
+                userSegments.get(userId).add(segment);
+            }
+        }
+
+        assertEquals(1, userSegments.get("alice").size(), "All alice items must belong to the exact same segment");
+        assertEquals(1, userSegments.get("bob").size(), "All bob items must belong to the exact same segment");
     }
 }

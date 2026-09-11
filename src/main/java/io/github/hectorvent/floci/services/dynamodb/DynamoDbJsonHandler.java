@@ -1115,18 +1115,9 @@ public class DynamoDbJsonHandler {
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
                 tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit,
-                exclusiveStartKey, indexNameScan, region);
+                exclusiveStartKey, indexNameScan, segment, totalSegments, region);
 
         List<JsonNode> scanItems = result.items();
-        // Apply parallel scan segment partitioning
-        if (segment != null && totalSegments != null && totalSegments > 1) {
-            final int seg = segment, total = totalSegments;
-            final List<JsonNode> allItems = scanItems;
-            scanItems = new ArrayList<>();
-            for (int si = 0; si < allItems.size(); si++) {
-                if (si % total == seg) scanItems.add(allItems.get(si));
-            }
-        }
         // Apply index projection (KEYS_ONLY / INCLUDE) when scanning a secondary index
         if (indexNameScan != null && projectionExpressionScan == null && attributesToGetScan == null) {
             scanItems = applyIndexProjection(scanItems, scanTable, scanAccessPath, select);
