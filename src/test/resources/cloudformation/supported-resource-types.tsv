@@ -101,6 +101,7 @@ AWS::Lambda::LayerVersion	LEGACY_SWITCH
 AWS::Lambda::MicrovmImage	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::NetworkConnector	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::Permission	LambdaAddressingCfnProvisioner
+AWS::Lambda::Url	LambdaAddressingCfnProvisioner
 AWS::Lambda::Version	LambdaVersionAliasCfnProvisioner
 AWS::Logs::LogGroup	LogsCfnProvisioner
 AWS::Organizations::Account	OrganizationsCfnProvisioner

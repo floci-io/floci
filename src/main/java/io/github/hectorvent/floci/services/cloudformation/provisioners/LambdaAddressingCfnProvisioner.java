@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -16,8 +17,17 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * CloudFormation provisioning for {@code AWS::Lambda::Permission}. {@code AWS::Lambda::Version} and
+ * CloudFormation provisioning for the types that address a function from outside it:
+ * {@code AWS::Lambda::Permission} and {@code AWS::Lambda::Url}. {@code AWS::Lambda::Version} and
  * {@code AWS::Lambda::Alias} belong to {@link LambdaVersionAliasCfnProvisioner}.
+ *
+ * <p>{@code AWS::Lambda::Url}: the physical id is the {@code FunctionArn} the URL is attached to
+ * (the alias ARN when {@code Qualifier} names one), which is both the schema's primary identifier
+ * and enough to address the config again, since a qualified ARN parses back into function and
+ * qualifier. {@code Fn::GetAtt FunctionUrl} is the URL itself; a template that omits the attribute
+ * would otherwise export the literal string {@code "LogicalId.FunctionUrl"}. The CloudFormation
+ * property names for the URL are already the ones the Lambda API takes, {@code Cors} members
+ * included, so they are passed through rather than translated.
  *
  * <p>The physical id doubles as the delete handle, since {@link #delete(String, String, String)}
  * only receives the physical id. It stores {@code <functionName>|<statementId>}, and '|' cannot
@@ -30,6 +40,9 @@ import java.util.Set;
 @ApplicationScoped
 public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final String PERMISSION = "AWS::Lambda::Permission";
+    private static final String URL = "AWS::Lambda::Url";
+
     private final LambdaService lambdaService;
 
     @Inject
@@ -39,21 +52,33 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::Lambda::Permission");
+        return Set.of(PERMISSION, URL);
     }
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
-        if (!"AWS::Lambda::Permission".equals(r.getResourceType())) {
-            throw new IllegalStateException(
-                    "LambdaPermissionCfnProvisioner cannot handle " + r.getResourceType());
+        switch (r.getResourceType()) {
+            case PERMISSION -> provisionPermission(r, props, ctx);
+            case URL -> provisionUrl(r, props, ctx);
+            default -> throw new IllegalStateException(
+                    "LambdaAddressingCfnProvisioner cannot handle " + r.getResourceType());
         }
-        provisionPermission(r, props, ctx);
     }
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        if (!"AWS::Lambda::Permission".equals(resourceType) || physicalId == null) {
+        if (physicalId == null) {
+            return;
+        }
+        if (URL.equals(resourceType)) {
+            // The physical id is the function (or alias) ARN, which resolveWithQualifier splits back
+            // into name and qualifier, so no create-time attribute is needed to find the config.
+            CfnDeletes.safeDelete("function URL", physicalId,
+                    () -> lambdaService.deleteFunctionUrlConfig(region, physicalId, null),
+                    "ResourceNotFoundException");
+            return;
+        }
+        if (!PERMISSION.equals(resourceType)) {
             return;
         }
         int sep = physicalId.lastIndexOf('|');
@@ -108,6 +133,108 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
             throw failure;
         }
         r.setPhysicalId(functionName + "|" + statementId);
+    }
+
+    private void provisionUrl(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String targetFunctionArn = ctx.resolveOptional(props, "TargetFunctionArn");
+        if (targetFunctionArn == null || targetFunctionArn.isBlank()) {
+            throw new AwsException("ValidationError", URL + " requires TargetFunctionArn.", 400);
+        }
+        String qualifier = ctx.resolveOptional(props, "Qualifier");
+        String authType = ctx.resolveOptional(props, "AuthType");
+
+        Map<String, Object> request = new HashMap<>();
+        // AWS_IAM in the template stays AWS_IAM; the service's own default is NONE, which is also
+        // what the Lambda API defaults an omitted AuthType to.
+        if (authType != null && !authType.isBlank()) {
+            request.put("AuthType", authType);
+        }
+        String invokeMode = ctx.resolveOptional(props, "InvokeMode");
+        if (invokeMode != null && !invokeMode.isBlank()) {
+            request.put("InvokeMode", invokeMode);
+        }
+        Map<String, Object> cors = corsRequest(props, ctx);
+        boolean updating = hasUrlConfig(ctx.region(), targetFunctionArn, qualifier);
+        if (cors != null) {
+            request.put("Cors", cors);
+        } else if (updating) {
+            // Present and null, which is how UpdateFunctionUrlConfig is told to clear the policy;
+            // omitting the member leaves the CORS rules the template no longer declares in place.
+            request.put("Cors", null);
+        }
+
+        // provision is the update path too, and CreateFunctionUrlConfig answers 409 on a function
+        // that already has one. Which call to make follows from whether the *intended* target
+        // already has a config, not from isUpdate(): TargetFunctionArn and Qualifier are
+        // create-only, so an update that changed either has to create against the new function.
+        LambdaUrlConfig urlConfig = updating
+                ? lambdaService.updateFunctionUrlConfig(ctx.region(), targetFunctionArn, qualifier, request)
+                : lambdaService.createFunctionUrlConfig(ctx.region(), targetFunctionArn, qualifier, request);
+
+        String priorPhysicalId = ctx.priorPhysicalId();
+        if (ctx.isUpdate() && !urlConfig.getFunctionArn().equals(priorPhysicalId)) {
+            // The URL moved to a different function. CloudFormation deletes the entity a replacing
+            // update displaced; a function URL is addressed only through its function, so the one
+            // left on the previous function would otherwise stay reachable forever.
+            CfnDeletes.safeDelete("displaced function URL", priorPhysicalId,
+                    () -> lambdaService.deleteFunctionUrlConfig(ctx.region(), priorPhysicalId, null),
+                    "ResourceNotFoundException");
+        }
+
+        r.setPhysicalId(urlConfig.getFunctionArn());
+        r.getAttributes().put("FunctionArn", urlConfig.getFunctionArn());
+        r.getAttributes().put("FunctionUrl", urlConfig.getFunctionUrl());
+    }
+
+    private boolean hasUrlConfig(String region, String functionName, String qualifier) {
+        try {
+            return lambdaService.getFunctionUrlConfig(region, functionName, qualifier) != null;
+        } catch (AwsException e) {
+            // Only "there is no config" means create. A missing function, or a qualifier that does
+            // not match the ARN, has to fail the resource rather than be retried as a create.
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return false;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * The {@code Cors} block as the Lambda API takes it, or null when the template has none.
+     * {@code AllowCredentials} must arrive as a Boolean and {@code MaxAge} as a number: the service
+     * reads them with {@code Boolean.TRUE.equals} and an int coercion, so the resolved strings the
+     * template engine hands back for scalars would read as false and 0.
+     */
+    private Map<String, Object> corsRequest(JsonNode props, ProvisionContext ctx) {
+        JsonNode cors = props == null ? null : props.get("Cors");
+        if (cors == null || cors.isNull() || !cors.isObject()) {
+            return null;
+        }
+        Map<String, Object> request = new HashMap<>();
+        putList(request, "AllowHeaders", ctx.resolveStringList(cors, "AllowHeaders"));
+        putList(request, "AllowMethods", ctx.resolveStringList(cors, "AllowMethods"));
+        putList(request, "AllowOrigins", ctx.resolveStringList(cors, "AllowOrigins"));
+        putList(request, "ExposeHeaders", ctx.resolveStringList(cors, "ExposeHeaders"));
+        String allowCredentials = ctx.resolveOptional(cors, "AllowCredentials");
+        if (allowCredentials != null && !allowCredentials.isBlank()) {
+            request.put("AllowCredentials", Boolean.parseBoolean(allowCredentials));
+        }
+        String maxAge = ctx.resolveOptional(cors, "MaxAge");
+        if (maxAge != null && !maxAge.isBlank()) {
+            try {
+                request.put("MaxAge", Integer.valueOf(maxAge.trim()));
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError",
+                        URL + " Cors.MaxAge must be a number, got: " + maxAge, 400);
+            }
+        }
+        return request;
+    }
+
+    private static void putList(Map<String, Object> request, String key, List<String> values) {
+        if (values != null && !values.isEmpty()) {
+            request.put(key, values);
+        }
     }
 
     /** A statement taken off a function so it can be put back if the replacement fails. */
