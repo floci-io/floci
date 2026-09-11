@@ -734,6 +734,7 @@ public class RdsService implements Resettable, ResourceProvider {
             try {
                 sqlDump = containerManager.createPostgresSnapshot(instance.getContainerId(), instance.getMasterUsername());
             } catch (Exception e) {
+                LOG.warnv(e, "Failed to create snapshot {0} of DB instance {1}", snapshotId, instanceId);
                 throw new AwsException("InvalidDBInstanceState", "Failed to create snapshot: " + e.getMessage(), 400);
             }
         }

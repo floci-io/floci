@@ -154,7 +154,7 @@ class RdsContainerManagerPostgresTest {
     }
 
     private void waitForPostgresReady(String containerId, String user, String dbName, int maxSeconds) {
-        String[] cmd = {"psql", "-U", user, "-d", dbName, "-c", "SELECT 1"};
+        String[] cmd = {"psql", "-h", "127.0.0.1", "-U", user, "-d", dbName, "-c", "SELECT 1"};
         for (int i = 0; i < maxSeconds; i++) {
             try {
                 ExecResult result = exec(containerId, cmd, 5);

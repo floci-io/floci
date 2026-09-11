@@ -480,10 +480,16 @@ public class RdsContainerManager {
                 """;
     }
 
+    /**
+     * Connects over TCP loopback on purpose. The official image runs first-boot init against a
+     * temporary server that listens only on the Unix socket, so a socket connection can succeed
+     * before the final server is up. Loopback is trusted by the generated pg_hba.conf.
+     */
     private void initializePostgresIamRole(String containerName, String containerId, String masterUsername) {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
         String[] cmd = {
                 "psql",
+                "-h", "127.0.0.1",
                 "-v", "ON_ERROR_STOP=1",
                 "-U", effectiveUser,
                 "-d", "postgres",
