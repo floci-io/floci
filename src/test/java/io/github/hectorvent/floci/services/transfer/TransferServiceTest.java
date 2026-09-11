@@ -33,6 +33,7 @@ class TransferServiceTest {
     private AccountAwareStorageBackend<User> userStore;
     private InMemoryStorage<String, Server> serverDelegate;
     private AccountAwareStorageBackend<Map<String, String>> tagStore;
+    private InMemoryStorage<String, Map<String, String>> tagDelegate;
     private TransferService service;
     private RegionResolver regionResolver;
     private RequestContext requestContext;
@@ -50,8 +51,9 @@ class TransferServiceTest {
                 "111111111111");
         userStore = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance,
                 "111111111111");
+        tagDelegate = new InMemoryStorage<>();
         tagStore = new AccountAwareStorageBackend<>(
-                new InMemoryStorage<>(), requestContextInstance, "111111111111");
+                tagDelegate, requestContextInstance, "111111111111");
         StorageFactory factory = new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
@@ -190,5 +192,31 @@ class TransferServiceTest {
                 service.listTagsForResource(server.getArn()));
         assertTrue(tagStore.getForAccount("111111111111", "server/" + server.getServerId()).isEmpty());
         assertTrue(tagStore.getForAccount("111111111111", "us-east-1/server/" + server.getServerId()).isPresent());
+    }
+
+    @Test
+    void fullyUnscopedLegacyTagsAreMigratedToTheScopedKey() {
+        Server server = service.createServer("us-east-1", null, null, null, null,
+                null, null, null, null, null);
+        String legacyKey = "server/" + server.getServerId();
+        tagDelegate.put(legacyKey, Map.of("legacy", "tag"));
+
+        assertEquals(Map.of("legacy", "tag"), service.listTagsForResource(server.getArn()));
+        assertTrue(tagDelegate.get(legacyKey).isEmpty());
+        assertEquals(Map.of("legacy", "tag"),
+                tagStore.getForAccount("111111111111", "us-east-1/" + legacyKey).orElseThrow());
+    }
+
+    @Test
+    void scopedTagsWinOverFullyUnscopedLegacyDuplicates() {
+        Server server = service.createServer("us-east-1", null, null, null, null,
+                null, null, null, null, null);
+        String legacyKey = "server/" + server.getServerId();
+        tagDelegate.put(legacyKey, Map.of("legacy", "tag"));
+        tagStore.putForAccount("111111111111", "us-east-1/" + legacyKey,
+                Map.of("current", "tag"));
+
+        assertEquals(Map.of("current", "tag"), service.listTagsForResource(server.getArn()));
+        assertTrue(tagDelegate.get(legacyKey).isEmpty());
     }
 }
