@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -91,7 +92,7 @@ public class MwaaService implements TagHandler {
         dagSyncPoller.shutdownNow();
         if (!config.services().mwaa().mock() && !config.services().mwaa().keepRunningOnShutdown()) {
             for (Environment environment : allEnvironments()) {
-                proxyManager.stopProxy(environment.getName());
+                proxyManager.stopProxy(environmentIdentity(environment));
                 environmentManager.stopEnvironment(environment);
             }
         }
@@ -101,7 +102,9 @@ public class MwaaService implements TagHandler {
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationException", "Environment name is required", 400);
         }
-        if (storage.get(name).isPresent()) {
+        String accountId = regionResolver.getAccountId();
+        String region = regionResolver.getRegion();
+        if (getStoredEnvironment(accountId, region, name).isPresent()) {
             // CreateEnvironment's botocore model declares only ServiceUnavailableException,
             // ValidationException, and InternalServerException — no "already exists" shape — so an
             // SDK client can't map a ResourceAlreadyExistsException here.
@@ -111,8 +114,6 @@ public class MwaaService implements TagHandler {
 
         String version = resolveAirflowVersion(request.getAirflowVersion());
 
-        String region = config.defaultRegion();
-        String accountId = regionResolver.getAccountId();
         String arn = AwsArnUtils.Arn.of("airflow", region, accountId, "environment/" + name).toString();
 
         Environment environment = new Environment();
@@ -158,7 +159,7 @@ public class MwaaService implements TagHandler {
                 environment.setProxyPort(proxyPort);
                 environment.setWebserverUrl(buildWebserverUrl(proxyPort));
                 String airflowContainerId = environment.getAirflowContainerId();
-                proxyManager.startProxy(name, proxyPort,
+                proxyManager.startProxy(environmentIdentity(environment), proxyPort,
                         environment.getAirflowInternalHost(), environment.getAirflowInternalPort(),
                         this::isValidCliToken,
                         cliCommand -> environmentManager.runAirflowCli(airflowContainerId, cliCommand));
@@ -173,7 +174,7 @@ public class MwaaService implements TagHandler {
             }
         }
 
-        storage.put(name, environment);
+        putEnvironment(environment);
         return environment;
     }
 
@@ -187,7 +188,7 @@ public class MwaaService implements TagHandler {
      */
     private void rollbackFailedCreate(Environment environment, int proxyPort) {
         try {
-            proxyManager.stopProxy(environment.getName());
+            proxyManager.stopProxy(environmentIdentity(environment));
         } catch (Exception e) {
             LOG.warnv("Error stopping proxy while rolling back failed MWAA environment {0}: {1}",
                     environment.getName(), e.getMessage());
@@ -205,13 +206,19 @@ public class MwaaService implements TagHandler {
     }
 
     public Environment getEnvironment(String name) {
-        return storage.get(name)
+        return getStoredEnvironment(regionResolver.getAccountId(), regionResolver.getRegion(), name)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No environment found for name: " + name, 404));
     }
 
     public List<String> listEnvironments() {
-        return storage.scan(k -> true).stream()
+        String accountId = regionResolver.getAccountId();
+        String region = regionResolver.getRegion();
+        List<Environment> environments = storage instanceof AccountAwareStorageBackend<Environment> aware
+                ? aware.scanForAccount(accountId, k -> true)
+                : storage.scan(k -> true);
+        return environments.stream()
+                .filter(environment -> region.equals(environmentRegion(environment)))
                 .map(Environment::getName)
                 .collect(Collectors.toList());
     }
@@ -287,17 +294,18 @@ public class MwaaService implements TagHandler {
         Environment environment = getEnvironment(name);
         environment.setStatus(EnvironmentStatus.DELETING);
         if (!config.services().mwaa().mock()) {
-            proxyManager.stopProxy(name);
+            proxyManager.stopProxy(environmentIdentity(environment));
             environmentManager.stopEnvironment(environment);
             // Mirrors how Lambda/MSK/EC2/ECR release their allocated ports on cleanup — otherwise
             // repeated create/delete cycles exhaust the configured proxy port range even though no
             // MWAA proxy is actually running anymore.
             portAllocator.release(environment.getProxyPort());
         }
-        cliTokensByEnvironment.remove(name);
-        dagSyncState.remove(name);
-        requirementsEtagByEnvironment.remove(name);
-        storage.delete(name);
+        String environmentIdentity = environmentIdentity(environment);
+        cliTokensByEnvironment.remove(environmentIdentity);
+        dagSyncState.remove(environmentIdentity);
+        requirementsEtagByEnvironment.remove(environmentIdentity);
+        deleteEnvironment(environment);
         return environment;
     }
 
@@ -314,14 +322,14 @@ public class MwaaService implements TagHandler {
     public Map<String, Object> createCliToken(String name) {
         Environment environment = getEnvironment(name);
         String token = generateToken();
-        cliTokensByEnvironment.computeIfAbsent(name, k -> ConcurrentHashMap.newKeySet()).add(token);
+        cliTokensByEnvironment.computeIfAbsent(environmentIdentity(environment), k -> ConcurrentHashMap.newKeySet()).add(token);
         return Map.of(
                 "CliToken", token,
                 "WebServerHostname", hostnameFromUrl(environment.getWebserverUrl()));
     }
 
-    boolean isValidCliToken(String environmentName, String token) {
-        Set<String> tokens = cliTokensByEnvironment.get(environmentName);
+    boolean isValidCliToken(String environmentIdentity, String token) {
+        Set<String> tokens = cliTokensByEnvironment.get(environmentIdentity);
         return tokens != null && tokens.contains(token);
     }
 
@@ -392,11 +400,24 @@ public class MwaaService implements TagHandler {
     }
 
     private Environment findByArn(String resourceArn) {
-        int idx = resourceArn.lastIndexOf('/');
-        if (idx < 0 || idx == resourceArn.length() - 1) {
+        if (resourceArn == null) {
             throw new AwsException("ValidationException", "Invalid resource ARN: " + resourceArn, 400);
         }
-        return getEnvironment(resourceArn.substring(idx + 1));
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+            String name = arn.resource().startsWith("environment/")
+                    ? arn.resource().substring("environment/".length())
+                    : "";
+            if (name.isBlank() || arn.region().isBlank() || arn.accountId().isBlank()
+                    || !"airflow".equals(arn.service())) {
+                throw new IllegalArgumentException("not an MWAA environment ARN");
+            }
+            return getStoredEnvironment(arn.accountId(), arn.region(), name)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "No environment found for name: " + name, 404));
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", "Invalid resource ARN: " + resourceArn, 400);
+        }
     }
 
     private void startReadinessPoller() {
@@ -457,7 +478,8 @@ public class MwaaService implements TagHandler {
             currentByKey.put(relative, obj.getETag());
         }
 
-        Map<String, String> previous = dagSyncState.computeIfAbsent(environment.getName(), k -> new HashMap<>());
+        String environmentIdentity = environmentIdentity(environment);
+        Map<String, String> previous = dagSyncState.computeIfAbsent(environmentIdentity, k -> new HashMap<>());
         for (Map.Entry<String, String> entry : currentByKey.entrySet()) {
             String relative = entry.getKey();
             String etag = entry.getValue();
@@ -492,10 +514,11 @@ public class MwaaService implements TagHandler {
         }
         try {
             S3Object requirements = s3Service.getObject(bucket, environment.getRequirementsS3Path());
-            String lastEtag = requirementsEtagByEnvironment.get(environment.getName());
+            String environmentIdentity = environmentIdentity(environment);
+            String lastEtag = requirementsEtagByEnvironment.get(environmentIdentity);
             if (!requirements.getETag().equals(lastEtag)) {
                 environmentManager.installRequirements(environment, requirements.getData());
-                requirementsEtagByEnvironment.put(environment.getName(), requirements.getETag());
+                requirementsEtagByEnvironment.put(environmentIdentity, requirements.getETag());
             }
         } catch (Exception e) {
             LOG.warnv("Could not sync requirements.txt for environment {0}: {1}",
@@ -533,10 +556,60 @@ public class MwaaService implements TagHandler {
     }
 
     private void putEnvironment(Environment environment) {
-        if (environment.getAccountId() != null && storage instanceof AccountAwareStorageBackend<Environment> aware) {
-            aware.putForAccount(environment.getAccountId(), environment.getName(), environment);
+        String key = environmentKey(environmentRegion(environment), environment.getName());
+        String accountId = environmentAccount(environment);
+        if (accountId != null && storage instanceof AccountAwareStorageBackend<Environment> aware) {
+            aware.putForAccount(accountId, key, environment);
         } else {
-            storage.put(environment.getName(), environment);
+            storage.put(key, environment);
         }
     }
+
+    private void deleteEnvironment(Environment environment) {
+        String key = environmentKey(environmentRegion(environment), environment.getName());
+        String accountId = environmentAccount(environment);
+        if (accountId != null && storage instanceof AccountAwareStorageBackend<Environment> aware) {
+            aware.deleteForAccount(accountId, key);
+        } else {
+            storage.delete(key);
+        }
+    }
+
+    private Optional<Environment> getStoredEnvironment(String accountId, String region, String name) {
+        String key = environmentKey(region, name);
+        if (storage instanceof AccountAwareStorageBackend<Environment> aware) {
+            return aware.getForAccountMigratingLegacyKeys(accountId, key, List.of(name),
+                    environment -> accountId.equals(environmentAccount(environment))
+                            && region.equals(environmentRegion(environment)));
+        }
+        return storage.get(key);
+    }
+
+    private static String environmentKey(String region, String name) {
+        return region + "/" + name;
+    }
+
+    static String environmentIdentity(Environment environment) {
+        return environmentAccount(environment) + "/" + environmentRegion(environment) + "/" + environment.getName();
+    }
+
+    private static String environmentAccount(Environment environment) {
+        if (environment.getAccountId() != null) {
+            return environment.getAccountId();
+        }
+        try {
+            return AwsArnUtils.parse(environment.getArn()).accountId();
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static String environmentRegion(Environment environment) {
+        try {
+            return AwsArnUtils.parse(environment.getArn()).region();
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
 }

@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.mwaa;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -66,21 +66,18 @@ public class MwaaEnvironmentManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final LaunchedContainerAwsEnv awsEnv;
-    private final RegionResolver regionResolver;
 
     @Inject
     public MwaaEnvironmentManager(ContainerBuilder containerBuilder,
                                   ContainerLifecycleManager lifecycleManager,
                                   ContainerDetector containerDetector,
                                   EmulatorConfig config,
-                                  LaunchedContainerAwsEnv awsEnv,
-                                  RegionResolver regionResolver) {
+                                  LaunchedContainerAwsEnv awsEnv) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.config = config;
         this.awsEnv = awsEnv;
-        this.regionResolver = regionResolver;
     }
 
     /**
@@ -98,7 +95,7 @@ public class MwaaEnvironmentManager {
         String dbPassword = generateSecret(24);
         environment.setDbPassword(dbPassword);
 
-        String dbContainerName = dbContainerName(config, name);
+        String dbContainerName = dbContainerName(config, environment);
         String dbVolume = dbContainerName;
         lifecycleManager.removeIfExists(dbContainerName);
         lifecycleManager.ensureVolume(dbVolume);
@@ -114,7 +111,7 @@ public class MwaaEnvironmentManager {
                 .withExposedPort(POSTGRES_PORT)
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "mwaa", name, regionResolver.getAccountId(), regionResolver.getDefaultRegion()))
+                        "mwaa", name, environmentAccount(environment), environmentRegion(environment)))
                 .build();
 
         String dbContainerId = lifecycleManager.create(dbSpec);
@@ -135,7 +132,7 @@ public class MwaaEnvironmentManager {
     void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
                                byte[] startupScriptContent) {
         String name = environment.getName();
-        String airflowContainerName = airflowContainerName(config, name);
+        String airflowContainerName = airflowContainerName(config, environment);
         String dagsVolume = airflowContainerName + "-dags";
         String logsVolume = airflowContainerName + "-logs";
 
@@ -151,7 +148,7 @@ public class MwaaEnvironmentManager {
         // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
         // Lambda/ECS containers already do via LaunchedContainerAwsEnv — otherwise a real DAG's
         // boto3.client("s3") etc. would target real AWS instead of this emulator.
-        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(config.defaultRegion(), Optional.empty()));
+        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(environmentRegion(environment), Optional.empty()));
         env.addAll(List.of(
                 "AIRFLOW__CORE__EXECUTOR=LocalExecutor",
                 "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=" + sqlAlchemyConn,
@@ -177,7 +174,7 @@ public class MwaaEnvironmentManager {
                 .withDockerNetwork(config.services().mwaa().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "mwaa", name, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "mwaa", name, environmentAccount(environment), environmentRegion(environment)));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(AIRFLOW_WEBSERVER_PORT);
@@ -293,8 +290,8 @@ public class MwaaEnvironmentManager {
         if (environment.getDbContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getDbContainerId(), null);
         }
-        String airflowContainerName = airflowContainerName(config, name);
-        lifecycleManager.removeVolume(dbContainerName(config, name));
+        String airflowContainerName = airflowContainerName(config, environment);
+        lifecycleManager.removeVolume(dbContainerName(config, environment));
         lifecycleManager.removeVolume(airflowContainerName + "-dags");
         lifecycleManager.removeVolume(airflowContainerName + "-logs");
         LOG.infov("Stopped MWAA containers for environment {0}", name);
@@ -351,6 +348,29 @@ public class MwaaEnvironmentManager {
 
     static String airflowContainerName(EmulatorConfig config, String environmentName) {
         return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentName + "-airflow");
+    }
+
+    static String dbContainerName(EmulatorConfig config, Environment environment) {
+        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentIdentity(environment) + "-db");
+    }
+
+    static String airflowContainerName(EmulatorConfig config, Environment environment) {
+        return ContainerStorageHelper.dockerName(config,
+                "floci-mwaa-" + environmentIdentity(environment) + "-airflow");
+    }
+
+    private static String environmentIdentity(Environment environment) {
+        return environmentAccount(environment) + "-" + environmentRegion(environment) + "-" + environment.getName();
+    }
+
+    private static String environmentAccount(Environment environment) {
+        return environment.getAccountId() != null
+                ? environment.getAccountId()
+                : AwsArnUtils.accountOrDefault(environment.getArn(), "000000000000");
+    }
+
+    private static String environmentRegion(Environment environment) {
+        return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1");
     }
 
     /**

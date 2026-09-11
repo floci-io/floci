@@ -31,6 +31,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -41,6 +42,9 @@ import static org.mockito.Mockito.when;
 class MwaaServiceTest {
 
     private MwaaService mwaaService;
+    private AccountAwareStorageBackend<Environment> environmentStorage;
+    private String currentAccount;
+    private String currentRegion;
 
     @BeforeEach
     void setUp() {
@@ -48,14 +52,99 @@ class MwaaServiceTest {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return AccountAwareStorageBackend.inMemory("000000000000");
+                environmentStorage = AccountAwareStorageBackend.<Environment>inMemory("000000000000");
+                return (AccountAwareStorageBackend<V>) (AccountAwareStorageBackend<?>) environmentStorage;
             }
         };
 
         EmulatorConfig config = testConfig();
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        currentAccount = "000000000000";
+        currentRegion = "us-east-1";
+        RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenAnswer(invocation -> currentAccount);
+        when(regionResolver.getRegion()).thenAnswer(invocation -> currentRegion);
         S3Service s3Service = Mockito.mock(S3Service.class);
         mwaaService = new MwaaService(storageFactory, config, regionResolver, null, null, null, s3Service);
+    }
+
+    @Test
+    void sameNameEnvironmentsAreIsolatedByAccountAndRegion() {
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+        Environment eastEnvironment = mwaaService.createEnvironment("shared-name",
+                createRequest("arn:aws:s3:::east-bucket", "dags"));
+
+        currentAccount = "222222222222";
+        currentRegion = "eu-west-1";
+        Environment westEnvironment = mwaaService.createEnvironment("shared-name",
+                createRequest("arn:aws:s3:::west-bucket", "dags"));
+
+        assertNotEquals(eastEnvironment.getArn(), westEnvironment.getArn());
+        assertEquals(westEnvironment.getArn(), mwaaService.getEnvironment("shared-name").getArn());
+        assertEquals(List.of("shared-name"), mwaaService.listEnvironments());
+
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+        assertEquals(eastEnvironment.getArn(), mwaaService.getEnvironment("shared-name").getArn());
+        assertEquals(List.of("shared-name"), mwaaService.listEnvironments());
+    }
+
+    @Test
+    void deletingOneScopedEnvironmentDoesNotDeleteAnotherWithTheSameName() {
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+        Environment eastEnvironment = mwaaService.createEnvironment("shared-name",
+                createRequest("arn:aws:s3:::east-bucket", "dags"));
+
+        currentAccount = "222222222222";
+        currentRegion = "eu-west-1";
+        mwaaService.createEnvironment("shared-name", createRequest("arn:aws:s3:::west-bucket", "dags"));
+        mwaaService.deleteEnvironment("shared-name");
+
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+        assertEquals(eastEnvironment.getArn(), mwaaService.getEnvironment("shared-name").getArn());
+    }
+
+    @Test
+    void cliTokensAreIsolatedForSameNameEnvironments() {
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+        Environment eastEnvironment = mwaaService.createEnvironment("shared-name",
+                createRequest("arn:aws:s3:::east-bucket", "dags"));
+        String eastToken = (String) mwaaService.createCliToken("shared-name").get("CliToken");
+
+        currentAccount = "222222222222";
+        currentRegion = "eu-west-1";
+        Environment westEnvironment = mwaaService.createEnvironment("shared-name",
+                createRequest("arn:aws:s3:::west-bucket", "dags"));
+        String westToken = (String) mwaaService.createCliToken("shared-name").get("CliToken");
+
+        assertTrue(mwaaService.isValidCliToken(MwaaService.environmentIdentity(westEnvironment), westToken));
+        assertFalse(mwaaService.isValidCliToken(MwaaService.environmentIdentity(westEnvironment), eastToken));
+        assertTrue(mwaaService.isValidCliToken(MwaaService.environmentIdentity(eastEnvironment), eastToken));
+        assertFalse(mwaaService.isValidCliToken(MwaaService.environmentIdentity(eastEnvironment), westToken));
+    }
+
+    @Test
+    void legacyEnvironmentIsMigratedOnlyWhenItsAccountAndRegionMatch() {
+        Environment legacy = new Environment();
+        legacy.setName("legacy-env");
+        legacy.setArn("arn:aws:airflow:us-east-1:111111111111:environment/legacy-env");
+        environmentStorage.putForAccount("111111111111", "legacy-env", legacy);
+
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+        assertEquals(legacy, mwaaService.getEnvironment("legacy-env"));
+
+        Environment wrongRegion = new Environment();
+        wrongRegion.setName("foreign-env");
+        wrongRegion.setArn("arn:aws:airflow:eu-west-1:222222222222:environment/foreign-env");
+        environmentStorage.putForAccount("222222222222", "foreign-env", wrongRegion);
+
+        currentAccount = "222222222222";
+        currentRegion = "us-east-1";
+        assertThrows(AwsException.class, () -> mwaaService.getEnvironment("foreign-env"));
     }
 
     private EmulatorConfig testConfig() {
@@ -290,6 +379,24 @@ class MwaaServiceTest {
     }
 
     @Test
+    void taggingUsesTheAccountAndRegionInTheResourceArn() {
+        currentAccount = "111111111111";
+        currentRegion = "us-east-1";
+        Environment first = mwaaService.createEnvironment("shared-name",
+                createRequest("arn:aws:s3:::first-bucket", "dags"));
+
+        currentAccount = "222222222222";
+        currentRegion = "eu-west-1";
+        mwaaService.createEnvironment("shared-name", createRequest("arn:aws:s3:::second-bucket", "dags"));
+
+        mwaaService.tagResource(null, first.getArn(), Map.of("owner", "first"));
+
+        assertEquals(Map.of("owner", "first"), mwaaService.listTags(null, first.getArn()));
+        assertTrue(mwaaService.listTags(null,
+                "arn:aws:airflow:eu-west-1:222222222222:environment/shared-name").isEmpty());
+    }
+
+    @Test
     void tagHandlerServiceKeyIsAirflow() {
         assertEquals("airflow", mwaaService.serviceKey());
         assertEquals("Tags", mwaaService.tagsBodyKey());
@@ -311,8 +418,10 @@ class MwaaServiceTest {
         Map<String, Object> response = mwaaService.createCliToken("cli-token-env");
         String token = (String) response.get("CliToken");
         assertNotNull(token);
-        assertTrue(mwaaService.isValidCliToken("cli-token-env", token));
-        assertFalse(mwaaService.isValidCliToken("cli-token-env", "not-a-real-token"));
+        assertTrue(mwaaService.isValidCliToken(MwaaService.environmentIdentity(
+                mwaaService.getEnvironment("cli-token-env")), token));
+        assertFalse(mwaaService.isValidCliToken(MwaaService.environmentIdentity(
+                mwaaService.getEnvironment("cli-token-env")), "not-a-real-token"));
         assertFalse(mwaaService.isValidCliToken("other-env", token));
     }
 
@@ -399,7 +508,7 @@ class MwaaServiceTest {
             assertEquals(EnvironmentStatus.CREATE_FAILED, environment.getStatus());
             verify(portAllocator).release(8701);
             verify(environmentManager).stopEnvironment(environment);
-            verify(proxyManager).stopProxy("failed-proxy-env");
+            verify(proxyManager).stopProxy(MwaaService.environmentIdentity(environment));
         }
     }
 }

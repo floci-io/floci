@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.mwaa;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -27,6 +26,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -41,7 +41,6 @@ class MwaaEnvironmentManagerTest {
 
     private ContainerLifecycleManager lifecycleManager;
     private ContainerDetector containerDetector;
-    private RegionResolver regionResolver;
     private MwaaEnvironmentManager manager;
 
     @BeforeEach
@@ -78,13 +77,14 @@ class MwaaEnvironmentManagerTest {
                 "AWS_ACCESS_KEY_ID=test",
                 "AWS_SECRET_ACCESS_KEY=test",
                 "AWS_ENDPOINT_URL=http://localhost:4566"));
-
-        regionResolver = Mockito.mock(RegionResolver.class);
-        when(regionResolver.getAccountId()).thenReturn("000000000000");
-        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+        when(awsEnv.sdkBaselineEnv(eq("eu-west-1"), any())).thenReturn(List.of(
+                "AWS_DEFAULT_REGION=eu-west-1",
+                "AWS_ACCESS_KEY_ID=test",
+                "AWS_SECRET_ACCESS_KEY=test",
+                "AWS_ENDPOINT_URL=http://localhost:4566"));
 
         manager = new MwaaEnvironmentManager(containerBuilder, lifecycleManager, containerDetector, config,
-                awsEnv, regionResolver);
+                awsEnv);
     }
 
     @SuppressWarnings("unchecked")
@@ -155,6 +155,24 @@ class MwaaEnvironmentManagerTest {
         assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://localhost:4566"),
                 "DAG code's own boto3 calls must target Floci, not real AWS");
         assertTrue(spec.env().contains("AWS_DEFAULT_REGION=us-east-1"));
+    }
+
+    @Test
+    void airflowContainerUsesTheEnvironmentRegionForItsOwnAwsSdkCalls() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+        when(lifecycleManager.startCreated(eq("airflow-container-id"), any())).thenReturn(
+                new ContainerInfo("airflow-container-id", Map.of(8080, new EndpointInfo("172.18.0.5", 8080))));
+
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setArn("arn:aws:airflow:eu-west-1:111111111111:environment/my-env");
+
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null);
+
+        ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(captor.capture());
+        assertTrue(captor.getValue().env().contains("AWS_DEFAULT_REGION=eu-west-1"));
     }
 
     @Test
@@ -232,6 +250,24 @@ class MwaaEnvironmentManagerTest {
                 MwaaEnvironmentManager.dbContainerName(namespacedConfig, "my-env"));
         assertEquals("floci-ns1-mwaa-my-env-airflow",
                 MwaaEnvironmentManager.airflowContainerName(namespacedConfig, "my-env"));
+    }
+
+    @Test
+    void scopedContainerNamesDifferForSameNameEnvironments() {
+        Environment eastEnvironment = new Environment();
+        eastEnvironment.setName("shared-name");
+        eastEnvironment.setAccountId("111111111111");
+        eastEnvironment.setArn("arn:aws:airflow:us-east-1:111111111111:environment/shared-name");
+
+        Environment westEnvironment = new Environment();
+        westEnvironment.setName("shared-name");
+        westEnvironment.setAccountId("222222222222");
+        westEnvironment.setArn("arn:aws:airflow:eu-west-1:222222222222:environment/shared-name");
+
+        assertNotEquals(MwaaEnvironmentManager.dbContainerName(null, eastEnvironment),
+                MwaaEnvironmentManager.dbContainerName(null, westEnvironment));
+        assertNotEquals(MwaaEnvironmentManager.airflowContainerName(null, eastEnvironment),
+                MwaaEnvironmentManager.airflowContainerName(null, westEnvironment));
     }
 
     @Test
