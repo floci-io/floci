@@ -1263,4 +1263,62 @@ class DynamoDbJsonHandlerTest {
         assertEquals("Invalid ProjectionExpression: Expression size has exceeded the maximum allowed size;",
                 ex.getMessage());
     }
+
+    private ObjectNode nestedMaps(int levels) {
+        ObjectNode value = attributeValue("S", "leaf");
+        for (var i = 0; i < levels; i++) {
+            var map = mapper.createObjectNode();
+            map.set("n", value);
+            value = mapper.createObjectNode();
+            value.set("M", map);
+        }
+        return value;
+    }
+
+    private ObjectNode putRequest(JsonNode value) {
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        var item = item("userId", "u1");
+        item.set("data", value);
+        request.set("Item", item);
+        return request;
+    }
+
+    private static final String NESTING_MESSAGE = "1 validation error detected: Nesting Levels have exceeded "
+            + "supported limits: Attributes in the item have nested levels beyond supported limit";
+
+    @Test
+    void putItemAcceptsAnAttributeWithALeafAtLevel32() throws Exception {
+        createUsersTable("eu-west-1");
+
+        var response = handler.handle("PutItem", putRequest(nestedMaps(31)), "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void putItemRejectsAnAttributeWithALeafAtLevel33BeforeTheTableLookup() {
+        var request = putRequest(nestedMaps(32));
+        request.put("TableName", "Missing");
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(NESTING_MESSAGE, ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsAnExpressionAttributeValueWithALeafAtLevel33() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "SET touched = :t");
+        request.put("ConditionExpression", "#d = :deep");
+        request.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
+        var values = singleValue(":t");
+        values.set(":deep", nestedMaps(32));
+        request.set("ExpressionAttributeValues", values);
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals(NESTING_MESSAGE, ex.getMessage());
+    }
 }

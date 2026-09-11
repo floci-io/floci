@@ -412,6 +412,8 @@ public class DynamoDbJsonHandler {
                     + String.join("; ", validationErrors), 400);
         }
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
         String conditionalOperator = request.has("ConditionalOperator")
@@ -542,6 +544,7 @@ public class DynamoDbJsonHandler {
                     + String.join("; ", delValidationErrors), 400);
         }
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
 
         // EAN/EAV with no expression to reference them: AWS reports "can only be specified
         // when using expressions", not the "unused in expressions" wording (#2893).
@@ -607,6 +610,7 @@ public class DynamoDbJsonHandler {
         }
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
         JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
@@ -941,6 +945,7 @@ public class DynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(keyConditionExpr, "KeyConditionExpression");
         DynamoDbExpressionSize.checkRead(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpression);
@@ -1111,6 +1116,7 @@ public class DynamoDbJsonHandler {
 
         DynamoDbExpressionSize.checkScanFilter(filterExpr);
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpressionScan);
 
