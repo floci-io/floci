@@ -36,6 +36,7 @@
 | `DisableEnhancedMonitoring` | - |
 | `UpdateStreamMode` | - |
 | `UpdateMaxRecordSize` | - |
+| `UpdateShardCount` | - |
 <!-- floci:actions:end -->
 
 ## Local Inspection Endpoints
@@ -71,6 +72,24 @@ A `LATEST` iterator is positioned at the shard tip at the moment the iterator is
 ## Record Routing
 
 `PutRecord` and `PutRecords` honor `ExplicitHashKey` when it is provided. The value must be a decimal integer in the Kinesis hash-key space, and records are written to the open shard whose `HashKeyRange` contains that value. Without `ExplicitHashKey`, Floci keeps using the partition key to choose a shard.
+
+## Shard Scaling (UpdateShardCount)
+
+`UpdateShardCount` enforces the documented default limits: at most double the current
+open shard count per call, at most ten calls per rolling 24-hour period per stream, a
+10000-shard ceiling, and the asymmetric rule that a stream already above 10000 shards can
+only move to a target strictly below it.
+
+The minimum bound (`TargetShardCount` cannot go below half the current open shard count)
+rounds up for an odd current count, so `current=5` accepts `target=3` but rejects
+`target=2`. AWS's documentation says only "below half" with no stated rounding, so which
+direction an odd count rounds is Floci's own call rather than observed AWS behavior; this
+is the more conservative reading (fewer shards allowed, not more).
+
+AWS also documents a separate 10 TPS call-rate limit on this action ("Make over 10 TPS.
+TPS over 10 will trigger the LimitExceededException"), independent of the ten-calls-per-24h
+limit above. Floci does not simulate real-time request throttling for this or any other
+action, so that limit is intentionally unenforced here.
 
 ## Configuration
 

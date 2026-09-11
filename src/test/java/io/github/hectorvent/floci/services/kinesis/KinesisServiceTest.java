@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -446,6 +447,182 @@ class KinesisServiceTest {
         assertTrue(updated.getShards().get(0).isClosed());
         assertTrue(updated.getShards().get(1).isClosed());
         assertFalse(updated.getShards().get(2).isClosed());
+    }
+
+    @Test
+    void updateShardCountScalesUpToDouble() {
+        kinesisService.createStream("my-stream", 2, REGION);
+
+        KinesisService.UpdateShardCountResult result =
+                kinesisService.updateShardCount("my-stream", 4, "UNIFORM_SCALING", REGION);
+
+        assertEquals(2, result.currentShardCount());
+        assertEquals(4, result.targetShardCount());
+        assertEquals("my-stream", result.streamName());
+
+        KinesisStream updated = kinesisService.describeStream("my-stream", REGION);
+        List<KinesisShard> openShards = updated.getShards().stream().filter(s -> !s.isClosed()).toList();
+        assertEquals(4, openShards.size());
+        assertEquals(2, updated.getShards().stream().filter(KinesisShard::isClosed).count());
+    }
+
+    @Test
+    void updateShardCountScalesDownToHalf() {
+        kinesisService.createStream("my-stream", 4, REGION);
+
+        KinesisService.UpdateShardCountResult result =
+                kinesisService.updateShardCount("my-stream", 2, "UNIFORM_SCALING", REGION);
+
+        assertEquals(4, result.currentShardCount());
+        assertEquals(2, result.targetShardCount());
+
+        KinesisStream updated = kinesisService.describeStream("my-stream", REGION);
+        List<KinesisShard> openShards = updated.getShards().stream().filter(s -> !s.isClosed()).toList();
+        assertEquals(2, openShards.size());
+        assertEquals(4, updated.getShards().stream().filter(KinesisShard::isClosed).count());
+    }
+
+    @Test
+    void updateShardCountRejectsTargetAboveDouble() {
+        kinesisService.createStream("my-stream", 2, REGION);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> kinesisService.updateShardCount("my-stream", 5, "UNIFORM_SCALING", REGION));
+        assertEquals("LimitExceededException", ex.getErrorCode());
+
+        assertEquals(2, kinesisService.describeStream("my-stream", REGION).getShards().size());
+    }
+
+    @Test
+    void updateShardCountRejectsTargetBelowHalf() {
+        kinesisService.createStream("my-stream", 4, REGION);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> kinesisService.updateShardCount("my-stream", 1, "UNIFORM_SCALING", REGION));
+        assertEquals("LimitExceededException", ex.getErrorCode());
+
+        assertEquals(4, kinesisService.describeStream("my-stream", REGION).getShards().size());
+    }
+
+    @Test
+    void updateShardCountAllowsExactlyHalfRoundedUp() {
+        // current=5, half rounded up is 3: 2 is rejected, 3 is the lowest allowed target.
+        kinesisService.createStream("my-stream", 5, REGION);
+
+        assertThrows(AwsException.class,
+                () -> kinesisService.updateShardCount("my-stream", 2, "UNIFORM_SCALING", REGION));
+
+        KinesisService.UpdateShardCountResult result =
+                kinesisService.updateShardCount("my-stream", 3, "UNIFORM_SCALING", REGION);
+        assertEquals(3, result.targetShardCount());
+    }
+
+    @Test
+    void updateShardCountRejectsNonUniformScalingType() {
+        kinesisService.createStream("my-stream", 2, REGION);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> kinesisService.updateShardCount("my-stream", 4, "BISECTION", REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateShardCountRejectsOnDemandStream() {
+        kinesisService.createStream("my-stream", 2, "ON_DEMAND", REGION);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> kinesisService.updateShardCount("my-stream", 4, "UNIFORM_SCALING", REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateShardCountSplitLineageRecordsParentAndCoversWholeRange() {
+        kinesisService.createStream("my-stream", 2, REGION);
+        KinesisStream before = kinesisService.describeStream("my-stream", REGION);
+        List<String> originalOpenIds = before.getShards().stream().map(KinesisShard::getShardId).toList();
+
+        kinesisService.updateShardCount("my-stream", 4, "UNIFORM_SCALING", REGION);
+
+        KinesisStream after = kinesisService.describeStream("my-stream", REGION);
+        List<KinesisShard> newOpenShards = after.getShards().stream()
+                .filter(s -> !s.isClosed())
+                .toList();
+        assertEquals(4, newOpenShards.size());
+
+        for (KinesisShard child : newOpenShards) {
+            assertNotNull(child.getParentShardId(), "each split child must record its parent");
+            assertTrue(originalOpenIds.contains(child.getParentShardId()),
+                    "split child's parent must be one of the pre-scaling open shards");
+            assertNull(child.getAdjacentParentShardId(), "a split child has no adjacent parent");
+        }
+
+        for (String originalId : originalOpenIds) {
+            KinesisShard closedParent = after.getShards().stream()
+                    .filter(s -> s.getShardId().equals(originalId))
+                    .findFirst().orElseThrow();
+            assertTrue(closedParent.isClosed(), "original open shards must be closed after a split");
+
+            List<KinesisShard> children = newOpenShards.stream()
+                    .filter(s -> originalId.equals(s.getParentShardId()))
+                    .toList();
+            assertEquals(2, children.size(), "each split parent must have exactly two children");
+            KinesisShard first = children.get(0);
+            KinesisShard second = children.get(1);
+            assertEquals(closedParent.getHashKeyRange().startingHashKey(), first.getHashKeyRange().startingHashKey());
+            assertEquals(closedParent.getHashKeyRange().endingHashKey(), second.getHashKeyRange().endingHashKey());
+            assertEquals(
+                    new java.math.BigInteger(first.getHashKeyRange().endingHashKey()).add(java.math.BigInteger.ONE).toString(),
+                    second.getHashKeyRange().startingHashKey(),
+                    "children must tile the parent's range with no gap or overlap");
+        }
+    }
+
+    @Test
+    void updateShardCountMergeLineageRecordsBothParents() {
+        kinesisService.createStream("my-stream", 4, REGION);
+        KinesisStream before = kinesisService.describeStream("my-stream", REGION);
+        List<KinesisShard> originalOpenShards = before.getShards().stream()
+                .sorted(Comparator.comparing(s -> new java.math.BigInteger(s.getHashKeyRange().startingHashKey())))
+                .toList();
+
+        kinesisService.updateShardCount("my-stream", 2, "UNIFORM_SCALING", REGION);
+
+        KinesisStream after = kinesisService.describeStream("my-stream", REGION);
+        List<KinesisShard> newOpenShards = after.getShards().stream()
+                .filter(s -> !s.isClosed())
+                .toList();
+        assertEquals(2, newOpenShards.size());
+
+        List<String> expectedParents = originalOpenShards.stream().map(KinesisShard::getShardId).toList();
+        List<String> actualParentPairs = new ArrayList<>();
+        for (KinesisShard mergedShard : newOpenShards) {
+            assertNotNull(mergedShard.getParentShardId(), "merge child must record its first parent");
+            assertNotNull(mergedShard.getAdjacentParentShardId(), "merge child must record its adjacent parent");
+            actualParentPairs.add(mergedShard.getParentShardId());
+            actualParentPairs.add(mergedShard.getAdjacentParentShardId());
+        }
+        assertEquals(new HashSet<>(expectedParents), new HashSet<>(actualParentPairs));
+
+        for (String originalId : expectedParents) {
+            KinesisShard closedParent = after.getShards().stream()
+                    .filter(s -> s.getShardId().equals(originalId))
+                    .findFirst().orElseThrow();
+            assertTrue(closedParent.isClosed(), "merged parent shards must be closed");
+        }
+    }
+
+    @Test
+    void updateShardCountRejectsMoreThanTenScalesInRollingDay() {
+        kinesisService.createStream("my-stream", 128, REGION);
+        String streamName = "my-stream";
+        for (int i = 0; i < 10; i++) {
+            int target = 128 + (i % 2 == 0 ? 1 : -1);
+            kinesisService.updateShardCount(streamName, target, "UNIFORM_SCALING", REGION);
+        }
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> kinesisService.updateShardCount(streamName, 129, "UNIFORM_SCALING", REGION));
+        assertEquals("LimitExceededException", ex.getErrorCode());
     }
 
     @Test

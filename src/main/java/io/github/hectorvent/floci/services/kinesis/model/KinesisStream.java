@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -28,6 +29,11 @@ public class KinesisStream {
     private Set<String> enhancedMonitoringMetrics = new HashSet<>();
     // AWS's default; streams persisted before this field existed read as the default too.
     private int maxRecordSizeInKiB = 1024;
+    /**
+     * UpdateShardCount call timestamps, kept to enforce the rolling 24-hour scaling-operation
+     * limit. Streams persisted before this field existed read back as an empty history.
+     */
+    private List<Instant> shardCountUpdateTimestamps = new ArrayList<>();
 
     public KinesisStream() {}
 
@@ -78,4 +84,9 @@ public class KinesisStream {
 
     public Set<String> getEnhancedMonitoringMetrics() { return enhancedMonitoringMetrics; }
     public void setEnhancedMonitoringMetrics(Set<String> enhancedMonitoringMetrics) { this.enhancedMonitoringMetrics = enhancedMonitoringMetrics; }
+
+    public List<Instant> getShardCountUpdateTimestamps() { return shardCountUpdateTimestamps; }
+    public void setShardCountUpdateTimestamps(List<Instant> shardCountUpdateTimestamps) {
+        this.shardCountUpdateTimestamps = shardCountUpdateTimestamps == null ? new ArrayList<>() : shardCountUpdateTimestamps;
+    }
 }

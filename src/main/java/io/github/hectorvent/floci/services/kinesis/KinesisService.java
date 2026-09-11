@@ -16,6 +16,7 @@ import org.jboss.logging.Logger;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,6 +45,14 @@ public class KinesisService implements ResourceProvider {
     private static final int MAX_RECORD_SIZE_KIB = 10240;
     private static final int MAX_RECORDS_PER_REQUEST = 500;
     private static final int MAX_REQUEST_SIZE_BYTES = 10 * 1024 * 1024;
+    /**
+     * UpdateShardCount's documented default limits: the per-account/region shard-per-stream
+     * ceiling, and how many scaling calls a stream may take in a rolling 24-hour window.
+     */
+    private static final int MAX_SHARDS_PER_STREAM = 10000;
+    private static final int MAX_SHARD_COUNT_UPDATES_PER_DAY = 10;
+    private static final Duration SHARD_COUNT_UPDATE_WINDOW = Duration.ofHours(24);
+    private static final String UNIFORM_SCALING = "UNIFORM_SCALING";
     private static final String MIN_HASH_KEY_VALUE = "0";
     private static final String INITIAL_SEQUENCE_NUMBER = "0";
     private static final BigInteger MIN_HASH_KEY = BigInteger.ZERO;
@@ -465,6 +474,166 @@ public class KinesisService implements ResourceProvider {
 
     private String subtractOne(String val) {
         return new BigInteger(val).subtract(BigInteger.ONE).toString();
+    }
+
+    public record UpdateShardCountResult(String streamName, String streamArn,
+                                          int currentShardCount, int targetShardCount) {}
+
+    /**
+     * Reshards a stream to {@code targetShardCount} open shards using uniform scaling: the only
+     * scaling type AWS documents. Internally this is expressed purely as a sequence of
+     * {@link #splitShard} and {@link #mergeShards} calls, exactly as real Kinesis performs
+     * UpdateShardCount as splits or merges on individual shards, so shard lineage
+     * (parent/adjacent-parent) comes out identical to calling those APIs by hand.
+     */
+    public UpdateShardCountResult updateShardCount(String streamName, int targetShardCount, String scalingType, String region) {
+        if (!UNIFORM_SCALING.equals(scalingType)) {
+            throw new AwsException("InvalidArgumentException",
+                    "ScalingType must be UNIFORM_SCALING, got: " + scalingType, 400);
+        }
+        if (targetShardCount < 1) {
+            throw new AwsException("InvalidArgumentException",
+                    "TargetShardCount must be at least 1, got: " + targetShardCount, 400);
+        }
+
+        String key = regionKey(region, streamName);
+        int currentOpenShardCount;
+        synchronized (lockFor(key)) {
+            KinesisStream stream = resolveStream(streamName, region);
+
+            if ("ON_DEMAND".equals(stream.getStreamMode())) {
+                throw new AwsException("ValidationException",
+                        "UpdateShardCount is only supported for data streams with the provisioned capacity mode.",
+                        400);
+            }
+            if (!"ACTIVE".equals(stream.getStreamStatus())) {
+                throw new AwsException("ResourceInUseException",
+                        "Stream " + streamName + " is not ACTIVE (current state: " + stream.getStreamStatus() + ")", 400);
+            }
+
+            currentOpenShardCount = (int) stream.getShards().stream().filter(s -> !s.isClosed()).count();
+            validateTargetShardCount(streamName, currentOpenShardCount, targetShardCount);
+            recordShardCountUpdate(stream, key);
+
+            applyUniformScaling(streamName, stream, currentOpenShardCount, targetShardCount, region);
+
+            return new UpdateShardCountResult(streamName, stream.getStreamArn(), currentOpenShardCount, targetShardCount);
+        }
+    }
+
+    /**
+     * Enforces UpdateShardCount's documented default limits. The minimum bound rounds up for an
+     * odd current shard count ({@code (n + 1) / 2}), so current=5 accepts target=3 but rejects
+     * target=2; AWS documents only "below half" with no stated rounding, so the rounding direction
+     * here is Floci's own call, chosen as the more conservative reading. AWS's separate 10 TPS
+     * call-rate limit on this action is not enforced: Floci does not simulate real-time request
+     * throttling for any action.
+     */
+    private void validateTargetShardCount(String streamName, int currentOpenShardCount, int targetShardCount) {
+        int maxAllowed = currentOpenShardCount * 2;
+        int minAllowed = (currentOpenShardCount + 1) / 2;
+        if (targetShardCount > maxAllowed) {
+            throw new AwsException("LimitExceededException",
+                    "TargetShardCount of " + targetShardCount + " for stream " + streamName
+                            + " exceeds double the current open shard count of " + currentOpenShardCount + ".", 400);
+        }
+        if (targetShardCount < minAllowed) {
+            throw new AwsException("LimitExceededException",
+                    "TargetShardCount of " + targetShardCount + " for stream " + streamName
+                            + " is below half the current open shard count of " + currentOpenShardCount + ".", 400);
+        }
+        if (targetShardCount > MAX_SHARDS_PER_STREAM) {
+            throw new AwsException("LimitExceededException",
+                    "TargetShardCount of " + targetShardCount + " exceeds the shard limit of "
+                            + MAX_SHARDS_PER_STREAM + " shards per stream.", 400);
+        }
+        if (currentOpenShardCount > MAX_SHARDS_PER_STREAM && targetShardCount >= MAX_SHARDS_PER_STREAM) {
+            throw new AwsException("LimitExceededException",
+                    "Stream " + streamName + " already has more than " + MAX_SHARDS_PER_STREAM
+                            + " shards; it can only be scaled down below that limit.", 400);
+        }
+    }
+
+    /** Enforces the "no more than ten UpdateShardCount calls per rolling 24 hours" default limit. */
+    private void recordShardCountUpdate(KinesisStream stream, String storageKey) {
+        Instant now = Instant.now();
+        Instant windowStart = now.minus(SHARD_COUNT_UPDATE_WINDOW);
+        List<Instant> recent = new ArrayList<>(stream.getShardCountUpdateTimestamps().stream()
+                .filter(t -> t.isAfter(windowStart))
+                .toList());
+        if (recent.size() >= MAX_SHARD_COUNT_UPDATES_PER_DAY) {
+            throw new AwsException("LimitExceededException",
+                    "Stream " + stream.getStreamName() + " has already been scaled "
+                            + MAX_SHARD_COUNT_UPDATES_PER_DAY + " times in the past 24 hours.", 400);
+        }
+        recent.add(now);
+        stream.setShardCountUpdateTimestamps(recent);
+        store.put(storageKey, stream);
+    }
+
+    /**
+     * Reaches {@code targetShardCount} open shards by splitting the widest open shards (scale up)
+     * or merging the narrowest disjoint adjacent pairs (scale down), so the resulting topology
+     * stays as close to equal-width as the existing shard layout allows.
+     */
+    private void applyUniformScaling(String streamName, KinesisStream stream,
+                                      int currentOpenShardCount, int targetShardCount, String region) {
+        if (targetShardCount > currentOpenShardCount) {
+            int splitsNeeded = targetShardCount - currentOpenShardCount;
+            List<KinesisShard> splitCandidates = stream.getShards().stream()
+                    .filter(s -> !s.isClosed())
+                    .sorted(Comparator.comparing(KinesisService::hashRangeWidth).reversed()
+                            .thenComparing(KinesisShard::getShardId))
+                    .limit(splitsNeeded)
+                    .toList();
+            for (KinesisShard parent : splitCandidates) {
+                splitShard(streamName, parent.getShardId(), midpointHashKey(parent.getHashKeyRange()), region);
+            }
+        } else if (targetShardCount < currentOpenShardCount) {
+            int mergesNeeded = currentOpenShardCount - targetShardCount;
+            List<KinesisShard> openByHashKey = stream.getShards().stream()
+                    .filter(s -> !s.isClosed())
+                    .sorted(Comparator.comparing(s -> new BigInteger(s.getHashKeyRange().startingHashKey())))
+                    .toList();
+
+            List<int[]> narrowestFirstDisjointPairs = narrowestFirstDisjointAdjacentPairs(openByHashKey);
+            for (int i = 0; i < mergesNeeded; i++) {
+                int[] pair = narrowestFirstDisjointPairs.get(i);
+                KinesisShard shard1 = openByHashKey.get(pair[0]);
+                KinesisShard shard2 = openByHashKey.get(pair[1]);
+                mergeShards(streamName, shard1.getShardId(), shard2.getShardId(), region);
+            }
+        }
+    }
+
+    /**
+     * Every disjoint adjacent-pair merge candidate among {@code openByHashKey}, narrowest
+     * combined hash-range width first. Only the fixed (0,1), (2,3), ... parity pairing is
+     * considered: those pairs never share a shard, so merging any prefix of this list is always
+     * valid regardless of how many merges are actually needed, and picking the narrowest pairs
+     * first keeps the resulting topology as close to equal-width as the existing layout allows.
+     */
+    private static List<int[]> narrowestFirstDisjointAdjacentPairs(List<KinesisShard> openByHashKey) {
+        List<int[]> pairs = new ArrayList<>();
+        for (int i = 0; i + 1 < openByHashKey.size(); i += 2) {
+            pairs.add(new int[]{i, i + 1});
+        }
+        pairs.sort(Comparator.comparing(pair ->
+                hashRangeWidth(openByHashKey.get(pair[0])).add(hashRangeWidth(openByHashKey.get(pair[1])))));
+        return pairs;
+    }
+
+    private static BigInteger hashRangeWidth(KinesisShard shard) {
+        BigInteger start = new BigInteger(shard.getHashKeyRange().startingHashKey());
+        BigInteger end = new BigInteger(shard.getHashKeyRange().endingHashKey());
+        return end.subtract(start).add(BigInteger.ONE);
+    }
+
+    private static String midpointHashKey(KinesisShard.HashKeyRange range) {
+        BigInteger start = new BigInteger(range.startingHashKey());
+        BigInteger end = new BigInteger(range.endingHashKey());
+        BigInteger width = end.subtract(start).add(BigInteger.ONE);
+        return start.add(width.divide(BigInteger.TWO)).toString();
     }
 
     public record PutRecordResult(String sequenceNumber, String shardId) {}
