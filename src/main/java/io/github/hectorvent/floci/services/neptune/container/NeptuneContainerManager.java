@@ -72,10 +72,6 @@ public class NeptuneContainerManager {
      *
      * @return the container handle, or {@code null} when no Docker daemon is reachable
      */
-    public NeptuneContainerHandle tryStart(String clusterId, String image, NeptuneDbType dbType) {
-        return tryStart(clusterId, image, dbType, regionResolver.getAccountId(), regionResolver.getDefaultRegion());
-    }
-
     public NeptuneContainerHandle tryStart(String clusterId, String image, NeptuneDbType dbType,
                                            String accountId, String region) {
         try {
@@ -109,10 +105,6 @@ public class NeptuneContainerManager {
             LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
             return false;
         }
-    }
-
-    public NeptuneContainerHandle start(String clusterId, String image, NeptuneDbType dbType) {
-        return start(clusterId, image, dbType, regionResolver.getAccountId(), regionResolver.getDefaultRegion());
     }
 
     public NeptuneContainerHandle start(String clusterId, String image, NeptuneDbType dbType,

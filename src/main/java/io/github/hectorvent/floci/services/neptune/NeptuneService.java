@@ -222,7 +222,7 @@ public class NeptuneService {
                         .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
                         .toList();
             }
-            return scanClusters().stream().filter(c -> c.getDbClusterIdentifier().equalsIgnoreCase(filterId)).toList();
+            return scanClusters().stream().filter(c -> filterId.equalsIgnoreCase(c.getDbClusterIdentifier())).toList();
         }
         return scanClusters();
     }
@@ -394,7 +394,7 @@ public class NeptuneService {
                         .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
                         .toList();
             }
-            return scanInstances().stream().filter(i -> i.getDbInstanceIdentifier().equalsIgnoreCase(filterId)).toList();
+            return scanInstances().stream().filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceIdentifier())).toList();
         }
         return scanInstances();
     }
@@ -567,32 +567,56 @@ public class NeptuneService {
 
     private void migrateLegacyClusters(AccountAwareStorageBackend<NeptuneCluster> aware,
                                        String account, String region) {
-        for (AccountAwareStorageBackend.AccountEntry<NeptuneCluster> entry
-                : aware.scanAllAccountEntries(key -> !key.contains("/"))) {
-            NeptuneCluster cluster = entry.value();
-            if (!account.equals(entry.accountId())
-                    || !belongsTo(cluster.getDbClusterArn(), account, region)) {
+        if (account.equals(regionResolver.getDefaultAccountId())) {
+            for (NeptuneCluster cluster : aware.scanUnscopedLegacy(value -> belongsTo(
+                    value.getDbClusterArn(), account, region))) {
+                migrateLegacyCluster(aware, account, region, cluster);
+            }
+        }
+        for (String legacyKey : aware.keysForAccount(account)) {
+            if (legacyKey.contains("/")) {
                 continue;
             }
-            String key = clusterKey(region, cluster.getDbClusterIdentifier());
-            aware.putForAccount(account, key, cluster);
-            aware.deleteForAccount(account, entry.key());
+            aware.getForAccount(account, legacyKey)
+                    .filter(value -> belongsTo(value.getDbClusterArn(), account, region))
+                    .ifPresent(value -> migrateLegacyCluster(aware, account, region, value));
         }
     }
 
     private void migrateLegacyInstances(AccountAwareStorageBackend<NeptuneInstance> aware,
                                         String account, String region) {
-        for (AccountAwareStorageBackend.AccountEntry<NeptuneInstance> entry
-                : aware.scanAllAccountEntries(key -> !key.contains("/"))) {
-            NeptuneInstance instance = entry.value();
-            if (!account.equals(entry.accountId())
-                    || !belongsTo(instance.getDbInstanceArn(), account, region)) {
+        if (account.equals(regionResolver.getDefaultAccountId())) {
+            for (NeptuneInstance instance : aware.scanUnscopedLegacy(value -> belongsTo(
+                    value.getDbInstanceArn(), account, region))) {
+                migrateLegacyInstance(aware, account, region, instance);
+            }
+        }
+        for (String legacyKey : aware.keysForAccount(account)) {
+            if (legacyKey.contains("/")) {
                 continue;
             }
-            String key = instanceKey(region, instance.getDbInstanceIdentifier());
-            aware.putForAccount(account, key, instance);
-            aware.deleteForAccount(account, entry.key());
+            aware.getForAccount(account, legacyKey)
+                    .filter(value -> belongsTo(value.getDbInstanceArn(), account, region))
+                    .ifPresent(value -> migrateLegacyInstance(aware, account, region, value));
         }
+    }
+
+    private void migrateLegacyCluster(AccountAwareStorageBackend<NeptuneCluster> aware,
+                                      String account, String region, NeptuneCluster cluster) {
+        String key = clusterKey(region, cluster.getDbClusterIdentifier());
+        aware.getForAccountMigratingLegacyKeys(account, key,
+                java.util.List.of(cluster.getDbClusterIdentifier()),
+                value -> belongsTo(value.getDbClusterArn(), account, region))
+                .ifPresent(value -> aware.putForAccount(account, key, value));
+    }
+
+    private void migrateLegacyInstance(AccountAwareStorageBackend<NeptuneInstance> aware,
+                                       String account, String region, NeptuneInstance instance) {
+        String key = instanceKey(region, instance.getDbInstanceIdentifier());
+        aware.getForAccountMigratingLegacyKeys(account, key,
+                java.util.List.of(instance.getDbInstanceIdentifier()),
+                value -> belongsTo(value.getDbInstanceArn(), account, region))
+                .ifPresent(value -> aware.putForAccount(account, key, value));
     }
 
     private void putCluster(NeptuneCluster cluster) {
@@ -647,7 +671,7 @@ public class NeptuneService {
         try {
             return AwsArnUtils.parse(arn).accountId();
         } catch (IllegalArgumentException e) {
-            return null;
+            return "";
         }
     }
 
@@ -655,7 +679,7 @@ public class NeptuneService {
         try {
             return AwsArnUtils.parse(arn).region();
         } catch (IllegalArgumentException e) {
-            return null;
+            return "";
         }
     }
 

@@ -60,6 +60,7 @@ class NeptuneServiceTest {
         when(regionResolver.getAccountId()).thenAnswer(invocation -> currentAccount);
         when(regionResolver.getRegion()).thenAnswer(invocation -> currentRegion);
         when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+        when(regionResolver.getDefaultAccountId()).thenReturn("000000000000");
         when(regionResolver.buildArn(anyString(), anyString(), anyString()))
                 .thenAnswer(invocation -> "arn:aws:" + invocation.getArgument(0)
                         + ":" + invocation.getArgument(1) + ":" + currentAccount

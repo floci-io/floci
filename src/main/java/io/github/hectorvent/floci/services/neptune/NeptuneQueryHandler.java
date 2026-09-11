@@ -114,29 +114,19 @@ public class NeptuneQueryHandler {
     /**
      * The rows the list form of DescribeDBClusters would return for the region a request is signed
      * for, for the RDS-family listing {@code RdsQueryHandler} assembles: a live account lists
-     * Neptune clusters from the RDS endpoint too. The Neptune store is not keyed by region, so the
-     * region is read off each record's ARN.
+     * Neptune clusters from the RDS endpoint too. The service storage is scoped by account and
+     * region before the rows are rendered.
      */
     public List<String> clusterRowsXml(String filterId, String region) {
         return service.listDbClusters(filterId).stream()
-                .filter(c -> inRegion(c.getDbClusterArn(), region))
                 .map(this::clusterInnerXml)
                 .toList();
     }
 
     public List<String> instanceRowsXml(String filterId, String region) {
         return service.listDbInstances(filterId).stream()
-                .filter(i -> inRegion(i.getDbInstanceArn(), region))
                 .map(this::instanceInnerXml)
                 .toList();
-    }
-
-    private static boolean inRegion(String arn, String region) {
-        if (region == null || region.isBlank()) {
-            return true;
-        }
-        String[] parts = arn == null ? new String[0] : arn.split(":", -1);
-        return parts.length >= 4 && region.equals(parts[3]);
     }
 
     private Response handleDeleteDbCluster(MultivaluedMap<String, String> params) {
