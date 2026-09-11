@@ -1933,7 +1933,11 @@ public class ApiGatewayController {
         // as aws_api_gateway_rest_api.root_resource_id, which is how the first resource
         // under "/" gets its parent, so leaving it out breaks the conventional way of
         // building a REST API.
-        service.findRootResourceId(region, api.getId()).ifPresent(id -> node.put("rootResourceId", id));
+        if (api.getRootResourceId() != null) {
+            node.put("rootResourceId", api.getRootResourceId());
+        } else {
+            service.findRootResourceId(region, api.getId()).ifPresent(id -> node.put("rootResourceId", id));
+        }
 
         // Neither member is settable on a REST API here: createRestApi ignores both and
         // updateRestApi patches only /name and /description, so the emulated value is always

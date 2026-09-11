@@ -260,12 +260,13 @@ public class ApiGatewayService {
 
         api.setEndpointConfiguration(endpointConfiguration);
 
-        apiStore.put(apiKey(region, api.getId()), api);
-
         // Create root resource "/"
         ApiGatewayResource root = new ApiGatewayResource();
         root.setId(shortId(8));
         root.setPath("/");
+        api.setRootResourceId(root.getId());
+
+        apiStore.put(apiKey(region, api.getId()), api);
         resourceStore.put(resourceKey(region, api.getId(), root.getId()), root);
 
         LOG.infov("Created REST API: {0} ({1}) in {2}", name, api.getId(), region);
@@ -315,25 +316,18 @@ public class ApiGatewayService {
         return resourceStore.scan(k -> k.startsWith(prefix));
     }
 
-    /**
-     * The id of the resource at "/", or empty if there is no API to read it from.
-     * <p>
-     * ListRestApis renders a snapshot of the APIs and resolves this per API afterwards, so an
-     * API deleted in between is already gone by the time its root is looked up. That must cost
-     * the caller the one member rather than failing the whole listing, which is why a missing
-     * API is empty here instead of a not-found. Every other failure still propagates.
-     */
+    /** The root resource id, with a resource-store fallback for data persisted before it was stored on the API. */
     public Optional<String> findRootResourceId(String region, String apiId) {
-        List<ApiGatewayResource> resources;
-        try {
-            resources = getResources(region, apiId);
-        } catch (AwsException e) {
-            if ("NotFoundException".equals(e.getErrorCode())) {
-                return Optional.empty();
-            }
-            throw e;
+        Optional<RestApi> api = apiStore.get(apiKey(region, apiId));
+        if (api.isEmpty()) {
+            return Optional.empty();
         }
-        return resources.stream()
+        if (api.get().getRootResourceId() != null) {
+            return Optional.of(api.get().getRootResourceId());
+        }
+
+        String prefix = region + "::" + apiId + "::";
+        return resourceStore.scan(k -> k.startsWith(prefix)).stream()
                 .filter(r -> "/".equals(r.getPath()))
                 .map(ApiGatewayResource::getId)
                 .findFirst();
