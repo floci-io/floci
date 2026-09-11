@@ -44,6 +44,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
@@ -436,7 +437,7 @@ public class ApiGatewayExecuteController {
         }
 
         String requestId = UUID.randomUUID().toString();
-        String eventJson = buildProxyEvent(region, apiId, httpMethod, path, proxy, resource.getPath(),
+        String eventJson = buildProxyEvent(region, apiId, httpMethod, path, resource.getPath(),
                 resource.getId(), stageName, stage, headers, uriInfo, body, requestId,
                 authorizerResult.principalId(), authorizerResult.context(), resolvedApiKey, iamIdentity);
 
@@ -725,7 +726,7 @@ public class ApiGatewayExecuteController {
     // Package-private rather than private so a focused unit test can assert the event's wire shape
     // without standing up a Lambda runtime, mirroring the buildV2ProxyEvent tests.
     String buildProxyEvent(String region, String apiId,
-                           String httpMethod, String path, String proxy,
+                           String httpMethod, String path,
                            String resourcePath, String resourceId,
                            String stageName, Stage stage,
                            HttpHeaders headers, UriInfo uriInfo,
@@ -750,12 +751,10 @@ public class ApiGatewayExecuteController {
         putMultiValueQueryStringParameters(event, uriInfo);
 
         // pathParameters come from the matcher, which ran on the normalized path, so the greedy
-        // {proxy+} value has no trailing slash on real AWS even when event.path keeps one.
+        // value has no trailing slash on real AWS even when event.path keeps one.
         ObjectNode pathParams = event.putObject("pathParameters");
-        if (proxy != null && !proxy.isEmpty()) {
-            pathParams.put("proxy", proxy);
-        }
         extractPathParams(resourcePath, path).forEach(pathParams::put);
+        putGreedyPathParam(pathParams, resourcePath, path);
 
         // stageVariables: populate from the Stage object (null if no variables configured)
         Map<String, String> stageVars = stage != null ? stage.getVariables() : null;
@@ -2758,6 +2757,41 @@ public class ApiGatewayExecuteController {
             if (!tParts[i].equals(rParts[i])) return false;
         }
         return true;
+    }
+
+    /**
+     * Adds the greedy path parameter, and only when the matched resource actually declares one.
+     *
+     * <p>AWS emits it solely for a greedy resource such as {@code /files/{proxy+}}, and its value
+     * is the remainder after the literal prefix — {@code a/b/c} for {@code /files/a/b/c}, not the
+     * whole request path. A plain parameterised resource such as {@code /datasets/{datasetId}}
+     * receives no extra key, so integrations validating the event against a strict schema
+     * (JSON Schema {@code additionalProperties: false}) do not see an undeclared property.
+     *
+     * <p>The parameter is named by the template ({@code {proxy+}} is only the conventional
+     * spelling), so the name is read from the resource rather than hardcoded.
+     */
+    private void putGreedyPathParam(ObjectNode pathParams, String resourcePath, String requestPath) {
+        if (resourcePath == null || requestPath == null) return;
+
+        String[] tParts = resourcePath.split("/", -1);
+        int greedyIndex = -1;
+        String name = null;
+        for (int i = 0; i < tParts.length; i++) {
+            String part = tParts[i];
+            if (part.startsWith("{") && part.endsWith("+}")) {
+                greedyIndex = i;
+                name = part.substring(1, part.length() - 2);
+                break;
+            }
+        }
+        if (greedyIndex < 0 || name.isEmpty()) return;
+
+        String[] rParts = requestPath.split("/", -1);
+        if (rParts.length <= greedyIndex) return;
+
+        String remainder = String.join("/", Arrays.copyOfRange(rParts, greedyIndex, rParts.length));
+        if (!remainder.isEmpty()) pathParams.put(name, remainder);
     }
 
     /**

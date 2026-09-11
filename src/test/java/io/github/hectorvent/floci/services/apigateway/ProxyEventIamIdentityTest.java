@@ -56,7 +56,7 @@ class ProxyEventIamIdentityTest {
     @Test
     void restIdentityCarriesTheVerifiedIamCaller() throws Exception {
         JsonNode identity = MAPPER.readTree(controller.buildProxyEvent(
-                        "us-east-1", "api1", "GET", "/iam", "iam", "/iam", "res1", "test", null,
+                        "us-east-1", "api1", "GET", "/iam", "/iam", "res1", "test", null,
                         headers, uriInfo, null, "req-1", null, null, null, CALLER))
                 .path("requestContext").path("identity");
 
@@ -70,7 +70,7 @@ class ProxyEventIamIdentityTest {
     @Test
     void restIdentityStaysExplicitlyNullWithoutIamAuthorization() throws Exception {
         JsonNode identity = MAPPER.readTree(controller.buildProxyEvent(
-                        "us-east-1", "api1", "GET", "/open", "open", "/open", "res2", "test", null,
+                        "us-east-1", "api1", "GET", "/open", "/open", "res2", "test", null,
                         headers, uriInfo, null, "req-2", null, null, null, null))
                 .path("requestContext").path("identity");
 
