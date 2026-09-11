@@ -33,7 +33,7 @@ public class TranscribeJsonHandler {
         this.objectMapper = objectMapper;
     }
 
-    public Response handle(String action, JsonNode request, String region) {
+    public Response handle(String action, JsonNode request) {
         LOG.debugv("Transcribe action: {0}", action);
         return switch (action) {
             case "StartTranscriptionJob" -> {

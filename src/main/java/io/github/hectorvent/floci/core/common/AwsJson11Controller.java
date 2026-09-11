@@ -304,7 +304,7 @@ public class AwsJson11Controller {
                 case "comprehend" -> comprehendJsonHandler.handle(action, request, region);
                 case "rekognition" -> rekognitionJsonHandler.handle(action, request, region);
                 case "pricing" -> pricingJsonHandler.handle(action, request, region);
-                case "transcribe" -> transcribeJsonHandler.handle(action, request, region);
+                case "transcribe" -> transcribeJsonHandler.handle(action, request);
                 case "translate" -> translateJsonHandler.handle(action, request, region);
                 case "ce" -> costExplorerJsonHandler.handle(action, request, region);
                 case "cur" -> curJsonHandler.handle(action, request, region);

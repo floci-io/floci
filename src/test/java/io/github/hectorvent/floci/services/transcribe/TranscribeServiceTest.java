@@ -100,4 +100,30 @@ class TranscribeServiceTest {
         region.set("eu-west-1");
         assertThrows(AwsException.class, () -> service.getVocabulary("legacy-vocabulary"));
     }
+
+    @Test
+    void accountPrefixedLegacyVocabularyMigratesForNonDefaultAccount() {
+        vocabularyStore.putForAccount("111111111111", "legacy-vocabulary",
+                new VocabularyInfo("legacy-vocabulary", "en-US", "READY", 1L));
+        account.set("111111111111");
+        region.set("eu-west-1");
+
+        assertEquals("en-US", service.getVocabulary("legacy-vocabulary").languageCode());
+        assertEquals(1, service.listVocabularies(null, null, null).vocabularies().size());
+        assertTrue(vocabularyStore.getForAccount("111111111111", "legacy-vocabulary").isEmpty());
+        assertTrue(vocabularyStore.getForAccount("111111111111", "eu-west-1/legacy-vocabulary").isPresent());
+
+        service.deleteVocabulary("legacy-vocabulary");
+        assertThrows(AwsException.class, () -> service.getVocabulary("legacy-vocabulary"));
+    }
+
+    @Test
+    void nullStorageFactoryUsesAnInMemoryVocabularyStore() {
+        TranscribeService serviceWithoutFactory = new TranscribeService(null,
+                new RegionResolver(DEFAULT_REGION, DEFAULT_ACCOUNT));
+        serviceWithoutFactory.initializeStorage();
+
+        assertEquals("READY", serviceWithoutFactory.createVocabulary("memory-vocabulary", "en-US")
+                .vocabularyState());
+    }
 }

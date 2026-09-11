@@ -49,7 +49,8 @@ public class TranscribeService implements Resettable {
     @PostConstruct
     void initializeStorage() {
         if (storageFactory == null) {
-            return; // keeps non-CDI unit tests working
+            vocabularies = AccountAwareStorageBackend.inMemory(regionResolver.getDefaultAccountId());
+            return;
         }
         this.vocabularies = storageFactory.create("transcribe",
                 "transcribe-vocabularies.json", new TypeReference<Map<String, VocabularyInfo>>() {});
@@ -175,8 +176,7 @@ public class TranscribeService implements Resettable {
 
     public void deleteVocabulary(String vocabularyName) {
         requireNonBlank(vocabularyName, "VocabularyName");
-        if (getStoredVocabulary(vocabularyName).isEmpty()
-                || vocabularies.getForAccount(regionResolver.getAccountId(), vocabularyKey(vocabularyName)).isEmpty()) {
+        if (getStoredVocabulary(vocabularyName).isEmpty()) {
             throw new AwsException("NotFoundException",
                     "The requested vocabulary couldn't be found. Check the vocabulary name and try your request again.",
                     400);
@@ -208,19 +208,18 @@ public class TranscribeService implements Resettable {
         return vocabularies.getForAccountMigratingLegacyKeys(
                 accountId,
                 region + "/" + vocabularyName,
-                isDefaultScope ? List.of(vocabularyName) : List.of(),
+                List.of(vocabularyName),
                 ignored -> true,
                 isDefaultScope);
     }
 
     private void migrateDefaultScopeVocabularies() {
-        if (!regionResolver.getDefaultAccountId().equals(regionResolver.getAccountId())
-                || !regionResolver.getDefaultRegion().equals(regionResolver.getRegion())) {
-            return;
+        boolean isDefaultAccount = regionResolver.getDefaultAccountId().equals(regionResolver.getAccountId());
+        if (isDefaultAccount && regionResolver.getDefaultRegion().equals(regionResolver.getRegion())) {
+            vocabularies.scanUnscopedLegacy(ignored -> true).stream()
+                    .map(VocabularyInfo::vocabularyName)
+                    .forEach(this::getStoredVocabulary);
         }
-        vocabularies.scanUnscopedLegacy(ignored -> true).stream()
-                .map(VocabularyInfo::vocabularyName)
-                .forEach(this::getStoredVocabulary);
         vocabularies.keysForAccount(regionResolver.getAccountId()).stream()
                 .filter(key -> !key.contains("/"))
                 .forEach(this::getStoredVocabulary);
