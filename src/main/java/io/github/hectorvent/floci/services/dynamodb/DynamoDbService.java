@@ -3205,19 +3205,27 @@ public class DynamoDbService implements ResourceProvider {
                         + " IndexName: " + indexName, 400);
             }
             if (attr.has("S") && attr.get("S").asText().isEmpty()) {
-                // AWS uses different wording for UpdateItem than for writes of a whole item.
-                if (isUpdate) {
-                    throw new AwsException("ValidationException",
-                            "One or more parameter values are not valid. The update expression attempted to "
-                            + "update a secondary index key to a value that is not supported. "
-                            + "The AttributeValue for a key attribute cannot contain an empty string value.", 400);
-                }
-                throw new AwsException("ValidationException",
-                        "One or more parameter values are not valid. A value specified for a secondary "
-                        + "index key is not supported. The AttributeValue for a key attribute cannot "
-                        + "contain an empty string value. IndexName: " + indexName + ", IndexKey: " + attrName, 400);
+                throw emptyIndexKeyValue("empty string value", indexName, attrName, isUpdate);
+            }
+            if (attr.has("B") && attr.get("B").asText().isEmpty()) {
+                throw emptyIndexKeyValue("empty binary value", indexName, attrName, isUpdate);
             }
         }
+    }
+
+    // AWS uses different wording for UpdateItem than for writes of a whole item.
+    private static AwsException emptyIndexKeyValue(String what, String indexName, String attrName,
+                                                   boolean isUpdate) {
+        if (isUpdate) {
+            return new AwsException("ValidationException",
+                    "One or more parameter values are not valid. The update expression attempted to "
+                    + "update a secondary index key to a value that is not supported. "
+                    + "The AttributeValue for a key attribute cannot contain an " + what + ".", 400);
+        }
+        return new AwsException("ValidationException",
+                "One or more parameter values are not valid. A value specified for a secondary "
+                + "index key is not supported. The AttributeValue for a key attribute cannot "
+                + "contain an " + what + ". IndexName: " + indexName + ", IndexKey: " + attrName, 400);
     }
 
     private String buildItemKeyFromNode(JsonNode item, String pkName, String skName) {

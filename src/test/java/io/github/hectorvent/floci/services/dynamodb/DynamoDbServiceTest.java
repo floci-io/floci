@@ -2625,6 +2625,50 @@ class DynamoDbServiceTest {
                 + "The AttributeValue for a key attribute cannot contain an empty string value.", ex.getMessage());
     }
 
+    private void createBinaryIndexedTable(String region) {
+        var gsi = new GlobalSecondaryIndex("gsib",
+                List.of(new KeySchemaElement("bidx", "HASH")), null, "ALL", null);
+        service.createTable("BinaryIndexed",
+                List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(
+                        new AttributeDefinition("pk", "S"),
+                        new AttributeDefinition("bidx", "B")),
+                5L, 5L, List.of(gsi), region);
+    }
+
+    @Test
+    void putItemEmptyBinaryGsiKeyThrowsValidationException() {
+        var region = "eu-west-1";
+        createBinaryIndexedTable(region);
+
+        var item = item("pk", "p1");
+        item.set("bidx", attributeValue("B", ""));
+
+        var ex = assertThrows(AwsException.class, () ->
+                service.putItem("BinaryIndexed", item, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. A value specified for a secondary "
+                + "index key is not supported. The AttributeValue for a key attribute cannot "
+                + "contain an empty binary value. IndexName: gsib, IndexKey: bidx", ex.getMessage());
+    }
+
+    @Test
+    void updateItemSettingEmptyBinaryGsiKeyThrowsValidationException() {
+        var region = "eu-west-1";
+        createBinaryIndexedTable(region);
+
+        var exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("B", ""));
+
+        var ex = assertThrows(AwsException.class, () ->
+                service.updateItem("BinaryIndexed", item("pk", "p1"), null,
+                        "SET bidx = :v", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. The update expression attempted to "
+                + "update a secondary index key to a value that is not supported. "
+                + "The AttributeValue for a key attribute cannot contain an empty binary value.", ex.getMessage());
+    }
+
     @Test
     void updateItemNullPartitionKeyThrowsValidationException() {
         String region = "eu-west-1";
