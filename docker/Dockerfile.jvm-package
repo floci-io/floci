@@ -1,0 +1,63 @@
+# JVM image built from an artifact that already exists on the host:
+#   ./mvnw package -DskipTests && docker build -f docker/Dockerfile.jvm-package -t floci/floci:dev .
+#
+# The counterpart to Dockerfile.native-package, for the JVM runtime: same idea, same reason. It
+# exists for the local loop: docker/Dockerfile runs Maven inside the build, which re-resolves every
+# dependency and wants a couple of gigabytes, so iterating on a change through it is slow and can
+# fall over on a machine with little headroom. Consuming target/quarkus-app takes seconds.
+#
+# The runtime setup below is deliberately identical to stage 2 of docker/Dockerfile, which is the
+# canonical definition: change it there and mirror it here.
+FROM eclipse-temurin:25-jre-noble
+
+ARG VERSION=dev
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+
+ENV AWS_DEFAULT_REGION=us-east-1
+ENV AWS_ACCESS_KEY_ID=test
+ENV AWS_SECRET_ACCESS_KEY=test
+ENV AWS_CONFIG_FILE=/etc/floci/aws/config
+
+# awscli and boto3 are what the init hooks in /etc/floci/init/ready.d call, and the `aws` shim
+# points them at the in-container gateway. bash as well: hooks that use arrays need it, and
+# FLOCI_INIT_HOOKS_SHELL_EXECUTABLE=/bin/bash selects it.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates passwd python3 python3-pip wget bash; \
+    rm -rf /var/lib/apt/lists/*; \
+    pip3 install --no-cache-dir --break-system-packages awscli boto3; \
+    aws_bin="$(command -v aws)"; \
+    mv "$aws_bin" /usr/bin/aws.real; \
+    printf '#!/bin/sh\nexec /usr/bin/aws.real --endpoint-url=http://localhost:4566 "$@"\n' > /usr/bin/aws; \
+    chmod +x /usr/bin/aws; \
+    useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci
+
+WORKDIR /app
+
+# cli_follow_urlparam: the bundled CLI is v1 (pip ships no v2), where a parameter value that looks
+# like a URL is *fetched* and its body used as the value. An init hook putting an SSM parameter such
+# as MY_API_URL=https://example.com then fails with "Unable to retrieve https://…", and a hook that
+# backgrounds its calls loses that silently. AWS CLI v2 dropped the behaviour, so this only shows up
+# in the image, never when the same script is run from a host with v2.
+RUN mkdir -p /app/data /etc/floci/aws \
+    && printf '[default]\nendpoint_url = http://localhost:4566\ncli_follow_urlparam = false\n' > /etc/floci/aws/config \
+    && chown 1001:root /app \
+    && chmod "g+rwX" /app \
+    && chown 1001:root /app/data
+
+COPY target/quarkus-app/ quarkus-app/
+RUN chown -R 1001:root /app/quarkus-app
+
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
+
+VOLUME /app/data
+
+EXPOSE 4566
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+    CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/quarkus-app/quarkus-run.jar"]
