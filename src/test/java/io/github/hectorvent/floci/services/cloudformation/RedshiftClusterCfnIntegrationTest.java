@@ -295,7 +295,7 @@ class RedshiftClusterCfnIntegrationTest {
             .formParam("ClusterSubnetGroupName", sgName)
         .when().post("/").then()
             .statusCode(404)
-            .body(containsString("<Code>ClusterSubnetGroupNotFoundFault</Code>"));
+            .body(containsString("<Code>ClusterSubnetGroupNotFound</Code>"));
     }
 
     private static String outputValue(String xml, String key) {
