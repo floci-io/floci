@@ -18,6 +18,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.math.BigInteger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -155,6 +156,10 @@ public class FirehoseLambdaTransformer {
      * count that large would stall every other stream's delivery behind it. The cap is
      * well above the documented 1 to 8 and the 9 the probe saw honored. A value that is
      * not a number falls back to the 3 AWS itself defaults to.
+     *
+     * Read as a BigInteger so the clamp holds at any magnitude: a value too wide even for
+     * a long is still a number, and treating it as unparseable would hand a larger
+     * NumberOfRetries fewer attempts than a smaller one.
      */
     private static int numberOfRetries(Processor processor) {
         String configured = parameterValue(processor, "NumberOfRetries");
@@ -162,7 +167,10 @@ public class FirehoseLambdaTransformer {
             return DEFAULT_NUMBER_OF_RETRIES;
         }
         try {
-            return (int) Math.clamp(Long.parseLong(configured.trim()), 0, MAX_NUMBER_OF_RETRIES);
+            return new BigInteger(configured.trim())
+                    .max(BigInteger.ZERO)
+                    .min(BigInteger.valueOf(MAX_NUMBER_OF_RETRIES))
+                    .intValue();
         } catch (NumberFormatException e) {
             LOG.warnv("Firehose Lambda processor has a non-numeric NumberOfRetries {0}, using {1}",
                     configured, DEFAULT_NUMBER_OF_RETRIES);

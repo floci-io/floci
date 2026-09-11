@@ -327,6 +327,14 @@ public class DeliveryStreamDescription {
                     bufferingHints.setIntervalInSeconds(BufferingHints.DEFAULT_INTERVAL_SECONDS);
                 }
             }
+            // Legacy persisted state again: a processing block stored before Enabled was
+            // defaulted never passes canonicalizeProcessors a second time, and would be
+            // described without the member AWS always returns. Only Enabled is healed
+            // here, since the parameters AWS defaults include RoleArn, which a read must
+            // not inject from whatever role is current by then.
+            if (processingConfiguration != null && processingConfiguration.getEnabled() == null) {
+                processingConfiguration.setEnabled(false);
+            }
         }
 
         /**

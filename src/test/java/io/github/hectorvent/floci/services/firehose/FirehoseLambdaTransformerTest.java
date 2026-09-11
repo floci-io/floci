@@ -436,6 +436,21 @@ class FirehoseLambdaTransformerTest {
         assertEquals(101, errorLines().get(0).get("attemptsMade").asInt());
     }
 
+    /**
+     * A NumberOfRetries too wide even for a long is still a number, and treating it as
+     * unparseable would hand it fewer attempts than a smaller one gets.
+     */
+    @Test
+    void aRetryCountTooWideForALongIsCappedRatherThanDefaulted() {
+        InvokeResult errored = new InvokeResult();
+        errored.setFunctionError("Unhandled");
+        when(lambdaService.invokeArn(anyString(), any(), any())).thenReturn(errored);
+
+        transform(stream(lambdaProcessor("NumberOfRetries", "999999999999999999999")), record("a"));
+
+        verify(lambdaService, times(101)).invokeArn(anyString(), any(), any());
+    }
+
     @Test
     void aNegativeRetryCountInvokesOnce() {
         replyWith(ids -> records(ok(ids.get(0), "one")));

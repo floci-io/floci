@@ -384,6 +384,24 @@ class FirehoseProcessingConfigurationTest {
         assertEquals("60", parameterValue(stored, "BufferIntervalInSeconds"));
     }
 
+    /**
+     * State persisted before Enabled was defaulted never passes canonicalizeProcessors
+     * again, so the describe path heals it rather than reporting a stream without the
+     * member AWS always returns.
+     */
+    @Test
+    void applyDefaultsHealsAProcessingBlockStoredWithoutEnabled() {
+        ProcessingConfiguration processing = new ProcessingConfiguration();
+        processing.setProcessors(List.of(lambdaProcessor(parameter("LambdaArn", LAMBDA_ARN))));
+        S3Destination stored = new S3Destination();
+        stored.setProcessingConfiguration(processing);
+
+        stored.applyDefaults();
+
+        assertEquals(false, processing.getEnabled());
+        assertFalse(stored.isProcessingEnabled());
+    }
+
     private static String parameterValue(List<ProcessorParameter> parameters, String name) {
         for (ProcessorParameter parameter : parameters) {
             if (name.equals(parameter.getParameterName())) {
