@@ -2,7 +2,8 @@ package io.github.hectorvent.floci.services.transcribe;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.transcribe.model.TranscriptionJob;
 import io.github.hectorvent.floci.services.transcribe.model.TranscriptionJobSummary;
@@ -16,6 +17,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -28,14 +30,20 @@ import java.util.concurrent.ConcurrentHashMap;
 public class TranscribeService implements Resettable {
 
     private final StorageFactory storageFactory;
+    private final RegionResolver regionResolver;
 
     // Transcription jobs are transient (async work deleted after processing); vocabularies are durable.
     private final ConcurrentHashMap<String, TranscriptionJob> transcriptionJobs = new ConcurrentHashMap<>();
-    private Map<String, VocabularyInfo> vocabularies = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<VocabularyInfo> vocabularies;
 
     @Inject
-    public TranscribeService(StorageFactory storageFactory) {
+    public TranscribeService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this.storageFactory = storageFactory;
+        this.regionResolver = regionResolver;
+    }
+
+    TranscribeService(StorageFactory storageFactory) {
+        this(storageFactory, new RegionResolver("us-east-1", "000000000000"));
     }
 
     @PostConstruct
@@ -43,20 +51,23 @@ public class TranscribeService implements Resettable {
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
         }
-        this.vocabularies = new StorageBackedMap<>(storageFactory.create("transcribe",
-                "transcribe-vocabularies.json", new TypeReference<Map<String, VocabularyInfo>>() {}));
+        this.vocabularies = storageFactory.create("transcribe",
+                "transcribe-vocabularies.json", new TypeReference<Map<String, VocabularyInfo>>() {});
     }
 
     public void clear() {
         transcriptionJobs.clear();
-        vocabularies.clear();
+        if (vocabularies != null) {
+            vocabularies.clear();
+        }
     }
 
     public TranscriptionJob startTranscriptionJob(String jobName, String mediaFileUri,
                                                   String languageCode, String mediaFormat) {
         requireNonBlank(jobName, "TranscriptionJobName");
         requireNonBlank(mediaFileUri, "Media.MediaFileUri");
-        if (transcriptionJobs.containsKey(jobName)) {
+        String jobKey = jobKey(jobName);
+        if (transcriptionJobs.containsKey(jobKey)) {
             throw new AwsException("ConflictException",
                     "The requested job name already exists. Use a different job name.", 400);
         }
@@ -72,13 +83,13 @@ public class TranscribeService implements Resettable {
                 new TranscriptionJob.Transcript("s3://floci-transcribe-output/" + jobName + ".json"),
                 now, now, now);
 
-        transcriptionJobs.put(jobName, job);
+        transcriptionJobs.put(jobKey, job);
         return job;
     }
 
     public TranscriptionJob getTranscriptionJob(String jobName) {
         requireNonBlank(jobName, "TranscriptionJobName");
-        TranscriptionJob job = transcriptionJobs.get(jobName);
+        TranscriptionJob job = transcriptionJobs.get(jobKey(jobName));
         if (job == null) {
             throw new AwsException("NotFoundException",
                     "The requested job couldn't be found. Check the job name and try your request again.", 400);
@@ -90,7 +101,10 @@ public class TranscribeService implements Resettable {
                                                              Integer maxResults) {
         int limit = maxResults != null ? Math.min(maxResults, 100) : 100;
 
-        List<TranscriptionJobSummary> filtered = transcriptionJobs.values().stream()
+        String currentPrefix = currentJobPrefix();
+        List<TranscriptionJobSummary> filtered = transcriptionJobs.entrySet().stream()
+                .filter(entry -> entry.getKey().startsWith(currentPrefix))
+                .map(Map.Entry::getValue)
                 .filter(j -> statusFilter == null || statusFilter.equals(j.transcriptionJobStatus()))
                 .filter(j -> jobNameContains == null || j.transcriptionJobName().contains(jobNameContains))
                 .sorted(Comparator.comparing(TranscriptionJob::transcriptionJobName))
@@ -106,7 +120,7 @@ public class TranscribeService implements Resettable {
 
     public void deleteTranscriptionJob(String jobName) {
         requireNonBlank(jobName, "TranscriptionJobName");
-        if (transcriptionJobs.remove(jobName) == null) {
+        if (transcriptionJobs.remove(jobKey(jobName)) == null) {
             throw new AwsException("BadRequestException",
                     "The requested job couldn't be found. Check the job name and try your request again.", 400);
         }
@@ -115,20 +129,20 @@ public class TranscribeService implements Resettable {
     public VocabularyInfo createVocabulary(String vocabularyName, String languageCode) {
         requireNonBlank(vocabularyName, "VocabularyName");
         requireNonBlank(languageCode, "LanguageCode");
-        if (vocabularies.containsKey(vocabularyName)) {
+        if (getStoredVocabulary(vocabularyName).isPresent()) {
             throw new AwsException("ConflictException",
                     "The requested vocabulary name already exists. Use a different vocabulary name.", 400);
         }
 
         VocabularyInfo vocab = new VocabularyInfo(
                 vocabularyName, languageCode, "READY", Instant.now().getEpochSecond());
-        vocabularies.put(vocabularyName, vocab);
+        vocabularies.putForAccount(regionResolver.getAccountId(), vocabularyKey(vocabularyName), vocab);
         return vocab;
     }
 
     public VocabularyInfo getVocabulary(String vocabularyName) {
         requireNonBlank(vocabularyName, "VocabularyName");
-        VocabularyInfo vocab = vocabularies.get(vocabularyName);
+        VocabularyInfo vocab = getStoredVocabulary(vocabularyName).orElse(null);
         if (vocab == null) {
             throw new AwsException("NotFoundException",
                     "The requested vocabulary couldn't be found. Check the vocabulary name and try your request again.",
@@ -141,7 +155,12 @@ public class TranscribeService implements Resettable {
                                                    Integer maxResults) {
         int limit = maxResults != null ? Math.min(maxResults, 100) : 100;
 
-        List<VocabularyInfo> filtered = vocabularies.values().stream()
+        migrateDefaultScopeVocabularies();
+
+        String currentPrefix = currentVocabularyPrefix();
+        List<VocabularyInfo> filtered = vocabularies.scanForAccount(regionResolver.getAccountId(),
+                        key -> key.startsWith(currentPrefix))
+                .stream()
                 .filter(v -> stateEquals == null || stateEquals.equals(v.vocabularyState()))
                 .filter(v -> nameContains == null || v.vocabularyName().contains(nameContains))
                 .sorted(Comparator.comparing(VocabularyInfo::vocabularyName))
@@ -156,11 +175,55 @@ public class TranscribeService implements Resettable {
 
     public void deleteVocabulary(String vocabularyName) {
         requireNonBlank(vocabularyName, "VocabularyName");
-        if (vocabularies.remove(vocabularyName) == null) {
+        if (getStoredVocabulary(vocabularyName).isEmpty()
+                || vocabularies.getForAccount(regionResolver.getAccountId(), vocabularyKey(vocabularyName)).isEmpty()) {
             throw new AwsException("NotFoundException",
                     "The requested vocabulary couldn't be found. Check the vocabulary name and try your request again.",
                     400);
         }
+        vocabularies.deleteForAccount(regionResolver.getAccountId(), vocabularyKey(vocabularyName));
+    }
+
+    private String jobKey(String jobName) {
+        return currentJobPrefix() + jobName;
+    }
+
+    private String vocabularyKey(String vocabularyName) {
+        return regionResolver.getRegion() + "/" + vocabularyName;
+    }
+
+    private String currentJobPrefix() {
+        return regionResolver.getAccountId() + "/" + regionResolver.getRegion() + "/";
+    }
+
+    private String currentVocabularyPrefix() {
+        return regionResolver.getRegion() + "/";
+    }
+
+    private Optional<VocabularyInfo> getStoredVocabulary(String vocabularyName) {
+        String accountId = regionResolver.getAccountId();
+        String region = regionResolver.getRegion();
+        boolean isDefaultScope = regionResolver.getDefaultAccountId().equals(accountId)
+                && regionResolver.getDefaultRegion().equals(region);
+        return vocabularies.getForAccountMigratingLegacyKeys(
+                accountId,
+                region + "/" + vocabularyName,
+                isDefaultScope ? List.of(vocabularyName) : List.of(),
+                ignored -> true,
+                isDefaultScope);
+    }
+
+    private void migrateDefaultScopeVocabularies() {
+        if (!regionResolver.getDefaultAccountId().equals(regionResolver.getAccountId())
+                || !regionResolver.getDefaultRegion().equals(regionResolver.getRegion())) {
+            return;
+        }
+        vocabularies.scanUnscopedLegacy(ignored -> true).stream()
+                .map(VocabularyInfo::vocabularyName)
+                .forEach(this::getStoredVocabulary);
+        vocabularies.keysForAccount(regionResolver.getAccountId()).stream()
+                .filter(key -> !key.contains("/"))
+                .forEach(this::getStoredVocabulary);
     }
 
     private void requireNonBlank(String value, String fieldName) {
