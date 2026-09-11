@@ -42,6 +42,33 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
 
+## CloudFormation
+
+Floci provisions these resource types:
+
+- `AWS::Redshift::Cluster`
+- `AWS::Redshift::ClusterParameterGroup`
+- `AWS::Redshift::ClusterSubnetGroup`
+- `AWS::Redshift::ClusterSecurityGroup`
+
+### Cluster Provisioning and References
+
+For `AWS::Redshift::Cluster`:
+
+- `Ref` returns the cluster identifier.
+- `Fn::GetAtt` exposes `Endpoint.Address`, `Endpoint.Port`, `Id`, and `ClusterNamespaceArn` (synthesised, stable).
+
+Replacement occurs if `ClusterIdentifier`, `DBName`, `MasterUsername`, or `ClusterSubnetGroupName` changes. Other properties (such as `NodeType`, `MasterUserPassword`, `ClusterParameterGroupName`, and `VpcSecurityGroupIds`) update in place.
+
+### Gaps and Limitations
+
+- `Port` is ignored: Floci assigns the dynamic host proxy port returned in `Endpoint.Port`.
+- `DBName` other than `dev` is ignored: the emulated PostgreSQL container database is always `dev`.
+- `NumberOfNodes` is not stored on cluster create: every emulated cluster is backed by a single PostgreSQL container.
+- `ManageMasterPassword` is rejected: set `MasterUserPassword` instead.
+- `SnapshotIdentifier` is ignored: a fresh cluster is created instead of restoring from a snapshot.
+- `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
+
 ## Configuration
 
 | Variable | Default | Description |
