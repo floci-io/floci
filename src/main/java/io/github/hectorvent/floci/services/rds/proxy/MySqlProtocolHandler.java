@@ -12,6 +12,8 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Handles the MySQL wire protocol auth intercept using a transparent relay.
@@ -60,6 +62,18 @@ public class MySqlProtocolHandler {
 
     // 4-byte capabilities + 4-byte max-packet-size + 1-byte charset + 23 reserved bytes.
     private static final int SSL_REQUEST_PAYLOAD_LENGTH = 32;
+
+    private static final int COM_QUERY = 0x03;
+    private static final int MAX_PACKET_PAYLOAD = 0xFFFFFF;
+
+    private static final Pattern IAM_AUTH_PLUGIN = Pattern.compile(
+            "IDENTIFIED\\s+WITH\\s+`?AWSAuthenticationPlugin`?"
+                    + "(?:\\s+AS\\s+(?:'[^']*'|\"[^\"]*\"|0x[0-9A-Fa-f]+))?",
+            Pattern.CASE_INSENSITIVE);
+    private static final String NO_MATCHING_PASSWORD_HASH =
+            "*0000000000000000000000000000000000000000";
+    private static final String IAM_AUTH_PLUGIN_REPLACEMENT =
+            "IDENTIFIED WITH mysql_native_password AS '" + NO_MATCHING_PASSWORD_HASH + "'";
 
     public static void handleAuth(Socket client, Socket backend,
                                   String masterUsername, String masterPassword,
@@ -586,7 +600,7 @@ public class MySqlProtocolHandler {
         }
 
         Thread t1 = Thread.ofVirtual().name("rds-mysql-c2b")
-                .start(() -> relay(clientIn, backendOut));
+                .start(() -> relayClientCommands(clientIn, backendOut));
         Thread t2 = Thread.ofVirtual().name("rds-mysql-b2c")
                 .start(() -> relay(backendIn, clientOut));
         try {
@@ -598,6 +612,35 @@ public class MySqlProtocolHandler {
             closeQuietly(client);
             closeQuietly(backend);
         }
+    }
+
+    private static void relayClientCommands(InputStream from, OutputStream to) {
+        try {
+            byte[] raw;
+            while ((raw = readMysqlPacketRaw(from)) != null) {
+                int length = (raw[0] & 0xFF) | ((raw[1] & 0xFF) << 8) | ((raw[2] & 0xFF) << 16);
+                byte[] rewritten = length == MAX_PACKET_PAYLOAD || raw.length < 5
+                        || (raw[4] & 0xFF) != COM_QUERY
+                        ? null
+                        : rewriteIamAuthPlugin(Arrays.copyOfRange(raw, 4, raw.length));
+                if (rewritten == null) {
+                    to.write(raw);
+                } else {
+                    writeMysqlPacket(to, raw[3] & 0xFF, rewritten);
+                }
+                to.flush();
+            }
+        } catch (IOException ignored) {}
+    }
+
+    static byte[] rewriteIamAuthPlugin(byte[] payload) {
+        String text = new String(payload, StandardCharsets.ISO_8859_1);
+        Matcher matcher = IAM_AUTH_PLUGIN.matcher(text);
+        if (!matcher.find()) {
+            return null;
+        }
+        return matcher.replaceAll(Matcher.quoteReplacement(IAM_AUTH_PLUGIN_REPLACEMENT))
+                .getBytes(StandardCharsets.ISO_8859_1);
     }
 
     private static void relay(InputStream from, OutputStream to) {

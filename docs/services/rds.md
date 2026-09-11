@@ -328,6 +328,21 @@ On PostgreSQL, the token names a database role (`DBUser`) and the session runs a
 
 Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
 
+On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
+`CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
+with `ERROR 1524 (HY000): Plugin 'AWSAuthenticationPlugin' is not loaded`. The proxy rewrites that
+clause to `IDENTIFIED WITH mysql_native_password AS '*000...0'`, an authentication string no
+password hashes to. The account is therefore created, can be granted to and can be dropped, but
+holds no password of its own, which is what an IAM DB user is: an account whose credentials come
+from IAM rather than from MySQL. This is the MySQL counterpart of the empty `rds_iam` role Floci
+pre-creates for PostgreSQL.
+
+Two limits follow from that. `SHOW CREATE USER` reports the substituted plugin rather than
+`AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`. And
+connecting with a token is not yet emulated for MySQL: unlike PostgreSQL, which receives the
+password in cleartext, MySQL sends a scramble, so the proxy would have to drive the
+`mysql_clear_password` auth switch that real RDS triggers before it could see a token to validate.
+
 ## TLS / SSL
 
 The RDS auth proxy terminates TLS itself (the backend container stays plaintext) using a
