@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.storage;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -11,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -31,6 +33,8 @@ import java.util.stream.Collectors;
  * created before multi-account support was added.
  */
 public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> {
+
+    private static final Logger LOG = Logger.getLogger(AccountAwareStorageBackend.class);
 
     /** A stored value together with its owning AWS account and account-relative key. */
     public record AccountEntry<T>(String accountId, String key, T value) {}
@@ -173,6 +177,15 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             Predicate<String> legacyKeyFilter,
             Function<V, String> destinationKey,
             Predicate<V> legacyOwner) {
+        migrateLegacyEntries(accountId, legacyKeyFilter,
+                (ignored, value) -> destinationKey.apply(value), legacyOwner);
+    }
+
+    private synchronized void migrateLegacyEntries(
+            String accountId,
+            Predicate<String> legacyKeyFilter,
+            BiFunction<String, V, String> destinationKey,
+            Predicate<V> legacyOwner) {
         for (String rawKey : new ArrayList<>(delegate.keys())) {
             boolean prefixed = hasAccountPrefix(rawKey);
             String owner = prefixed ? rawKey.substring(0, 12) : defaultAccountId;
@@ -190,16 +203,19 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                 continue;
             }
 
-            String newLogicalKey = destinationKey.apply(value.get());
+            String newLogicalKey = destinationKey.apply(logicalKey, value.get());
             if (newLogicalKey == null) {
                 continue;
             }
 
             String destination = accountId + "/" + newLogicalKey;
-            if (!destination.equals(rawKey) && delegate.get(destination).isEmpty()) {
-                delegate.put(destination, value.get());
-            }
             if (!destination.equals(rawKey)) {
+                if (delegate.get(destination).isEmpty()) {
+                    delegate.put(destination, value.get());
+                } else {
+                    LOG.warnv("Legacy storage migration skipped stale value at {0}; destination {1} already exists",
+                            rawKey, destination);
+                }
                 delegate.delete(rawKey);
             }
         }
@@ -236,25 +252,17 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
      */
     public Map<String, V> scanAllAccountsRaw() {
         Map<String, V> result = new LinkedHashMap<>();
-        List<String> legacyKeys = new ArrayList<>();
         for (String rawKey : delegate.keys()) {
-            if (rawKey.indexOf('/') < 0) {
-                legacyKeys.add(rawKey);
-                continue;
+            if (rawKey.indexOf('/') >= 0) {
+                delegate.get(rawKey).ifPresent(v -> result.put(rawKey, v));
             }
-            delegate.get(rawKey).ifPresent(v -> result.put(rawKey, v));
         }
-        for (String rawKey : legacyKeys) {
-            String effectiveKey = defaultAccountId + "/" + rawKey;
-            if (result.containsKey(effectiveKey)) {
-                delegate.delete(rawKey);
-                continue;
+        migrateLegacyEntries(defaultAccountId, key -> key.indexOf('/') < 0,
+                (key, value) -> key, value -> true);
+        for (String rawKey : delegate.keys()) {
+            if (rawKey.indexOf('/') >= 0) {
+                delegate.get(rawKey).ifPresent(v -> result.put(rawKey, v));
             }
-            delegate.get(rawKey).ifPresent(v -> {
-                delegate.put(effectiveKey, v);
-                delegate.delete(rawKey);
-                result.put(effectiveKey, v);
-            });
         }
         return result;
     }
