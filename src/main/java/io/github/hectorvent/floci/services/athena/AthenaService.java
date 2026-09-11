@@ -146,6 +146,9 @@ public class AthenaService {
 
         // Submit async — caller gets the ID immediately while execution runs in background
         vertx.executeBlocking(() -> {
+            // Athena rejects a query that leaves an injected partition column unconstrained. It fails
+            // the query rather than the submission, which is what throwing here produces.
+            PartitionProjection.assertInjectedColumnsFiltered(query, tablesForProjectionCheck(database));
             String setupDdl = ddlBuilder.build(database);
             if (outputLocation != null) {
                 ensureOutputBucket(outputLocation);
@@ -161,6 +164,20 @@ public class AthenaService {
         });
 
         return id;
+    }
+
+    /** Tables of the query's database, or none when the catalog cannot answer. */
+    private List<Table> tablesForProjectionCheck(String database) {
+        if (database == null || database.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<Table> tables = glueService.getTables(database);
+            return tables == null ? List.of() : tables;
+        } catch (Exception e) {
+            LOG.debugv("Could not fetch tables for projection check on {0}: {1}", database, e.getMessage());
+            return List.of();
+        }
     }
 
     public QueryExecution getQueryExecution(String id) {
