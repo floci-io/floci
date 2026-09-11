@@ -102,6 +102,7 @@ import software.amazon.awssdk.services.iotjobsdataplane.IotJobsDataPlaneClient;
 import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
+import software.amazon.awssdk.services.appintegrations.AppIntegrationsClient;
 import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.backup.BackupClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
@@ -1161,6 +1162,14 @@ public final class TestFixtures {
 
     public static AppConfigDataClient appConfigDataClient() {
         return AppConfigDataClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static AppIntegrationsClient appIntegrationsClient() {
+        return AppIntegrationsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

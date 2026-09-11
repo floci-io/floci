@@ -540,6 +540,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appconfigdata</artifactId>
         </dependency>
+        <!-- Amazon AppIntegrations client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>appintegrations</artifactId>
+        </dependency>
         <!-- JDBC drivers for RDS data-plane tests -->
         <dependency>
             <groupId>org.postgresql</groupId>
