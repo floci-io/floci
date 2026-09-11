@@ -32,6 +32,7 @@ class TransferServiceTest {
     private AccountAwareStorageBackend<Server> serverStore;
     private AccountAwareStorageBackend<User> userStore;
     private InMemoryStorage<String, Server> serverDelegate;
+    private AccountAwareStorageBackend<Map<String, String>> tagStore;
     private TransferService service;
     private RegionResolver regionResolver;
     private RequestContext requestContext;
@@ -49,7 +50,7 @@ class TransferServiceTest {
                 "111111111111");
         userStore = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance,
                 "111111111111");
-        AccountAwareStorageBackend<Map<String, String>> tagStore = new AccountAwareStorageBackend<>(
+        tagStore = new AccountAwareStorageBackend<>(
                 new InMemoryStorage<>(), requestContextInstance, "111111111111");
         StorageFactory factory = new StorageFactory(null, null) {
             @Override
@@ -153,5 +154,41 @@ class TransferServiceTest {
         when(regionResolver.getAccountId()).thenReturn("222222222222");
         when(regionResolver.getRegion()).thenReturn("eu-west-1");
         assertThrows(AwsException.class, () -> service.getServer("s-legacy"));
+    }
+
+    @Test
+    void listMigratesAccountPrefixedLegacyServerAndUserRecords() {
+        Server server = new Server();
+        server.setServerId("s-legacy");
+        server.setArn("arn:aws:transfer:us-east-1:111111111111:server/s-legacy");
+        serverStore.putForAccount("111111111111", "s-legacy", server);
+
+        User user = new User();
+        user.setUserName("alice");
+        user.setArn("arn:aws:transfer:us-east-1:111111111111:user/s-legacy/alice");
+        userStore.putForAccount("111111111111", "s-legacy/alice", user);
+
+        assertEquals(1, service.listServers(null, 100).size());
+        assertEquals(1, service.listUsers("s-legacy", null, 100).size());
+        assertTrue(serverStore.getForAccount("111111111111", "s-legacy").isEmpty());
+        assertTrue(userStore.getForAccount("111111111111", "s-legacy/alice").isEmpty());
+        assertTrue(serverStore.getForAccount("111111111111", "us-east-1/s-legacy").isPresent());
+        assertTrue(userStore.getForAccount("111111111111", "us-east-1/s-legacy/alice").isPresent());
+        assertEquals(1, service.countUsers("s-legacy"));
+    }
+
+    @Test
+    void legacyTagsAreMigratedWithoutDroppingResourceTags() {
+        Server server = service.createServer("us-east-1", null, null, null, null,
+                null, null, null, null, Map.of("resource", "tag"));
+        tagStore.putForAccount("111111111111", "server/" + server.getServerId(),
+                new java.util.HashMap<>(Map.of("legacy", "tag")));
+
+        service.tagResource(server.getArn(), Map.of("new", "tag"));
+
+        assertEquals(Map.of("legacy", "tag", "resource", "tag", "new", "tag"),
+                service.listTagsForResource(server.getArn()));
+        assertTrue(tagStore.getForAccount("111111111111", "server/" + server.getServerId()).isEmpty());
+        assertTrue(tagStore.getForAccount("111111111111", "us-east-1/server/" + server.getServerId()).isPresent());
     }
 }

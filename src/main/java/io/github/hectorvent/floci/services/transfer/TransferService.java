@@ -56,6 +56,7 @@ public class TransferService {
                                String securityPolicyName,
                                Map<String, String> tags) {
         String serverId = generateServerId();
+        region = currentRegion();
         String arn = regionResolver.buildArn("transfer", region, "server/" + serverId);
 
         Server server = new Server();
@@ -94,6 +95,7 @@ public class TransferService {
         // state precondition (and no ConflictException at all).
         Server server = getServer(serverId);
         deleteServerRecord(server);
+        migrateLegacyUsers(currentAccount(), currentRegion(), serverId);
         for (User user : userStore.scanForAccount(currentAccount(),
                 k -> k.startsWith(scopedKey(currentRegion(), serverId) + "/"))) {
             deleteUserRecord(user);
@@ -101,11 +103,9 @@ public class TransferService {
     }
 
     public List<Server> listServers(String nextToken, int maxResults) {
+        migrateLegacyServers(currentAccount(), currentRegion());
         List<Server> all = new ArrayList<>(serverStore.scanForAccount(currentAccount(),
                 k -> k.startsWith(currentRegion() + "/")));
-        for (Server legacy : serverStore.scanUnscopedLegacy(s -> owns(s, currentAccount(), currentRegion()))) {
-            findServer(legacy.getServerId()).ifPresent(all::add);
-        }
         all.sort((a, b) -> a.getServerId().compareTo(b.getServerId()));
         if (nextToken != null && !nextToken.isEmpty()) {
             int idx = 0;
@@ -185,6 +185,7 @@ public class TransferService {
                     "User " + userName + " already exists on server " + serverId + ".", 400);
         }
 
+        region = currentRegion();
         String arn = regionResolver.buildArn("transfer", region, "user/" + serverId + "/" + userName);
         User user = new User();
         user.setUserName(userName);
@@ -218,12 +219,9 @@ public class TransferService {
 
     public List<User> listUsers(String serverId, String nextToken, int maxResults) {
         getServer(serverId);
+        migrateLegacyUsers(currentAccount(), currentRegion(), serverId);
         List<User> all = new ArrayList<>(userStore.scanForAccount(currentAccount(),
                 k -> k.startsWith(scopedKey(currentRegion(), serverId) + "/")));
-        for (User legacy : userStore.scanUnscopedLegacy(u -> owns(u, currentAccount(), currentRegion())
-                && u.getArn().contains("/" + serverId + "/"))) {
-            findUser(serverId, legacy.getUserName()).ifPresent(all::add);
-        }
         all.sort((a, b) -> a.getUserName().compareTo(b.getUserName()));
         if (nextToken != null && !nextToken.isEmpty()) {
             int idx = 0;
@@ -282,13 +280,13 @@ public class TransferService {
 
     public Map<String, String> listTagsForResource(String arn) {
         String key = arnToTagKey(arn);
-        return tagStore.getForAccount(currentAccount(), scopedKey(currentRegion(), key)).orElse(new HashMap<>());
+        return storedTags(key);
     }
 
     public void tagResource(String arn, Map<String, String> tags) {
         String key = arnToTagKey(arn);
-        Map<String, String> existing = new HashMap<>(tagStore.getForAccount(currentAccount(), scopedKey(currentRegion(), key))
-                .orElse(new HashMap<>()));
+        Map<String, String> existing = new HashMap<>(storedTags(key));
+        resourceTags(arn).ifPresent(resource -> existing.putAll(resource));
         existing.putAll(tags);
         putTags(key, existing);
 
@@ -298,8 +296,7 @@ public class TransferService {
 
     public void untagResource(String arn, List<String> tagKeys) {
         String key = arnToTagKey(arn);
-        Map<String, String> existing = new HashMap<>(tagStore.getForAccount(currentAccount(), scopedKey(currentRegion(), key))
-                .orElse(new HashMap<>()));
+        Map<String, String> existing = new HashMap<>(storedTags(key));
         tagKeys.forEach(existing::remove);
         putTags(key, existing);
         syncTagsToResource(arn, existing);
@@ -359,6 +356,7 @@ public class TransferService {
     }
 
     public int countUsers(String serverId) {
+        migrateLegacyUsers(currentAccount(), currentRegion(), serverId);
         return (int) userStore.scanForAccount(currentAccount(),
                 k -> k.startsWith(scopedKey(currentRegion(), serverId) + "/")).stream().count();
     }
@@ -378,25 +376,102 @@ public class TransferService {
                 List.of(key), user -> owns(user, accountId, region));
     }
 
+    private void migrateLegacyServers(String account, String region) {
+        for (Server server : serverStore.scanUnscopedLegacy(value -> owns(value, account, region))) {
+            migrateServer(server, account, region);
+        }
+        for (String key : serverStore.keysForAccount(account)) {
+            if (key.contains("/")) {
+                continue;
+            }
+            serverStore.getForAccount(account, key)
+                    .filter(value -> owns(value, account, region))
+                    .ifPresent(value -> migrateServer(value, account, region));
+        }
+    }
+
+    private void migrateServer(Server server, String account, String region) {
+        String key = server.getServerId();
+        serverStore.getForAccountMigratingLegacyKeys(account, scopedKey(region, key), List.of(key),
+                value -> owns(value, account, region)).ifPresent(value ->
+                serverStore.putForAccount(account, scopedKey(region, key), value));
+    }
+
+    private void migrateLegacyUsers(String account, String region, String serverId) {
+        for (User user : userStore.scanUnscopedLegacy(value -> owns(value, account, region)
+                && userMatchesServer(value, serverId))) {
+            migrateUser(user, account, region, serverId);
+        }
+        for (String key : userStore.keysForAccount(account)) {
+            if (key.contains("/") && key.startsWith(region + "/")) {
+                continue;
+            }
+            userStore.getForAccount(account, key)
+                    .filter(value -> owns(value, account, region) && userMatchesServer(value, serverId))
+                    .ifPresent(value -> migrateUser(value, account, region, serverId));
+        }
+    }
+
+    private void migrateUser(User user, String account, String region, String serverId) {
+        String key = userKey(serverId, user.getUserName());
+        userStore.getForAccountMigratingLegacyKeys(account, scopedKey(region, key), List.of(key),
+                value -> owns(value, account, region)).ifPresent(value ->
+                userStore.putForAccount(account, scopedKey(region, key), value));
+    }
+
+    private static boolean userMatchesServer(User user, String serverId) {
+        try {
+            return AwsArnUtils.parse(user.getArn()).resource().equals("user/" + serverId + "/" + user.getUserName());
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private Map<String, String> storedTags(String key) {
+        String account = currentAccount();
+        String scoped = scopedKey(currentRegion(), key);
+        Map<String, String> merged = new HashMap<>(tagStore.getForAccount(account, scoped)
+                .orElseGet(HashMap::new));
+        tagStore.getForAccount(account, key).ifPresent(merged::putAll);
+        if (!merged.isEmpty()) {
+            tagStore.putForAccount(account, scoped, merged);
+        }
+        return tagStore.getForAccountMigratingLegacyKeys(account, scoped, List.of(key), ignored -> true)
+                .orElseGet(HashMap::new);
+    }
+
+    private Optional<Map<String, String>> resourceTags(String arn) {
+        String resource = AwsArnUtils.parse(arn).resource();
+        if (resource.startsWith("server/")) {
+            return Optional.ofNullable(getServer(resource.substring("server/".length())).getTags());
+        }
+        String[] parts = resource.substring("user/".length()).split("/", 2);
+        return Optional.ofNullable(getUser(parts[0], parts[1]).getTags());
+    }
+
     private void putServer(Server server) {
         serverStore.putForAccount(currentAccount(), scopedKey(regionOf(server), server.getServerId()), server);
     }
 
     private void deleteServerRecord(Server server) {
-        serverStore.deleteForAccount(currentAccount(), scopedKey(regionOf(server), server.getServerId()));
-        tagStore.deleteForAccount(currentAccount(), scopedKey(regionOf(server), "server/" + server.getServerId()));
+        String serverId = server.getServerId();
+        serverStore.deleteForAccount(currentAccount(), scopedKey(regionOf(server), serverId));
+        tagStore.deleteForAccount(currentAccount(), scopedKey(regionOf(server), "server/" + serverId));
+        tagStore.deleteForAccount(currentAccount(), "server/" + serverId);
     }
 
     private void putUser(User user) {
-        String[] resource = AwsArnUtils.parse(user.getArn()).resource().substring("user/".length()).split("/", 2);
+        String[] resource = userResourceParts(user);
         userStore.putForAccount(currentAccount(), scopedKey(regionOf(user), userKey(resource[0], resource[1])), user);
     }
 
     private void deleteUserRecord(User user) {
-        String[] resource = AwsArnUtils.parse(user.getArn()).resource().substring("user/".length()).split("/", 2);
+        String[] resource = userResourceParts(user);
         String key = userKey(resource[0], resource[1]);
         userStore.deleteForAccount(currentAccount(), scopedKey(regionOf(user), key));
         tagStore.deleteForAccount(currentAccount(), scopedKey(regionOf(user), "user/" + key));
+        userStore.deleteForAccount(currentAccount(), key);
+        tagStore.deleteForAccount(currentAccount(), "user/" + key);
     }
 
     private void putTags(String key, Map<String, String> tags) {
@@ -439,10 +514,33 @@ public class TransferService {
     }
 
     private static String regionOf(Server server) {
-        return AwsArnUtils.parse(server.getArn()).region();
+        return parseRegion(server.getArn());
     }
 
     private static String regionOf(User user) {
-        return AwsArnUtils.parse(user.getArn()).region();
+        return parseRegion(user.getArn());
+    }
+
+    private static String parseRegion(String arn) {
+        try {
+            return AwsArnUtils.parse(arn).region();
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ResourceNotFoundException", "Persisted Transfer resource has an invalid ARN.", 404);
+        }
+    }
+
+    private static String[] userResourceParts(User user) {
+        try {
+            String resource = AwsArnUtils.parse(user.getArn()).resource();
+            String[] parts = resource.startsWith("user/")
+                    ? resource.substring("user/".length()).split("/", 2)
+                    : new String[0];
+            if (parts.length == 2) {
+                return parts;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // Convert corrupt persisted records into the AWS resource error below.
+        }
+        throw new AwsException("ResourceNotFoundException", "Persisted Transfer user has an invalid ARN.", 404);
     }
 }
