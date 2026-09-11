@@ -64,6 +64,18 @@ final class DynamoDbNumberUtils {
         return toNormalizedString(stripped);
     }
 
+    // AWS answers with the overflow wording for any arithmetic result it cannot store,
+    // a magnitude too small or too many significant digits included.
+    static void checkArithmeticResult(BigDecimal result) {
+        var stripped = result.stripTrailingZeros();
+        var abs = stripped.abs();
+        if (stripped.precision() > 38 || abs.compareTo(MAX_ABS) >= 0
+                || (abs.signum() > 0 && abs.compareTo(MIN_ABS_NONZERO) < 0)) {
+            throw new AwsException("ValidationException",
+                    "Number overflow. Attempting to store a number with magnitude larger than supported range", 400);
+        }
+    }
+
     private static String toNormalizedString(BigDecimal bd) {
         // -0 -> 0
         if (bd.compareTo(BigDecimal.ZERO) == 0) {

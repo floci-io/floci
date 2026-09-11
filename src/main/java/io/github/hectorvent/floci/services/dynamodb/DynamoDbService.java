@@ -863,8 +863,10 @@ public class DynamoDbService implements ResourceProvider {
                                     BigDecimal delta = new BigDecimal(value.get("N").asText());
                                     BigDecimal current = curAttr != null && curAttr.has("N")
                                             ? new BigDecimal(curAttr.get("N").asText()) : BigDecimal.ZERO;
+                                    var sum = current.add(delta);
+                                    DynamoDbNumberUtils.checkArithmeticResult(sum);
                                     ObjectNode numNode = objectMapper.createObjectNode();
-                                    numNode.put("N", current.add(delta).stripTrailingZeros().toPlainString());
+                                    numNode.put("N", sum.stripTrailingZeros().toPlainString());
                                     item.set(attrName, numNode);
                                 } else {
                                     // Add elements to a set
@@ -2176,6 +2178,7 @@ public class DynamoDbService implements ResourceProvider {
                     BigDecimal left = new BigDecimal(leftVal.get("N").asText());
                     BigDecimal right = new BigDecimal(rightVal.get("N").asText());
                     BigDecimal result = (operator == '+') ? left.add(right) : left.subtract(right);
+                    DynamoDbNumberUtils.checkArithmeticResult(result);
                     ObjectNode numNode = JsonNodeFactory.instance.objectNode();
                     numNode.put("N", result.toPlainString());
                     setValueAtPath(item, attrPath, numNode, exprAttrNames);
@@ -2395,7 +2398,9 @@ public class DynamoDbService implements ResourceProvider {
             try {
                 BigDecimal existingNum = new BigDecimal(existingNumStr);
                 BigDecimal addNum = new BigDecimal(addNumStr);
-                result.put("N", existingNum.add(addNum).toPlainString());
+                var sum = existingNum.add(addNum);
+                DynamoDbNumberUtils.checkArithmeticResult(sum);
+                result.put("N", sum.toPlainString());
                 return result;
             } catch (NumberFormatException e) {
                 // Fall back to just setting the value

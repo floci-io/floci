@@ -3496,6 +3496,41 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void updateItemSetArithmeticOverflowThrowsValidationException() {
+        var region = "eu-west-1";
+        createUsersTable(region);
+        var exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "9.9e125"));
+        exprValues.set(":b", attributeValue("N", "9.9e125"));
+
+        var ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", item("userId", "u1"), null,
+                        "SET n = :a + :b", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Number overflow. Attempting to store a number with magnitude larger than supported range",
+                ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), region));
+    }
+
+    @Test
+    void updateItemAddOverflowThrowsValidationException() {
+        var region = "eu-west-1";
+        createUsersTable(region);
+        var existing = item("userId", "u1");
+        existing.set("n", attributeValue("N", "9.9e125"));
+        service.putItem("Users", existing, region);
+        var exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "9.9e125"));
+
+        var ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", item("userId", "u1"), null,
+                        "ADD n :a", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Number overflow. Attempting to store a number with magnitude larger than supported range",
+                ex.getMessage());
+    }
+
+    @Test
     void updateItemSetParenthesizedArithmeticAppliesSubtraction() {
         String region = "eu-west-1";
         // "SET c = (c - :v)" must subtract identically to the unwrapped form.
