@@ -135,6 +135,24 @@ class EmulatorInfoControllerIntegrationTest {
     }
 
     @Test
+    void stateReset_keepsBootstrapStateOfServicesThatReseedOnClear() {
+        // IAM Identity Center recreates its bootstrap instance in clear(). A reset that wiped
+        // storage after that step left every SCIM call answering 401 until a restart.
+        given()
+            .when().post("/_floci/state/reset")
+            .then()
+                .statusCode(200);
+
+        given()
+            .header("Authorization", "Bearer floci-scim-token")
+        .when()
+            .get("/9067f2a3c1-00000000-0000-0000-0000-000000000000/scim/v2/ServiceProviderConfig")
+        .then()
+            .statusCode(200)
+            .body("schemas[0]", equalTo("urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"));
+    }
+
+    @Test
     void stateReset_clearsDatabaseState() {
         // 1. Put SSM parameter
         given()

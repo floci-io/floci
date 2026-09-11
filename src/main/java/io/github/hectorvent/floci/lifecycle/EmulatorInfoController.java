@@ -146,10 +146,12 @@ public class EmulatorInfoController {
     }
 
     private void performReset() {
+        // Storage first. Services re-create their bootstrap state in clear(), and a wipe
+        // afterwards would remove it again until the next restart.
+        storageFactory.clearAll();
         for (Resettable r : resettables) {
             r.clear();
         }
-        storageFactory.clearAll();
     }
 
     static String resolveVersion() {
