@@ -28,7 +28,6 @@ import jakarta.ws.rs.core.Response;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -151,7 +150,7 @@ public class BedrockController {
         String region = regionResolver.resolveRegion(headers);
         JsonNode request = readTree(body);
         bedrockService.tagResource(textOrNull(request, "resourceARN"),
-                parseTagList(request.get("tags")), region);
+                BedrockService.parseTagList(request.get("tags")), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -255,19 +254,5 @@ public class BedrockController {
             return null;
         }
         return value.asText();
-    }
-
-    private Map<String, String> parseTagList(JsonNode tagsNode) {
-        Map<String, String> tags = new HashMap<>();
-        if (tagsNode != null && tagsNode.isArray()) {
-            for (JsonNode tag : tagsNode) {
-                JsonNode key = tag.get("key");
-                JsonNode value = tag.get("value");
-                if (key != null && !key.isNull() && value != null && !value.isNull()) {
-                    tags.put(key.asText(), value.asText());
-                }
-            }
-        }
-        return tags;
     }
 }

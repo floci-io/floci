@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.bedrock;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -12,6 +13,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -343,6 +345,115 @@ class BedrockServiceTest {
         overLong.put("blockedOutputsMessaging", "o".repeat(501));
         assertEquals("ValidationException", assertThrows(AwsException.class,
                 () -> service.updateGuardrail(created.getGuardrailId(), overLong, REGION)).getErrorCode());
+    }
+
+    // Tag limits from the AWS model
+
+    private ArrayNode tagArray(int count) {
+        ArrayNode tags = mapper.createArrayNode();
+        for (int i = 0; i < count; i++) {
+            ObjectNode tag = tags.addObject();
+            tag.put("key", "key-" + i);
+            tag.put("value", "value-" + i);
+        }
+        return tags;
+    }
+
+    private Map<String, String> tagMap(String prefix, int count) {
+        Map<String, String> tags = new HashMap<>();
+        for (int i = 0; i < count; i++) {
+            tags.put(prefix + i, "value-" + i);
+        }
+        return tags;
+    }
+
+    @Test
+    void parseTagListAcceptsATagListExactlyAtTheModelItemCap() {
+        assertEquals(200, BedrockService.parseTagList(tagArray(200)).size());
+    }
+
+    @Test
+    void parseTagListRejectsATagListOverTheModelItemCap() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> BedrockService.parseTagList(tagArray(201)));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("200"), error.getMessage());
+    }
+
+    @Test
+    void createAcceptsTagsExactlyAtThePerResourceLimit() {
+        ObjectNode request = createRequest("tags-at-limit");
+        request.set("tags", tagArray(50));
+
+        assertEquals(50, service.createGuardrail(request, REGION).getTags().size());
+    }
+
+    @Test
+    void createRejectsMoreTagsThanOneResourceMayHold() {
+        ObjectNode request = createRequest("tags-over-limit");
+        request.set("tags", tagArray(51));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createGuardrail(request, REGION));
+        assertEquals("TooManyTagsException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertNotNull(error.getExtendedData().get("resourceName"));
+    }
+
+    @Test
+    void createRejectsATagListOverTheModelItemCapBeforeTheResourceLimit() {
+        ObjectNode request = createRequest("tags-over-item-cap");
+        request.set("tags", tagArray(201));
+
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.createGuardrail(request, REGION)).getErrorCode());
+    }
+
+    @Test
+    void tagResourceAcceptsTagsExactlyAtThePerResourceLimit() {
+        String arn = create("tagging-at-limit").getGuardrailArn();
+
+        service.tagResource(arn, tagMap("key-", 50), REGION);
+
+        assertEquals(50, service.listTags(arn, REGION).size());
+    }
+
+    @Test
+    void tagResourceRejectsMoreTagsThanOneResourceMayHold() {
+        Guardrail created = create("tagging-over-limit");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.tagResource(created.getGuardrailArn(), tagMap("key-", 51), REGION));
+        assertEquals("TooManyTagsException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(created.getGuardrailArn(), error.getExtendedData().get("resourceName"));
+        assertTrue(service.listTags(created.getGuardrailArn(), REGION).isEmpty());
+    }
+
+    @Test
+    void tagResourceCountsTheTotalLeftOnTheResourceAfterTheMerge() {
+        String arn = create("tagging-merge").getGuardrailArn();
+        service.tagResource(arn, tagMap("existing-", 40), REGION);
+
+        service.tagResource(arn, tagMap("added-", 10), REGION);
+        assertEquals(50, service.listTags(arn, REGION).size());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.tagResource(arn, Map.of("one-too-many", "x"), REGION));
+        assertEquals("TooManyTagsException", error.getErrorCode());
+        assertEquals(50, service.listTags(arn, REGION).size());
+    }
+
+    @Test
+    void tagResourceDoesNotCountAKeyItOnlyReplaces() {
+        String arn = create("tagging-replace").getGuardrailArn();
+        service.tagResource(arn, tagMap("key-", 50), REGION);
+
+        service.tagResource(arn, Map.of("key-0", "replaced"), REGION);
+
+        assertEquals(50, service.listTags(arn, REGION).size());
+        assertEquals("replaced", service.listTags(arn, REGION).get("key-0"));
     }
 
     // kmsKeyId normalisation

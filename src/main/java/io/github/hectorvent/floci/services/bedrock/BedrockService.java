@@ -61,6 +61,15 @@ public class BedrockService {
     /** {@code MaxResults} on {@code ListGuardrails} is capped at 1000 by the AWS model. */
     private static final int MAX_PAGE = 1000;
 
+    /** {@code TagList} from the AWS model: at most 200 items on one request. */
+    private static final int TAG_LIST_MAX = 200;
+
+    /**
+     * {@code TooManyTagsException} documents a limit of 50 tags per resource, counted over the
+     * tags already on the resource together with the tags carried by the current request.
+     */
+    private static final int TAGS_PER_RESOURCE_MAX = 50;
+
     /**
      * Policy blocks arrive as {@code *Config} shapes on create and update, and are read back
      * as their unsuffixed counterparts. The member structures are identical in the AWS
@@ -109,11 +118,16 @@ public class BedrockService {
         }
 
         String guardrailId = newGuardrailId();
+        String guardrailArn = regionResolver.buildArn("bedrock", region, "guardrail/" + guardrailId);
+        Map<String, String> tags = parseTagList(request.get("tags"));
+        if (tags.size() > TAGS_PER_RESOURCE_MAX) {
+            throw tooManyTags(guardrailArn, tags.size());
+        }
         Instant now = Instant.now();
 
         Guardrail guardrail = new Guardrail();
         guardrail.setGuardrailId(guardrailId);
-        guardrail.setGuardrailArn(regionResolver.buildArn("bedrock", region, "guardrail/" + guardrailId));
+        guardrail.setGuardrailArn(guardrailArn);
         guardrail.setName(name);
         guardrail.setDescription(description);
         guardrail.setVersion(DRAFT_VERSION);
@@ -122,7 +136,7 @@ public class BedrockService {
         guardrail.setKmsKeyArn(resolveKmsKeyArn(textOrNull(request, "kmsKeyId"), region));
         guardrail.setCreatedAt(now);
         guardrail.setUpdatedAt(now);
-        guardrail.setTags(parseTagList(request.get("tags")));
+        guardrail.setTags(tags);
         guardrail.setAccountId(regionResolver.getAccountId());
         applyPolicies(guardrail, request, region);
 
@@ -232,12 +246,21 @@ public class BedrockService {
         return guardrail.getTags() != null ? guardrail.getTags() : Map.of();
     }
 
+    /**
+     * The 50 tag limit applies to the resource, not to the request, so it is checked against the
+     * total the resource is left holding once the incoming tags are merged in. A tag that replaces
+     * the value of a key already present does not add to that total.
+     */
     public synchronized void tagResource(String resourceArn, Map<String, String> tags, String region) {
         Guardrail guardrail = findByArn(resourceArn, region);
-        if (guardrail.getTags() == null) {
-            guardrail.setTags(new HashMap<>());
+        Map<String, String> merged = guardrail.getTags() == null
+                ? new HashMap<>()
+                : new HashMap<>(guardrail.getTags());
+        merged.putAll(tags);
+        if (merged.size() > TAGS_PER_RESOURCE_MAX) {
+            throw tooManyTags(guardrail.getGuardrailArn(), merged.size());
         }
-        guardrail.getTags().putAll(tags);
+        guardrail.setTags(merged);
         guardrails.put(storageKey(region, guardrail.getGuardrailId(), DRAFT_VERSION), guardrail);
     }
 
@@ -474,17 +497,33 @@ public class BedrockService {
         return value.asText();
     }
 
-    private Map<String, String> parseTagList(JsonNode tagsNode) {
+    /**
+     * Reads a {@code TagList}. Shared with the controller so that {@code CreateGuardrail} and
+     * {@code TagResource}, which both declare that shape, apply the same item cap.
+     */
+    static Map<String, String> parseTagList(JsonNode tagsNode) {
         Map<String, String> tags = new HashMap<>();
-        if (tagsNode != null && tagsNode.isArray()) {
-            for (JsonNode tag : tagsNode) {
-                JsonNode key = tag.get("key");
-                JsonNode value = tag.get("value");
-                if (key != null && !key.isNull() && value != null && !value.isNull()) {
-                    tags.put(key.asText(), value.asText());
-                }
+        if (tagsNode == null || !tagsNode.isArray()) {
+            return tags;
+        }
+        if (tagsNode.size() > TAG_LIST_MAX) {
+            throw new AwsException("ValidationException",
+                    "tags must have at most " + TAG_LIST_MAX + " items.", 400);
+        }
+        for (JsonNode tag : tagsNode) {
+            JsonNode key = tag.get("key");
+            JsonNode value = tag.get("value");
+            if (key != null && !key.isNull() && value != null && !value.isNull()) {
+                tags.put(key.asText(), value.asText());
             }
         }
         return tags;
+    }
+
+    private static AwsException tooManyTags(String resourceArn, int total) {
+        return new AwsException("TooManyTagsException",
+                "Resource " + resourceArn + " would hold " + total + " tags, over the limit of "
+                        + TAGS_PER_RESOURCE_MAX + " tags per resource.",
+                400, Map.<String, Object>of("resourceName", resourceArn));
     }
 }

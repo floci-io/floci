@@ -18,9 +18,13 @@ import software.amazon.awssdk.services.bedrock.model.GuardrailTopicType;
 import software.amazon.awssdk.services.bedrock.model.ListGuardrailsResponse;
 import software.amazon.awssdk.services.bedrock.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.bedrock.model.Tag;
+import software.amazon.awssdk.services.bedrock.model.TooManyTagsException;
 import software.amazon.awssdk.services.bedrock.model.UpdateGuardrailResponse;
 import software.amazon.awssdk.services.bedrock.model.ValidationException;
 import software.amazon.awssdk.services.kms.KmsClient;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -197,6 +201,30 @@ class BedrockGuardrailTest {
 
     @Test
     @Order(8)
+    void tagResourceRejectsMoreTagsThanOneResourceMayHold() {
+        // The 50 tag limit belongs to the resource, so it is measured against the total left
+        // after the merge rather than the size of the incoming request.
+        bedrock.tagResource(r -> r.resourceARN(guardrailArn).tags(tags("bulk-", 49)));
+
+        assertThatThrownBy(() -> bedrock.tagResource(r -> r.resourceARN(guardrailArn)
+                .tags(Tag.builder().key("one-too-many").value("x").build())))
+                .isInstanceOf(TooManyTagsException.class)
+                .satisfies(e -> assertThat(((TooManyTagsException) e).resourceName()).isEqualTo(guardrailArn));
+
+        bedrock.untagResource(r -> r.resourceARN(guardrailArn)
+                .tagKeys(tags("bulk-", 49).stream().map(Tag::key).toList()));
+    }
+
+    private static List<Tag> tags(String prefix, int count) {
+        List<Tag> tags = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            tags.add(Tag.builder().key(prefix + i).value("v" + i).build());
+        }
+        return tags;
+    }
+
+    @Test
+    @Order(9)
     void deleteGuardrailThenGetThrowsResourceNotFound() {
         bedrock.deleteGuardrail(r -> r.guardrailIdentifier(guardrailId));
 

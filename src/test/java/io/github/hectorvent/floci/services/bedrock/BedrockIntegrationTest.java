@@ -489,4 +489,64 @@ class BedrockIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
     }
+
+    @Test
+    @Order(21)
+    void createRejectsATagListOverTheModelItemCap() {
+        given()
+            .contentType("application/json")
+            .body("{\"name\": \"tags-over-item-cap\","
+                + " \"blockedInputMessaging\": \"in\","
+                + " \"blockedOutputsMessaging\": \"out\","
+                + " \"tags\": " + tagListJson("key-", 201) + "}")
+        .when()
+            .post("/guardrails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(22)
+    void tagResourceRejectsMoreTagsThanOneResourceMayHold() {
+        String arn = given()
+            .contentType("application/json")
+            .body("{\"name\": \"tags-per-resource\","
+                + " \"blockedInputMessaging\": \"in\","
+                + " \"blockedOutputsMessaging\": \"out\"}")
+        .when()
+            .post("/guardrails")
+        .then()
+            .statusCode(202)
+            .extract().path("guardrailArn");
+
+        given()
+            .contentType("application/json")
+            .body("{\"resourceARN\": \"" + arn + "\", \"tags\": " + tagListJson("key-", 50) + "}")
+        .when()
+            .post("/tagResource")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("{\"resourceARN\": \"" + arn + "\", \"tags\": [{\"key\": \"one-too-many\", \"value\": \"x\"}]}")
+        .when()
+            .post("/tagResource")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("TooManyTagsException"))
+            .body("resourceName", equalTo(arn));
+    }
+
+    private static String tagListJson(String prefix, int count) {
+        StringBuilder json = new StringBuilder("[");
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            json.append("{\"key\": \"").append(prefix).append(i).append("\", \"value\": \"v").append(i).append("\"}");
+        }
+        return json.append(']').toString();
+    }
 }

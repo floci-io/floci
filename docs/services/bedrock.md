@@ -55,6 +55,13 @@ The AWS model's length constraints are enforced: `name` is 1 to 50 characters ma
 `blockedOutputsMessaging` are 1 to 500 each. A value outside those bounds is rejected
 with `ValidationException`.
 
+The model's tag limits are enforced as well. A `TagList` holds at most 200 items on one
+request, and a longer array is rejected with `ValidationException`. A guardrail holds at
+most 50 tags, counted over the tags already on it together with the tags in the current
+request, so `CreateGuardrail` and `TagResource` both raise `TooManyTagsException` once
+the resulting total would pass 50. Replacing the value of a tag key the guardrail
+already carries does not add to that total.
+
 ## Not implemented
 
 The rest of the Bedrock control plane is absent rather than stubbed, because
