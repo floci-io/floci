@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.bedrock.model.Guardrail;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -50,6 +52,12 @@ public class BedrockService {
     /** {@code GuardrailNumericalVersion} from the AWS model. */
     private static final Pattern NUMERICAL_VERSION_PATTERN = Pattern.compile("[1-9][0-9]{0,7}");
 
+    /** {@code GuardrailDescription} from the AWS model: min 1, max 200. */
+    private static final int DESCRIPTION_MAX = 200;
+
+    /** {@code GuardrailBlockedMessaging} from the AWS model: min 1, max 500. */
+    private static final int BLOCKED_MESSAGING_MAX = 500;
+
     /** {@code MaxResults} on {@code ListGuardrails} is capped at 1000 by the AWS model. */
     private static final int MAX_PAGE = 1000;
 
@@ -70,25 +78,28 @@ public class BedrockService {
     private final StorageBackend<String, Guardrail> guardrails;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final KmsService kmsService;
 
     @Inject
     public BedrockService(StorageFactory storageFactory, RegionResolver regionResolver,
-                          ObjectMapper objectMapper) {
+                          ObjectMapper objectMapper, KmsService kmsService) {
         this(storageFactory.create("bedrock", "bedrock-guardrails.json",
-                new TypeReference<Map<String, Guardrail>>() {}), regionResolver, objectMapper);
+                new TypeReference<Map<String, Guardrail>>() {}), regionResolver, objectMapper, kmsService);
     }
 
     BedrockService(StorageBackend<String, Guardrail> guardrails, RegionResolver regionResolver,
-                   ObjectMapper objectMapper) {
+                   ObjectMapper objectMapper, KmsService kmsService) {
         this.guardrails = guardrails;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.kmsService = kmsService;
     }
 
     public Guardrail createGuardrail(JsonNode request, String region) {
         String name = requiredName(request);
-        String blockedInputMessaging = requiredText(request, "blockedInputMessaging");
-        String blockedOutputsMessaging = requiredText(request, "blockedOutputsMessaging");
+        String description = boundedDescription(request);
+        String blockedInputMessaging = requiredBlockedMessaging(request, "blockedInputMessaging");
+        String blockedOutputsMessaging = requiredBlockedMessaging(request, "blockedOutputsMessaging");
 
         for (Guardrail existing : draftsIn(region)) {
             if (name.equals(existing.getName())) {
@@ -104,11 +115,11 @@ public class BedrockService {
         guardrail.setGuardrailId(guardrailId);
         guardrail.setGuardrailArn(regionResolver.buildArn("bedrock", region, "guardrail/" + guardrailId));
         guardrail.setName(name);
-        guardrail.setDescription(textOrNull(request, "description"));
+        guardrail.setDescription(description);
         guardrail.setVersion(DRAFT_VERSION);
         guardrail.setBlockedInputMessaging(blockedInputMessaging);
         guardrail.setBlockedOutputsMessaging(blockedOutputsMessaging);
-        guardrail.setKmsKeyArn(textOrNull(request, "kmsKeyId"));
+        guardrail.setKmsKeyArn(resolveKmsKeyArn(textOrNull(request, "kmsKeyId"), region));
         guardrail.setCreatedAt(now);
         guardrail.setUpdatedAt(now);
         guardrail.setTags(parseTagList(request.get("tags")));
@@ -130,15 +141,16 @@ public class BedrockService {
 
     public Guardrail updateGuardrail(String identifier, JsonNode request, String region) {
         String name = requiredName(request);
-        String blockedInputMessaging = requiredText(request, "blockedInputMessaging");
-        String blockedOutputsMessaging = requiredText(request, "blockedOutputsMessaging");
+        String description = boundedDescription(request);
+        String blockedInputMessaging = requiredBlockedMessaging(request, "blockedInputMessaging");
+        String blockedOutputsMessaging = requiredBlockedMessaging(request, "blockedOutputsMessaging");
 
         Guardrail guardrail = getGuardrail(identifier, DRAFT_VERSION, region);
         guardrail.setName(name);
-        guardrail.setDescription(textOrNull(request, "description"));
+        guardrail.setDescription(description);
         guardrail.setBlockedInputMessaging(blockedInputMessaging);
         guardrail.setBlockedOutputsMessaging(blockedOutputsMessaging);
-        guardrail.setKmsKeyArn(textOrNull(request, "kmsKeyId"));
+        guardrail.setKmsKeyArn(resolveKmsKeyArn(textOrNull(request, "kmsKeyId"), region));
         guardrail.setUpdatedAt(Instant.now());
         applyPolicies(guardrail, request, region);
 
@@ -389,6 +401,61 @@ public class BedrockService {
                     "name must match [0-9a-zA-Z-_]+ and be at most 50 characters.", 400);
         }
         return name;
+    }
+
+    /**
+     * {@code description} is optional, but the AWS model gives it a 1 to 200 character
+     * {@code GuardrailDescription} shape, so an over-long or empty value is rejected.
+     */
+    private String boundedDescription(JsonNode request) {
+        String description = textOrNull(request, "description");
+        if (description == null) {
+            return null;
+        }
+        return bounded(description, "description", DESCRIPTION_MAX);
+    }
+
+    private String requiredBlockedMessaging(JsonNode request, String field) {
+        return bounded(requiredText(request, field), field, BLOCKED_MESSAGING_MAX);
+    }
+
+    private String bounded(String value, String field, int max) {
+        if (value.isEmpty() || value.length() > max) {
+            throw new AwsException("ValidationException",
+                    field + " must be between 1 and " + max + " characters.", 400);
+        }
+        return value;
+    }
+
+    /**
+     * {@code kmsKeyId} on the request is a {@code KmsKeyId}: a key id, a key ARN, an alias name
+     * or an alias ARN. {@code kmsKeyArn} on the read shapes is a {@code KmsKeyArn}, which is only
+     * ever the full key ARN, so every accepted form resolves through KMS to that one shape.
+     */
+    private String resolveKmsKeyArn(String kmsKeyId, String region) {
+        if (kmsKeyId == null || kmsKeyId.isBlank()) {
+            return null;
+        }
+        if (kmsService == null) {
+            throw new IllegalStateException("BedrockService was built without a KmsService; "
+                    + "a kmsKeyId cannot be resolved");
+        }
+        KmsKey key;
+        try {
+            key = kmsService.describeKey(kmsKeyId, region);
+        } catch (AwsException e) {
+            LOG.debugv("Rejecting Bedrock guardrail kmsKeyId {0}: {1}", kmsKeyId, e.getMessage());
+            throw kmsKeyNotUsable(kmsKeyId);
+        }
+        if (!key.isEnabled() || "PendingDeletion".equals(key.getKeyState())) {
+            throw kmsKeyNotUsable(kmsKeyId);
+        }
+        return key.getArn();
+    }
+
+    private static AwsException kmsKeyNotUsable(String kmsKeyId) {
+        return new AwsException("ValidationException", "The KMS key " + kmsKeyId
+                + " does not exist, is not enabled, or cannot be used.", 400);
     }
 
     private String requiredText(JsonNode request, String field) {

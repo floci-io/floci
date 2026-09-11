@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.bedrock;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -20,6 +22,11 @@ class BedrockIntegrationTest {
     private static String guardrailId;
     private static String guardrailArn;
     private static String guardrailVersion;
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @Test
     @Order(1)
@@ -386,5 +393,100 @@ class BedrockIntegrationTest {
         .then()
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(18)
+    void createRejectsAnOverLongDescriptionAndBlockedMessaging() {
+        given()
+            .contentType("application/json")
+            .body("{\"name\": \"over-long-description\","
+                + " \"description\": \"" + "d".repeat(201) + "\","
+                + " \"blockedInputMessaging\": \"in\","
+                + " \"blockedOutputsMessaging\": \"out\"}")
+        .when()
+            .post("/guardrails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .contentType("application/json")
+            .body("{\"name\": \"over-long-messaging\","
+                + " \"blockedInputMessaging\": \"" + "i".repeat(501) + "\","
+                + " \"blockedOutputsMessaging\": \"out\"}")
+        .when()
+            .post("/guardrails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(19)
+    void kmsKeyIdIsReadBackAsAFullKeyArn() {
+        String keyId = given()
+            .header("X-Amz-Target", "TrentService.CreateKey")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"Description\": \"bedrock-guardrail-key\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("KeyMetadata.KeyId");
+
+        given()
+            .header("X-Amz-Target", "TrentService.CreateAlias")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"AliasName\": \"alias/bedrock-guardrails\", \"TargetKeyId\": \"" + keyId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String expectedArn = "arn:aws:kms:us-east-1:000000000000:key/" + keyId;
+
+        // A bare key id, an alias and a full ARN all land on the one KmsKeyArn shape
+        // that the GetGuardrail response model declares.
+        for (String submitted : new String[] {keyId, "alias/bedrock-guardrails", expectedArn}) {
+            String id = given()
+                .contentType("application/json")
+                .body("{\"name\": \"kms-" + submitted.hashCode() + "\","
+                    + " \"blockedInputMessaging\": \"in\","
+                    + " \"blockedOutputsMessaging\": \"out\","
+                    + " \"kmsKeyId\": \"" + submitted + "\"}")
+            .when()
+                .post("/guardrails")
+            .then()
+                .statusCode(202)
+                .extract().path("guardrailId");
+
+            given()
+            .when()
+                .get("/guardrails/" + id)
+            .then()
+                .statusCode(200)
+                .body("kmsKeyArn", equalTo(expectedArn));
+        }
+    }
+
+    @Test
+    @Order(20)
+    void createRejectsAKmsKeyThatDoesNotExist() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "kms-unknown",
+                  "blockedInputMessaging": "in",
+                  "blockedOutputsMessaging": "out",
+                  "kmsKeyId": "alias/does-not-exist"
+                }
+                """)
+        .when()
+            .post("/guardrails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
     }
 }

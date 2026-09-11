@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.bedrock.model.Guardrail;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -18,19 +20,38 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 class BedrockServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
+    private static final String KEY_ID = "8f2b1c4e-0a7d-4e5f-9b31-6c8d2e4f7a90";
+    private static final String KEY_ARN = "arn:aws:kms:" + REGION + ":" + ACCOUNT + ":key/" + KEY_ID;
 
     private final ObjectMapper mapper = new ObjectMapper();
+    private KmsService kmsService;
     private BedrockService service;
 
     @BeforeEach
     void setUp() {
+        kmsService = mock(KmsService.class);
         service = new BedrockService(new InMemoryStorage<>(),
-                new RegionResolver(REGION, ACCOUNT), mapper);
+                new RegionResolver(REGION, ACCOUNT), mapper, kmsService);
+    }
+
+    /** Registers one usable KMS key that answers to every form the AWS model accepts. */
+    private void knownKey(String... forms) {
+        KmsKey key = new KmsKey();
+        key.setKeyId(KEY_ID);
+        key.setArn(KEY_ARN);
+        key.setEnabled(true);
+        key.setKeyState("Enabled");
+        for (String form : forms) {
+            doReturn(key).when(kmsService).describeKey(form, REGION);
+        }
     }
 
     private ObjectNode createRequest(String name) {
@@ -229,6 +250,175 @@ class BedrockServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.listTags("arn:aws:bedrock:" + REGION + ":" + ACCOUNT + ":guardrail/missing", REGION));
         assertEquals("ResourceNotFoundException", error.getErrorCode());
+    }
+
+    // Length constraints from the AWS model
+
+    @Test
+    void createAcceptsADescriptionExactlyAtTheModelCap() {
+        ObjectNode request = createRequest("description-at-cap");
+        request.put("description", "d".repeat(200));
+
+        assertEquals(200, service.createGuardrail(request, REGION).getDescription().length());
+    }
+
+    @Test
+    void createRejectsADescriptionOverTheModelCap() {
+        ObjectNode request = createRequest("description-over-cap");
+        request.put("description", "d".repeat(201));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createGuardrail(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("description"), error.getMessage());
+    }
+
+    @Test
+    void createRejectsAnEmptyDescription() {
+        ObjectNode request = createRequest("empty-description");
+        request.put("description", "");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createGuardrail(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createAcceptsBlockedMessagingExactlyAtTheModelCap() {
+        ObjectNode request = createRequest("messaging-at-cap");
+        request.put("blockedInputMessaging", "i".repeat(500));
+        request.put("blockedOutputsMessaging", "o".repeat(500));
+
+        Guardrail guardrail = service.createGuardrail(request, REGION);
+
+        assertEquals(500, guardrail.getBlockedInputMessaging().length());
+        assertEquals(500, guardrail.getBlockedOutputsMessaging().length());
+    }
+
+    @Test
+    void createRejectsBlockedInputMessagingOverTheModelCap() {
+        ObjectNode request = createRequest("input-over-cap");
+        request.put("blockedInputMessaging", "i".repeat(501));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createGuardrail(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("blockedInputMessaging"), error.getMessage());
+    }
+
+    @Test
+    void createRejectsBlockedOutputsMessagingOverTheModelCap() {
+        ObjectNode request = createRequest("outputs-over-cap");
+        request.put("blockedOutputsMessaging", "o".repeat(501));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createGuardrail(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("blockedOutputsMessaging"), error.getMessage());
+    }
+
+    @Test
+    void createAcceptsANameExactlyAtTheModelCap() {
+        assertEquals(50, create("n".repeat(50)).getName().length());
+    }
+
+    @Test
+    void createRejectsANameOverTheModelCap() {
+        AwsException error = assertThrows(AwsException.class, () -> create("n".repeat(51)));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateEnforcesTheSameLengthCapsAsCreate() {
+        Guardrail created = create("update-caps");
+
+        ObjectNode request = createRequest("update-caps");
+        request.put("description", "d".repeat(201));
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateGuardrail(created.getGuardrailId(), request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+
+        ObjectNode overLong = createRequest("update-caps");
+        overLong.put("blockedOutputsMessaging", "o".repeat(501));
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.updateGuardrail(created.getGuardrailId(), overLong, REGION)).getErrorCode());
+    }
+
+    // kmsKeyId normalisation
+
+    @Test
+    void createResolvesABareKeyIdToTheKeyArn() {
+        knownKey(KEY_ID);
+        ObjectNode request = createRequest("kms-by-id");
+        request.put("kmsKeyId", KEY_ID);
+
+        assertEquals(KEY_ARN, service.createGuardrail(request, REGION).getKmsKeyArn());
+    }
+
+    @Test
+    void createResolvesAnAliasToTheKeyArn() {
+        knownKey("alias/guardrails");
+        ObjectNode request = createRequest("kms-by-alias");
+        request.put("kmsKeyId", "alias/guardrails");
+
+        assertEquals(KEY_ARN, service.createGuardrail(request, REGION).getKmsKeyArn());
+    }
+
+    @Test
+    void createKeepsAFullKeyArn() {
+        knownKey(KEY_ARN);
+        ObjectNode request = createRequest("kms-by-arn");
+        request.put("kmsKeyId", KEY_ARN);
+
+        assertEquals(KEY_ARN, service.createGuardrail(request, REGION).getKmsKeyArn());
+    }
+
+    @Test
+    void createWithoutAKmsKeyLeavesTheArnUnset() {
+        assertNull(create("kms-absent").getKmsKeyArn());
+    }
+
+    @Test
+    void createRejectsAKmsKeyThatDoesNotResolve() {
+        doThrow(new AwsException("NotFoundException", "Key not found: missing", 404))
+                .when(kmsService).describeKey("missing", REGION);
+        ObjectNode request = createRequest("kms-missing");
+        request.put("kmsKeyId", "missing");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createGuardrail(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createRejectsAKmsKeyPendingDeletion() {
+        KmsKey key = new KmsKey();
+        key.setKeyId(KEY_ID);
+        key.setArn(KEY_ARN);
+        key.setEnabled(false);
+        key.setKeyState("PendingDeletion");
+        doReturn(key).when(kmsService).describeKey(KEY_ID, REGION);
+        ObjectNode request = createRequest("kms-pending");
+        request.put("kmsKeyId", KEY_ID);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createGuardrail(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateResolvesTheKeyAndTheVersionSnapshotKeepsIt() {
+        knownKey(KEY_ID, "alias/guardrails");
+        Guardrail created = create("kms-on-update");
+
+        ObjectNode request = createRequest("kms-on-update");
+        request.put("kmsKeyId", "alias/guardrails");
+        assertEquals(KEY_ARN, service.updateGuardrail(created.getGuardrailId(), request, REGION).getKmsKeyArn());
+
+        assertEquals(KEY_ARN,
+                service.createGuardrailVersion(created.getGuardrailId(), null, REGION).getKmsKeyArn());
     }
 
     @Test

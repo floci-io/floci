@@ -44,6 +44,17 @@ guardrail and all of its versions.
 Both an id (`abc123def456`) and a full ARN are accepted wherever the API takes a
 `guardrailIdentifier` or a `resourceARN`.
 
+`kmsKeyId` on `CreateGuardrail` and `UpdateGuardrail` is a `KmsKeyId`: a key id, a key
+ARN, an alias name or an alias ARN. `kmsKeyArn` on the read shapes is a `KmsKeyArn`,
+which is only ever the full key ARN, so every accepted form is resolved through KMS to
+that one shape. A key that does not exist, is disabled, or is pending deletion is
+rejected with `ValidationException`.
+
+The AWS model's length constraints are enforced: `name` is 1 to 50 characters matching
+`[0-9a-zA-Z-_]+`, `description` is 1 to 200, and `blockedInputMessaging` and
+`blockedOutputsMessaging` are 1 to 500 each. A value outside those bounds is rejected
+with `ValidationException`.
+
 ## Not implemented
 
 The rest of the Bedrock control plane is absent rather than stubbed, because
