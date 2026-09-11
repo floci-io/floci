@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import io.github.hectorvent.floci.services.appsync.model.ResolverKind;
+import io.github.hectorvent.floci.services.appsync.model.ResolverRuntimeName;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -415,6 +416,99 @@ class AppSyncResolverExecutorTest {
         // Absent, not null: `if (ctx.error)` must be false, and the request handler never sees one.
         assertFalse(jsRuntime.contexts.get(0).containsKey("error"));
         assertFalse(jsRuntime.contexts.get(1).containsKey("error"));
+    }
+
+    // ── VTL is refused, not silently skipped ─────────────────────────────────
+
+    @Test
+    void aResolverWithMappingTemplatesAndNoCodeIsRefused() {
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountDB");
+        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\"}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+
+        // AppSync leaves Runtime unset on a VTL resolver, so "no runtime" must not read as
+        // APPSYNC_JS: that made this fall through to the pass-through arm and resolve to null,
+        // which is indistinguishable from an empty result.
+        assertEquals(1, result.getErrors().size());
+        assertTrue(result.getErrors().get(0).getMessage().contains("VTL"),
+                result.getErrors().get(0).getMessage());
+        assertTrue(invoker.requests.isEmpty(), "a VTL resolver must not reach the data source");
+    }
+
+    @Test
+    void aFunctionWithMappingTemplatesAndNoCodeIsRefused() {
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1"));
+        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
+
+        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+
+        assertEquals(1, result.getErrors().size());
+        assertTrue(result.getErrors().get(0).getMessage().contains("VTL"),
+                result.getErrors().get(0).getMessage());
+    }
+
+    @Test
+    void anExplicitVtlRuntimeIsRefusedEvenWithCode() {
+        Resolver resolver = resolver(ResolverKind.UNIT, "$util.toJson($ctx.args)");
+        resolver.setDataSourceName("accountDB");
+        Resolver.ResolverRuntime runtime = new Resolver.ResolverRuntime();
+        runtime.setName(ResolverRuntimeName.VTL);
+        resolver.setRuntime(runtime);
+
+        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+
+        assertEquals(1, result.getErrors().size());
+        assertTrue(result.getErrors().get(0).getMessage().contains("VTL"));
+    }
+
+    @Test
+    void aStageWithNeitherCodeNorTemplatesStillPassesThrough() {
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", null));
+        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
+        jsRuntime.script("pipeline-code", "response", (h, ctx) -> ok(ctx.get("result")));
+        invoker.answer = List.of(Map.of("id", 1));
+
+        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+
+        // No code and no templates is not VTL — there is simply nothing to run.
+        assertTrue(result.getErrors().isEmpty());
+        assertEquals(List.of(Map.of("id", 1)), result.getData());
+    }
+
+    @Test
+    void aControlPlaneFailureLookingUpAFunctionIsNotReportedAsMissing() {
+        when(appSync.getFunction(API_ID, "fn1"))
+                .thenThrow(new AwsException("ConcurrentModificationException",
+                        "Schema is being modified", 409));
+        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
+
+        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+
+        // Reporting a 409 as "function does not exist" hides the real cause.
+        assertEquals(1, result.getErrors().size());
+        assertEquals("Schema is being modified", result.getErrors().get(0).getMessage());
+        assertEquals("ConcurrentModificationException",
+                ((AppSyncResolverError) result.getErrors().get(0)).getExtensions().get("errorType"));
+    }
+
+    private FunctionConfiguration vtlFunction(String id) {
+        FunctionConfiguration fn = new FunctionConfiguration();
+        fn.setFunctionId(id);
+        fn.setName("vtl-" + id);
+        fn.setDataSourceName("accountDB");
+        fn.setRequestMappingTemplate("{\"version\":\"2018-05-29\"}");
+        fn.setResponseMappingTemplate("$util.toJson($ctx.result)");
+        return fn;
     }
 
     @Test

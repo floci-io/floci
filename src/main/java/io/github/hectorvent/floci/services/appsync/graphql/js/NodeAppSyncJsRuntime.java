@@ -27,6 +27,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -57,6 +59,13 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
     private static final String SERVER_PATH = "/tmp/floci-appsync-js-runtime.mjs";
     /** How long an existing container gets to answer before it is treated as unusable. */
     private static final int ADOPT_PROBE_SECONDS = 5;
+    /**
+     * Label carrying a digest of the server script the container was started with. The script is
+     * baked into the container's command, so a sidecar left over from an older Floci serves that
+     * older script forever — a fixed shim would never reach a developer who had one running.
+     * Adoption compares this and replaces the container when it differs.
+     */
+    private static final String SCRIPT_LABEL = "io.floci.appsync.js-runtime.script";
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -143,6 +152,7 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
                     // in the alpine image supplies both sh and base64.
                     .withEntrypoint(List.of("sh", "-c"))
                     .withCmd(List.of(startCommand()))
+                    .withLabel(SCRIPT_LABEL, scriptDigest())
                     .withDockerNetwork(jsRuntimeConfig().dockerNetwork())
                     .withLogRotation();
             int configuredPort = jsRuntimeConfig().port();
@@ -183,6 +193,13 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
      * container should be replaced promptly, not waited on.
      */
     private boolean tryAdopt(Container existing) {
+        Map<String, String> labels = existing.getLabels();
+        String ranWith = labels == null ? null : labels.get(SCRIPT_LABEL);
+        if (!scriptDigest().equals(ranWith)) {
+            LOG.infov("Existing AppSync JS runtime sidecar was started from a different server "
+                    + "script ({0}); replacing it", ranWith == null ? "unlabelled" : ranWith);
+            return false;
+        }
         try {
             this.containerId = existing.getId();
             ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT));
@@ -208,6 +225,21 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
     private String startCommand() {
         String encoded = Base64.getEncoder().encodeToString(serverScript().getBytes(StandardCharsets.UTF_8));
         return "echo " + encoded + " | base64 -d > " + SERVER_PATH + " && exec node " + SERVER_PATH;
+    }
+
+    /** Digest of the server script this build would start the sidecar with. */
+    private String scriptDigest() {
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256")
+                    .digest(serverScript().getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(16);
+            for (int i = 0; i < 8; i++) {
+                hex.append(String.format("%02x", hash[i]));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
     }
 
     private String serverScript() {

@@ -32,6 +32,9 @@ const UTILS_DIR = path.join(ROOT, 'node_modules', '@aws-appsync', 'utils');
 // reach for in practice is here; anything missing throws by name rather than returning undefined,
 // so a gap shows up as a clear error instead of a null field.
 
+// NOTE: UTILS_INDEX and UTILS_RDS below are template literals, so a backtick or a ${ inside them
+// - in code *or in a comment* - ends the string and the sidecar fails to boot with a SyntaxError.
+// Escape them (\` and \${) or write around them.
 const UTILS_INDEX = `
 import { randomUUID } from 'node:crypto';
 const ERROR_MARKER = Symbol.for('floci.appsync.error');
@@ -99,7 +102,9 @@ const unsupported = (name) => () => {
 export const util = {
   error(message, type, data, errorInfo) { throw new TemplateError(message, type, data, errorInfo); },
   appendError(message, type, data, errorInfo) {
-    appendedErrors.push({ message, errorType: type ?? null, data: data ?? null, errorInfo: errorInfo ?? null });
+    // The member is named type, matching what describeError() reports for util.error. Naming it
+    // errorType here instead silently dropped the type off every appended error on its way to Java.
+    appendedErrors.push({ message, type: type ?? null, data: data ?? null, errorInfo: errorInfo ?? null });
   },
   unauthorized() { throw new TemplateError('Unauthorized', 'Unauthorized'); },
   autoId() { return randomUUID(); },

@@ -41,6 +41,7 @@ class AppSyncJsResolverDockerIntegrationTest {
               getMessages(orgNo: String!): [Message]
               ping: String
               failing: String
+              warned: String
             }
             """;
 
@@ -77,6 +78,18 @@ class AppSyncJsResolverDockerIntegrationTest {
               return { payload: { value: "pong", at: util.time.nowISO8601() } };
             }
             export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    /** Appends an error and still returns data — AppSync reports both. */
+    private static final String WARNING_RESOLVER = """
+            import { util } from "@aws-appsync/utils";
+            export function request(ctx) {
+              return { payload: { value: "partial" } };
+            }
+            export function response(ctx) {
+              util.appendError("one row was dropped", "Partial");
               return ctx.result.value;
             }
             """;
@@ -123,6 +136,7 @@ class AppSyncJsResolverDockerIntegrationTest {
         createPipelineResolver(apiId, "Query", "getMessages", PIPELINE_RESOLVER, functionId);
         createUnitResolver(apiId, "Query", "ping", "local", UNIT_RESOLVER);
         createUnitResolver(apiId, "Query", "failing", "local", FAILING_RESOLVER);
+        createUnitResolver(apiId, "Query", "warned", "local", WARNING_RESOLVER);
     }
 
     @Test
@@ -156,6 +170,19 @@ class AppSyncJsResolverDockerIntegrationTest {
             // on errorType.
             .body("errors[0].errorType", equalTo("BadRequest"))
             .body("errors[0].data.field", equalTo("orgNo"));
+    }
+
+    @Test
+    void utilAppendErrorReturnsTheErrorBesideTheDataWithItsType() {
+        query("{ warned }")
+            .statusCode(200)
+            // appendError is the one that stops nothing: the field keeps its value.
+            .body("data.warned", equalTo("partial"))
+            .body("errors", hasSize(1))
+            .body("errors[0].message", equalTo("one row was dropped"))
+            // The shim and the Java bridge have to agree on the member carrying the type, or it is
+            // dropped on the way out and every appended error arrives untyped.
+            .body("errors[0].errorType", equalTo("Partial"));
     }
 
     @Test

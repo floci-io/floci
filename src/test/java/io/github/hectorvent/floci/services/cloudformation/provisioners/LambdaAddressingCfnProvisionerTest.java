@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -237,6 +238,26 @@ class LambdaAddressingCfnProvisionerTest {
         assertEquals(600, cfg.get("MaxAge"));
         assertEquals(List.of("https://app.example.com"), cfg.get("AllowOrigins"));
         assertEquals(List.of("GET", "POST"), cfg.get("AllowMethods"));
+    }
+
+    @Test
+    void anUpdateThatDroppedCorsClearsIt() {
+        when(lambda.getFunctionUrlConfig(REGION, FN_ARN, null)).thenReturn(urlConfig(FN_ARN));
+        when(lambda.updateFunctionUrlConfig(eq(REGION), eq(FN_ARN), isNull(), anyMap()))
+                .thenReturn(urlConfig(FN_ARN));
+        StackResource r = urlResource();
+        r.setPhysicalId(FN_ARN);
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("TargetFunctionArn", FN_ARN)
+                .put("AuthType", "NONE"), ctx());
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.captor();
+        verify(lambda).updateFunctionUrlConfig(eq(REGION), eq(FN_ARN), isNull(), captor.capture());
+        // UpdateFunctionUrlConfig clears the policy only for a Cors member that is present and
+        // null; omitting it left the rules the template no longer declares in force.
+        assertTrue(captor.getValue().containsKey("Cors"));
+        assertNull(captor.getValue().get("Cors"));
     }
 
     @Test

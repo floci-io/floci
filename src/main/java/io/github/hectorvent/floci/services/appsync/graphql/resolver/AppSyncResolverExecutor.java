@@ -104,6 +104,45 @@ public class AppSyncResolverExecutor {
         }
     }
 
+    /**
+     * One stage's code and the runtime it is written for: the resolver itself, or one pipeline
+     * function.
+     *
+     * <p>{@code vtl} is decided from the mapping templates, not from an absent runtime. AppSync
+     * leaves {@code Runtime} unset on a VTL resolver, so treating "no runtime" as APPSYNC_JS made
+     * the VTL check below unreachable and a VTL stage fell through to the pass-through arm — it ran
+     * as if it had no handler instead of saying it is unsupported.
+     */
+    private record Stage(String code, ResolverRuntimeName runtime, boolean vtl) {
+
+        static Stage of(Resolver resolver) {
+            return new Stage(resolver.getCode(), resolver.getRuntime() == null
+                    ? null : resolver.getRuntime().getName(),
+                    isVtl(resolver.getCode(), resolver.getRuntime() == null
+                                    ? null : resolver.getRuntime().getName(),
+                            resolver.getRequestMappingTemplate(), resolver.getResponseMappingTemplate()));
+        }
+
+        static Stage of(FunctionConfiguration function) {
+            return new Stage(function.getCode(), function.getRuntime() == null
+                    ? null : function.getRuntime().getName(),
+                    isVtl(function.getCode(), function.getRuntime() == null
+                                    ? null : function.getRuntime().getName(),
+                            function.getRequestMappingTemplate(), function.getResponseMappingTemplate()));
+        }
+
+        private static boolean isVtl(String code, ResolverRuntimeName runtime, String requestTemplate,
+                                     String responseTemplate) {
+            if (runtime == ResolverRuntimeName.VTL) {
+                return true;
+            }
+            boolean hasCode = code != null && !code.isBlank();
+            boolean hasTemplate = (requestTemplate != null && !requestTemplate.isBlank())
+                    || (responseTemplate != null && !responseTemplate.isBlank());
+            return !hasCode && hasTemplate;
+        }
+    }
+
     /** One field's resolution, holding the mutable pipeline state. */
     private final class Execution {
 
@@ -134,12 +173,13 @@ public class AppSyncResolverExecutor {
         }
 
         private DataFetcherResult<Object> runUnit() {
-            Object request = callHandler(resolver.getCode(), runtimeOf(resolver), REQUEST, null, null, null);
+            Stage stage = Stage.of(resolver);
+            Object request = callHandler(stage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
             }
             Invocation invocation = invokeDataSource(resolver.getDataSourceName(), request);
-            Object response = callHandler(resolver.getCode(), runtimeOf(resolver), RESPONSE,
+            Object response = callHandler(stage, RESPONSE,
                     invocation.result(), invocation.error(), invocation.result());
             return result(returned ? earlyReturnValue : response);
         }
@@ -147,7 +187,8 @@ public class AppSyncResolverExecutor {
         private DataFetcherResult<Object> runPipeline() {
             // The before step's job is usually to fill ctx.stash for the functions; its return value
             // is not the field's result, but it is what the first function sees as ctx.prev.result.
-            Object before = callHandler(resolver.getCode(), runtimeOf(resolver), REQUEST, null, null, null);
+            Stage resolverStage = Stage.of(resolver);
+            Object before = callHandler(resolverStage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
             }
@@ -155,15 +196,13 @@ public class AppSyncResolverExecutor {
 
             for (String functionId : pipelineFunctionIds()) {
                 FunctionConfiguration function = function(functionId);
-                ResolverRuntimeName runtime = function.getRuntime() == null
-                        ? ResolverRuntimeName.APPSYNC_JS
-                        : function.getRuntime().getName();
-                Object request = callHandler(function.getCode(), runtime, REQUEST, null, null, null);
+                Stage functionStage = Stage.of(function);
+                Object request = callHandler(functionStage, REQUEST, null, null, null);
                 if (returned) {
                     return result(earlyReturnValue);
                 }
                 Invocation invocation = invokeDataSource(function.getDataSourceName(), request);
-                Object response = callHandler(function.getCode(), runtime, RESPONSE,
+                Object response = callHandler(functionStage, RESPONSE,
                         invocation.result(), invocation.error(), invocation.result());
                 if (returned) {
                     return result(earlyReturnValue);
@@ -175,8 +214,7 @@ public class AppSyncResolverExecutor {
 
             // The after step has no data source of its own, so it never carries ctx.error: a
             // function whose error went unsuppressed stopped the pipeline before this point.
-            Object after = callHandler(resolver.getCode(), runtimeOf(resolver), RESPONSE,
-                    previousResult, null, null);
+            Object after = callHandler(resolverStage, RESPONSE, previousResult, null, null);
             return result(returned ? earlyReturnValue : after);
         }
 
@@ -194,6 +232,11 @@ public class AppSyncResolverExecutor {
             try {
                 return appSyncService.getFunction(apiId, functionId);
             } catch (AwsException e) {
+                // Only "no such function" is that. A 409 from a schema mid-recreation, or any other
+                // control-plane failure, has to surface as itself or the real cause is lost.
+                if (e.getHttpStatus() != 404) {
+                    throw e;
+                }
                 throw new AwsException("InternalFailureException",
                         "Pipeline resolver " + resolver.getTypeName() + "." + resolver.getFieldName()
                                 + " names function " + functionId + ", which does not exist", 500);
@@ -251,20 +294,24 @@ public class AppSyncResolverExecutor {
          * missing {@code response()} as "pass the data source result through", which is
          * {@code passThrough} here.
          */
-        private Object callHandler(String code, ResolverRuntimeName runtime, String handler,
-                                  Object result, JsEvaluation.JsError error, Object passThrough) {
-            if (code == null || code.isBlank()) {
-                if (runtime == ResolverRuntimeName.VTL || runtime == null) {
-                    throw new AwsException("InternalFailureException",
-                            "Floci runs APPSYNC_JS resolvers only; " + resolver.getTypeName() + "."
-                                    + resolver.getFieldName() + " has a VTL mapping template", 500);
-                }
-                return passThrough;
-            }
-            if (runtime == ResolverRuntimeName.VTL) {
+        private Object callHandler(Stage stage, String handler, Object result,
+                                  JsEvaluation.JsError error, Object passThrough) {
+            if (stage.vtl()) {
+                // Said out loud rather than resolved to null: a null that means "not implemented"
+                // is indistinguishable from a null that means "no rows".
                 throw new AwsException("InternalFailureException",
                         "Floci runs APPSYNC_JS resolvers only; " + resolver.getTypeName() + "."
-                                + resolver.getFieldName() + " declares the VTL runtime", 500);
+                                + resolver.getFieldName() + " uses VTL mapping templates", 500);
+            }
+            String code = stage.code();
+            if (code == null || code.isBlank()) {
+                // Neither code nor templates: nothing to run, and nothing that could have decided
+                // to suppress a data source error either.
+                if (error != null) {
+                    throw new ResolverRaisedException(new AppSyncResolverError(error.message(),
+                            error.type(), error.data(), error.errorInfo(), path));
+                }
+                return passThrough;
             }
 
             JsEvaluation evaluation = jsRuntime.evaluate(code, handler, context(result, error));
@@ -382,12 +429,6 @@ public class AppSyncResolverExecutor {
             DataFetcherResult.Builder<Object> builder = DataFetcherResult.newResult().data(data);
             errors.forEach(builder::error);
             return builder.build();
-        }
-
-        private ResolverRuntimeName runtimeOf(Resolver resolver) {
-            return resolver.getRuntime() == null
-                    ? ResolverRuntimeName.APPSYNC_JS
-                    : resolver.getRuntime().getName();
         }
     }
 

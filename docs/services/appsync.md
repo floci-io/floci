@@ -190,7 +190,7 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 
 | Case | HTTP | Notes |
 |---|---|---|
-| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Fields with an `APPSYNC_JS` resolver are resolved (see [Resolver execution](#resolver-execution)); a field with no resolver, or one with a VTL template, is `null` |
+| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Fields with an `APPSYNC_JS` resolver are resolved (see [Resolver execution](#resolver-execution)). A field with no resolver is `null`; one with a VTL mapping template fails with an error saying so, rather than resolving to `null` |
 | HTTP subscription operation | 200 | `OperationNotSupported` (realtime WebSocket is a later phase) |
 | Empty body / `{}` / `[]` / unparseable JSON / bad Content-Type | 400 | `MalformedHttpRequestException` |
 | Missing `operationName` with multiple operations | 400 | `BadRequestException` — `Missing operation name.` |

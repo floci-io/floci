@@ -97,6 +97,63 @@ class AppSyncCfnProvisionerTest {
         return captor.getValue();
     }
 
+    @Test
+    void anUpdateThatDroppedTagsClearsThem() {
+        when(appSync.updateGraphqlApi(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "account-api")
+                .put("AuthenticationType", "API_KEY");
+
+        provisioner.provision(r, props, updateCtx(API_ID));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateGraphqlApi(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        // The service only touches tags when the member is present, so an omitted one left the
+        // previous tags on an API the template no longer tags at all.
+        assertEquals(Map.of(), captor.getValue().get("tags"));
+    }
+
+    @Test
+    void aCreateWithNoTagsSendsNoTagsMember() {
+        when(appSync.createGraphqlApi(any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Name", "account-api")
+                .put("AuthenticationType", "API_KEY"), ctx());
+
+        // Nothing to drive to on a create: an untagged API keeps a null tag map, not an empty one.
+        assertFalse(capturedApiRequest().containsKey("tags"));
+    }
+
+    @Test
+    void anUpdateThatDroppedEnvironmentVariablesClearsThem() {
+        when(appSync.updateGraphqlApi(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Name", "account-api")
+                .put("AuthenticationType", "API_KEY"), updateCtx(API_ID));
+
+        // PutGraphqlApiEnvironmentVariables replaces the whole set, so the empty map is what clears
+        // it; skipping the call left variables the template dropped readable by every resolver.
+        verify(appSync).putEnvironmentVariables(API_ID, Map.of());
+    }
+
+    @Test
+    void aCreateWithNoEnvironmentVariablesMakesNoCall() {
+        when(appSync.createGraphqlApi(any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("Name", "account-api")
+                .put("AuthenticationType", "API_KEY"), ctx());
+
+        verify(appSync, never()).putEnvironmentVariables(anyString(), any());
+    }
+
     // ── GraphQLApi ───────────────────────────────────────────────────────────
 
     @Test

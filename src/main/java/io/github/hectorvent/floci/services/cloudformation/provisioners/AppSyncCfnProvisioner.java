@@ -122,7 +122,11 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         req.remove("tags");
         Object environmentVariables = req.remove("environmentVariables");
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        if (!tags.isEmpty()) {
+        // Sent on every update, empty map included: CloudFormation drives a resource to the
+        // template's desired state, so a tag the template no longer declares has to go. Omitting
+        // the member left the old tags in place. On a create an empty map is left out, so a
+        // resource with no tags keeps a null tag map rather than an empty one.
+        if (!tags.isEmpty() || ctx.isUpdate()) {
             req.put("tags", tags);
         }
         if (blank(str(req.get("name")))) {
@@ -134,8 +138,12 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
                 : appSyncService.createGraphqlApi(req, ctx.region());
 
         Map<String, String> resolvedEnvironment = stringMap(environmentVariables);
-        // Driven to the template's desired state on every provision, empty map included: the call
-        // replaces the whole set, so a variable dropped from the template is dropped from the API.
+        if (resolvedEnvironment == null && ctx.isUpdate()) {
+            // The property was dropped from the template. The call replaces the whole set, so an
+            // empty map is what clears it; skipping the call left the old variables readable by
+            // every resolver.
+            resolvedEnvironment = Map.of();
+        }
         if (resolvedEnvironment != null) {
             appSyncService.putEnvironmentVariables(api.getApiId(), resolvedEnvironment);
         }

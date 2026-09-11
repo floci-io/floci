@@ -154,15 +154,20 @@ public class LambdaAddressingCfnProvisioner implements CfnResourceProvisioner {
             request.put("InvokeMode", invokeMode);
         }
         Map<String, Object> cors = corsRequest(props, ctx);
+        boolean updating = hasUrlConfig(ctx.region(), targetFunctionArn, qualifier);
         if (cors != null) {
             request.put("Cors", cors);
+        } else if (updating) {
+            // Present and null, which is how UpdateFunctionUrlConfig is told to clear the policy;
+            // omitting the member leaves the CORS rules the template no longer declares in place.
+            request.put("Cors", null);
         }
 
         // provision is the update path too, and CreateFunctionUrlConfig answers 409 on a function
         // that already has one. Which call to make follows from whether the *intended* target
         // already has a config, not from isUpdate(): TargetFunctionArn and Qualifier are
         // create-only, so an update that changed either has to create against the new function.
-        LambdaUrlConfig urlConfig = hasUrlConfig(ctx.region(), targetFunctionArn, qualifier)
+        LambdaUrlConfig urlConfig = updating
                 ? lambdaService.updateFunctionUrlConfig(ctx.region(), targetFunctionArn, qualifier, request)
                 : lambdaService.createFunctionUrlConfig(ctx.region(), targetFunctionArn, qualifier, request);
 

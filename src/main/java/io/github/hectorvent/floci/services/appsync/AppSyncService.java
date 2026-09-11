@@ -531,6 +531,10 @@ public class AppSyncService {
     public FunctionConfiguration updateFunction(String apiId, String functionId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         FunctionConfiguration existing = getFunction(apiId, functionId);
+        // UpdateFunction takes a new name on AWS, and CloudFormation drives FunctionConfiguration
+        // renames through it. Leaving the name alone let a stack complete while GetFunction still
+        // reported the old one.
+        if (request.containsKey("name")) existing.setName((String) request.get("name"));
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         if (request.containsKey("dataSourceName")) existing.setDataSourceName((String) request.get("dataSourceName"));
         if (request.containsKey("requestMappingTemplate")) existing.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
