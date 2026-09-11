@@ -344,4 +344,30 @@ class RedshiftClusterCfnProvisionerTest {
         assertEquals("my-cluster", p.updateCleanupPhysicalId(r));
         assertTrue(p.hasReplacementUpdate(r));
     }
+
+    @Test
+    void changingDBNameTriggersReplacement() {
+        RedshiftService service = mock(RedshiftService.class);
+        Cluster existing = availableCluster("my-cluster");
+        existing.setMasterUsername("admin");
+        when(service.describeClusters("my-cluster")).thenReturn(List.of(existing));
+        when(service.createCluster(anyString(), anyString(), anyString(), anyString(), any(), anyList()))
+                .thenAnswer(inv -> availableCluster(inv.getArgument(0)));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("W");
+        r.setPhysicalId("my-cluster");
+        r.getAttributes().put("Floci::DBName", "dev");
+
+        p.provision(r, json("""
+            {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
+             "MasterUserPassword":"Secret123","DBName":"analytics"}"""), ctx("my-cluster"));
+
+        assertNotEquals("my-cluster", r.getPhysicalId());
+        assertEquals("my-cluster", p.updateCleanupPhysicalId(r));
+        assertTrue(p.hasReplacementUpdate(r));
+        assertEquals("analytics", r.getAttributes().get("Floci::DBName"));
+    }
 }

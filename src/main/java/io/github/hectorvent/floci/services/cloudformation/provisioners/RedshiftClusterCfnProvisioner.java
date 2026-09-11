@@ -45,7 +45,7 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         if (CLUSTER.equals(r.getResourceType())) {
             Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
-            provisionCluster(r, props, ctx);
+            provisionCluster(r, props, ctx, attributesBefore);
             ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
         }
@@ -78,7 +78,8 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         return ReplacementCleanup.rollback(resource, this::delete);
     }
 
-    private void provisionCluster(StackResource r, JsonNode props, ProvisionContext ctx) {
+    private void provisionCluster(StackResource r, JsonNode props, ProvisionContext ctx,
+                                  Map<String, String> attributesBefore) {
         if (Boolean.parseBoolean(ctx.resolveOptional(props, "ManageMasterPassword"))) {
             throw new AwsException("ValidationException",
                     "ManageMasterPassword is not emulated by Floci; set MasterUserPassword instead", 400);
@@ -93,12 +94,16 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         String subnetGroup = ctx.resolveOptional(props, "ClusterSubnetGroupName");
         List<String> securityGroups = ctx.resolveStringList(props, "VpcSecurityGroupIds");
 
+        String dbName = ctx.resolveOptional(props, "DBName");
+        String priorDbName = attributesBefore.get("Floci::DBName");
+        boolean dbNameChanged = ctx.isUpdate() && dbName != null && priorDbName != null && !dbName.equals(priorDbName);
+
         String explicitId = ctx.resolveOptional(props, "ClusterIdentifier");
         Cluster prior = ctx.isUpdate() ? findExistingCluster(ctx.priorPhysicalId()) : null;
-        boolean createOnlyChanged = prior != null && (
+        boolean createOnlyChanged = dbNameChanged || (prior != null && (
                 (masterUsername != null && !masterUsername.equals(prior.getMasterUsername()))
                 || (subnetGroup != null && !Objects.equals(subnetGroup, prior.getClusterSubnetGroupName()))
-        );
+        ));
 
         String id;
         if (createOnlyChanged && (explicitId == null || explicitId.equals(ctx.priorPhysicalId()))) {
@@ -129,6 +134,9 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(id);
         r.getAttributes().put("Id", id);
+        if (dbName != null && !dbName.isBlank()) {
+            r.getAttributes().put("Floci::DBName", dbName);
+        }
         if (cluster.getEndpoint() != null) {
             r.getAttributes().put("Endpoint.Address", cluster.getEndpoint().getAddress());
             r.getAttributes().put("Endpoint.Port", String.valueOf(cluster.getEndpoint().getPort()));
