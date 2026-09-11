@@ -241,7 +241,7 @@ public class IotMqttWebSocketIntegrationTest {
                 String clientId = "ws-fanout-" + i + "-" + System.nanoTime();
                 Thread thread = new Thread(() -> {
                     try {
-                        WsClient subscriber = WsClient.connect(wss("/mqtt"), clientId, null, null);
+                        WsClient subscriber = WsClient.connect(ws("/mqtt"), clientId, null, null);
                         subscriber.subscribe(topic);
                         synchronized (subscribers) {
                             subscribers.add(subscriber);
