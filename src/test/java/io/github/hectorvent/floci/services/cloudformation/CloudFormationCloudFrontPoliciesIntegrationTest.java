@@ -12,11 +12,11 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -267,16 +267,40 @@ class CloudFormationCloudFrontPoliciesIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(400)
-            .body(containsString("Stack with id " + stackName + " does not exist"));
+        awaitStackGone(stackName);
+    }
+
+    private static void awaitStackGone(String stackName) {
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        String lastBody = "";
+        while (System.nanoTime() < deadline) {
+            var response = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .extract()
+                .response();
+            lastBody = response.asString();
+            if (response.statusCode() == 400) {
+                assertTrue(lastBody.contains("Stack with id " + stackName + " does not exist"), lastBody);
+                return;
+            }
+            assertEquals(200, response.statusCode(), lastBody);
+            if (lastBody.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
+                fail("Stack deletion failed: " + lastBody);
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                fail("Interrupted while waiting for stack deletion", e);
+            }
+        }
+        fail("Stack did not disappear after deletion: " + lastBody);
     }
 
     private static String describeStacks(String stackName) {
