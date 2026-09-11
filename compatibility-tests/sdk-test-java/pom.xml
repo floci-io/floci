@@ -453,6 +453,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>elasticloadbalancingv2</artifactId>
         </dependency>
+        <!-- Global Accelerator client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>globalaccelerator</artifactId>
+        </dependency>
         <!-- EventBridge Scheduler client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
