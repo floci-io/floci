@@ -17,6 +17,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GlueJsonHandlerTest {
@@ -38,6 +39,51 @@ class GlueJsonHandlerTest {
         GlueService glueService = new GlueService(
                 storageFactory, schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(storageFactory));
         handler = new GlueJsonHandler(glueService, schemaRegistryService, mapper);
+    }
+
+    private void createDatabaseAndTable(String dbName, String tableName) throws Exception {
+        ObjectNode createDb = mapper.createObjectNode();
+        createDb.putObject("DatabaseInput").put("Name", dbName);
+        assertEquals(200, handler.handle("CreateDatabase", createDb, REGION).getStatus());
+
+        ObjectNode createTable = mapper.createObjectNode();
+        createTable.put("DatabaseName", dbName);
+        createTable.putObject("TableInput").put("Name", tableName);
+        assertEquals(200, handler.handle("CreateTable", createTable, REGION).getStatus());
+    }
+
+    /**
+     * A client reading a table's partition indexes needs an answer, not an unsupported-action
+     * failure: the Terraform AWS provider reads them after creating a table and on every refresh,
+     * so without this a Glue table cannot be managed as a resource at all.
+     */
+    @Test
+    void getPartitionIndexesReturnsAnEmptyListForAnExistingTable() throws Exception {
+        createDatabaseAndTable("indexes_db", "events");
+
+        ObjectNode request = mapper.createObjectNode();
+        request.put("DatabaseName", "indexes_db");
+        request.put("TableName", "events");
+
+        Response response = handler.handle("GetPartitionIndexes", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getEntity();
+        assertTrue(body.containsKey("PartitionIndexDescriptorList"));
+        assertTrue(((java.util.List<?>) body.get("PartitionIndexDescriptorList")).isEmpty());
+    }
+
+    /** A missing table is reported as missing, not as a table that happens to have no indexes. */
+    @Test
+    void getPartitionIndexesOnAMissingTableFails() throws Exception {
+        createDatabaseAndTable("indexes_db2", "events");
+
+        ObjectNode request = mapper.createObjectNode();
+        request.put("DatabaseName", "indexes_db2");
+        request.put("TableName", "absent");
+
+        assertThrows(Exception.class, () -> handler.handle("GetPartitionIndexes", request, REGION));
     }
 
     @Test
