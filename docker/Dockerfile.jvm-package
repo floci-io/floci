@@ -1,19 +1,16 @@
-# Stage 1: Build
-FROM eclipse-temurin:25-jdk-noble AS build
-WORKDIR /build
-
-RUN apt-get update && apt-get install -y maven && rm -rf /var/lib/apt/lists/*
-
-COPY pom.xml .
-RUN mvn dependency:go-offline -q
-
-COPY src/ src/
-RUN mvn clean package -DskipTests -q
-
-# Stage 2: Runtime
+# JVM image built from an artifact that already exists on the host:
+#   ./mvnw package -DskipTests && docker build -f docker/Dockerfile.jvm-package -t floci/floci:dev .
+#
+# The counterpart to Dockerfile.native-package, for the JVM runtime — same idea, same reason. It
+# exists for the local loop: docker/Dockerfile runs Maven inside the build, which re-resolves every
+# dependency and wants a couple of gigabytes, so iterating on a change through it is slow and can
+# fall over on a machine with little headroom. Consuming target/quarkus-app takes seconds.
+#
+# The runtime setup below is deliberately identical to stage 2 of docker/Dockerfile, which is the
+# canonical definition: change it there and mirror it here.
 FROM eclipse-temurin:25-jre-noble
 
-ARG VERSION=latest
+ARG VERSION=dev
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
@@ -22,11 +19,12 @@ ENV AWS_ACCESS_KEY_ID=test
 ENV AWS_SECRET_ACCESS_KEY=test
 ENV AWS_CONFIG_FILE=/etc/floci/aws/config
 
-# Privilege drop happens in the entrypoint through coreutils chroot, so no gosu
-# download; wget stays for the HEALTHCHECK below.
+# awscli and boto3 are what the init hooks in /etc/floci/init/ready.d call, and the `aws` shim
+# points them at the in-container gateway. bash as well: hooks that use arrays need it, and
+# FLOCI_INIT_HOOKS_SHELL_EXECUTABLE=/bin/bash selects it.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates passwd python3 python3-pip wget; \
+    apt-get install -y --no-install-recommends ca-certificates passwd python3 python3-pip wget bash; \
     rm -rf /var/lib/apt/lists/*; \
     pip3 install --no-cache-dir --break-system-packages awscli boto3; \
     aws_bin="$(command -v aws)"; \
@@ -48,7 +46,7 @@ RUN mkdir -p /app/data /etc/floci/aws \
     && chmod "g+rwX" /app \
     && chown 1001:root /app/data
 
-COPY --from=build /build/target/quarkus-app/ quarkus-app/
+COPY target/quarkus-app/ quarkus-app/
 RUN chown -R 1001:root /app/quarkus-app
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
@@ -57,30 +55,6 @@ COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
 VOLUME /app/data
 
 EXPOSE 4566
-
-# Need to expose separately due to https://github.com/floci-io/floci/issues/2095.
-# This preseres compatibility with https://github.com/docker-java/docker-java/blob/002b6eb7aa2b892be729c7c2a5e95f782924db38/docker-java-api/src/main/java/com/github/dockerjava/api/model/ExposedPort.java#L119
-EXPOSE 6379
-EXPOSE 6380
-EXPOSE 6381
-EXPOSE 6382
-EXPOSE 6383
-EXPOSE 6384
-EXPOSE 6385
-EXPOSE 6386
-EXPOSE 6387
-EXPOSE 6388
-EXPOSE 6389
-EXPOSE 6390
-EXPOSE 6391
-EXPOSE 6392
-EXPOSE 6393
-EXPOSE 6394
-EXPOSE 6395
-EXPOSE 6396
-EXPOSE 6397
-EXPOSE 6398
-EXPOSE 6399
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
     CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
