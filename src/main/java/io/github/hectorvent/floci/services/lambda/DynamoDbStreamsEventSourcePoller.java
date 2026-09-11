@@ -31,6 +31,9 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbStreamsEventSourcePoller.class);
 
+    /** Raised by the stream when a stored checkpoint has aged out of the retained window. */
+    private static final String TRIMMED_DATA_ACCESS_EXCEPTION = "TrimmedDataAccessException";
+
     private final Vertx vertx;
     private final DynamoDbStreamService streamService;
     private final LambdaExecutorService executorService;
@@ -154,11 +157,28 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                 String shardId = DynamoDbStreamService.SHARD_ID;
                 String lastSeq = esm.getShardSequenceNumbers().get(shardId);
 
-                String iterator = lastSeq == null
-                        ? streamService.getShardIterator(streamArn, shardId, "TRIM_HORIZON", null)
-                        : streamService.getShardIterator(streamArn, shardId, "AFTER_SEQUENCE_NUMBER", lastSeq);
-
-                DynamoDbStreamService.GetRecordsResult result = streamService.getRecords(iterator, esm.getBatchSize());
+                DynamoDbStreamService.GetRecordsResult result;
+                try {
+                    String iterator = lastSeq == null
+                            ? streamService.getShardIterator(streamArn, shardId, "TRIM_HORIZON", null)
+                            : streamService.getShardIterator(streamArn, shardId, "AFTER_SEQUENCE_NUMBER", lastSeq);
+                    result = streamService.getRecords(iterator, esm.getBatchSize());
+                } catch (AwsException e) {
+                    if (!TRIMMED_DATA_ACCESS_EXCEPTION.equals(e.getErrorCode())) {
+                        throw e;
+                    }
+                    // The checkpoint fell outside the retained window, so the cursor it names can
+                    // never succeed again. Retrying it wedges the ESM permanently: every later
+                    // write reaches the stream and none is ever delivered. Resume from the oldest
+                    // record still held instead, which is what AWS does when a consumer is
+                    // overtaken by the trim horizon. Records written between the lost checkpoint
+                    // and that record are gone from the stream and are not delivered.
+                    LOG.warnv("DynamoDB Streams ESM {0}: checkpoint {1} was trimmed, resuming from the "
+                                    + "trim horizon; records between were dropped from the stream",
+                            esm.getUuid(), lastSeq);
+                    String horizon = streamService.getShardIterator(streamArn, shardId, "TRIM_HORIZON", null);
+                    result = streamService.getRecords(horizon, esm.getBatchSize());
+                }
                 List<DynamoDbStreamRecord> records = result.records();
 
                 if (records.isEmpty()) {

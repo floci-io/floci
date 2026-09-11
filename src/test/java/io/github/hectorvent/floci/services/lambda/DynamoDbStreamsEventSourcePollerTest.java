@@ -332,6 +332,67 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
     }
 
+    /**
+     * A checkpoint that has aged out of the retained window names a cursor that can never succeed.
+     * Retrying it wedges the ESM for good: later writes keep reaching the stream and none is ever
+     * delivered. The poller must resume from the trim horizon instead.
+     */
+    @Test
+    void trimmedCheckpointResumesFromTrimHorizonInsteadOfWedging() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+
+        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
+                eq("AFTER_SEQUENCE_NUMBER"), any())).thenReturn("it-trimmed");
+        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
+                eq("TRIM_HORIZON"), any())).thenReturn("it-horizon");
+        when(streamService.getRecords("it-trimmed", 10)).thenThrow(
+                new AwsException("TrimmedDataAccessException",
+                        "The requested sequence number has been trimmed", 400));
+        when(streamService.getRecords("it-horizon", 10)).thenReturn(
+                new DynamoDbStreamService.GetRecordsResult(
+                        List.of(ddbRecord("s9", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-horizon"));
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, STALE_CHECKPOINT);
+
+        pollerWith(store).pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(1, readRecords(payload.getValue()).size());
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s9", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    /** Only a trimmed checkpoint resets the cursor; any other stream failure retries the same window. */
+    @Test
+    void nonTrimmedStreamErrorLeavesTheCheckpointAlone() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+
+        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
+                anyString(), any())).thenReturn("it");
+        when(streamService.getRecords("it", 10)).thenThrow(
+                new AwsException("InternalServerError", "boom", 500));
+
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, STALE_CHECKPOINT);
+
+        pollerWith(store).pollAndInvoke(esm);
+        awaitPollCompletedViaSecondFetch(pollerWith(store), esm);
+
+        verify(executorService, never()).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(store, never()).saveForAccount(anyString(), any());
+        assertEquals(STALE_CHECKPOINT, esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
     private JsonNode readRecords(byte[] payload) {
         try {
             return OBJECT_MAPPER.readTree(payload).path("Records");
