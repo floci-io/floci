@@ -415,6 +415,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>pipes</artifactId>
         </dependency>
+        <!-- Bedrock control-plane client (guardrails) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrock</artifactId>
+        </dependency>
         <!-- Bedrock AgentCore control-plane client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
