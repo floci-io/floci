@@ -12,6 +12,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -82,8 +83,6 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationException",
                     "ManageMasterPassword is not emulated by Floci; set MasterUserPassword instead", 400);
         }
-        String id = ctx.stablePhysicalName(ctx.resolveOptional(props, "ClusterIdentifier"),
-                r.getLogicalId(), IDENTIFIER_MAX_LENGTH, true);
         String nodeType = ctx.resolveOptional(props, "NodeType");
         String masterUsername = ctx.resolveOptional(props, "MasterUsername");
         String masterUserPassword = ctx.resolveOptional(props, "MasterUserPassword");
@@ -93,6 +92,24 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         }
         String subnetGroup = ctx.resolveOptional(props, "ClusterSubnetGroupName");
         List<String> securityGroups = ctx.resolveStringList(props, "VpcSecurityGroupIds");
+
+        String explicitId = ctx.resolveOptional(props, "ClusterIdentifier");
+        Cluster prior = ctx.isUpdate() ? findExistingCluster(ctx.priorPhysicalId()) : null;
+        boolean createOnlyChanged = prior != null && (
+                (masterUsername != null && !masterUsername.equals(prior.getMasterUsername()))
+                || (subnetGroup != null && !Objects.equals(subnetGroup, prior.getClusterSubnetGroupName()))
+        );
+
+        String id;
+        if (createOnlyChanged && (explicitId == null || explicitId.equals(ctx.priorPhysicalId()))) {
+            if (explicitId != null && !explicitId.isBlank()) {
+                id = replacementId(explicitId, IDENTIFIER_MAX_LENGTH);
+            } else {
+                id = ctx.generatePhysicalName(r.getLogicalId(), IDENTIFIER_MAX_LENGTH, true);
+            }
+        } else {
+            id = ctx.stablePhysicalName(explicitId, r.getLogicalId(), IDENTIFIER_MAX_LENGTH, true);
+        }
 
         warnUnsupported(props, ctx, id);
 
@@ -150,5 +167,30 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             CfnDeletes.safeDelete("Redshift cluster", physicalId,
                     () -> redshiftService.deleteCluster(physicalId), "ClusterNotFound");
         }
+    }
+
+    private Cluster findExistingCluster(String clusterIdentifier) {
+        if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
+            return null;
+        }
+        try {
+            List<Cluster> list = redshiftService.describeClusters(clusterIdentifier);
+            return (list != null && !list.isEmpty()) ? list.get(0) : null;
+        } catch (AwsException e) {
+            if ("ClusterNotFound".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private String replacementId(String baseId, int maxLength) {
+        String suffix = "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        int keep = Math.max(0, maxLength - suffix.length());
+        String prefix = baseId.length() > keep ? baseId.substring(0, keep) : baseId;
+        while (prefix.endsWith("-")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        return (prefix + suffix).toLowerCase();
     }
 }

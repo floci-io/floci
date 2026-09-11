@@ -18,6 +18,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -291,5 +292,56 @@ class RedshiftClusterCfnProvisionerTest {
         assertTrue(p.rollbackUpdate(r));
         assertEquals("old-name", r.getPhysicalId());
         verify(service).deleteCluster("new-name");
+    }
+
+    @Test
+    void changingMasterUsernameTriggersReplacement() {
+        RedshiftService service = mock(RedshiftService.class);
+        Cluster existing = availableCluster("my-cluster");
+        existing.setMasterUsername("admin");
+        when(service.describeClusters("my-cluster")).thenReturn(List.of(existing));
+        when(service.createCluster(anyString(), anyString(), eq("newadmin"), anyString(), any(), anyList()))
+                .thenAnswer(inv -> availableCluster(inv.getArgument(0)));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("W");
+        p.provision(r, json("""
+            {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"newadmin",
+             "MasterUserPassword":"Secret123"}"""), ctx("my-cluster"));
+
+        assertNotEquals("my-cluster", r.getPhysicalId());
+        assertTrue(r.getPhysicalId().startsWith("my-cluster-"));
+        assertEquals("my-cluster", p.updateCleanupPhysicalId(r));
+        assertTrue(p.hasReplacementUpdate(r));
+
+        when(service.deleteCluster("my-cluster")).thenReturn(null);
+        UpdateCleanupResult result = p.completeUpdate(r);
+        verify(service).deleteCluster("my-cluster");
+        assertEquals(new UpdateCleanupResult(true, true, "my-cluster", 0, null), result);
+    }
+
+    @Test
+    void changingClusterSubnetGroupTriggersReplacement() {
+        RedshiftService service = mock(RedshiftService.class);
+        Cluster existing = availableCluster("my-cluster");
+        existing.setMasterUsername("admin");
+        existing.setClusterSubnetGroupName("subnet-group-1");
+        when(service.describeClusters("my-cluster")).thenReturn(List.of(existing));
+        when(service.createCluster(anyString(), anyString(), anyString(), anyString(), eq("subnet-group-2"), anyList()))
+                .thenAnswer(inv -> availableCluster(inv.getArgument(0)));
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
+
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Redshift::Cluster");
+        r.setLogicalId("W");
+        p.provision(r, json("""
+            {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
+             "MasterUserPassword":"Secret123","ClusterSubnetGroupName":"subnet-group-2"}"""), ctx("my-cluster"));
+
+        assertNotEquals("my-cluster", r.getPhysicalId());
+        assertEquals("my-cluster", p.updateCleanupPhysicalId(r));
+        assertTrue(p.hasReplacementUpdate(r));
     }
 }
