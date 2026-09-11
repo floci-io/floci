@@ -386,4 +386,65 @@ class AppSyncServiceTest {
             return instant;
         }
     }
+
+    /**
+     * Tagging takes an API-level ARN. Reading the API id as "the segment after the last slash"
+     * took the sub-resource id instead, so tagging a data source looked up an API by the data
+     * source's id and answered NotFound. Botocore anchors AppSync's ResourceArn to
+     * {@code apis/<26 chars>} with nothing after it, so a sub-resource ARN is not taggable at all
+     * and the answer is a 400, not a 404.
+     */
+    @Test
+    void tagResourceAcceptsAnApiArnAndTagsThatApi() {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "taggable", "authenticationType", "API_KEY"), "us-east-1");
+        String apiArn = "arn:aws:appsync:us-east-1:000000000000:apis/" + api.getApiId();
+
+        service.tagResource(apiArn, Map.of("env", "test"));
+
+        assertEquals("test", service.getTags(apiArn).get("env"));
+    }
+
+    /**
+     * The ARN AppSync hands back carries the region's partition, so pinning the tagging pattern to
+     * {@code arn:aws:appsync:} meant refusing to tag an API using the exact ARN just returned.
+     * Botocore spells the literal, but this emulator has to accept its own output.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "us-east-1,      aws",
+            "us-gov-west-1,  aws-us-gov",
+            "cn-north-1,     aws-cn",
+            "us-isob-east-1, aws-iso-b"})
+    void tagResourceAcceptsAnApiArnFromAnyPartition(String region, String partition) {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "p-" + region, "authenticationType", "API_KEY"), region);
+        String apiArn = "arn:" + partition + ":appsync:" + region + ":000000000000:apis/" + api.getApiId();
+
+        service.tagResource(apiArn, Map.of("env", "test"));
+
+        assertEquals("test", service.getTags(apiArn).get("env"));
+    }
+
+    @Test
+    void tagResourceRejectsASubResourceArn() {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "subresource", "authenticationType", "API_KEY"), "us-east-1");
+        String dataSourceArn = "arn:aws:appsync:us-east-1:000000000000:apis/"
+                + api.getApiId() + "/datasources/myDS";
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.tagResource(dataSourceArn, Map.of("env", "test")));
+
+        assertEquals(400, thrown.getHttpStatus());
+        assertEquals("BadRequestException", thrown.getErrorCode());
+    }
+
+    @Test
+    void tagResourceRejectsAnArnThatIsNotAppSync() {
+        assertThrows(AwsException.class, () -> service.tagResource(
+                "arn:aws:sqs:us-east-1:000000000000:apis/abcdefghijklmnopqrstuvwxyz", Map.of()));
+        assertThrows(AwsException.class, () -> service.tagResource("apis/abc", Map.of()));
+        assertThrows(AwsException.class, () -> service.tagResource(null, Map.of()));
+    }
 }

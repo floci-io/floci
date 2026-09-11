@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -22,6 +23,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.*;
 import java.util.Base64;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class AppSyncService {
@@ -1128,11 +1131,36 @@ public class AppSyncService {
         return regionResolver.buildArn("appsync", region, "apis/" + apiId + "/functions/" + functionId);
     }
 
+    /**
+     * The model's own {@code ResourceArn} shape for AppSync tagging. Only an API-level ARN is
+     * taggable: the pattern is anchored to {@code apis/<26 chars>} with nothing after it, so a
+     * data source or function ARN is not a valid ResourceArn at all.
+     *
+     * <p>The partition is the one place this departs from the model, which spells it {@code aws}.
+     * This emulator mints its API ARNs with the region's own partition, so keeping the literal
+     * would mean refusing to tag an API using the exact ARN it had just returned.
+     */
+    private static final Pattern RESOURCE_ARN = Pattern.compile(
+            "^arn:" + AwsArnUtils.PARTITION_REGEX
+                    + ":appsync:[A-Za-z0-9_/.-]{0,63}:\\d{12}:apis/([0-9A-Za-z_-]{26})$");
+
+    /**
+     * API id out of a tagging ResourceArn.
+     *
+     * <p>Splitting on {@code /} and taking the last segment read the sub-resource id as the API
+     * id, so tagging {@code .../apis/<api>/datasources/<ds>} looked up an API called
+     * {@code <ds>} and answered NotFound. AWS rejects that ARN outright, so the shape is
+     * validated instead.
+     */
     private String extractApiIdFromArn(String arn) {
-        if (arn == null) throw new AwsException("BadRequestException", "Invalid ARN", 400);
-        String[] parts = arn.split("/");
-        if (parts.length < 2) throw new AwsException("BadRequestException", "Invalid ARN format", 400);
-        return parts[parts.length - 1];
+        if (arn == null) {
+            throw new AwsException("BadRequestException", "Invalid ARN", 400);
+        }
+        Matcher matcher = RESOURCE_ARN.matcher(arn);
+        if (!matcher.matches()) {
+            throw new AwsException("BadRequestException", "Invalid ARN format", 400);
+        }
+        return matcher.group(1);
     }
 
     private String coerceString(Object value) {

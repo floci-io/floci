@@ -489,7 +489,7 @@ public class LambdaMicrovmsController {
         node.put("imageVersion", vm.imageVersion);
         node.put("endpoint", vm.endpoint);
         node.put("maximumDurationInSeconds", 28800);
-        String region = vm.imageArn.split(":")[3];
+        String region = regionOf(vm.imageArn);
         node.putArray("egressNetworkConnectors")
                 .add("arn:aws:lambda:" + region + ":aws:network-connector:aws-network-connector:INTERNET_EGRESS");
         node.putArray("ingressNetworkConnectors")

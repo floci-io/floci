@@ -419,21 +419,17 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             return copyStateMachine(stateMachine.get());
         }
 
-        int versionSeparator = arn != null ? arn.lastIndexOf(':') : -1;
-        if (versionSeparator > 0 && versionSeparator < arn.length() - 1) {
-            String versionText = arn.substring(versionSeparator + 1);
-            if (versionText.chars().allMatch(Character::isDigit)) {
-                String baseArn = arn.substring(0, versionSeparator);
-                Optional<StateMachine> baseStateMachine = stateMachineStore.get(baseArn);
-                if (baseStateMachine.isPresent()) {
-                    return baseStateMachine.get().getVersions().stream()
-                            .filter(version -> arn.equals(version.getStateMachineVersionArn()))
-                            .findFirst()
-                            .map(version -> stateMachineFromVersion(baseStateMachine.get(), version))
-                            .orElseThrow(() -> new AwsException(
-                                    "StateMachineDoesNotExist",
-                                    "State machine does not exist", 400));
-                }
+        VersionArn parsedVersion = parseVersionArn(arn);
+        if (parsedVersion != null) {
+            Optional<StateMachine> baseStateMachine = stateMachineStore.get(parsedVersion.baseArn());
+            if (baseStateMachine.isPresent()) {
+                return baseStateMachine.get().getVersions().stream()
+                        .filter(version -> arn.equals(version.getStateMachineVersionArn()))
+                        .findFirst()
+                        .map(version -> stateMachineFromVersion(baseStateMachine.get(), version))
+                        .orElseThrow(() -> new AwsException(
+                                "StateMachineDoesNotExist",
+                                "State machine does not exist", 400));
             }
         }
         throw new AwsException(
@@ -518,11 +514,11 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     public synchronized void deleteStateMachineVersion(String stateMachineVersionArn) {
-        int lastColon = stateMachineVersionArn.lastIndexOf(':');
-        if (lastColon < 0) {
+        VersionArn parsed = parseVersionArn(stateMachineVersionArn);
+        if (parsed == null) {
             return;
         }
-        String baseArn = stateMachineVersionArn.substring(0, lastColon);
+        String baseArn = parsed.baseArn();
         stateMachineStore.get(baseArn).ifPresent(current -> {
             StateMachine updated = copyStateMachine(current);
             updated.getVersions().removeIf(
@@ -1230,25 +1226,43 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return copy;
     }
 
+    private static final String STATE_MACHINE_RESOURCE = "stateMachine";
+
     private record VersionArn(String baseArn, int version) {
     }
 
+    /**
+     * Splits a state machine <em>version</em> ARN into its base ARN and version number, or returns
+     * {@code null} when {@code arn} is not one.
+     *
+     * <p>Decided by the shape of the resource, not by whether the tail happens to be digits. A
+     * state machine ARN is {@code stateMachine:<name>} and a version ARN is
+     * {@code stateMachine:<name>:<version>}, so the segment count settles it. Digits are legal in
+     * a state machine name, and reading the tail alone meant a machine named {@code 2024} was
+     * taken apart into version 2024 of a nameless ARN, which the caller then rejected as
+     * InvalidArn: an existing state machine that could not be described.
+     */
     private static VersionArn parseVersionArn(String arn) {
         if (arn == null) {
             return null;
         }
-        int separator = arn.lastIndexOf(':');
-        if (separator < 0 || separator == arn.length() - 1) {
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
             return null;
         }
-        String suffix = arn.substring(separator + 1);
-        if (!suffix.chars().allMatch(Character::isDigit)) {
+        String[] segments = parsed.resource().split(":", -1);
+        if (segments.length != 3
+                || !STATE_MACHINE_RESOURCE.equals(segments[0])
+                || segments[2].isEmpty()
+                || !segments[2].chars().allMatch(Character::isDigit)) {
             return null;
         }
         try {
             return new VersionArn(
-                    arn.substring(0, separator),
-                    Integer.parseInt(suffix));
+                    arn.substring(0, arn.length() - segments[2].length() - 1),
+                    Integer.parseInt(segments[2]));
         } catch (NumberFormatException ignored) {
             return null;
         }

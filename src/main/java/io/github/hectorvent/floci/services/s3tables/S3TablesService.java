@@ -309,10 +309,13 @@ public class S3TablesService {
     }
 
     private String resourceName(String arn, String prefix) {
-        if (arn == null || !arn.startsWith("arn:") || !arn.contains(":" + prefix)) {
+        // Guard and cut must use the same needle. Checking for ":" + prefix but cutting on prefix
+        // alone means a name that itself contains the prefix is cut at the wrong place.
+        String needle = ":" + prefix;
+        if (arn == null || !arn.startsWith("arn:") || !arn.contains(needle)) {
             throw notFound("The table bucket does not exist.");
         }
-        return arn.substring(arn.lastIndexOf(prefix) + prefix.length());
+        return arn.substring(arn.indexOf(needle) + needle.length());
     }
 
     private void persist(TableBucket bucket, String region) {
