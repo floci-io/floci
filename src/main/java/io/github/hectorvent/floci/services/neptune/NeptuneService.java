@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerHandle;
@@ -70,7 +71,7 @@ public class NeptuneService {
     public NeptuneCluster createDbCluster(String id, String engineVersion, boolean iamEnabled,
                                           NeptuneClusterSettings settings, Map<String, String> tags) {
         settings.validate();
-        if (clusters.get(id).isPresent()) {
+        if (getStoredCluster(id).isPresent()) {
             throw new AwsException("DBClusterAlreadyExistsFault",
                     "Neptune cluster " + id + " already exists.", 400);
         }
@@ -97,10 +98,11 @@ public class NeptuneService {
             // A cluster record is metadata: its identifier, ARN, endpoint host and proxy port
             // are derived from configuration and need no Docker, so the cluster is created and
             // reaches 'available' even when no daemon is reachable. Only connecting to the
+            String region = currentRegion();
+            String accountId = currentAccount();
+            String identity = resourceIdentity(accountId, region, id);
             // graph database needs the container.
-            handle = containerManager.tryStart(id, image, dbType);
-
-            String region = regionResolver.getDefaultRegion();
+            handle = containerManager.tryStart(id, image, dbType, accountId, region);
             String endpointHost = resolveEndpointHost();
 
             NeptuneCluster cluster = new NeptuneCluster();
@@ -127,14 +129,14 @@ public class NeptuneService {
                 cluster.setContainerHost(handle.getHost());
                 cluster.setContainerPort(handle.getPort());
 
-                proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
+                proxyManager.startProxy(identity, proxyPort, handle.getHost(), handle.getPort());
             } else {
                 LOG.warnv("Neptune cluster {0} created without a backing graph database container: "
                         + "no Docker daemon is reachable. Metadata operations work; connections to "
                         + "the cluster do not until a daemon appears.", id);
             }
 
-            clusters.put(id, cluster);
+            putCluster(cluster);
             provisioned = true;
             LOG.infov("Neptune cluster {0} created ({1}), endpoint={2}:{3}",
                     id, dbType, endpointHost, String.valueOf(proxyPort));
@@ -147,30 +149,30 @@ public class NeptuneService {
             // catch (RuntimeException) would miss — so a failed create never leaks the
             // reserved port or leaves a container behind. Idempotent and a no-op on success.
             if (!provisioned) {
-                rollbackDbCluster(id, handle, proxyPort);
+                rollbackDbCluster(resourceIdentity(currentAccount(), currentRegion(), id), handle, proxyPort);
             }
         }
     }
 
-    private void rollbackDbCluster(String id, NeptuneContainerHandle handle, int proxyPort) {
+    private void rollbackDbCluster(String identity, NeptuneContainerHandle handle, int proxyPort) {
         try {
             try {
                 // The proxy only starts after the container is ready, so a null handle means it
                 // never started — nothing to stop.
                 if (handle != null) {
-                    proxyManager.stopProxy(id);
+                    proxyManager.stopProxy(identity);
                 }
             } catch (RuntimeException e) {
-                LOG.warnv("Error stopping proxy for Neptune cluster {0}: {1}", id, e.getMessage());
+                LOG.warnv("Error stopping proxy for Neptune cluster {0}: {1}", identity, e.getMessage());
             }
             try {
                 // Stop by id, not handle: a readiness timeout in containerManager.start() throws
                 // after the container was created and registered but before the handle is returned,
                 // so cleaning up by handle here would miss (and orphan) it. stopByClusterId is
                 // idempotent, so it's safe when the container never started.
-                containerManager.stopByClusterId(id);
+                containerManager.stopByClusterId(identity);
             } catch (RuntimeException e) {
-                LOG.warnv("Error stopping container for Neptune cluster {0}: {1}", id, e.getMessage());
+                LOG.warnv("Error stopping container for Neptune cluster {0}: {1}", identity, e.getMessage());
             }
         } finally {
             // Always release the port — even if a cleanup step throws a non-RuntimeException
@@ -180,7 +182,7 @@ public class NeptuneService {
     }
 
     public NeptuneCluster getDbCluster(String id) {
-        return clusters.get(id).orElseThrow(() ->
+        return getStoredCluster(id).orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "Neptune cluster " + id + " not found.", 404));
     }
@@ -189,23 +191,23 @@ public class NeptuneService {
         if (id == null || id.isBlank()) {
             return false;
         }
-        return clusters.get(id).isPresent();
+        return getStoredCluster(id).isPresent();
     }
 
     public boolean hasInstance(String id) {
         if (id == null || id.isBlank()) {
             return false;
         }
-        return instances.get(id).isPresent();
+        return getStoredInstance(id).isPresent();
     }
 
     public boolean hasResourceWithArn(String arn) {
         if (arn == null || !arn.startsWith("arn:")) {
             return false;
         }
-        return clusters.scan(k -> true).stream()
+        return scanClusters().stream()
                         .anyMatch(c -> arn.equalsIgnoreCase(c.getDbClusterArn()))
-                || instances.scan(k -> true).stream()
+                || scanInstances().stream()
                         .anyMatch(i -> arn.equalsIgnoreCase(i.getDbInstanceArn()));
     }
 
@@ -216,13 +218,13 @@ public class NeptuneService {
             // the bare identifier, so a cross-account or cross-region ARN does not
             // resolve a same-named local cluster.
             if (filterId.startsWith("arn:")) {
-                return clusters.scan(k -> true).stream()
+                return scanClusters().stream()
                         .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
                         .toList();
             }
-            return clusters.scan(k -> k.equalsIgnoreCase(filterId));
+            return scanClusters().stream().filter(c -> c.getDbClusterIdentifier().equalsIgnoreCase(filterId)).toList();
         }
-        return clusters.scan(k -> true);
+        return scanClusters();
     }
 
     public NeptuneCluster modifyDbCluster(String id, String engineVersion, Boolean iamEnabled) {
@@ -240,13 +242,13 @@ public class NeptuneService {
             cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
         settings.applyTo(cluster);
-        clusters.put(id, cluster);
+        putCluster(cluster);
         LOG.infov("Neptune cluster {0} modified", id);
         return cluster;
     }
 
     public void deleteDbCluster(String id) {
-        NeptuneCluster cluster = clusters.get(id).orElseThrow(() ->
+        NeptuneCluster cluster = getStoredCluster(id).orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "Neptune cluster " + id + " not found.", 404));
 
@@ -260,18 +262,19 @@ public class NeptuneService {
         }
 
         cluster.setStatus("deleting");
-        clusters.put(id, cluster);
+        putCluster(cluster);
 
-        proxyManager.stopProxy(id);
+        String identity = resourceIdentity(cluster);
+        proxyManager.stopProxy(identity);
 
         if (cluster.getContainerId() != null) {
             containerManager.stop(new NeptuneContainerHandle(
-                    cluster.getContainerId(), id,
+                    cluster.getContainerId(), identity,
                     cluster.getContainerHost(), cluster.getContainerPort()));
         }
 
         releaseProxyPort(cluster.getProxyPort());
-        clusters.delete(id);
+        deleteCluster(cluster);
         LOG.infov("Neptune cluster {0} deleted", id);
     }
 
@@ -285,7 +288,7 @@ public class NeptuneService {
                     "Role ARN " + roleArn + " is already associated with Neptune cluster " + id + ".", 400);
         }
         cluster.getAssociatedRoleArns().add(roleArn);
-        clusters.put(id, cluster);
+        putCluster(cluster);
         LOG.infov("Role {0} added to Neptune cluster {1}", roleArn, id);
         return cluster;
     }
@@ -296,7 +299,7 @@ public class NeptuneService {
             throw new AwsException("DBClusterRoleNotFound",
                     "Role ARN " + roleArn + " is not associated with Neptune cluster " + id + ".", 404);
         }
-        clusters.put(id, cluster);
+        putCluster(cluster);
         LOG.infov("Role {0} removed from Neptune cluster {1}", roleArn, id);
         return cluster;
     }
@@ -338,13 +341,13 @@ public class NeptuneService {
                                             boolean iamEnabled, NeptuneInstanceSettings settings,
                                             Map<String, String> tags) {
         settings.validate();
-        if (instances.get(id).isPresent()) {
+        if (getStoredInstance(id).isPresent()) {
             throw new AwsException("DBInstanceAlreadyExists",
                     "Neptune instance " + id + " already exists.", 400);
         }
 
         NeptuneCluster cluster = getDbCluster(dbClusterIdentifier);
-        String region = regionResolver.getDefaultRegion();
+        String region = currentRegion();
 
         NeptuneInstance instance = new NeptuneInstance();
         instance.setDbInstanceIdentifier(id);
@@ -365,19 +368,19 @@ public class NeptuneService {
         }
 
         cluster.getDbClusterMembers().add(id);
-        clusters.put(dbClusterIdentifier, cluster);
+        putCluster(cluster);
 
-        instances.put(id, instance);
+        putInstance(instance);
         LOG.infov("Neptune instance {0} created in cluster {1}", id, dbClusterIdentifier);
         return instance;
     }
 
     public Optional<NeptuneCluster> findDbCluster(String id) {
-        return id == null ? Optional.empty() : clusters.get(id);
+        return id == null ? Optional.empty() : getStoredCluster(id);
     }
 
     public NeptuneInstance getDbInstance(String id) {
-        return instances.get(id).orElseThrow(() ->
+        return getStoredInstance(id).orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "Neptune instance " + id + " not found.", 404));
     }
@@ -387,13 +390,13 @@ public class NeptuneService {
             // The db-instance-id filter accepts ARNs as well as identifiers; see
             // listDbClusters for why the match is against the stored ARN.
             if (filterId.startsWith("arn:")) {
-                return instances.scan(k -> true).stream()
+                return scanInstances().stream()
                         .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
                         .toList();
             }
-            return instances.scan(k -> k.equalsIgnoreCase(filterId));
+            return scanInstances().stream().filter(i -> i.getDbInstanceIdentifier().equalsIgnoreCase(filterId)).toList();
         }
-        return instances.scan(k -> true);
+        return scanInstances();
     }
 
     public NeptuneInstance modifyDbInstance(String id, String dbInstanceClass, Boolean iamEnabled) {
@@ -411,24 +414,24 @@ public class NeptuneService {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
         settings.applyTo(instance);
-        instances.put(id, instance);
+        putInstance(instance);
         LOG.infov("Neptune instance {0} modified", id);
         return instance;
     }
 
     public void deleteDbInstance(String id) {
-        NeptuneInstance instance = instances.get(id).orElseThrow(() ->
+        NeptuneInstance instance = getStoredInstance(id).orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "Neptune instance " + id + " not found.", 404));
 
         String clusterId = instance.getDbClusterIdentifier();
-        NeptuneCluster cluster = clusters.get(clusterId).orElse(null);
+        NeptuneCluster cluster = getStoredCluster(clusterId).orElse(null);
         if (cluster != null) {
             cluster.getDbClusterMembers().remove(id);
-            clusters.put(clusterId, cluster);
+            putCluster(cluster);
         }
 
-        instances.delete(id);
+        deleteInstance(instance);
         LOG.infov("Neptune instance {0} deleted", id);
     }
 
@@ -474,25 +477,25 @@ public class NeptuneService {
         String id = resource.substring(separator + 1);
         return switch (type) {
             case "cluster" -> {
-                NeptuneCluster cluster = clusters.scan(k -> true).stream()
+                NeptuneCluster cluster = scanClusters().stream()
                         .filter(c -> resourceName.equalsIgnoreCase(c.getDbClusterArn()))
                         .findFirst()
                         .orElseThrow(() -> new AwsException("DBClusterNotFoundFault",
                                 "Neptune cluster " + id + " not found.", 404));
                 yield new TagTarget(cluster.getTags(), updated -> {
                     cluster.setTags(updated);
-                    clusters.put(cluster.getDbClusterIdentifier(), cluster);
+                    putCluster(cluster);
                 });
             }
             case "db" -> {
-                NeptuneInstance instance = instances.scan(k -> true).stream()
+                NeptuneInstance instance = scanInstances().stream()
                         .filter(i -> resourceName.equalsIgnoreCase(i.getDbInstanceArn()))
                         .findFirst()
                         .orElseThrow(() -> new AwsException("DBInstanceNotFound",
                                 "Neptune instance " + id + " not found.", 404));
                 yield new TagTarget(instance.getTags(), updated -> {
                     instance.setTags(updated);
-                    instances.put(instance.getDbInstanceIdentifier(), instance);
+                    putInstance(instance);
                 });
             }
             default -> throw new AwsException("InvalidParameterValue",
@@ -501,6 +504,169 @@ public class NeptuneService {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private String currentAccount() {
+        String account = regionResolver.getAccountId();
+        return account != null ? account : regionResolver.getDefaultAccountId();
+    }
+
+    private String currentRegion() {
+        String region = regionResolver.getRegion();
+        return region != null ? region : regionResolver.getDefaultRegion();
+    }
+
+    private String clusterKey(String region, String id) {
+        return region + "/" + id;
+    }
+
+    private String instanceKey(String region, String id) {
+        return region + "/" + id;
+    }
+
+    private Optional<NeptuneCluster> getStoredCluster(String id) {
+        String account = currentAccount();
+        String region = currentRegion();
+        String key = clusterKey(region, id);
+        if (clusters instanceof AccountAwareStorageBackend<NeptuneCluster> aware) {
+            return aware.getForAccountMigratingLegacyKeys(account, key, java.util.List.of(id),
+                    value -> belongsTo(value.getDbClusterArn(), account, region));
+        }
+        return clusters.get(key);
+    }
+
+    private Optional<NeptuneInstance> getStoredInstance(String id) {
+        String account = currentAccount();
+        String region = currentRegion();
+        String key = instanceKey(region, id);
+        if (instances instanceof AccountAwareStorageBackend<NeptuneInstance> aware) {
+            return aware.getForAccountMigratingLegacyKeys(account, key, java.util.List.of(id),
+                    value -> belongsTo(value.getDbInstanceArn(), account, region));
+        }
+        return instances.get(key);
+    }
+
+    private Collection<NeptuneCluster> scanClusters() {
+        String account = currentAccount();
+        String region = currentRegion();
+        if (clusters instanceof AccountAwareStorageBackend<NeptuneCluster> aware) {
+            migrateLegacyClusters(aware, account, region);
+            return aware.scanForAccount(account, key -> key.startsWith(region + "/"));
+        }
+        return clusters.scan(key -> key.startsWith(region + "/"));
+    }
+
+    private Collection<NeptuneInstance> scanInstances() {
+        String account = currentAccount();
+        String region = currentRegion();
+        if (instances instanceof AccountAwareStorageBackend<NeptuneInstance> aware) {
+            migrateLegacyInstances(aware, account, region);
+            return aware.scanForAccount(account, key -> key.startsWith(region + "/"));
+        }
+        return instances.scan(key -> key.startsWith(region + "/"));
+    }
+
+    private void migrateLegacyClusters(AccountAwareStorageBackend<NeptuneCluster> aware,
+                                       String account, String region) {
+        for (AccountAwareStorageBackend.AccountEntry<NeptuneCluster> entry
+                : aware.scanAllAccountEntries(key -> !key.contains("/"))) {
+            NeptuneCluster cluster = entry.value();
+            if (!account.equals(entry.accountId())
+                    || !belongsTo(cluster.getDbClusterArn(), account, region)) {
+                continue;
+            }
+            String key = clusterKey(region, cluster.getDbClusterIdentifier());
+            aware.putForAccount(account, key, cluster);
+            aware.deleteForAccount(account, entry.key());
+        }
+    }
+
+    private void migrateLegacyInstances(AccountAwareStorageBackend<NeptuneInstance> aware,
+                                        String account, String region) {
+        for (AccountAwareStorageBackend.AccountEntry<NeptuneInstance> entry
+                : aware.scanAllAccountEntries(key -> !key.contains("/"))) {
+            NeptuneInstance instance = entry.value();
+            if (!account.equals(entry.accountId())
+                    || !belongsTo(instance.getDbInstanceArn(), account, region)) {
+                continue;
+            }
+            String key = instanceKey(region, instance.getDbInstanceIdentifier());
+            aware.putForAccount(account, key, instance);
+            aware.deleteForAccount(account, entry.key());
+        }
+    }
+
+    private void putCluster(NeptuneCluster cluster) {
+        String account = arnAccount(cluster.getDbClusterArn());
+        String region = arnRegion(cluster.getDbClusterArn());
+        String key = clusterKey(region, cluster.getDbClusterIdentifier());
+        if (clusters instanceof AccountAwareStorageBackend<NeptuneCluster> aware) {
+            aware.putForAccount(account, key, cluster);
+        } else {
+            clusters.put(key, cluster);
+        }
+    }
+
+    private void deleteCluster(NeptuneCluster cluster) {
+        String account = arnAccount(cluster.getDbClusterArn());
+        String region = arnRegion(cluster.getDbClusterArn());
+        String key = clusterKey(region, cluster.getDbClusterIdentifier());
+        if (clusters instanceof AccountAwareStorageBackend<NeptuneCluster> aware) {
+            aware.deleteForAccount(account, key);
+        } else {
+            clusters.delete(key);
+        }
+    }
+
+    private void putInstance(NeptuneInstance instance) {
+        String account = arnAccount(instance.getDbInstanceArn());
+        String region = arnRegion(instance.getDbInstanceArn());
+        String key = instanceKey(region, instance.getDbInstanceIdentifier());
+        if (instances instanceof AccountAwareStorageBackend<NeptuneInstance> aware) {
+            aware.putForAccount(account, key, instance);
+        } else {
+            instances.put(key, instance);
+        }
+    }
+
+    private void deleteInstance(NeptuneInstance instance) {
+        String account = arnAccount(instance.getDbInstanceArn());
+        String region = arnRegion(instance.getDbInstanceArn());
+        String key = instanceKey(region, instance.getDbInstanceIdentifier());
+        if (instances instanceof AccountAwareStorageBackend<NeptuneInstance> aware) {
+            aware.deleteForAccount(account, key);
+        } else {
+            instances.delete(key);
+        }
+    }
+
+    private static boolean belongsTo(String arn, String account, String region) {
+        return account.equals(arnAccount(arn)) && region.equals(arnRegion(arn));
+    }
+
+    private static String arnAccount(String arn) {
+        try {
+            return AwsArnUtils.parse(arn).accountId();
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static String arnRegion(String arn) {
+        try {
+            return AwsArnUtils.parse(arn).region();
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static String resourceIdentity(String account, String region, String id) {
+        return account + "-" + region + "-" + id;
+    }
+
+    private static String resourceIdentity(NeptuneCluster cluster) {
+        return resourceIdentity(arnAccount(cluster.getDbClusterArn()), arnRegion(cluster.getDbClusterArn()),
+                cluster.getDbClusterIdentifier());
+    }
 
     private String resolveEndpointHost() {
         return config.hostname().orElse("localhost");

@@ -23,6 +23,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -42,6 +43,10 @@ class NeptuneServiceTest {
     private NeptuneContainerManager containerManager;
     private NeptuneProxyManager proxyManager;
     private EmulatorConfig.NeptuneServiceConfig neptuneConfig;
+    private RegionResolver regionResolver;
+    private String currentAccount;
+    private String currentRegion;
+    private AccountAwareStorageBackend<NeptuneCluster> clusterStorage;
 
     @BeforeEach
     void setUp() {
@@ -49,7 +54,16 @@ class NeptuneServiceTest {
         proxyManager = mock(NeptuneProxyManager.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        currentAccount = "000000000000";
+        currentRegion = "us-east-1";
+        regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenAnswer(invocation -> currentAccount);
+        when(regionResolver.getRegion()).thenAnswer(invocation -> currentRegion);
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+        when(regionResolver.buildArn(anyString(), anyString(), anyString()))
+                .thenAnswer(invocation -> "arn:aws:" + invocation.getArgument(0)
+                        + ":" + invocation.getArgument(1) + ":" + currentAccount
+                        + ":" + invocation.getArgument(2));
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         neptuneConfig = mock(EmulatorConfig.NeptuneServiceConfig.class);
@@ -63,8 +77,14 @@ class NeptuneServiceTest {
         when(config.hostname()).thenReturn(Optional.of("localhost"));
 
         when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class)))
+                .thenAnswer(inv -> {
+                    AccountAwareStorageBackend<?> store = AccountAwareStorageBackend.inMemory("000000000000");
+                    if ("neptune-clusters.json".equals(inv.getArgument(1))) {
+                        clusterStorage = (AccountAwareStorageBackend<NeptuneCluster>) store;
+                    }
+                    return store;
+                });
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
                 .thenReturn(new NeptuneContainerHandle("cid", "c", "localhost", 8182));
         doNothing().when(proxyManager).startProxy(anyString(), anyInt(), anyString(), anyInt());
 
@@ -72,22 +92,63 @@ class NeptuneServiceTest {
     }
 
     @Test
+    void sameNameClustersAreIsolatedByAccountAndRegion() {
+        NeptuneCluster first = service.createDbCluster("shared", "1.3.2.1", false);
+        NeptuneInstance firstInstance = service.createDbInstance(
+                "shared-instance", "shared", "db.r5.large", null, false);
+
+        currentAccount = "111111111111";
+        currentRegion = "eu-west-1";
+        NeptuneCluster second = service.createDbCluster("shared", "1.3.2.1", false);
+        NeptuneInstance secondInstance = service.createDbInstance(
+                "shared-instance", "shared", "db.r5.large", null, false);
+
+        assertNotEquals(first.getDbClusterArn(), second.getDbClusterArn());
+        assertNotEquals(firstInstance.getDbInstanceArn(), secondInstance.getDbInstanceArn());
+        assertEquals(second.getDbClusterArn(), service.getDbCluster("shared").getDbClusterArn());
+        assertEquals(secondInstance.getDbInstanceArn(), service.getDbInstance("shared-instance").getDbInstanceArn());
+        assertEquals(1, service.listDbClusters(null).size());
+        assertEquals(1, service.listDbInstances(null).size());
+
+        currentAccount = "000000000000";
+        currentRegion = "us-east-1";
+        assertEquals(first.getDbClusterArn(), service.getDbCluster("shared").getDbClusterArn());
+        assertEquals(firstInstance.getDbInstanceArn(), service.getDbInstance("shared-instance").getDbInstanceArn());
+        assertEquals(1, service.listDbClusters(null).size());
+        assertEquals(1, service.listDbInstances(null).size());
+    }
+
+    @Test
+    void legacyClusterIsMigratedOnlyWhenItsArnMatchesTheRequestedScope() {
+        NeptuneCluster legacy = new NeptuneCluster();
+        legacy.setDbClusterIdentifier("legacy");
+        legacy.setDbClusterArn("arn:aws:neptune:us-east-1:000000000000:cluster:legacy");
+        clusterStorage.putForAccount("000000000000", "legacy", legacy);
+
+        assertEquals("legacy", service.getDbCluster("legacy").getDbClusterIdentifier());
+
+        currentRegion = "eu-west-1";
+        assertEquals("DBClusterNotFoundFault",
+                assertThrows(AwsException.class, () -> service.getDbCluster("legacy")).getErrorCode());
+    }
+
+    @Test
     void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
         NeptuneContainerHandle handle = new NeptuneContainerHandle("cid", "c", "localhost", 8182);
-        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class)))
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
                 .thenReturn(handle);
 
         // Proxy startup blows up after the port is reserved and the container is started.
         doThrow(new RuntimeException("proxy boom"))
-                .when(proxyManager).startProxy(eq("c"), anyInt(), anyString(), anyInt());
+                .when(proxyManager).startProxy(eq("000000000000-us-east-1-c"), anyInt(), anyString(), anyInt());
 
         // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class,
                 () -> service.createDbCluster("c", "1.3.2.1", false));
 
         // Rollback stopped the proxy and the already-started container (by id).
-        verify(proxyManager).stopProxy("c");
-        verify(containerManager).stopByClusterId("c");
+        verify(proxyManager).stopProxy("000000000000-us-east-1-c");
+        verify(containerManager).stopByClusterId("000000000000-us-east-1-c");
 
         // The reserved proxy port was released: a subsequent successful create reuses the base port
         // instead of skipping to the next one (which is what a leak would cause).
@@ -100,20 +161,20 @@ class NeptuneServiceTest {
     @Test
     void jvmErrorDuringProvisioningStillRollsBack() {
         NeptuneContainerHandle handle = new NeptuneContainerHandle("cid", "c", "localhost", 8182);
-        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class)))
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
                 .thenReturn(handle);
 
         // A JVM Error (not a RuntimeException) escapes provisioning — a catch (RuntimeException)
         // would miss it, so rollback must run from a finally instead.
         doThrow(new StackOverflowError("boom"))
-                .when(proxyManager).startProxy(eq("c"), anyInt(), anyString(), anyInt());
+                .when(proxyManager).startProxy(eq("000000000000-us-east-1-c"), anyInt(), anyString(), anyInt());
 
         assertThrows(StackOverflowError.class,
                 () -> service.createDbCluster("c", "1.3.2.1", false));
 
         // Rollback still fired despite the Error: proxy and container stopped, port released.
-        verify(proxyManager).stopProxy("c");
-        verify(containerManager).stopByClusterId("c");
+        verify(proxyManager).stopProxy("000000000000-us-east-1-c");
+        verify(containerManager).stopByClusterId("000000000000-us-east-1-c");
 
         doNothing().when(proxyManager).startProxy(anyString(), anyInt(), anyString(), anyInt());
         NeptuneCluster recovered = service.createDbCluster("c2", "1.3.2.1", false);
@@ -127,7 +188,7 @@ class NeptuneServiceTest {
         // and (crucially) a readiness timeout, where start() created + registered the container
         // before throwing, so no handle ever reaches the service.
         doThrow(new RuntimeException("readiness boom"))
-                .when(containerManager).tryStart(eq("c"), anyString(), any(NeptuneDbType.class));
+                .when(containerManager).tryStart(eq("c"), anyString(), any(NeptuneDbType.class), anyString(), anyString());
 
         // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class,
@@ -137,10 +198,10 @@ class NeptuneServiceTest {
         verify(proxyManager, never()).stopProxy(anyString());
         // ...but the container must still be cleaned up by id, since start() may have created and
         // registered it before failing. Cleaning up by handle here would orphan it.
-        verify(containerManager).stopByClusterId("c");
+        verify(containerManager).stopByClusterId("000000000000-us-east-1-c");
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
-        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class)))
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
                 .thenReturn(new NeptuneContainerHandle("cid", "c2", "localhost", 8182));
         NeptuneCluster recovered = service.createDbCluster("c2", "1.3.2.1", false);
         assertEquals(18182, recovered.getProxyPort(),
@@ -192,7 +253,7 @@ class NeptuneServiceTest {
         // tryStart() returns null when no Docker daemon is reachable. The cluster record is
         // metadata, so the create still succeeds, the cluster reaches 'available' on the first
         // describe (what SDK/Terraform waiters poll), and no proxy is started.
-        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class))).thenReturn(null);
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString())).thenReturn(null);
 
         NeptuneCluster created = service.createDbCluster("no-docker-cluster", "1.3.2.1", false);
 

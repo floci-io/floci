@@ -157,14 +157,16 @@ class NeptuneContainerManagerTest {
                     mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
                     new RegionResolver("us-east-1", "000000000000"));
 
-            manager.start("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN);
+            manager.start("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN,
+                    "111111111111", "eu-west-1");
 
             verify(builder).withLabels(Map.of(
                     "io.floci", "aws",
                     "io.floci.service", "neptune",
                     "io.floci.resource-id", "cluster1",
-                    "io.floci.account", "000000000000",
-                    "io.floci.region", "us-east-1"));
+                    "io.floci.account", "111111111111",
+                    "io.floci.region", "eu-west-1"));
+            verify(builder).withName("floci-neptune-111111111111-eu-west-1-cluster1");
         }
     }
 

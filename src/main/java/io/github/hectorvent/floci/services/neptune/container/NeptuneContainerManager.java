@@ -73,8 +73,13 @@ public class NeptuneContainerManager {
      * @return the container handle, or {@code null} when no Docker daemon is reachable
      */
     public NeptuneContainerHandle tryStart(String clusterId, String image, NeptuneDbType dbType) {
+        return tryStart(clusterId, image, dbType, regionResolver.getAccountId(), regionResolver.getDefaultRegion());
+    }
+
+    public NeptuneContainerHandle tryStart(String clusterId, String image, NeptuneDbType dbType,
+                                           String accountId, String region) {
         try {
-            NeptuneContainerHandle handle = start(clusterId, image, dbType);
+            NeptuneContainerHandle handle = start(clusterId, image, dbType, accountId, region);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -107,10 +112,16 @@ public class NeptuneContainerManager {
     }
 
     public NeptuneContainerHandle start(String clusterId, String image, NeptuneDbType dbType) {
+        return start(clusterId, image, dbType, regionResolver.getAccountId(), regionResolver.getDefaultRegion());
+    }
+
+    public NeptuneContainerHandle start(String clusterId, String image, NeptuneDbType dbType,
+                                        String accountId, String region) {
         LOG.infov("Starting Neptune backend container ({0}) for cluster: {1}", dbType, clusterId);
 
         int backendPort = dbType.backendPort();
-        String containerName = containerName(clusterId);
+        String identity = resourceIdentity(accountId, region, clusterId);
+        String containerName = containerName(identity);
         lifecycleManager.removeIfExists(containerName);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
@@ -119,7 +130,7 @@ public class NeptuneContainerManager {
                 .withDockerNetwork(config.services().neptune().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "neptune", clusterId, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "neptune", clusterId, accountId, region));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(backendPort);
@@ -134,18 +145,17 @@ public class NeptuneContainerManager {
         LOG.infov("Neptune {0} backend for cluster {1}: {2}", dbType, clusterId, endpoint);
 
         NeptuneContainerHandle handle = new NeptuneContainerHandle(
-                info.containerId(), clusterId, endpoint.host(), endpoint.port());
-        activeContainers.put(clusterId, handle);
+                info.containerId(), identity, endpoint.host(), endpoint.port());
+        activeContainers.put(identity, handle);
 
         String shortId = info.containerId().length() >= 8
                 ? info.containerId().substring(0, 8)
                 : info.containerId();
-        String logGroup = "/aws/neptune/cluster/" + clusterId + "/" + dbType.name().toLowerCase() + "-log";
+        String logGroup = "/aws/neptune/cluster/" + identity + "/" + dbType.name().toLowerCase() + "-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = regionResolver.getDefaultRegion();
 
         Closeable logHandle = logStreamer.attach(
-                info.containerId(), logGroup, logStream, region, "neptune:" + clusterId);
+                info.containerId(), logGroup, logStream, region, "neptune:" + identity);
         handle.setLogStream(logHandle);
 
         waitForBackendReady(clusterId, dbType, endpoint.host(), endpoint.port());
@@ -190,6 +200,10 @@ public class NeptuneContainerManager {
             return;
         }
         lifecycleManager.removeIfExists(containerName(clusterId));
+    }
+
+    private static String resourceIdentity(String accountId, String region, String clusterId) {
+        return accountId + "-" + region + "-" + clusterId;
     }
 
     private String containerName(String clusterId) {
