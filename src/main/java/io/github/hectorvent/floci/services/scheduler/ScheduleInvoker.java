@@ -20,6 +20,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -180,11 +181,35 @@ public class ScheduleInvoker {
                 String body = text(params, "MessageBody");
                 String messageGroupId = text(params, "MessageGroupId");
                 String messageDeduplicationId = text(params, "MessageDeduplicationId");
-                sqsService.sendMessage(queueUrl, body, 0, messageGroupId, messageDeduplicationId, region);
+                Map<String, MessageAttributeValue> messageAttributes =
+                        parseUniversalSqsMessageAttributes(params.path("MessageAttributes"));
+                sqsService.sendMessage(queueUrl, body, 0, messageGroupId, messageDeduplicationId,
+                        messageAttributes, region);
                 LOG.debugv("Scheduler delivered to SQS (universal target): {0}", queueUrl);
             }
             default -> LOG.warnv("Scheduler: unsupported universal target action: {0}", serviceAction);
         }
+    }
+
+    private static Map<String, MessageAttributeValue> parseUniversalSqsMessageAttributes(JsonNode attrsNode) {
+        Map<String, MessageAttributeValue> attributes = new HashMap<>();
+        if (attrsNode == null || !attrsNode.isObject()) {
+            return attributes;
+        }
+        attrsNode.fields().forEachRemaining(entry -> {
+            JsonNode valueNode = entry.getValue();
+            String binaryValue = valueNode.path("BinaryValue").asText(null);
+            String dataType = valueNode.path("DataType")
+                    .asText(binaryValue != null ? "Binary" : "String");
+            if (binaryValue != null) {
+                attributes.put(entry.getKey(), new MessageAttributeValue(
+                        binaryValue.getBytes(StandardCharsets.UTF_8), dataType));
+            } else {
+                attributes.put(entry.getKey(), new MessageAttributeValue(
+                        valueNode.path("StringValue").asText(null), dataType));
+            }
+        });
+        return attributes;
     }
 
     private static String text(JsonNode node, String field) {
