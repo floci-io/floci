@@ -302,6 +302,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>marketplacedeployment</artifactId>
         </dependency>
+        <!-- AWS Marketplace Reporting client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>marketplacereporting</artifactId>
+        </dependency>
         <!-- IAM Access Analyzer client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

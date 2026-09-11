@@ -88,6 +88,7 @@ services:
       - { path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceAgreementService.java, mode: switch }
       - { path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceEntitlementController.java, mode: switch }
       - { path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceDeploymentController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceReportingController.java, mode: rest }
     exclude_actions:
       - AgreementType
       - Status

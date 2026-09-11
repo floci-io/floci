@@ -49,6 +49,7 @@ Floci emulates AWS Marketplace APIs under the shared `aws-marketplace` SigV4 sig
 | `UpdatePurchaseOrders` | Updates purchase orders for an agreement |
 | `GetEntitlements` | - |
 | `PutDeploymentParameter` | Creates or updates an AWS Marketplace deployment parameter |
+| `GetBuyerDashboard` | Returns an embeddable AWS Marketplace buyer dashboard URL |
 <!-- floci:actions:end -->
 
 ## Marketplace Catalog
@@ -72,6 +73,14 @@ AWS exposes this service as read-only: `GetEntitlements` is the only public oper
 ## Marketplace Deployment
 
 Deployment parameters and idempotency records are persisted through `StorageFactory` and isolated by AWS account.
+
+## Marketplace Reporting
+
+Marketplace Reporting validates buyer dashboard requests and returns account-scoped local embed URLs for supported dashboard identifiers.
+
+### Known deviations
+
+- AWS limits `GetBuyerDashboard` to an AWS Organizations management account or a delegated administrator registered for procurement insights. Floci does not currently enforce that Organizations-role prerequisite.
 
 
 
