@@ -425,11 +425,17 @@ public class MwaaEnvironmentManager {
                 + "exec airflow webserver";
     }
 
+    /**
+     * Probes over TCP loopback on purpose. The official image runs first-boot init against a
+     * temporary server that listens only on the Unix socket, so a socket probe can pass before
+     * the final server accepts the Airflow container's TCP connections.
+     */
     private void waitForPostgresReady(String containerId) {
         Exception last = null;
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
-                ExecResult result = execInContainer(containerId, new String[]{"pg_isready", "-U", "airflow"});
+                ExecResult result = execInContainer(containerId,
+                        new String[]{"pg_isready", "-h", "127.0.0.1", "-U", "airflow"});
                 if (result.exitCode() == 0) {
                     return;
                 }
