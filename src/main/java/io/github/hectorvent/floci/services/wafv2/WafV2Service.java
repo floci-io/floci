@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.wafv2.model.WebAcl;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -130,6 +132,7 @@ public class WafV2Service {
         if (findByName(ipSetStore, scope, name) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate IPSet name: " + name, 400);
         }
+        validateAddresses(ipSet.getAddresses(), ipSet.getIpAddressVersion());
         ipSet.setId(UUID.randomUUID().toString());
         ipSet.setName(name);
         ipSet.setScope(scope);
@@ -148,6 +151,7 @@ public class WafV2Service {
                               List<String> addresses, String name, String lockToken) {
         IpSet existing = require(ipSetStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
+        validateAddresses(addresses, existing.getIpAddressVersion());
         existing.setDescription(description);
         existing.setAddresses(addresses);
         return rotate(existing, ipSetStore, scope);
@@ -479,6 +483,63 @@ public class WafV2Service {
         if (name == null || name.isBlank()) {
             throw new AwsException("WAFInvalidParameterException", "Name is required.", 400);
         }
+    }
+
+    /**
+     * Validates that every entry in an IPSet's {@code Addresses} is a CIDR block matching
+     * the declared {@code IPAddressVersion}, per the {@code CreateIPSet}/{@code UpdateIPSet}
+     * contract: a bare IP address with no prefix is rejected, as is a prefix outside
+     * 1-32 for IPv4 or 1-128 for IPv6 (AWS WAF supports all CIDR ranges except {@code /0}).
+     */
+    private void validateAddresses(List<String> addresses, String ipAddressVersion) {
+        if (addresses == null || addresses.isEmpty()) {
+            return;
+        }
+        boolean ipv6 = "IPV6".equals(ipAddressVersion);
+        if (!ipv6 && !"IPV4".equals(ipAddressVersion)) {
+            throw new AwsException("WAFInvalidParameterException",
+                    "Field: IPAddressVersion, Parameter: " + ipAddressVersion
+                            + ", Reason: must be IPV4 or IPV6.", 400);
+        }
+        for (String address : addresses) {
+            validateCidrAddress(address, ipv6);
+        }
+    }
+
+    private void validateCidrAddress(String address, boolean ipv6) {
+        int maxPrefix = ipv6 ? 128 : 32;
+        int slash = address == null ? -1 : address.lastIndexOf('/');
+        if (slash < 1 || slash == address.length() - 1) {
+            throw invalidAddress(address,
+                    "must be specified in CIDR notation, e.g. \"203.0.113.10/32\" (a bare IP address is not valid).");
+        }
+        String addressPart = address.substring(0, slash);
+        int prefixLength;
+        try {
+            prefixLength = Integer.parseInt(address.substring(slash + 1));
+        } catch (NumberFormatException e) {
+            throw invalidAddress(address, "the CIDR prefix length must be an integer.");
+        }
+        InetAddress parsed;
+        try {
+            parsed = InetAddress.ofLiteral(addressPart);
+        } catch (IllegalArgumentException e) {
+            throw invalidAddress(address, "the address portion is not a valid IP literal.");
+        }
+        boolean isIpv4Address = parsed instanceof Inet4Address;
+        if (ipv6 == isIpv4Address) {
+            throw invalidAddress(address,
+                    "the address does not match the IPSet's IPAddressVersion (" + (ipv6 ? "IPV6" : "IPV4") + ").");
+        }
+        if (prefixLength < 1 || prefixLength > maxPrefix) {
+            throw invalidAddress(address,
+                    "the CIDR prefix length must be between 1 and " + maxPrefix + ".");
+        }
+    }
+
+    private AwsException invalidAddress(String address, String reason) {
+        return new AwsException("WAFInvalidParameterException",
+                "Field: Addresses, Parameter: " + address + ", Reason: " + reason, 400);
     }
 
     private String key(String scope, String id) {
