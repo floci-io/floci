@@ -205,4 +205,36 @@ class Ec2VpcEndpointSubnetConfigurationIntegrationTest {
                 .toList();
         assertEquals(List.of(), subnets, "the rejected request must not have created an endpoint");
     }
+
+    @Test
+    void theSubnetReservedAddressesAreRejected() {
+        String vpcId = createVpc("10.75.0.0/16");
+        String subnetId = createSubnet(vpcId, "10.75.1.0/24", "us-east-1a");
+
+        for (String reserved : List.of("10.75.1.0", "10.75.1.1", "10.75.1.2", "10.75.1.3", "10.75.1.255")) {
+            given()
+                .formParam("Action", "CreateVpcEndpoint")
+                .formParam("VpcId", vpcId)
+                .formParam("ServiceName", "com.amazonaws.us-east-1.ecs")
+                .formParam("VpcEndpointType", "Interface")
+                .formParam("SubnetId.1", subnetId)
+                .formParam("SubnetConfiguration.1.SubnetId", subnetId)
+                .formParam("SubnetConfiguration.1.Ipv4", reserved)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+        }
+
+        ec2Value("CreateVpcEndpoint", "CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId",
+                "VpcId", vpcId, "ServiceName", "com.amazonaws.us-east-1.ecs",
+                "VpcEndpointType", "Interface", "SubnetId.1", subnetId,
+                "SubnetConfiguration.1.SubnetId", subnetId,
+                "SubnetConfiguration.1.Ipv4", "10.75.1.4");
+
+        assertEquals("10.75.1.4", endpointAddressesBySubnet().get(subnetId),
+                "the first address above the reserved four is assignable");
+    }
 }

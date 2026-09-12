@@ -3459,9 +3459,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /**
      * Checks a {@code SubnetConfiguration} list before anything is stored. The named subnet has to
      * exist, and an IPv4 address has to be one the endpoint's interface in that subnet could
-     * actually take, which means inside the subnet's own CIDR. AWS rejects an address outside it
-     * with {@code InvalidParameterValue}; accepting it here would hand back an interface address
-     * that belongs to a different subnet.
+     * actually take. That means inside the subnet's own CIDR, and outside the five addresses AWS
+     * keeps in every subnet. AWS rejects both with {@code InvalidParameterValue}; accepting either
+     * here would hand back an interface address no real endpoint could hold.
+     *
+     * <p>The reserved five are the first four addresses of the subnet and the last one, per the
+     * CreateSubnet documentation in ec2/2016-11-15. Since {@code SubnetConfiguration.Ipv4} is the
+     * address assigned to the endpoint network interface, a reserved value is as unusable as one
+     * from a different subnet.
      *
      * <p>IPv6 is stored as given. Floci's subnets carry no IPv6 CIDR to check an address against.
      */
@@ -3482,6 +3487,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 throw new AwsException("InvalidParameterValue",
                         "Address " + ipv4 + " does not fall within the address range of subnet "
                                 + subnet.getSubnetId(), 400);
+            }
+            if (Ipv4Cidrs.isSubnetReserved(subnet.getCidrBlock(), host)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Address " + ipv4 + " is reserved by AWS in subnet " + subnet.getSubnetId()
+                                + " and cannot be assigned", 400);
             }
         }
     }
