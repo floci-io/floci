@@ -103,6 +103,40 @@ class EmbeddedDnsServerTest {
                 dns.resolveARecord("ip-172-16-128-9.ec2.internal", "172.16.128.5").orElseThrow());
     }
 
+    // ── spoof-aws-endpoints — transparent endpoint injection ──────────────────
+
+    @Test
+    void spoofAwsEndpoints_answersAmazonawsAQueriesWithFlociIp() {
+        EmbeddedDnsServer spoofing = new EmbeddedDnsServer(List.of(), true);
+        assertEquals("172.19.0.2", spoofing.resolveARecord("sts.amazonaws.com", "172.19.0.2").orElseThrow());
+        assertEquals("172.19.0.2", spoofing.resolveARecord("sts.us-east-1.amazonaws.com", "172.19.0.2").orElseThrow());
+        assertEquals("172.19.0.2", spoofing.resolveARecord("organizations.us-east-1.amazonaws.com", "172.19.0.2").orElseThrow());
+        assertEquals("172.19.0.2", spoofing.resolveARecord("my-bucket.s3.us-east-1.amazonaws.com", "172.19.0.2").orElseThrow());
+        assertEquals("172.19.0.2", spoofing.resolveARecord("amazonaws.com", "172.19.0.2").orElseThrow());
+    }
+
+    @Test
+    void spoofAwsEndpoints_offByDefault_amazonawsQueriesAreForwarded() {
+        assertTrue(dns.resolveARecord("sts.amazonaws.com", "172.19.0.2").isEmpty());
+        assertTrue(dns.resolveARecord("sts.us-east-1.amazonaws.com", "172.19.0.2").isEmpty());
+        assertTrue(dns.resolveARecord("my-bucket.s3.us-east-1.amazonaws.com", "172.19.0.2").isEmpty());
+    }
+
+    @Test
+    void spoofAwsEndpoints_doesNotCaptureOtherDomains() {
+        EmbeddedDnsServer spoofing = new EmbeddedDnsServer(List.of(), true);
+        assertFalse(spoofing.matchesSuffix("business-api.tiktok.com"));
+        assertFalse(spoofing.matchesSuffix("myamazonaws.com"));
+        assertFalse(spoofing.matchesSuffix("amazonaws.com.evil.example"));
+    }
+
+    @Test
+    void spoofAwsEndpoints_flociDomainsStillResolve() {
+        EmbeddedDnsServer spoofing = new EmbeddedDnsServer(List.of(), true);
+        assertTrue(spoofing.matchesSuffix("my-bucket.s3.localhost.floci.io"));
+        assertTrue(spoofing.matchesSuffix("my-bucket.localhost.localstack.cloud"));
+    }
+
     // ── matchesSuffix — built-in emulator domains ─────────────────────────────
 
     @Test

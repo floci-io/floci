@@ -34,6 +34,9 @@ public class CodePipelineExecution {
     private boolean stopRequested;
     private boolean abandon;
     private String rollbackTargetPipelineExecutionId;
+    private List<Map<String, Object>> ruleExecutions = new ArrayList<>();
+    /** Overridden stage conditions, keyed {@code <stageName>/<conditionType>}. */
+    private Map<String, Boolean> conditionOverrides = new LinkedHashMap<>();
 
     public String getAccountId() {
         return accountId;
@@ -193,6 +196,22 @@ public class CodePipelineExecution {
 
     public void setRollbackTargetPipelineExecutionId(String rollbackTargetPipelineExecutionId) {
         this.rollbackTargetPipelineExecutionId = rollbackTargetPipelineExecutionId;
+    }
+
+    public List<Map<String, Object>> getRuleExecutions() {
+        return ruleExecutions;
+    }
+
+    public void setRuleExecutions(List<Map<String, Object>> ruleExecutions) {
+        this.ruleExecutions = ruleExecutions;
+    }
+
+    public Map<String, Boolean> getConditionOverrides() {
+        return conditionOverrides;
+    }
+
+    public void setConditionOverrides(Map<String, Boolean> conditionOverrides) {
+        this.conditionOverrides = conditionOverrides;
     }
 
     @RegisterForReflection

@@ -417,8 +417,12 @@ public class CodeBuildService {
     public Build startBuild(String region, String account, String projectName,
                             String buildspecOverride,
                             ProjectEnvironment environmentOverride,
+                            List<Map<String, String>> environmentVariablesOverride,
                             ProjectArtifacts artifactsOverride,
                             String sourceVersion,
+                            String sourceTypeOverride,
+                            String sourceLocationOverride,
+                            List<ProjectSource> secondarySourcesOverride,
                             Integer timeoutOverride,
                             String imageOverride,
                             String computeTypeOverride) {
@@ -449,23 +453,59 @@ public class CodeBuildService {
         build.setProjectName(projectName);
         build.setInitiator("user");
         build.setStartTime(Instant.now().toEpochMilli() / 1000.0);
-        build.setSource(project.getSource());
+        ProjectSource projectSource = project.getSource();
+        if (sourceTypeOverride != null || sourceLocationOverride != null) {
+            ProjectSource merged = new ProjectSource();
+            merged.setType(sourceTypeOverride != null ? sourceTypeOverride
+                    : (projectSource != null ? projectSource.getType() : null));
+            merged.setLocation(sourceLocationOverride != null ? sourceLocationOverride
+                    : (projectSource != null ? projectSource.getLocation() : null));
+            merged.setBuildspec(projectSource != null ? projectSource.getBuildspec() : null);
+            build.setSource(merged);
+        } else {
+            build.setSource(projectSource);
+        }
+        build.setSecondarySources(secondarySourcesOverride != null && !secondarySourcesOverride.isEmpty()
+                ? secondarySourcesOverride : project.getSecondarySources());
         build.setArtifacts(artifactsOverride != null ? artifactsOverride : project.getArtifacts());
         build.setTimeoutInMinutes(timeoutOverride != null ? timeoutOverride : project.getTimeoutInMinutes());
         build.setQueuedTimeoutInMinutes(project.getQueuedTimeoutInMinutes());
         build.setEncryptionKey(project.getEncryptionKey());
 
-        ProjectEnvironment env = environmentOverride != null ? environmentOverride : project.getEnvironment();
-        if (imageOverride != null || computeTypeOverride != null) {
+        ProjectEnvironment projectEnv = project.getEnvironment();
+        boolean hasVariablesOverride = environmentVariablesOverride != null && !environmentVariablesOverride.isEmpty();
+        if (environmentOverride != null || imageOverride != null || computeTypeOverride != null || hasVariablesOverride) {
             ProjectEnvironment merged = new ProjectEnvironment();
-            merged.setType(env != null ? env.getType() : null);
-            merged.setImage(imageOverride != null ? imageOverride : (env != null ? env.getImage() : null));
-            merged.setComputeType(computeTypeOverride != null ? computeTypeOverride : (env != null ? env.getComputeType() : null));
-            merged.setEnvironmentVariables(env != null ? env.getEnvironmentVariables() : null);
-            merged.setPrivilegedMode(env != null ? env.getPrivilegedMode() : null);
+            merged.setType(environmentOverride != null && environmentOverride.getType() != null
+                    ? environmentOverride.getType() : (projectEnv != null ? projectEnv.getType() : null));
+            merged.setImage(imageOverride != null ? imageOverride
+                    : (environmentOverride != null && environmentOverride.getImage() != null
+                            ? environmentOverride.getImage() : (projectEnv != null ? projectEnv.getImage() : null)));
+            merged.setComputeType(computeTypeOverride != null ? computeTypeOverride
+                    : (environmentOverride != null && environmentOverride.getComputeType() != null
+                            ? environmentOverride.getComputeType()
+                            : (projectEnv != null ? projectEnv.getComputeType() : null)));
+            // retryBuild passes the original build's already-resolved environment as
+            // environmentOverride (not a sparse StartBuild-style override), so its own variables
+            // must win here too -- falling back straight to the project would replay the retry
+            // with the CURRENT project's variables instead of the ones the original build ran with.
+            List<Map<String, String>> baseVariables =
+                    environmentOverride != null && environmentOverride.getEnvironmentVariables() != null
+                            ? environmentOverride.getEnvironmentVariables()
+                            : (projectEnv != null ? projectEnv.getEnvironmentVariables() : null);
+            if (hasVariablesOverride) {
+                List<Map<String, String>> variables =
+                        new ArrayList<>(baseVariables != null ? baseVariables : List.of());
+                variables.addAll(environmentVariablesOverride);
+                merged.setEnvironmentVariables(variables);
+            } else {
+                merged.setEnvironmentVariables(baseVariables);
+            }
+            merged.setPrivilegedMode(environmentOverride != null && environmentOverride.getPrivilegedMode() != null
+                    ? environmentOverride.getPrivilegedMode() : (projectEnv != null ? projectEnv.getPrivilegedMode() : null));
             build.setEnvironment(merged);
         } else {
-            build.setEnvironment(env);
+            build.setEnvironment(projectEnv);
         }
 
         build.setPhases(new CopyOnWriteArrayList<>());
@@ -527,9 +567,34 @@ public class CodeBuildService {
     public Build retryBuild(String region, String account, String buildId) {
         Build original = getBuild(region, account, buildId);
         String buildspecOverride = buildspecOverridesFor(account, region).get(original.getId());
+        ProjectSource originalSource = original.getSource();
         return startBuild(region, account, original.getProjectName(),
-                buildspecOverride, original.getEnvironment(), original.getArtifacts(),
-                null, original.getTimeoutInMinutes(), null, null);
+                buildspecOverride, replayEnvironment(original.getEnvironment()), null, original.getArtifacts(),
+                null, originalSource != null ? originalSource.getType() : null,
+                originalSource != null ? originalSource.getLocation() : null,
+                original.getSecondarySources(),
+                original.getTimeoutInMinutes(), null, null);
+    }
+
+    /**
+     * The original build's environment as a StartBuild override that wins on every field. A
+     * build started from a project with no variables stores a null list; left null, the
+     * override merge would fall back to the CURRENT project's variables and the retry would
+     * pick up whatever the project gained since, so null is replayed as an empty list.
+     */
+    private static ProjectEnvironment replayEnvironment(ProjectEnvironment original) {
+        ProjectEnvironment replay = new ProjectEnvironment();
+        if (original != null) {
+            replay.setType(original.getType());
+            replay.setImage(original.getImage());
+            replay.setComputeType(original.getComputeType());
+            replay.setPrivilegedMode(original.getPrivilegedMode());
+            replay.setCertificate(original.getCertificate());
+            replay.setImagePullCredentialsType(original.getImagePullCredentialsType());
+        }
+        replay.setEnvironmentVariables(original != null && original.getEnvironmentVariables() != null
+                ? original.getEnvironmentVariables() : List.of());
+        return replay;
     }
 
     private Build copyBuild(Build source) {
@@ -545,6 +610,7 @@ public class CodeBuildService {
         copy.setStartTime(source.getStartTime());
         copy.setEndTime(source.getEndTime());
         copy.setSource(source.getSource());
+        copy.setSecondarySources(source.getSecondarySources());
         copy.setArtifacts(source.getArtifacts());
         copy.setEnvironment(source.getEnvironment());
         copy.setLogs(source.getLogs());

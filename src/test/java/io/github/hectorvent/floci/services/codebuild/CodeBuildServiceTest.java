@@ -39,7 +39,7 @@ class CodeBuildServiceTest {
 
         String buildspec = "version: 0.2\nphases:\n  build:\n    commands:\n      - echo retry\n";
         Build original = service.startBuild(REGION, ACCOUNT, "retry-project", buildspec,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null);
         Build retried = service.retryBuild(REGION, ACCOUNT, original.getId());
 
         assertNotEquals(original.getId(), retried.getId());
