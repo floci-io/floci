@@ -3,6 +3,11 @@ package io.github.hectorvent.floci.services.apigatewayv2.proxy;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -15,6 +20,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -48,6 +56,18 @@ public class HttpProxyInvoker {
     private static final Set<String> RESTRICTED = Set.of(
             "connection", "content-length", "expect", "host", "upgrade");
 
+    /**
+     * Per-integration transport settings.
+     *
+     * @param timeout     how long to wait for the backend response
+     * @param insecureTls skip backend certificate and hostname verification, for an integration
+     *                    configured with {@code tlsConfig.insecureSkipVerification}
+     */
+    public record ProxyOptions(Duration timeout, boolean insecureTls) {
+        /** HTTP API (v2) defaults: 30s, certificates verified. */
+        public static final ProxyOptions DEFAULTS = new ProxyOptions(Duration.ofSeconds(30), false);
+    }
+
     // Pin to HTTP/1.1: the default HTTP_2 setting attempts cleartext-HTTP/2 negotiation
     // against http:// backends, which hangs against plain HTTP/1.1 servers (notably the
     // in-JVM Vertx HttpServer used by ELBv2 listeners for HttpAlbIntegration).
@@ -57,9 +77,63 @@ public class HttpProxyInvoker {
             .followRedirects(HttpClient.Redirect.NEVER)
             .build();
 
+    /** Built on first use: an integration opting out of TLS verification is the exception. */
+    private volatile HttpClient insecureClient;
+
+    private HttpClient clientFor(ProxyOptions options) {
+        if (!options.insecureTls()) return client;
+        HttpClient existing = insecureClient;
+        if (existing != null) return existing;
+        synchronized (this) {
+            if (insecureClient == null) {
+                insecureClient = buildInsecureClient();
+            }
+            return insecureClient;
+        }
+    }
+
+    private HttpClient buildInsecureClient() {
+        try {
+            TrustManager[] trustAll = {
+                    new X509TrustManager() {
+                        @Override
+                        public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+
+                        @Override
+                        public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+
+                        @Override
+                        public X509Certificate[] getAcceptedIssuers() {
+                            return new X509Certificate[0];
+                        }
+                    }
+            };
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, trustAll, new SecureRandom());
+            // A null endpoint identification algorithm turns off hostname verification, which
+            // insecureSkipVerification must also cover — a self-signed cert rarely matches the host.
+            SSLParameters sslParameters = new SSLParameters();
+            sslParameters.setEndpointIdentificationAlgorithm(null);
+            return HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .followRedirects(HttpClient.Redirect.NEVER)
+                    .sslContext(sslContext)
+                    .sslParameters(sslParameters)
+                    .build();
+        } catch (GeneralSecurityException e) {
+            LOG.warnv("Could not build insecure TLS client, falling back to verified: {0}", e.getMessage());
+            return client;
+        }
+    }
+
     private final RequestParameterMapper mapper = new RequestParameterMapper(new ContextValueResolver());
 
     public ProxyResult invoke(Integration integration, RequestContext ctx) {
+        return invoke(integration, ctx, ProxyOptions.DEFAULTS);
+    }
+
+    public ProxyResult invoke(Integration integration, RequestContext ctx, ProxyOptions options) {
         // 1. Resolve target URL from IntegrationUri template + captured path params
         String resolvedUrl = PathTemplateResolver.resolve(integration.getIntegrationUri(), ctx.pathParams());
 
@@ -92,7 +166,7 @@ public class HttpProxyInvoker {
         String finalUrl = buildFinalUrl(builder);
         if (hasHeader(builder, "Host") && finalUrl.startsWith("http://")) {
             try {
-                return invokeHttpWithHostOverride(finalUrl, method, builder);
+                return invokeHttpWithHostOverride(finalUrl, method, builder, options.timeout());
             } catch (Exception e) {
                 LOG.warnv("HTTP_PROXY backend call failed: {0}", e.getMessage());
                 return errorResult("Bad Gateway: " + e.getMessage());
@@ -103,7 +177,7 @@ public class HttpProxyInvoker {
         try {
             hrb = HttpRequest.newBuilder()
                     .uri(URI.create(finalUrl))
-                    .timeout(Duration.ofSeconds(30));
+                    .timeout(options.timeout());
         } catch (IllegalArgumentException e) {
             LOG.warnv("HTTP_PROXY: invalid target URL: {0}", e.getMessage());
             return errorResult("Bad Gateway: invalid target URL: " + e.getMessage());
@@ -128,7 +202,8 @@ public class HttpProxyInvoker {
         }
 
         try {
-            HttpResponse<byte[]> resp = client.send(hrb.build(), HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> resp =
+                    clientFor(options).send(hrb.build(), HttpResponse.BodyHandlers.ofByteArray());
             Map<String, String> respHeaders = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> e : resp.headers().map().entrySet()) {
                 if (HOP_BY_HOP.contains(e.getKey().toLowerCase())) continue;
@@ -154,7 +229,8 @@ public class HttpProxyInvoker {
         return null;
     }
 
-    private static ProxyResult invokeHttpWithHostOverride(String finalUrl, String method, ProxyRequestBuilder builder)
+    private static ProxyResult invokeHttpWithHostOverride(String finalUrl, String method,
+                                                          ProxyRequestBuilder builder, Duration timeout)
             throws IOException {
         URI uri = URI.create(finalUrl);
         int port = uri.getPort() == -1 ? 80 : uri.getPort();
@@ -168,7 +244,7 @@ public class HttpProxyInvoker {
 
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(uri.getHost(), port), 10_000);
-            socket.setSoTimeout(30_000);
+            socket.setSoTimeout((int) Math.min(timeout.toMillis(), Integer.MAX_VALUE));
 
             OutputStream out = socket.getOutputStream();
             byte[] body = builder.body() == null ? new byte[0] : builder.body();

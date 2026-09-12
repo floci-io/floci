@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.Integration;
 import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
+import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
 import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
@@ -62,7 +63,7 @@ import java.util.regex.PatternSyntaxException;
 
 /**
  * Executes API Gateway stage requests, routing them through the configured
- * integration (AWS_PROXY or MOCK).
+ * integration (AWS_PROXY, AWS, HTTP_PROXY, HTTP or MOCK).
  *
  * <p>Endpoint: {@code /{apiId}/{stageName}/{proxy+}}
  *
@@ -401,17 +402,41 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
-        return switch (integrationType.toUpperCase(Locale.ROOT)) {
+        Response vpcLinkError = validateVpcLink(region, integration);
+        if (vpcLinkError != null) return vpcLinkError;
+
+        String cacheKey = cacheKeyFor(stage, matched, httpMethod, path, integration, headers, uriInfo);
+        if (cacheKey != null) {
+            CachedResponse cached = responseCache.get(cacheKey);
+            if (cached != null && cached.expiresAt() > System.currentTimeMillis()) {
+                LOG.debugv("execute-api: cache hit for {0} {1}/{2}{3}", httpMethod, apiId, stageName, path);
+                return fromCache(cached);
+            }
+            responseCache.remove(cacheKey);
+        }
+
+        Response response = switch (integrationType.toUpperCase(Locale.ROOT)) {
             case "AWS_PROXY" -> invokeProxy(region, apiId, httpMethod, path, proxy, stageName,
                     matched, stage, integration, headers, uriInfo, body, authorizerResult, resolvedApiKey,
                     iamIdentity);
             case "AWS" -> invokeAwsIntegration(region, httpMethod, path, proxy, stageName,
+                    matched, integration, headers, uriInfo, body);
+            case "HTTP_PROXY" -> invokeHttpProxy(apiId, httpMethod, path, proxy, stageName,
+                    matched, integration, headers, uriInfo, body);
+            case "HTTP" -> invokeHttpIntegration(region, apiId, httpMethod, path, proxy, stageName,
                     matched, integration, headers, uriInfo, body);
             case "MOCK" -> invokeMock(region, httpMethod, path, stageName, matched, integration, headers, uriInfo, body);
             default -> Response.status(500)
                     .entity(jsonMessage("Unsupported integration type: " + integration.getType()))
                     .type(MediaType.APPLICATION_JSON).build();
         };
+
+        // Only successful responses are cached — AWS does not serve an error from the cache.
+        if (cacheKey != null && response.getStatus() < 400) {
+            responseCache.put(cacheKey,
+                    snapshotForCache(response, cacheTtlSeconds(methodSettingFor(stage, matched.getPath(), httpMethod))));
+        }
+        return response;
     }
 
     private void applyApiOwnerContext(ApiGatewayV2Service.ApiOwner owner) {
@@ -452,6 +477,399 @@ public class ApiGatewayExecuteController {
             }
             throw e;
         }
+    }
+
+    // ──────────────────────────── HTTP_PROXY ────────────────────────────
+
+    /**
+     * Forwards the request to an arbitrary HTTP backend and relays that backend's response.
+     *
+     * <p>HTTP_PROXY is a passthrough: AWS applies neither request templates nor integration-response
+     * selection to it, so the backend's status, headers and body come back untouched — including
+     * error statuses, which must not be remapped into a gateway error. Only
+     * {@code integration.request.*} parameter mapping applies on the way out.
+     */
+    private Response invokeHttpProxy(String apiId, String httpMethod, String path, String proxy,
+                                     String stageName, ApiGatewayResource resource,
+                                     Integration integration, HttpHeaders headers,
+                                     UriInfo uriInfo, byte[] body) {
+        String uri = integration.getUri();
+        if (uri == null || uri.isBlank()) {
+            return Response.status(500)
+                    .entity(jsonMessage("No integration URI configured"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
+        Map<String, String> headerMap = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+            if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), String.join(",", e.getValue()));
+        }
+        Map<String, String> queryMap = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+            if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), String.join(",", e.getValue()));
+        }
+        Map<String, String> pathMap = new java.util.LinkedHashMap<>();
+        if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
+        pathMap.putAll(extractPathParams(resource.getPath(), path));
+
+        // integration.request.{header,querystring,path}.X ← method.request.*, applied here rather
+        // than by the v2 RequestParameterMapper: that mapper reads the unrelated v2 syntax
+        // ("append:header.x" → "$request.header.y") and would silently ignore these REST mappings.
+        Map<String, String> requestParameters = integration.getRequestParameters();
+        if (requestParameters != null) {
+            for (Map.Entry<String, String> param : requestParameters.entrySet()) {
+                String dest = param.getKey();
+                String resolved = resolveRequestParameter(param.getValue(), queryMap, pathMap, headerMap);
+                if (resolved == null) continue;
+                if (dest.startsWith("integration.request.header.")) {
+                    headerMap.put(dest.substring("integration.request.header.".length()), resolved);
+                } else if (dest.startsWith("integration.request.querystring.")) {
+                    queryMap.put(dest.substring("integration.request.querystring.".length()), resolved);
+                } else if (dest.startsWith("integration.request.path.")) {
+                    pathMap.put(dest.substring("integration.request.path.".length()), resolved);
+                }
+            }
+        }
+
+        // HttpProxyInvoker speaks the v2 integration model. The REST parameter mapping above is
+        // already folded into the header/query/path maps, so this adapter deliberately carries no
+        // requestParameters of its own — leaving them set would re-apply them under v2 semantics.
+        io.github.hectorvent.floci.services.apigatewayv2.model.Integration target =
+                new io.github.hectorvent.floci.services.apigatewayv2.model.Integration();
+        target.setIntegrationType("HTTP_PROXY");
+        target.setIntegrationUri(uri);
+        target.setIntegrationMethod(integration.getHttpMethod());
+
+        io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
+                new io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext(
+                        apiId, stageName, httpMethod, path,
+                        pathMap.getOrDefault("proxy", ""), resource.getPath(),
+                        UUID.randomUUID().toString(),
+                        headerMap.getOrDefault("X-Forwarded-For", "127.0.0.1"),
+                        headerMap, queryMap, pathMap, body,
+                        Map.of(), Map.of());
+
+        LOG.debugv("execute-api: {0} {1}/{2}{3} → HTTP_PROXY {4}",
+                httpMethod, apiId, stageName, path, uri);
+
+        io.github.hectorvent.floci.services.apigatewayv2.proxy.ProxyResult result =
+                httpProxyInvoker.invoke(target, ctx, proxyOptions(integration));
+
+        Response.ResponseBuilder rb = Response.status(result.statusCode());
+        if (result.body() != null) rb.entity(result.body());
+        if (result.headers() != null) {
+            for (Map.Entry<String, String> e : result.headers().entrySet()) {
+                rb.header(e.getKey(), e.getValue());
+            }
+        }
+        return rb.build();
+    }
+
+    // ──────────────────────────── Response caching ────────────────────────────
+
+    /** AWS's default integration cache TTL when a method enables caching without naming one. */
+    private static final int DEFAULT_CACHE_TTL_SECONDS = 300;
+
+    private record CachedResponse(int status, Object entity, Map<String, String> headers, long expiresAt) {}
+
+    private final Map<String, CachedResponse> responseCache = new ConcurrentHashMap<>();
+
+    /**
+     * The cache key for this request, or {@code null} when caching does not apply. AWS caches only
+     * when the stage has a cache cluster <em>and</em> the method — or the wildcard entry — enables
+     * caching. The key is the integration's {@code cacheNamespace} plus the values of its
+     * {@code cacheKeyParameters}, so two requests differing only in an uncached parameter share an
+     * entry, which is exactly the behaviour that surprises people in production.
+     */
+    private String cacheKeyFor(Stage stage, ApiGatewayResource resource, String httpMethod,
+                               String path, Integration integration, HttpHeaders headers, UriInfo uriInfo) {
+        if (stage == null || !stage.isCacheClusterEnabled()) return null;
+        MethodSetting setting = methodSettingFor(stage, resource.getPath(), httpMethod);
+        if (setting == null || !setting.isCachingEnabled()) return null;
+
+        StringBuilder key = new StringBuilder();
+        key.append(integration.getCacheNamespace() != null
+                ? integration.getCacheNamespace() : resource.getId());
+        key.append('|').append(httpMethod).append('|').append(path);
+        for (String param : integration.getCacheKeyParameters()) {
+            key.append('|').append(param).append('=')
+                    .append(cacheKeyParameterValue(param, headers, uriInfo, resource.getPath(), path));
+        }
+        return key.toString();
+    }
+
+    /**
+     * The method's own settings, falling back to the stage-wide wildcard entry. Settings are keyed
+     * by the resource path without its leading slash ({@code pets/GET}), matching what AWS reports.
+     */
+    private static MethodSetting methodSettingFor(Stage stage, String resourcePath, String httpMethod) {
+        String normalized = resourcePath != null && resourcePath.startsWith("/")
+                ? resourcePath.substring(1) : resourcePath;
+        MethodSetting exact = stage.getMethodSettings().get(normalized + "/" + httpMethod);
+        return exact != null ? exact : stage.getMethodSettings().get("*/*");
+    }
+
+    private String cacheKeyParameterValue(String param, HttpHeaders headers, UriInfo uriInfo,
+                                          String resourcePath, String path) {
+        if (param.startsWith("method.request.querystring.")) {
+            return uriInfo.getQueryParameters()
+                    .getFirst(param.substring("method.request.querystring.".length()));
+        }
+        if (param.startsWith("method.request.header.")) {
+            return headers.getHeaderString(param.substring("method.request.header.".length()));
+        }
+        if (param.startsWith("method.request.path.")) {
+            return extractPathParams(resourcePath, path)
+                    .get(param.substring("method.request.path.".length()));
+        }
+        return null;
+    }
+
+    private static int cacheTtlSeconds(MethodSetting setting) {
+        int ttl = setting != null ? setting.getCacheTtlInSeconds() : 0;
+        return ttl > 0 ? ttl : DEFAULT_CACHE_TTL_SECONDS;
+    }
+
+    private static CachedResponse snapshotForCache(Response response, int ttlSeconds) {
+        Map<String, String> headers = new java.util.LinkedHashMap<>();
+        response.getStringHeaders().forEach((name, values) -> {
+            if (!values.isEmpty()) headers.put(name, values.get(0));
+        });
+        return new CachedResponse(response.getStatus(), response.getEntity(), headers,
+                System.currentTimeMillis() + ttlSeconds * 1000L);
+    }
+
+    private static Response fromCache(CachedResponse cached) {
+        Response.ResponseBuilder rb = Response.status(cached.status()).entity(cached.entity());
+        cached.headers().forEach(rb::header);
+        return rb.build();
+    }
+
+    // ──────────────────────────── VPC Link ────────────────────────────
+
+    /**
+     * Checks that a {@code VPC_LINK} integration names a VPC link that exists and is available,
+     * returning an error response when it does not and {@code null} when the request may proceed.
+     *
+     * <p>Floci has no real VPC, so a valid link routes straight to the integration URI. What this
+     * catches is the misconfiguration AWS also rejects: pointing at a link that was deleted or
+     * never created, which would otherwise silently behave like a plain internet integration.
+     */
+    private Response validateVpcLink(String region, Integration integration) {
+        if (!"VPC_LINK".equalsIgnoreCase(integration.getConnectionType())) {
+            return null;
+        }
+        String connectionId = integration.getConnectionId();
+        if (connectionId == null || connectionId.isBlank()) {
+            return Response.status(500)
+                    .entity(jsonMessage("VPC_LINK integration is missing a connectionId"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+        try {
+            io.github.hectorvent.floci.services.apigateway.model.VpcLink link =
+                    apiGatewayService.getVpcLink(region, connectionId);
+            if (!"AVAILABLE".equalsIgnoreCase(link.getStatus())) {
+                return Response.status(502)
+                        .entity(jsonMessage("VPC link is not available: " + link.getStatus()))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+            return null;
+        } catch (AwsException e) {
+            LOG.warnv("VPC_LINK integration references unknown link {0} in {1}", connectionId, region);
+            return Response.status(502)
+                    .entity(jsonMessage("Invalid VPC link identifier specified: " + connectionId))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+    }
+
+    // ──────────────────────────── Binary payloads ────────────────────────────
+
+    /**
+     * True when {@code contentType} matches one of the API's configured {@code binaryMediaTypes}.
+     * The charset parameter is ignored when comparing.
+     *
+     * <p>Wildcards are matched rather than compared literally, because AWS documents the wildcard
+     * character generally and not just the catch-all entry: "Example binary media types include
+     * {@code image/png} or {@code application/octet-stream}. You can use the wildcard character
+     * (<code>*</code>) to cover multiple media types." So {@code image/*} covers any image subtype,
+     * and <code>*&#47;*</code> covers everything.
+     *
+     * @see <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-payload-encodings.html">Binary media types for REST APIs</a>
+     */
+    private boolean isBinaryMediaType(String region, String apiId, String contentType) {
+        if (contentType == null || contentType.isBlank()) return false;
+        List<String> binaryTypes;
+        try {
+            binaryTypes = apiGatewayService.getRestApi(region, apiId).getBinaryMediaTypes();
+        } catch (AwsException e) {
+            return false;
+        }
+        if (binaryTypes == null || binaryTypes.isEmpty()) return false;
+
+        String base = contentType.contains(";")
+                ? contentType.substring(0, contentType.indexOf(';')).trim() : contentType.trim();
+        return binaryTypes.stream().anyMatch(configured -> mediaTypeMatches(configured, base));
+    }
+
+    private static boolean mediaTypeMatches(String pattern, String contentType) {
+        if (pattern == null) return false;
+        String candidate = pattern.trim();
+        if ("*/*".equals(candidate) || candidate.equalsIgnoreCase(contentType)) return true;
+        int slash = candidate.indexOf('/');
+        return slash > 0 && "*".equals(candidate.substring(slash + 1))
+                && contentType.regionMatches(true, 0, candidate, 0, slash + 1);
+    }
+
+    /**
+     * The request body as mapping templates should see it. {@code CONVERT_TO_TEXT} base64-encodes a
+     * binary payload so it survives being handled as a string; otherwise the bytes are read as UTF-8.
+     */
+    private static String templateBody(Integration integration, byte[] body, boolean binaryRequest) {
+        if (body == null || body.length == 0) return null;
+        if (binaryRequest && "CONVERT_TO_TEXT".equalsIgnoreCase(integration.getContentHandling())) {
+            return Base64.getEncoder().encodeToString(body);
+        }
+        return new String(body, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * The payload actually sent to the backend. {@code CONVERT_TO_BINARY} treats the rendered body
+     * as base64 and decodes it; anything else is sent as UTF-8 bytes.
+     */
+    private static byte[] outgoingPayload(Integration integration, String renderedBody) {
+        if (renderedBody == null) return new byte[0];
+        if ("CONVERT_TO_BINARY".equalsIgnoreCase(integration.getContentHandling())) {
+            try {
+                return Base64.getDecoder().decode(renderedBody.trim());
+            } catch (IllegalArgumentException e) {
+                LOG.debugv("CONVERT_TO_BINARY: body is not valid base64, sending it unchanged");
+            }
+        }
+        return renderedBody.getBytes(StandardCharsets.UTF_8);
+    }
+
+    // ──────────────────────────── HTTP (non-proxy) ────────────────────────────
+
+    /**
+     * Invokes an arbitrary HTTP backend with VTL request/response mapping applied.
+     *
+     * <p>Unlike {@code HTTP_PROXY}, a non-proxy {@code HTTP} integration builds its backend request
+     * entirely from mapping templates and explicit {@code integration.request.*} parameter
+     * mappings — inbound headers and query parameters that were <em>not</em> mapped are not
+     * forwarded. The backend's response then runs through the method's integration responses, where
+     * {@code selectionPattern} is matched against the backend's HTTP status code (for
+     * {@code AWS}/Lambda integrations it is matched against the error message instead).
+     */
+    private Response invokeHttpIntegration(String region, String apiId, String httpMethod, String path,
+                                           String proxy, String stageName, ApiGatewayResource resource,
+                                           Integration integration, HttpHeaders headers,
+                                           UriInfo uriInfo, byte[] body) {
+        String uri = integration.getUri();
+        if (uri == null || uri.isBlank()) {
+            return Response.status(500)
+                    .entity(jsonMessage("No integration URI configured"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
+        String requestId = UUID.randomUUID().toString();
+        boolean binaryRequest = isBinaryMediaType(region, apiId,
+                headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
+        String bodyStr = templateBody(integration, body, binaryRequest);
+
+        Map<String, String> headerMap = new HashMap<>();
+        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+            if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
+        }
+        Map<String, String> queryMap = new HashMap<>();
+        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+            if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
+        }
+        Map<String, String> pathMap = new HashMap<>();
+        if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
+        pathMap.putAll(extractPathParams(resource.getPath(), path));
+
+        String incomingContentType = headerMap.getOrDefault("Content-Type",
+                headerMap.getOrDefault("content-type", "application/json"));
+
+        VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
+                bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
+                resource.getPath(), requestId, regionResolver.getAccountId(), null);
+
+        // Only explicitly mapped parameters reach the backend — the defining difference from
+        // HTTP_PROXY, which seeds the outgoing request with every inbound header and query param.
+        Map<String, String> outHeaders = new java.util.LinkedHashMap<>();
+        Map<String, String> outQuery = new java.util.LinkedHashMap<>();
+        Map<String, String> outPath = new java.util.LinkedHashMap<>(pathMap);
+        Map<String, String> requestParameters = integration.getRequestParameters();
+        if (requestParameters != null) {
+            for (Map.Entry<String, String> param : requestParameters.entrySet()) {
+                String dest = param.getKey();
+                String resolved = resolveRequestParameter(param.getValue(), queryMap, pathMap, headerMap);
+                if (resolved == null) continue;
+                if (dest.startsWith("integration.request.header.")) {
+                    outHeaders.put(dest.substring("integration.request.header.".length()), resolved);
+                } else if (dest.startsWith("integration.request.querystring.")) {
+                    outQuery.put(dest.substring("integration.request.querystring.".length()), resolved);
+                } else if (dest.startsWith("integration.request.path.")) {
+                    outPath.put(dest.substring("integration.request.path.".length()), resolved);
+                }
+            }
+        }
+
+        RequestTemplateResult requestTemplateResult =
+                applyRequestTemplates(integration, incomingContentType, bodyStr, vtlCtx);
+        if (requestTemplateResult.rejection() != null) return requestTemplateResult.rejection();
+        String transformedBody = requestTemplateResult.body();
+
+        // The payload is the rendered template, so the backend is told the media type that template
+        // was keyed under — unless a requestParameters mapping already set one explicitly.
+        outHeaders.putIfAbsent("Content-Type",
+                requestTemplateResult.contentType() != null
+                        ? requestTemplateResult.contentType() : MediaType.APPLICATION_JSON);
+
+        // Reuses the HTTP_PROXY transport (hop-by-hop stripping, chunked decoding, 502-on-failure).
+        // The non-proxy semantics live in what this hands it: a mapped header/query set and a
+        // VTL-rendered body, rather than the inbound request verbatim.
+        io.github.hectorvent.floci.services.apigatewayv2.model.Integration target =
+                new io.github.hectorvent.floci.services.apigatewayv2.model.Integration();
+        target.setIntegrationType("HTTP_PROXY");
+        target.setIntegrationUri(uri);
+        target.setIntegrationMethod(integration.getHttpMethod());
+
+        byte[] payload = outgoingPayload(integration, transformedBody);
+
+        io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
+                new io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext(
+                        apiId, stageName, httpMethod, path,
+                        outPath.getOrDefault("proxy", ""), resource.getPath(),
+                        requestId, headerMap.getOrDefault("X-Forwarded-For", "127.0.0.1"),
+                        outHeaders, outQuery, outPath, payload,
+                        Map.of(), Map.of());
+
+        LOG.debugv("execute-api: {0} {1}/{2}{3} → HTTP {4}", httpMethod, apiId, stageName, path, uri);
+
+        io.github.hectorvent.floci.services.apigatewayv2.proxy.ProxyResult result =
+                httpProxyInvoker.invoke(target, ctx, proxyOptions(integration));
+
+        String responseBodyStr = result.body() != null
+                ? new String(result.body(), StandardCharsets.UTF_8) : "";
+        // java.net.http lowercases response header names, so this must be case-insensitive for an
+        // integration.response.header.X-Backend-Id mapping to resolve.
+        Map<String, String> responseHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        if (result.headers() != null) responseHeaders.putAll(result.headers());
+
+        VtlTemplateEngine.VtlContext responseMappingCtx = new VtlTemplateEngine.VtlContext(
+                responseBodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
+                resource.getPath(), requestId, regionResolver.getAccountId(), null);
+
+        // responseHeaders is already case-insensitive, so a plain lookup suffices.
+        String defaultContentType =
+                responseHeaders.getOrDefault("Content-Type", MediaType.APPLICATION_JSON);
+
+        // For HTTP integrations selectionPattern is matched against the backend's status code.
+        return mapIntegrationResponse(integration, String.valueOf(result.statusCode()),
+                responseBodyStr, result.body(), result.statusCode(), responseHeaders,
+                responseMappingCtx, defaultContentType);
     }
 
     private AuthorizerResult invokeAuthorizer(String region, String apiId, String stageName,
@@ -839,8 +1257,13 @@ public class ApiGatewayExecuteController {
         }
 
         if (body != null && body.length > 0) {
-            event.put("body", new String(body));
-            event.put("isBase64Encoded", false);
+            // A payload whose content type is in the API's binaryMediaTypes must reach the function
+            // base64-encoded; reading it as a UTF-8 string corrupts it.
+            boolean binary = isBinaryMediaType(region, apiId, headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
+            event.put("body", binary
+                    ? Base64.getEncoder().encodeToString(body)
+                    : new String(body, StandardCharsets.UTF_8));
+            event.put("isBase64Encoded", binary);
         } else {
             event.putNull("body");
             event.put("isBase64Encoded", false);
@@ -1005,11 +1428,11 @@ public class ApiGatewayExecuteController {
         // Build VTL context
         Map<String, String> headerMap = new HashMap<>();
         for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
-            if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
+            if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().getFirst());
         }
         Map<String, String> queryMap = new HashMap<>();
         for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
-            if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
+            if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().getFirst());
         }
         Map<String, String> pathMap = new HashMap<>();
         if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
@@ -1047,49 +1470,10 @@ public class ApiGatewayExecuteController {
         }
 
         // Content-Type negotiation and passthrough behavior
-        String transformedBody;
-        Map<String, String> requestTemplates = integration.getRequestTemplates();
-
-        if (requestTemplates != null && !requestTemplates.isEmpty()) {
-            // Try exact match first, then wildcard fallback
-            String template = requestTemplates.get(incomingContentType);
-            if (template == null) {
-                // Try without charset: "application/json; charset=utf-8" → "application/json"
-                String baseType = incomingContentType.contains(";")
-                        ? incomingContentType.substring(0, incomingContentType.indexOf(';')).trim()
-                        : incomingContentType;
-                template = requestTemplates.get(baseType);
-            }
-
-            if (template != null) {
-                transformedBody = vtlEngine.evaluate(template, vtlCtx).body();
-            } else {
-                // No matching template for this Content-Type
-                String behavior = integration.getPassthroughBehavior();
-                if ("NEVER".equalsIgnoreCase(behavior)) {
-                    return Response.status(415)
-                            .entity(jsonMessage("Unsupported Media Type"))
-                            .type(MediaType.APPLICATION_JSON).build();
-                } else if ("WHEN_NO_TEMPLATES".equalsIgnoreCase(behavior)) {
-                    // Templates exist but none match → reject
-                    return Response.status(415)
-                            .entity(jsonMessage("Unsupported Media Type"))
-                            .type(MediaType.APPLICATION_JSON).build();
-                } else {
-                    // WHEN_NO_MATCH (default) — passthrough
-                    transformedBody = bodyStr != null ? bodyStr : "";
-                }
-            }
-        } else {
-            // No templates defined at all
-            String behavior = integration.getPassthroughBehavior();
-            if ("NEVER".equalsIgnoreCase(behavior)) {
-                return Response.status(415)
-                        .entity(jsonMessage("Unsupported Media Type"))
-                        .type(MediaType.APPLICATION_JSON).build();
-            }
-            transformedBody = bodyStr != null ? bodyStr : "";
-        }
+        RequestTemplateResult requestTemplateResult =
+                applyRequestTemplates(integration, incomingContentType, bodyStr, vtlCtx);
+        if (requestTemplateResult.rejection() != null) return requestTemplateResult.rejection();
+        String transformedBody = requestTemplateResult.body();
 
         // Dispatch to service.
         //
@@ -1192,25 +1576,122 @@ public class ApiGatewayExecuteController {
                     errorType != null ? errorType : "UnknownError");
         }
 
-        // Select integration response
-        Map<String, IntegrationResponse> integrationResponses = integration.getIntegrationResponses();
-        IntegrationResponse matchedResponse = null;
-        IntegrationResponse defaultResponse = null;
-
-        // Build the error string to match selectionPattern against.
-        // AWS matches against the error response body/message. We match against
-        // both errorType and errorMessage to catch patterns like ".*ResourceNotFoundException.*".
+        // AWS matches selectionPattern against the error response body/message for AWS/Lambda
+        // integrations. We match against both errorType and errorMessage to catch patterns like
+        // ".*ResourceNotFoundException.*". (HTTP integrations match the status code instead —
+        // see invokeHttpIntegration.)
         String errorMatchString = errorType != null
                 ? errorType + (errorMessage != null ? ": " + errorMessage : "")
                 : errorMessage;
+
+        // Case-insensitive: an integration.response.header.X-Foo mapping must resolve regardless of
+        // the casing the backend or client library used for the header name.
+        Map<String, String> serviceResponseHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        if (serviceResponse != null) {
+            for (Map.Entry<String, List<String>> e : serviceResponse.getStringHeaders().entrySet()) {
+                if (!e.getValue().isEmpty()) serviceResponseHeaders.put(e.getKey(), e.getValue().get(0));
+            }
+        }
+
+        VtlTemplateEngine.VtlContext responseMappingCtx = new VtlTemplateEngine.VtlContext(
+                responseBodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
+                resource.getPath(), requestId, regionResolver.getAccountId(), null);
+
+        int fallbackStatus = errorType != null ? 500 : (serviceStatus >= 400 ? serviceStatus : 200);
+        return mapIntegrationResponse(integration, errorMatchString, responseBodyStr, fallbackStatus,
+                serviceResponseHeaders, responseMappingCtx, MediaType.APPLICATION_JSON);
+    }
+
+    /**
+     * Outcome of request-template negotiation: either a rendered request body plus the media type
+     * it was rendered as, or a ready-made rejection when {@code passthroughBehavior} forbids
+     * passing the payload through untransformed.
+     */
+    private record RequestTemplateResult(String body, String contentType, Response rejection) {}
+
+    /**
+     * Selects a request template by the incoming {@code Content-Type} and renders it, applying
+     * {@code passthroughBehavior} when no template matches. Shared by the {@code AWS} and
+     * {@code HTTP} (non-proxy) integration types, which negotiate identically.
+     */
+    private RequestTemplateResult applyRequestTemplates(Integration integration, String incomingContentType,
+                                                        String bodyStr, VtlTemplateEngine.VtlContext vtlCtx) {
+        Response unsupportedMediaType = Response.status(415)
+                .entity(jsonMessage("Unsupported Media Type"))
+                .type(MediaType.APPLICATION_JSON).build();
+        Map<String, String> requestTemplates = integration.getRequestTemplates();
+
+        RequestTemplateResult requestTemplateResult = new RequestTemplateResult(bodyStr != null ? bodyStr : "", incomingContentType, null);
+        if (requestTemplates == null || requestTemplates.isEmpty()) {
+            // No templates defined at all
+            if ("NEVER".equalsIgnoreCase(integration.getPassthroughBehavior())) {
+                return new RequestTemplateResult(null, null, unsupportedMediaType);
+            }
+            return requestTemplateResult;
+        }
+
+        // Try exact match first, then without charset: "application/json; charset=utf-8" → "application/json"
+        String matchedType = incomingContentType;
+        String template = requestTemplates.get(incomingContentType);
+        if (template == null) {
+            String baseType = incomingContentType.contains(";")
+                    ? incomingContentType.substring(0, incomingContentType.indexOf(';')).trim()
+                    : incomingContentType;
+            template = requestTemplates.get(baseType);
+            if (template != null) matchedType = baseType;
+        }
+
+        if (template != null) {
+            // The template's own key is the media type the backend should be told it is receiving.
+            return new RequestTemplateResult(vtlEngine.evaluate(template, vtlCtx).body(), matchedType, null);
+        }
+
+        // No matching template for this Content-Type. NEVER forbids passthrough outright;
+        // WHEN_NO_TEMPLATES rejects because templates exist but none matched.
+        String behavior = integration.getPassthroughBehavior();
+        if ("NEVER".equalsIgnoreCase(behavior) || "WHEN_NO_TEMPLATES".equalsIgnoreCase(behavior)) {
+            return new RequestTemplateResult(null, null, unsupportedMediaType);
+        }
+        // WHEN_NO_MATCH (default) — passthrough
+        return requestTemplateResult;
+    }
+
+    /**
+     * Maps an integration result onto the method response: selects the matching
+     * {@link IntegrationResponse}, renders its response template, then applies
+     * {@code $context.responseOverride} assignments and {@code responseParameters} header mappings.
+     *
+     * @param selectionMatchString what {@code selectionPattern} regexes are tested against — the
+     *                             error message for {@code AWS}/Lambda integrations, the backend's
+     *                             HTTP status code for {@code HTTP} integrations
+     * @param fallbackStatus       status used when no integration response is configured or matched
+     */
+    private Response mapIntegrationResponse(Integration integration, String selectionMatchString,
+                                            String responseBodyStr, int fallbackStatus,
+                                            Map<String, String> integrationResponseHeaders,
+                                            VtlTemplateEngine.VtlContext responseMappingCtx,
+                                            String defaultContentType) {
+        return mapIntegrationResponse(integration, selectionMatchString, responseBodyStr, null,
+                fallbackStatus, integrationResponseHeaders, responseMappingCtx, defaultContentType);
+    }
+
+    private Response mapIntegrationResponse(Integration integration, String selectionMatchString,
+                                            String responseBodyStr, byte[] rawResponseBody,
+                                            int fallbackStatus,
+                                            Map<String, String> integrationResponseHeaders,
+                                            VtlTemplateEngine.VtlContext responseMappingCtx,
+                                            String defaultContentType) {
+        Map<String, IntegrationResponse> integrationResponses = integration.getIntegrationResponses();
+        IntegrationResponse matchedResponse = null;
+        IntegrationResponse defaultResponse = null;
 
         if (integrationResponses != null && !integrationResponses.isEmpty()) {
             for (IntegrationResponse ir : integrationResponses.values()) {
                 if (ir.selectionPattern() == null || ir.selectionPattern().isEmpty()) {
                     defaultResponse = ir;
-                } else if (errorMatchString != null) {
+                } else if (selectionMatchString != null) {
                     try {
-                        if (Pattern.matches(ir.selectionPattern(), errorMatchString)) {
+                        if (Pattern.matches(ir.selectionPattern(), selectionMatchString)) {
                             matchedResponse = ir;
                             break;
                         }
@@ -1237,9 +1718,6 @@ public class ApiGatewayExecuteController {
                 String responseTemplate = responseTemplates.getOrDefault("application/json",
                         responseTemplates.values().iterator().next());
                 if (responseTemplate != null && !responseTemplate.isEmpty()) {
-                    VtlTemplateEngine.VtlContext responseMappingCtx = new VtlTemplateEngine.VtlContext(
-                            responseBodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                            resource.getPath(), requestId, regionResolver.getAccountId(), null);
                     templateResult = vtlEngine.evaluate(responseTemplate, responseMappingCtx);
                     finalBody = templateResult.body();
                 } else {
@@ -1249,19 +1727,34 @@ public class ApiGatewayExecuteController {
                 finalBody = responseBodyStr;
             }
         } else {
-            finalStatus = errorType != null ? 500 : (serviceStatus >= 400 ? serviceStatus : 200);
+            finalStatus = fallbackStatus;
             finalBody = responseBodyStr;
         }
 
         // Apply $context.responseOverride assignments from the response template (if any).
-        if (templateResult != null) {
-            if (templateResult.statusOverride() != null) {
-                finalStatus = templateResult.statusOverride();
+        if (templateResult != null && templateResult.statusOverride() != null) {
+            finalStatus = templateResult.statusOverride();
+        }
+
+        // Integration-response contentHandling is an output conversion, applied after templates:
+        // CONVERT_TO_TEXT base64-encodes a binary payload for the caller, CONVERT_TO_BINARY decodes
+        // a base64 text payload back to bytes.
+        Object entity = finalBody;
+        String responseContentHandling = matchedResponse != null ? matchedResponse.contentHandling() : null;
+        if ("CONVERT_TO_TEXT".equalsIgnoreCase(responseContentHandling)) {
+            byte[] source = templateResult == null && rawResponseBody != null
+                    ? rawResponseBody : finalBody.getBytes(StandardCharsets.UTF_8);
+            entity = Base64.getEncoder().encodeToString(source);
+        } else if ("CONVERT_TO_BINARY".equalsIgnoreCase(responseContentHandling)) {
+            try {
+                entity = Base64.getDecoder().decode(finalBody.trim());
+            } catch (IllegalArgumentException e) {
+                LOG.debugv("CONVERT_TO_BINARY: response body is not valid base64, returning it unchanged");
             }
         }
 
         Response.ResponseBuilder rb = Response.status(finalStatus)
-                .entity(finalBody);
+                .entity(entity);
 
         String contentType = null;
 
@@ -1278,20 +1771,12 @@ public class ApiGatewayExecuteController {
 
         // Apply response parameter mapping (header mapping from responseParameters config).
         if (matchedResponse != null && matchedResponse.responseParameters() != null) {
-            // Case-insensitive: an integration.response.header.X-Foo mapping must resolve
-            // regardless of the casing the backend or client library used for the header name.
-            Map<String, String> serviceResponseHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            if (serviceResponse != null) {
-                for (Map.Entry<String, List<String>> e : serviceResponse.getStringHeaders().entrySet()) {
-                    if (!e.getValue().isEmpty()) serviceResponseHeaders.put(e.getKey(), e.getValue().get(0));
-                }
-            }
             for (Map.Entry<String, String> param : matchedResponse.responseParameters().entrySet()) {
                 String dest = param.getKey();   // method.response.header.X-Foo
                 String source = param.getValue(); // integration.response.header.X-Bar or 'static' or integration.response.body.jsonpath
                 if (!dest.startsWith("method.response.header.")) continue;
                 String headerName = dest.substring("method.response.header.".length());
-                String headerValue = resolveResponseParameter(source, serviceResponseHeaders, responseBodyStr);
+                String headerValue = resolveResponseParameter(source, integrationResponseHeaders, responseBodyStr);
                 if (headerValue != null) {
                     if ("Content-Type".equalsIgnoreCase(headerName)) {
                         contentType = headerValue;
@@ -1302,7 +1787,7 @@ public class ApiGatewayExecuteController {
             }
         }
 
-        rb.type(contentType != null ? contentType : MediaType.APPLICATION_JSON);
+        rb.type(contentType != null ? contentType : defaultContentType);
         return rb.build();
     }
 
@@ -1734,6 +2219,17 @@ public class ApiGatewayExecuteController {
 
     private final io.github.hectorvent.floci.services.apigatewayv2.proxy.HttpProxyInvoker httpProxyInvoker =
             new io.github.hectorvent.floci.services.apigatewayv2.proxy.HttpProxyInvoker();
+
+    /** REST integrations default to AWS's 29s and may opt out of backend TLS verification. */
+    private static io.github.hectorvent.floci.services.apigatewayv2.proxy.HttpProxyInvoker.ProxyOptions
+            proxyOptions(Integration integration) {
+        long timeoutMillis = integration.getTimeoutInMillis() != null
+                ? integration.getTimeoutInMillis() : 29_000L;
+        boolean insecure = integration.getTlsConfig() != null
+                && integration.getTlsConfig().isInsecureSkipVerification();
+        return new io.github.hectorvent.floci.services.apigatewayv2.proxy.HttpProxyInvoker.ProxyOptions(
+                java.time.Duration.ofMillis(timeoutMillis), insecure);
+    }
 
     private Response dispatchHttpProxyV2(io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
                                           Route route, String httpMethod, String path,

@@ -182,11 +182,56 @@ These management-plane operations have no handler in v1. Calls will return `404`
 - Model templates: `GetModelTemplate`
 - Gateway Responses (the entire family: `PutGatewayResponse`, `GetGatewayResponse`, etc.)
 - Documentation parts and versions (the entire family, 10 operations)
-- VPC Links (5 operations)
 - Client Certificates (5 operations)
 - `GetExport` / `ImportDocumentationParts`
 
-The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports `AWS_PROXY` (Lambda proxy), `AWS` (Lambda with VTL request/response templates), and `MOCK` integrations; other integration types return an error. A `MOCK` integration renders its request template and uses the `statusCode` it produces to pick the integration response, exactly as AWS does: the first response whose `selectionPattern` matches wins, otherwise the response without a pattern (the default) answers. This is what makes CORS preflights declared with a `204` response (CDK's `addCorsPreflight`) carry their `Access-Control-*` headers.
+The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports these integration types; others return an error:
+
+| Type | Support |
+| --- | --- |
+| `AWS_PROXY` (Lambda proxy) | ✅ |
+| `AWS` (Lambda / AWS service with VTL request/response templates) | ✅ |
+| `HTTP_PROXY` (passthrough to an arbitrary HTTP backend) | ✅ |
+| `HTTP` (non-proxy, with VTL request/response templates) | ✅ |
+| `MOCK` | ✅ |
+
+A `MOCK` integration renders its request template and uses the `statusCode` it produces to pick the integration response, exactly as AWS does: the first response whose `selectionPattern` matches wins, otherwise the response without a pattern (the default) answers. This is what makes CORS preflights declared with a `204` response (CDK's `addCorsPreflight`) carry their `Access-Control-*` headers.
+
+`HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`.
+
+`HTTP` (non-proxy) transforms in both directions instead:
+
+- **Request** — the body is the rendered `requestTemplates` entry selected by the incoming `Content-Type` (falling back to the type without its charset), subject to `passthroughBehavior` (`NEVER` and `WHEN_NO_TEMPLATES` return `415`). Only headers and query parameters named by `integration.request.*` mappings are forwarded; unmapped inbound headers are **not** passed through — that passthrough is `HTTP_PROXY`'s job.
+- **Response** — the backend's reply runs through the method's integration responses. As in AWS, `selectionPattern` is matched against the backend's **HTTP status code** (for `AWS`/Lambda integrations it is matched against the error message instead), so `"5\\d{2}"` on a `502` integration response remaps any backend `5xx` to `502`. The matched response's `responseTemplates` render the body, `responseParameters` map `integration.response.header.*` (case-insensitively) or `integration.response.body.<jsonpath>` onto `method.response.header.*`, and `$context.responseOverride` assignments take precedence. With no integration responses configured, the backend's status and body are relayed as-is.
+
+### Integration Settings
+
+`PutIntegration` persists and `GetIntegration` returns the full configuration, including the mapping templates and integration responses that IaC tools diff against:
+
+| Field | Behaviour |
+| --- | --- |
+| `requestParameters` / `requestTemplates` | Applied at invoke time and returned on read-back |
+| `passthroughBehavior` | `NEVER` and `WHEN_NO_TEMPLATES` reject an unmatched Content-Type with `415` |
+| `timeoutInMillis` | Honoured; defaults to AWS's 29,000 ms. Values below 50 are rejected. The 29s ceiling is an edge-optimized limit, so Regional APIs may exceed it |
+| `tlsConfig.insecureSkipVerification` | Honoured — skips backend certificate *and* hostname verification, for a backend behind a private CA or self-signed cert |
+| `contentHandling` | `CONVERT_TO_TEXT` base64-encodes a binary request for mapping templates; `CONVERT_TO_BINARY` base64-decodes a text request before sending it |
+| `connectionType` / `connectionId` | `VPC_LINK` requires `connectionId` to name an existing, available VPC link; an unknown link yields `502` |
+| `cacheNamespace` / `cacheKeyParameters` | Form the response cache key (see below) |
+| `credentials` | Persisted and returned. Floci does not enforce IAM, so the role is not actually assumed |
+
+Integration responses additionally accept `contentHandling`, applied as an output conversion after response templates.
+
+### Binary Payloads
+
+Set `binaryMediaTypes` on the RestApi (exact types or a subtype wildcard such as `image/*`) to mark content types as binary. A binary request body reaches an `AWS_PROXY` (Lambda) integration base64-encoded with `isBase64Encoded: true`; previously it was read as a UTF-8 string, which corrupted it. For non-proxy integrations, pair `binaryMediaTypes` with `contentHandling` as above.
+
+### Caching
+
+Response caching needs both switches AWS requires: `cacheClusterEnabled` on the stage and `caching/enabled` on the method (or the `*/*` wildcard) via `UpdateStage` patch operations. Entries are keyed by the integration's `cacheNamespace` and the values of its `cacheKeyParameters`, expire after `caching/ttlInSeconds` (default 300s), and only successful (`< 400`) responses are stored. There is no real cache cluster — `cacheClusterSize` is recorded and reported but has no effect on capacity.
+
+### VPC Links
+
+The five REST VPC Link operations (`CreateVpcLink`, `GetVpcLink`, `GetVpcLinks`, `UpdateVpcLink`, `DeleteVpcLink`) are emulated at `/vpclinks`. `CreateVpcLink` requires a name and at least one target ARN, answers `202`, and provisions the link as `AVAILABLE` immediately rather than transitioning through `PENDING`. Since Floci has no real VPC, a valid link routes straight to the integration URI; what is enforced is that the link exists and is available.
 
 ### Examples
 

@@ -4,7 +4,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -18,6 +20,16 @@ public class RestApi {
     private String rootResourceId;
     private Map<String, String> tags = new HashMap<>();
     private EndpointConfiguration endpointConfiguration;
+    /** Content types treated as binary when applying integration contentHandling. */
+    private List<String> binaryMediaTypes = new ArrayList<>();
+
+    public List<String> getBinaryMediaTypes() {
+        return binaryMediaTypes;
+    }
+
+    public void setBinaryMediaTypes(List<String> binaryMediaTypes) {
+        this.binaryMediaTypes = binaryMediaTypes != null ? binaryMediaTypes : new ArrayList<>();
+    }
 
 
     public String getId() {
