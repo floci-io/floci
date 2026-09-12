@@ -19,6 +19,8 @@ import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.WaitResponse;
+import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -404,6 +406,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
+        watchForUnexpectedExit(dockerClient, containerId, runtimeApiServer);
 
         // Extensions can log as soon as they start, which is before the container's own log stream
         // is attached below. Create the group/stream up front so those early lines are not dropped
@@ -1234,6 +1237,36 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      */
     /** Where a container's output is sent: the CloudWatch log group/stream and its region. */
     private record LogDestination(String logGroup, String logStream, String region) { }
+
+    /**
+     * Arms an async watch (via Docker's own wait-for-exit API, not polling) that notices when
+     * this container's main process dies while nothing inside the runtime reported it - a
+     * stray {@code sys.exit}/{@code process.exit}/{@code System.exit} in the handler, or any
+     * other crash (see #3314). Without this, a dead runtime left every pending/in-flight
+     * invocation waiting out the full function timeout to be told {@code Function.TimedOut}
+     * instead of the {@code Runtime.ExitError} AWS reports immediately.
+     *
+     * <p>Fires exactly once per container, on whatever exit eventually happens - including an
+     * intentional {@code docker stop} during normal teardown. {@link RuntimeApiServer
+     * #handleRuntimeProcessExited} itself distinguishes a genuine crash from that case (its own
+     * {@code stopped}/{@code faulted} guard), so this method only needs to forward the event;
+     * it does not need to be un-armed on the teardown path.
+     */
+    private void watchForUnexpectedExit(DockerClient dockerClient, String containerId,
+                                        RuntimeApiServer runtimeApiServer) {
+        try {
+            dockerClient.waitContainerCmd(containerId).exec(new WaitContainerResultCallback() {
+                @Override
+                public void onNext(WaitResponse response) {
+                    super.onNext(response);
+                    Integer statusCode = response.getStatusCode();
+                    runtimeApiServer.handleRuntimeProcessExited(statusCode != null ? statusCode : -1);
+                }
+            });
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "Could not arm exit watcher for container {0}", containerId);
+        }
+    }
 
     private void launchExtensions(DockerClient dockerClient, String containerId, String functionName,
                                   RuntimeApiServer runtimeApiServer, LogDestination logDestination) {

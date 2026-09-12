@@ -256,6 +256,227 @@ class RuntimeApiServerTest {
         assertEquals("OK", new JsonObject(response.body()).getString("status"));
     }
 
+    /**
+     * Regression for #3314: the Python and Node.js runtime interface clients never send
+     * {@code Lambda-Runtime-Function-Error-Type} on {@code /invocation/{id}/error} at all, so
+     * FunctionError must not depend on that header being present or on its value - it is
+     * always {@code Unhandled}, matching AWS for every runtime.
+     */
+    @Test
+    @Timeout(15)
+    void errorEndpoint_reportsUnhandledEvenWithoutTheErrorTypeHeader() throws Exception {
+        assertErrorEndpointReportsUnhandled("req-no-header", null);
+    }
+
+    /**
+     * The Java RIC does send the header, with its own vocabulary ({@code
+     * Runtime.UserException}); an earlier, narrower {@code contains("Runtime")} heuristic
+     * happened to key on exactly that value. Must still be {@code Unhandled}.
+     */
+    @Test
+    @Timeout(15)
+    void errorEndpoint_reportsUnhandledWithARuntimeVocabularyHeader() throws Exception {
+        assertErrorEndpointReportsUnhandled("req-runtime-header", "Runtime.UserException");
+    }
+
+    /**
+     * A plain error type with no "Runtime" substring (e.g. a Python {@code ValueError}) used to
+     * fall through the old heuristic to the legacy {@code Handled} value. AWS reports
+     * {@code Unhandled} regardless.
+     */
+    @Test
+    @Timeout(15)
+    void errorEndpoint_reportsUnhandledWithAPlainErrorTypeHeader() throws Exception {
+        assertErrorEndpointReportsUnhandled("req-plain-header", "ValueError");
+    }
+
+    private void assertErrorEndpointReportsUnhandled(String requestId, String errorTypeHeader) throws Exception {
+        CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
+        PendingInvocation invocation = new PendingInvocation(
+                requestId, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", resultFuture);
+        server.enqueue(invocation);
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        HttpRequest.Builder errorRequest = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port
+                        + "/2018-06-01/runtime/invocation/" + requestId + "/error"))
+                .POST(HttpRequest.BodyPublishers.ofString("{\"errorMessage\":\"boom\",\"errorType\":\"X\"}"));
+        if (errorTypeHeader != null) {
+            errorRequest.header("Lambda-Runtime-Function-Error-Type", errorTypeHeader);
+        }
+        httpClient.send(errorRequest.build(), HttpResponse.BodyHandlers.ofString());
+
+        InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("boom"));
+    }
+
+    /**
+     * Regression for #3314: a runtime that reports a failed initialization (module not
+     * importable, handler missing, a syntax error, ...) via {@code /runtime/init/error} never
+     * calls {@code /next} - it exits immediately. The invocation that triggered this cold
+     * start must fail with the runtime's own reported payload and {@code Unhandled}, not sit
+     * until the function timeout to be told {@code Function.TimedOut}.
+     */
+    @Test
+    @Timeout(15)
+    void initErrorEndpoint_failsThePendingInvocationAndCondemnsTheEnvironment() throws Exception {
+        CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
+        PendingInvocation invocation = new PendingInvocation(
+                "req-init-error", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", resultFuture);
+        server.enqueue(invocation);
+
+        assertFalse(resultFuture.isDone(), "invocation must still be queued, waiting for a /next poller");
+
+        HttpResponse<String> initErrorResponse = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/init/error"))
+                        .header("Lambda-Runtime-Function-Error-Type", "Runtime.ImportModuleError")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"errorMessage\":\"Unable to import module\","
+                                        + "\"errorType\":\"Runtime.ImportModuleError\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(202, initErrorResponse.statusCode());
+
+        InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("Unable to import module"));
+        assertTrue(server.isFaulted(), "a condemned environment must never be pooled or reused");
+
+        CompletableFuture<InvokeResult> secondFuture = new CompletableFuture<>();
+        server.enqueue(new PendingInvocation(
+                "req-after-init-error", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", secondFuture));
+        assertEquals("Unhandled", secondFuture.get(2, TimeUnit.SECONDS).getFunctionError(),
+                "a condemned environment must fail new work immediately, not queue it to a dead runtime");
+    }
+
+    /**
+     * Regression: production enqueues in the opposite order used above. {@code
+     * LambdaExecutorService.executeSync()} calls {@code warmPool.acquire(fn)} first, which
+     * launches the container, and only creates/enqueues the {@code PendingInvocation} once
+     * that returns - so a cold-start init error can fault this server before any invocation
+     * exists for {@code handleInitError} to strand. A later {@code enqueue()} on the now-faulted
+     * server must still return the runtime's own reported error, not the generic
+     * {@code ContainerStopped} fallback.
+     */
+    @Test
+    @Timeout(15)
+    void initErrorBeforeEnqueue_completesTheLaterInvocationWithTheOriginalInitError() throws Exception {
+        HttpResponse<String> initErrorResponse = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/init/error"))
+                        .header("Lambda-Runtime-Function-Error-Type", "Runtime.ImportModuleError")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"errorMessage\":\"Unable to import module\","
+                                        + "\"errorType\":\"Runtime.ImportModuleError\"}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(202, initErrorResponse.statusCode());
+        assertTrue(server.isFaulted(), "a condemned environment must never be pooled or reused");
+
+        CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
+        server.enqueue(new PendingInvocation(
+                "req-init-error-cold-start", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", resultFuture));
+
+        InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        String payload = new String(result.getPayload());
+        assertTrue(payload.contains("Runtime.ImportModuleError"), payload);
+        assertTrue(payload.contains("Unable to import module"), payload);
+        assertFalse(payload.contains("ContainerStopped"), payload);
+    }
+
+    /**
+     * Regression for #3314: nothing inside the runtime can report its own process dying (a
+     * stray {@code sys.exit}/{@code process.exit}/{@code System.exit} in the handler, or any
+     * other crash), so {@code ContainerLauncher}'s Docker exit watcher calls this directly.
+     * The in-flight invocation must fail immediately with {@code Runtime.ExitError}, not wait
+     * out the full function timeout for {@code Function.TimedOut}.
+     */
+    @Test
+    @Timeout(15)
+    void handleRuntimeProcessExited_failsInFlightInvocationWithRuntimeExitError() throws Exception {
+        CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
+        PendingInvocation invocation = new PendingInvocation(
+                "req-exit", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", resultFuture);
+        server.enqueue(invocation);
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(1, server.inFlightSize(), "invocation must be in flight before the process exits");
+
+        server.handleRuntimeProcessExited(1);
+
+        InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        String payload = new String(result.getPayload());
+        assertTrue(payload.contains("Runtime.ExitError"), payload);
+        assertTrue(payload.contains("req-exit"), payload);
+        assertTrue(payload.contains("exit status 1"), payload);
+        assertTrue(server.isFaulted());
+    }
+
+    /**
+     * Regression: mirrors {@code initErrorBeforeEnqueue_completesTheLaterInvocationWithTheOriginal
+     * InitError} for the process-exit path. {@code warmPool.acquire(fn)} arms {@code
+     * ContainerLauncher}'s Docker exit watcher while it launches the container, before {@code
+     * LambdaExecutorService.executeSync()} creates and enqueues the {@code PendingInvocation} -
+     * so an immediate crash can fault this server with nothing yet in {@code pendingQueue}/{@code
+     * inFlight} for {@code handleRuntimeProcessExited} to strand. The invocation enqueued
+     * afterward must still surface {@code Runtime.ExitError}, not {@code ContainerStopped}.
+     */
+    @Test
+    @Timeout(15)
+    void processExitBeforeEnqueue_completesTheLaterInvocationWithRuntimeExitError() throws Exception {
+        server.handleRuntimeProcessExited(1);
+        assertTrue(server.isFaulted(), "a condemned environment must never be pooled or reused");
+
+        CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
+        server.enqueue(new PendingInvocation(
+                "req-exit-cold-start", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", resultFuture));
+
+        InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        String payload = new String(result.getPayload());
+        assertTrue(payload.contains("Runtime.ExitError"), payload);
+        assertTrue(payload.contains("exit status 1"), payload);
+        assertFalse(payload.contains("ContainerStopped"), payload);
+    }
+
+    /**
+     * An intentional teardown ({@code quiesce()}, which sets {@code stopped}) always runs
+     * before {@code ContainerLauncher} actually stops the container - so the exit event that
+     * same teardown causes must not be reinterpreted as a crash and re-fail an invocation
+     * {@code quiesce()} already completed with {@code ContainerStopped}.
+     */
+    @Test
+    @Timeout(15)
+    void handleRuntimeProcessExited_isANoOpAfterIntentionalTeardown() throws Exception {
+        CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
+        PendingInvocation invocation = new PendingInvocation(
+                "req-teardown", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", resultFuture);
+        server.enqueue(invocation);
+
+        server.quiesce();
+        InvokeResult quiesceResult = resultFuture.get(2, TimeUnit.SECONDS);
+
+        server.handleRuntimeProcessExited(0);
+
+        assertEquals(quiesceResult.getFunctionError(), resultFuture.get().getFunctionError());
+        assertTrue(new String(resultFuture.get().getPayload()).contains("ContainerStopped"),
+                "must keep quiesce()'s ContainerStopped result, not overwrite it with Runtime.ExitError");
+    }
+
     @Test
     @Timeout(15)
     void stopCompletesInFlightWithContainerStopped() throws Exception {
