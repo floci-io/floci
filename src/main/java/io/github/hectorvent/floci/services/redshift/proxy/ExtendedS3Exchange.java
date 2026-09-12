@@ -49,6 +49,7 @@ final class ExtendedS3Exchange {
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(executeFrame.toPacketBytes());
         backendOut.flush();
+        forwardClientSyncToBackend(client, backendOut, coordinator);
 
         PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
         PostgresWireDecoder.FrontendMessage first = nextOwnedFrame(client, decoder, coordinator);

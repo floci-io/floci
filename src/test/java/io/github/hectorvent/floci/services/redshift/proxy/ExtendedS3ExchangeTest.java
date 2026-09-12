@@ -70,6 +70,7 @@ class ExtendedS3ExchangeTest {
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
         ByteArrayOutputStream copied = new ByteArrayOutputStream();
+        writeSync();
         Thread backend = backendThread(() -> playCopyIn(copied));
 
         ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, coordinator, ticket);
@@ -78,6 +79,7 @@ class ExtendedS3ExchangeTest {
         PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClient.getInputStream());
         assertEquals('C', clientDecoder.nextMessage().type());
         assertEquals("1|a\n", copied.toString(StandardCharsets.US_ASCII));
+        coordinator.onBackendFrame('Z', new byte[]{'I'});
         assertTrue(coordinator.awaitIdle(1, TimeUnit.SECONDS));
         testClient.setSoTimeout(200);
         assertThrows(SocketTimeoutException.class, () -> testClient.getInputStream().read());
@@ -96,6 +98,7 @@ class ExtendedS3ExchangeTest {
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
+        writeSync();
         Thread backend = backendThread(this::playCopyOut);
 
         ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), unload, s3, coordinator, ticket);
@@ -104,6 +107,7 @@ class ExtendedS3ExchangeTest {
         assertEquals("1\n2\n", new String(written.get("out/000"), StandardCharsets.US_ASCII));
         PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClient.getInputStream());
         assertEquals('C', clientDecoder.nextMessage().type());
+        coordinator.onBackendFrame('Z', new byte[]{'I'});
         assertTrue(coordinator.awaitIdle(1, TimeUnit.SECONDS));
         testClient.setSoTimeout(200);
         assertThrows(SocketTimeoutException.class, () -> testClient.getInputStream().read());
@@ -116,9 +120,11 @@ class ExtendedS3ExchangeTest {
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
+        writeSync();
         Thread backend = backendThread(() -> {
             PostgresWireDecoder decoder = new PostgresWireDecoder(testBackend.getInputStream());
             assertEquals('E', decoder.nextMessage().type());
+            assertEquals('S', decoder.nextMessage().type());
             testBackend.getOutputStream().write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
             testBackend.getOutputStream().flush();
             assertEquals('f', decoder.nextMessage().type());
@@ -137,7 +143,6 @@ class ExtendedS3ExchangeTest {
         assertTrue(new String(error.body(), StandardCharsets.US_ASCII).contains("s3://b/missing"));
         assertTrue(coordinator.isDiscardingUntilSync());
 
-        coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
         coordinator.onBackendFrame('Z', new byte[]{'I'});
         assertEquals('I', coordinator.lastReadyStatus());
         assertTrue(coordinator.awaitIdle(1, TimeUnit.SECONDS));
@@ -150,6 +155,7 @@ class ExtendedS3ExchangeTest {
     private void playCopyIn(ByteArrayOutputStream copied) throws IOException {
         PostgresWireDecoder decoder = new PostgresWireDecoder(testBackend.getInputStream());
         assertEquals('E', decoder.nextMessage().type());
+        assertEquals('S', decoder.nextMessage().type());
         testBackend.getOutputStream().write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
         testBackend.getOutputStream().flush();
         while (true) {
@@ -166,6 +172,7 @@ class ExtendedS3ExchangeTest {
     private void playCopyOut() throws IOException {
         PostgresWireDecoder decoder = new PostgresWireDecoder(testBackend.getInputStream());
         assertEquals('E', decoder.nextMessage().type());
+        assertEquals('S', decoder.nextMessage().type());
         OutputStream out = testBackend.getOutputStream();
         out.write(new byte[]{'H', 0, 0, 0, 7, 0, 0, 0});
         writeFrame(out, 'd', "1\n".getBytes(StandardCharsets.US_ASCII));
@@ -177,6 +184,11 @@ class ExtendedS3ExchangeTest {
     private void writeCommandComplete() throws IOException {
         writeFrame(testBackend.getOutputStream(), 'C', "COPY 2\0".getBytes(StandardCharsets.US_ASCII));
         testBackend.getOutputStream().flush();
+    }
+
+    private void writeSync() throws IOException {
+        testClient.getOutputStream().write(new byte[]{'S', 0, 0, 0, 4});
+        testClient.getOutputStream().flush();
     }
 
     private static void writeFrame(OutputStream out, char type, byte[] body) throws IOException {
