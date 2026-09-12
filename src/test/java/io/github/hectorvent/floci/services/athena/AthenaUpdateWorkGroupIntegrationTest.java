@@ -186,4 +186,102 @@ class AthenaUpdateWorkGroupIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"));
     }
+
+    @Test
+    void updateWorkGroupRejectsBytesScannedCutoffBelowMinimumWithoutApplyingOtherChanges() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "Name": "analytics-invalid-cutoff",
+                  "Description": "before",
+                  "Configuration": {
+                    "BytesScannedCutoffPerQuery": 20000000
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.UpdateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "WorkGroup": "analytics-invalid-cutoff",
+                  "Description": "after",
+                  "ConfigurationUpdates": {
+                    "BytesScannedCutoffPerQuery": 9999999
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"analytics-invalid-cutoff\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WorkGroup.Description", equalTo("before"))
+            .body("WorkGroup.Configuration.BytesScannedCutoffPerQuery", equalTo(20000000));
+    }
+
+    @Test
+    void updateWorkGroupRejectsEmptySelectedEngineVersionWithoutApplyingOtherChanges() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "Name": "analytics-invalid-engine",
+                  "Description": "before"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.UpdateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "WorkGroup": "analytics-invalid-engine",
+                  "Description": "after",
+                  "ConfigurationUpdates": {
+                    "EngineVersion": {
+                      "SelectedEngineVersion": ""
+                    }
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"analytics-invalid-engine\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WorkGroup.Description", equalTo("before"))
+            .body("WorkGroup.Configuration.EngineVersion.SelectedEngineVersion",
+                    equalTo("Athena engine version 3"));
+    }
 }

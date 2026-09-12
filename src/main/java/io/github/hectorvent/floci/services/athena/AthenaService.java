@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.athena.model.UpdateWorkGroupRequest;
 import io.github.hectorvent.floci.services.athena.model.WorkGroup;
 import io.github.hectorvent.floci.services.athena.model.WorkGroupConfiguration;
 import io.github.hectorvent.floci.services.athena.model.WorkGroupConfigurationUpdates;
+import io.github.hectorvent.floci.services.athena.model.WorkGroupEngineVersionRequest;
 import io.github.hectorvent.floci.services.athena.model.WorkGroupTag;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
@@ -59,6 +60,7 @@ public class AthenaService {
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
     private static final String DEFAULT_ENGINE_VERSION = "Athena engine version 3";
+    private static final long MIN_BYTES_SCANNED_CUTOFF_PER_QUERY = 10_000_000L;
     private static final String WORKGROUP_RESOURCE = "workgroup/";
     private static final String DATA_CATALOG_RESOURCE = "datacatalog/";
     private static final Set<String> CATALOG_TYPES = Set.of("LAMBDA", "GLUE", "HIVE", "FEDERATED");
@@ -236,6 +238,7 @@ public class AthenaService {
         validateWorkGroupName(request.getWorkGroup());
         validateWorkGroupDescription(request.getDescription());
         validateWorkGroupState(request.getState());
+        validateWorkGroupConfigurationUpdates(request.getConfigurationUpdates());
 
         WorkGroup workGroup = DEFAULT_WORKGROUP.equals(request.getWorkGroup())
                 ? primaryWorkGroup(region)
@@ -639,7 +642,7 @@ public class AthenaService {
         }
         if (updates.getEngineVersion() != null) {
             String selectedEngineVersion = updates.getEngineVersion().getSelectedEngineVersion();
-            if (selectedEngineVersion != null && !selectedEngineVersion.isBlank()) {
+            if (selectedEngineVersion != null) {
                 QueryExecution.EngineVersion engineVersion = new QueryExecution.EngineVersion();
                 engineVersion.setSelectedEngineVersion(selectedEngineVersion);
                 engineVersion.setEffectiveEngineVersion(resolveEffectiveEngineVersion(selectedEngineVersion));
@@ -910,6 +913,24 @@ public class AthenaService {
         if (state != null && !Set.of("ENABLED", "DISABLED").contains(state)) {
             throw new AwsException("InvalidRequestException",
                     "State must be ENABLED or DISABLED.", 400);
+        }
+    }
+
+    private void validateWorkGroupConfigurationUpdates(WorkGroupConfigurationUpdates updates) {
+        if (updates == null) {
+            return;
+        }
+        Long bytesScannedCutoff = updates.getBytesScannedCutoffPerQuery();
+        if (bytesScannedCutoff != null && bytesScannedCutoff < MIN_BYTES_SCANNED_CUTOFF_PER_QUERY) {
+            throw new AwsException("InvalidRequestException",
+                    "BytesScannedCutoffPerQuery must be at least "
+                            + MIN_BYTES_SCANNED_CUTOFF_PER_QUERY + ".", 400);
+        }
+        WorkGroupEngineVersionRequest engineVersion = updates.getEngineVersion();
+        if (engineVersion != null && engineVersion.getSelectedEngineVersion() != null
+                && engineVersion.getSelectedEngineVersion().isBlank()) {
+            throw new AwsException("InvalidRequestException",
+                    "SelectedEngineVersion must not be empty.", 400);
         }
     }
 
