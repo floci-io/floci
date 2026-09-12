@@ -406,7 +406,7 @@ public class ApiGatewayExecuteController {
             case "AWS_PROXY" -> invokeProxy(region, apiId, httpMethod, path, proxy, stageName,
                     matched, stage, integration, headers, uriInfo, body, authorizerResult, resolvedApiKey,
                     iamIdentity);
-            case "AWS" -> invokeAwsIntegration(region, httpMethod, path, proxy, stageName,
+            case "AWS" -> invokeAwsIntegration(region, httpMethod, path, stageName,
                     matched, integration, headers, uriInfo, body);
             case "MOCK" -> invokeMock(region, httpMethod, path, stageName, matched, integration, headers, uriInfo, body);
             default -> Response.status(500)
@@ -987,7 +987,7 @@ public class ApiGatewayExecuteController {
         return params;
     }
 
-    private Response invokeAwsIntegration(String region, String httpMethod, String path, String proxy,
+    private Response invokeAwsIntegration(String region, String httpMethod, String path,
                                           String stageName, ApiGatewayResource resource,
                                           Integration integration, HttpHeaders headers,
                                           UriInfo uriInfo, byte[] body) {
@@ -1011,8 +1011,8 @@ public class ApiGatewayExecuteController {
             if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
         }
         Map<String, String> pathMap = new HashMap<>();
-        if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
         pathMap.putAll(extractPathParams(resource.getPath(), path));
+        pathMap.putAll(greedyPathParam(resource.getPath(), path));
 
         String incomingContentType = headerMap.getOrDefault("Content-Type",
                 headerMap.getOrDefault("content-type", "application/json"));
@@ -1370,6 +1370,7 @@ public class ApiGatewayExecuteController {
             }
         }
         Map<String, String> pathMap = new HashMap<>(extractPathParams(resource.getPath(), path));
+        pathMap.putAll(greedyPathParam(resource.getPath(), path));
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,

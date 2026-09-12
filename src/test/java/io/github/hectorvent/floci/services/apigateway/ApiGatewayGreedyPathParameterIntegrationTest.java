@@ -88,7 +88,8 @@ class ApiGatewayGreedyPathParameterIntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("{\"selectionPattern\":\"\",\"responseTemplates\":{\"application/json\":"
-                        + "\"{\\\"matched\\\":\\\"assets-greedy\\\"}\"}}")
+                        + "\"{\\\"matched\\\":\\\"assets-greedy\\\","
+                        + "\\\"rest\\\":\\\"$input.params('rest')\\\"}\"}}")
                 .when().put("/restapis/" + apiId + "/resources/" + greedyResourceId
                         + "/methods/ANY/integration/responses/200")
                 .then()
@@ -121,7 +122,10 @@ class ApiGatewayGreedyPathParameterIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/test/assets/img/logo.png")
                 .then()
                 .statusCode(200)
-                .body("matched", equalTo("assets-greedy"));
+                .body("matched", equalTo("assets-greedy"))
+                // The captured value is the remainder after the literal prefix, under the name the
+                // template declares - not "proxy", and not the whole request path.
+                .body("rest", equalTo("img/logo.png"));
     }
 
     @Test @Order(5)
@@ -131,7 +135,8 @@ class ApiGatewayGreedyPathParameterIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/test/assets/logo.png")
                 .then()
                 .statusCode(200)
-                .body("matched", equalTo("assets-greedy"));
+                .body("matched", equalTo("assets-greedy"))
+                .body("rest", equalTo("logo.png"));
     }
 
     @Test @Order(6)
@@ -140,7 +145,8 @@ class ApiGatewayGreedyPathParameterIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/test/assets/a/b/c/d")
                 .then()
                 .statusCode(200)
-                .body("matched", equalTo("assets-greedy"));
+                .body("matched", equalTo("assets-greedy"))
+                .body("rest", equalTo("a/b/c/d"));
     }
 
     @Test @Order(7)
