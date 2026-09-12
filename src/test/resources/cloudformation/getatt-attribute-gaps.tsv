@@ -26,4 +26,6 @@ AWS::Pipes::Pipe	CreationTime	pipe lifecycle timestamps are not tracked
 AWS::Pipes::Pipe	CurrentState	pipe state transitions are not modelled
 AWS::Pipes::Pipe	LastModifiedTime	pipe lifecycle timestamps are not tracked
 AWS::Pipes::Pipe	StateReason	pipe state transitions are not modelled
+AWS::Redshift::Cluster	DeferMaintenanceIdentifier	Floci does not emulate deferred maintenance windows
+AWS::Redshift::Cluster	MasterPasswordSecretArn	only set when ManageMasterPassword is true, which Floci rejects
 AWS::SQS::QueuePolicy	Id	schema gives no description; the policy has no backing entity to take an id from

@@ -62,6 +62,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEve
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftClusterCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
@@ -93,6 +94,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
@@ -178,6 +180,7 @@ final class CfnProvisionerFixture {
         private SqsService sqsService;
         private WafV2Service wafV2Service;
         private BackupService backupService;
+        private RedshiftService redshiftService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
         private CfnDynamicReferences dynamicReferences;
@@ -336,6 +339,9 @@ final class CfnProvisionerFixture {
             }
             if (schedulerService != null) {
                 discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
+            }
+            if (redshiftService != null) {
+                discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
             }
             return discovered;
         }
@@ -568,6 +574,15 @@ final class CfnProvisionerFixture {
         public Builder backup(BackupService v) {
             this.backupService = v;
             return this;
+        }
+
+        public Builder redshiftService(RedshiftService s) {
+            this.redshiftService = s;
+            return this;
+        }
+
+        public Builder redshift(RedshiftService s) {
+            return redshiftService(s);
         }
 
         public Builder registry(CloudFormationResourceRegistry v) {
