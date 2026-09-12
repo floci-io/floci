@@ -417,6 +417,7 @@ public class DynamoDbJsonHandler {
         DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(expected));
         String conditionalOperator = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
 
@@ -547,6 +548,8 @@ public class DynamoDbJsonHandler {
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(
+                legacyValues(request.has("Expected") ? request.get("Expected") : null));
 
         // EAN/EAV with no expression to reference them: AWS reports "can only be specified
         // when using expressions", not the "unused in expressions" wording (#2893).
@@ -615,7 +618,10 @@ public class DynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
         var attributeUpdateValues = legacyValues(attributeUpdates);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(attributeUpdateValues);
         DynamoDbNumberUtils.requireStorable(attributeUpdateValues, true);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(
+                legacyValues(request.has("Expected") ? request.get("Expected") : null));
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
         JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
@@ -854,7 +860,8 @@ public class DynamoDbJsonHandler {
 
     private static final int MAX_TOTAL_SEGMENTS = 1_000_000;
 
-    // The AttributeValues inside a legacy container, carried under Value or AttributeValueList.
+    // The AttributeValues inside a legacy container. AttributeUpdates, Expected,
+    // KeyConditions and QueryFilter carry them under Value or AttributeValueList.
     private ObjectNode legacyValues(JsonNode container) {
         var values = objectMapper.createObjectNode();
         if (container == null || !container.isObject()) {
@@ -970,6 +977,8 @@ public class DynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(keyConditions), false);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpression);

@@ -1486,4 +1486,51 @@ class DynamoDbJsonHandlerTest {
         assertEquals("Number overflow. Attempting to store a number with magnitude larger than supported range",
                 ex.getMessage());
     }
+
+    @Test
+    void updateItemRejectsAnAttributeUpdatesValueWithALeafAtLevel33BeforeTheTableLookup() {
+        var request = updateUserRequest();
+        request.put("TableName", "Missing");
+        var update = mapper.createObjectNode();
+        update.put("Action", "PUT");
+        update.set("Value", nestedMaps(32));
+        request.set("AttributeUpdates", mapper.createObjectNode().set("data", update));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(NESTING_MESSAGE, ex.getMessage());
+    }
+
+    @Test
+    void putItemRejectsAnExpectedValueWithALeafAtLevel33() {
+        createUsersTable("eu-west-1");
+        var request = putRequest(attributeValue("S", "x"));
+        request.set("Expected", mapper.createObjectNode().set("data",
+                mapper.createObjectNode().set("Value", nestedMaps(32))));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals(NESTING_MESSAGE, ex.getMessage());
+    }
+
+    @Test
+    void queryRejectsAQueryFilterValueWithALeafAtLevel33WithoutTheEnvelope() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        var keyCondition = mapper.createObjectNode();
+        keyCondition.put("ComparisonOperator", "EQ");
+        keyCondition.set("AttributeValueList", mapper.createArrayNode().add(attributeValue("S", "u1")));
+        request.set("KeyConditions", mapper.createObjectNode().set("userId", keyCondition));
+        var filter = mapper.createObjectNode();
+        filter.put("ComparisonOperator", "EQ");
+        filter.set("AttributeValueList", mapper.createArrayNode().add(nestedMaps(32)));
+        request.set("QueryFilter", mapper.createObjectNode().set("data", filter));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("Query", request, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
+    }
 }
