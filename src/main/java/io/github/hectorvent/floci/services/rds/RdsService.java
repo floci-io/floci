@@ -688,15 +688,26 @@ public class RdsService implements Resettable, ResourceProvider {
             attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId);
         }
 
+        String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        putInstanceForScope(accountId, effectiveRegion, id, instance);
+
         if (!mock && hasBackend(backendHost, backendPort)) {
-            final String accountId = accountIdFromArn(instance.getDbInstanceArn());
             final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
-            proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                    engine, iamEnabled, proxyPort, backendHost, backendPort,
-                    instance.getEndpoint().address(),
-                    masterUsername, masterPassword, dbName,
-                    (user, pw) -> validateDbPasswordForScope(
-                            accountId, instanceRegion, id, user, pw));
+            try {
+                proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                        engine, iamEnabled, proxyPort, backendHost, backendPort,
+                        instance.getEndpoint().address(),
+                        masterUsername, masterPassword, dbName,
+                        (user, pw) -> validateDbPasswordForScope(
+                                accountId, instanceRegion, id, user, pw));
+            } catch (RuntimeException | Error e) {
+                try {
+                    deleteInstanceForScope(accountId, effectiveRegion, id);
+                } catch (RuntimeException rollbackFailure) {
+                    e.addSuppressed(rollbackFailure);
+                }
+                throw e;
+            }
         }
 
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
@@ -709,7 +720,6 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         }
 
-        putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
                 id, engine, endpoint.address(), String.valueOf(endpoint.port()));
         return instance;
