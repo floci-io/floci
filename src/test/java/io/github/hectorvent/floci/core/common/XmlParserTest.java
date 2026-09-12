@@ -68,8 +68,9 @@ class XmlParserTest {
             }
         }, "an external entity must never be resolved");
         assertFailedOnUndeclaredEntity(e, "secret");
-        assertFalse(e.getMessage().contains("nonexistent"),
-                "must fail without reading the file at all, was: " + e.getMessage());
+        String message = String.valueOf(e.getMessage());
+        assertFalse(message.contains("nonexistent"),
+                "must fail without reading the file at all, was: " + message);
     }
 
     @Test
@@ -405,7 +406,8 @@ class XmlParserTest {
      * LANG. The entity name it quotes is the part no translation touches.
      */
     private static void assertFailedOnUndeclaredEntity(XMLStreamException e, String entityName) {
-        assertTrue(e.getMessage().contains('"' + entityName + '"'),
-                "should fail on the undeclared entity " + entityName + ", was: " + e.getMessage());
+        String message = String.valueOf(e.getMessage());
+        assertTrue(message.contains("\"" + entityName + "\""),
+                "should fail on the undeclared entity " + entityName + ", was: " + message);
     }
 }
