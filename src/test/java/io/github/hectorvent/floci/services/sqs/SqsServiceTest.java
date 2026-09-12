@@ -1010,6 +1010,39 @@ class SqsServiceTest {
         assertEquals("1", attributes.get("ApproximateNumberOfMessagesNotVisible"));
     }
 
+    @Test
+    void startMessageMoveTask_failedDeliveryLeavesNoCopyInTheDestination() throws Exception {
+        AtomicBoolean destinationStoreDown = new AtomicBoolean();
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, List<Message> value) {
+                if (destinationStoreDown.get() && key.endsWith("/dup-replay")) {
+                    throw new IllegalStateException("destination store unavailable");
+                }
+                super.put(key, value);
+            }
+        };
+        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, null, 30, 1048576, BASE_URL,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
+        Queue dlq = service.createQueue("dup-dlq", null, "us-east-1");
+        String dlqArn = queueArn("dup-dlq");
+        service.createQueue("dup-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        Queue replay = service.createQueue("dup-replay", null, "us-east-1");
+        for (String body : List.of("first", "second", "third")) {
+            service.sendMessage(dlq.getQueueUrl(), body, 0, null, null, "us-east-1");
+        }
+        destinationStoreDown.set(true);
+
+        String taskHandle = service.startMessageMoveTask(dlqArn, queueArn("dup-replay"), 0, "us-east-1");
+
+        awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of(), bodies(service.peekMessages(replay.getQueueUrl(), "us-east-1")));
+        assertEquals("0", service.getQueueAttributes(replay.getQueueUrl(),
+                List.of("ApproximateNumberOfMessages"), "us-east-1").get("ApproximateNumberOfMessages"));
+        assertTrue(service.receiveMessage(replay.getQueueUrl(), 10, 0, 0, "us-east-1").isEmpty());
+        assertEquals(List.of("first", "second", "third"), bodies(service.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
     private static String redrivePolicy(String dlqArn) {
         return "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
     }

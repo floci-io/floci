@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,11 +16,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GuardedMessageQueueTest {
@@ -146,6 +149,28 @@ class GuardedMessageQueueTest {
 
         var result = target.claimVisibleMessages(10, 30, false, -1, null);
         assertEquals(2, result.claimed().size());
+    }
+
+    @Test
+    void addAllRollsBackTheInMemoryAddWhenPersistFails() {
+        AtomicBoolean storeDown = new AtomicBoolean();
+        var store = new InMemoryStorage<String, List<Message>>() {
+            @Override
+            public void put(String key, List<Message> value) {
+                if (storeDown.get()) {
+                    throw new IllegalStateException("store unavailable");
+                }
+                super.put(key, value);
+            }
+        };
+        var target = new GuardedMessageQueue(store, "us-east-1::/000000000000/target");
+        target.addMessage(new Message("already-there"));
+        storeDown.set(true);
+
+        assertThrows(IllegalStateException.class, () -> target.addAll(List.of(new Message("incoming"))));
+
+        assertEquals(List.of("already-there"), target.peekAll().stream().map(Message::getBody).toList());
+        assertEquals(1, target.messageCounts().visible());
     }
 
     @Test

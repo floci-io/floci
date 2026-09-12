@@ -54,10 +54,18 @@ class GuardedMessageQueue {
         }
     }
 
+    /** If persisting fails the in-memory add is rolled back and the exception propagates, so a
+     *  caller that compensates on the source side does not leave a duplicate here. */
     void addAll(List<Message> toAdd) {
         try (var _ = hold()) {
+            int mark = messages.size();
             messages.addAll(toAdd);
-            persist();
+            try {
+                persist();
+            } catch (RuntimeException e) {
+                messages.subList(mark, messages.size()).clear();
+                throw e;
+            }
         }
     }
 
