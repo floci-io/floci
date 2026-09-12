@@ -26,4 +26,23 @@ AWS::Pipes::Pipe	CreationTime	pipe lifecycle timestamps are not tracked
 AWS::Pipes::Pipe	CurrentState	pipe state transitions are not modelled
 AWS::Pipes::Pipe	LastModifiedTime	pipe lifecycle timestamps are not tracked
 AWS::Pipes::Pipe	StateReason	pipe state transitions are not modelled
+AWS::RDS::DBCluster	DBClusterResourceId	not set by the legacy switch; closable, deferred to a follow-up PR to keep this one a pure move
+AWS::RDS::DBCluster	Endpoint	the dotted Endpoint.Address and Endpoint.Port are set instead, which is the form AWS's GetAtt actually exposes
+AWS::RDS::DBCluster	ReadEndpoint	ReadEndpoint.Address is set instead, the form AWS's GetAtt exposes
+AWS::RDS::DBCluster	StorageEncryptionType	cluster storage encryption is not emulated
+AWS::RDS::DBCluster	StorageThroughput	provisioned storage throughput is not emulated
+AWS::RDS::DBInstance	AutomaticRestartTime	instance restart scheduling is not emulated
+AWS::RDS::DBInstance	CertificateDetails	per-instance CA certificate metadata is not emulated
+AWS::RDS::DBInstance	DBInstanceStatus	the model carries no lifecycle status; instances reach available synchronously
+AWS::RDS::DBInstance	DbiResourceId	not set by the legacy switch; closable, deferred to a follow-up PR to keep this one a pure move
+AWS::RDS::DBInstance	InstanceCreateTime	creation timestamps are not recorded on the instance
+AWS::RDS::DBInstance	IsStorageConfigUpgradeAvailable	storage configuration upgrades are not emulated
+AWS::RDS::DBInstance	LatestRestorableTime	point-in-time restore windows are not emulated
+AWS::RDS::DBInstance	ListenerEndpoint	the SQL Server listener endpoint is not emulated
+AWS::RDS::DBInstance	PercentProgress	no asynchronous progress to report; instances reach available synchronously
+AWS::RDS::DBInstance	ReadReplicaDBClusterIdentifiers	read replicas are not emulated
+AWS::RDS::DBInstance	ReadReplicaDBInstanceIdentifiers	read replicas are not emulated
+AWS::RDS::DBInstance	ResumeFullAutomationModeTime	RDS Custom automation mode is not emulated
+AWS::RDS::DBInstance	SecondaryAvailabilityZone	multi-AZ secondary placement is not emulated
+AWS::RDS::DBInstance	StatusInfos	read-replica status detail is not emulated
 AWS::SQS::QueuePolicy	Id	schema gives no description; the policy has no backing entity to take an id from
