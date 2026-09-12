@@ -1058,16 +1058,15 @@ public class SqsService implements Resettable, ResourceProvider {
 
     /** Place a single drained message in its destination according to the rules of
      *  StartMessageMoveTask (explicit destination, or the per-message origin
-     *  recorded when it was DLQ'd). Resets per-receive state so the message
-     *  starts a fresh life. Returns true when the message was placed. */
+     *  recorded when it was DLQ'd). Delivers a copy whose per-receive state starts
+     *  a fresh life; {@code msg} itself is left untouched so that, if delivery
+     *  fails, the caller can restore it to the source exactly as it was.
+     *  Returns true when the message was placed. */
     private boolean deliverMovedMessage(Message msg, String destUrl, String region) {
-        msg.setReceiveCount(0);
-        msg.setFirstReceiveTimestamp(null);
-        msg.setReceiptHandle(null);
-        msg.setVisibleAt(null);
+        Message moved = msg.copyForRedrive();
         if (destUrl != null) {
             String destKey = regionKey(region, destUrl);
-            getOrCreateQueue(destKey).addAll(List.of(msg));
+            getOrCreateQueue(destKey).addAll(List.of(moved));
             return true;
         }
         if (msg.getOriginalSourceQueueUrl() != null) {
@@ -1076,7 +1075,7 @@ public class SqsService implements Resettable, ResourceProvider {
             // the account), so addAll on the right storage key lands the message in
             // the queue any future receive will see.
             String originKey = regionKey(region, msg.getOriginalSourceQueueUrl());
-            getOrCreateQueue(originKey).addAll(List.of(msg));
+            getOrCreateQueue(originKey).addAll(List.of(moved));
             return true;
         }
         return false;

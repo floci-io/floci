@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -961,6 +962,52 @@ class SqsServiceTest {
 
         awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
         assertEquals(List.of("first", "second", "third"), bodies(service.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void startMessageMoveTask_failedDeliveryRestoresTheSourceMessageUnchanged() throws Exception {
+        AtomicBoolean destinationStoreDown = new AtomicBoolean();
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, List<Message> value) {
+                if (destinationStoreDown.get() && key.endsWith("/held-replay")) {
+                    throw new IllegalStateException("destination store unavailable");
+                }
+                super.put(key, value);
+            }
+        };
+        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, null, 30, 1048576, BASE_URL,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
+        Queue dlq = service.createQueue("held-dlq", null, "us-east-1");
+        String dlqArn = queueArn("held-dlq");
+        service.createQueue("held-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        service.createQueue("held-replay", null, "us-east-1");
+        service.sendMessage(dlq.getQueueUrl(), "held", 0, null, null, "us-east-1");
+        service.sendMessage(dlq.getQueueUrl(), "next", 0, null, null, "us-east-1");
+        // A consumer holds the head message when the redrive starts.
+        Message held = service.receiveMessage(dlq.getQueueUrl(), 1, 30, 0, "us-east-1").getFirst();
+        String messageId = held.getMessageId();
+        String receiptHandle = held.getReceiptHandle();
+        Instant firstReceive = held.getFirstReceiveTimestamp();
+        Instant visibleAt = held.getVisibleAt();
+        assertEquals(1, held.getReceiveCount());
+        destinationStoreDown.set(true);
+
+        String taskHandle = service.startMessageMoveTask(dlqArn, queueArn("held-replay"), 0, "us-east-1");
+
+        awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
+        List<Message> dlqMessages = service.peekMessages(dlq.getQueueUrl(), "us-east-1");
+        assertEquals(List.of("held", "next"), bodies(dlqMessages));
+        Message restored = dlqMessages.getFirst();
+        assertEquals(messageId, restored.getMessageId());
+        assertEquals(1, restored.getReceiveCount());
+        assertEquals(firstReceive, restored.getFirstReceiveTimestamp());
+        assertEquals(receiptHandle, restored.getReceiptHandle());
+        assertEquals(visibleAt, restored.getVisibleAt());
+        Map<String, String> attributes = service.getQueueAttributes(dlq.getQueueUrl(),
+                List.of("ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"), "us-east-1");
+        assertEquals("1", attributes.get("ApproximateNumberOfMessages"));
+        assertEquals("1", attributes.get("ApproximateNumberOfMessagesNotVisible"));
     }
 
     private static String redrivePolicy(String dlqArn) {
