@@ -692,18 +692,12 @@ public class DynamoDbJsonHandler {
             response.set("Attributes", result.newItem());
         } else if ("ALL_OLD" .equals(returnValues) && result.oldItem() != null) {
             response.set("Attributes", result.oldItem());
-        } else if ("UPDATED_NEW".equals(returnValues) && result.newItem() != null) {
-            // When oldItem is null (new item created), diff against the key so key
-            // attributes are excluded - matching AWS behavior where UPDATED_NEW
-            // returns only the attributes set by the expression.
-            JsonNode baseline = result.oldItem() != null ? result.oldItem() : key;
-            var changed = getChangedAttributes(result.newItem(), baseline);
-            // A REMOVE sets nothing to a new value, and AWS then omits Attributes.
-            if (!changed.isEmpty()) {
-                response.set("Attributes", changed);
+        } else if ("UPDATED_NEW".equals(returnValues) || "UPDATED_OLD".equals(returnValues)) {
+            var updated = DynamoDbUpdatedAttributes.collect(result.touched(), "UPDATED_NEW".equals(returnValues));
+            // AWS omits Attributes when no touched path has a value on that side.
+            if (!updated.isEmpty()) {
+                response.set("Attributes", updated);
             }
-        } else if ("UPDATED_OLD".equals(returnValues) && result.oldItem() != null) {
-            response.set("Attributes", getChangedAttributes(result.oldItem(), result.newItem()));
         }
         addItemCollectionMetrics(response, request, tableName, key, region);
         addWriteConsumedCapacity(response, request, tableName, region, result.oldItem(), result.newItem());
@@ -834,30 +828,6 @@ public class DynamoDbJsonHandler {
         } catch (Exception ignored) {}
     }
 
-    private ObjectNode getChangedAttributes(JsonNode preferredItem, JsonNode secondaryItem){
-        ObjectNode changedAttributes = objectMapper.createObjectNode();
-        Iterator<Map.Entry<String, JsonNode>> fields = preferredItem.fields();
-        while (fields.hasNext()) {
-            var entry = fields.next();
-            String attrName = entry.getKey();
-            JsonNode value = entry.getValue();
-
-            if (secondaryItem.has(attrName)){
-                JsonNode secondaryValue = secondaryItem.get(attrName);
-                if (!value.equals(secondaryValue)){
-                    var fragment = changedFragment(value, secondaryValue);
-                    if (fragment != null) {
-                        changedAttributes.set(attrName, fragment);
-                    }
-                }
-            }
-            else {
-                changedAttributes.set(attrName, value);
-            }
-        }
-        return changedAttributes;
-    }
-
     private static final int MAX_TOTAL_SEGMENTS = 1_000_000;
 
     // The AttributeValues inside a legacy container. AttributeUpdates, Expected,
@@ -877,22 +847,6 @@ public class DynamoDbJsonHandler {
             }
         }
         return values;
-    }
-
-    // UPDATED_NEW and UPDATED_OLD report only the changed part of a map, not the whole
-    // attribute. Returns null when the map changed only by losing an entry, which sets
-    // nothing to a new value.
-    private JsonNode changedFragment(JsonNode value, JsonNode secondaryValue) {
-        if (!value.has("M") || !secondaryValue.has("M")) {
-            return value;
-        }
-        var changed = getChangedAttributes(value.get("M"), secondaryValue.get("M"));
-        if (changed.isEmpty()) {
-            return null;
-        }
-        var fragment = objectMapper.createObjectNode();
-        fragment.set("M", changed);
-        return fragment;
     }
 
     private static final Set<String> VALID_SELECT = Set.of(

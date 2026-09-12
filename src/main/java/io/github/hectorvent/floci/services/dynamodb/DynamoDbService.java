@@ -814,9 +814,10 @@ public class DynamoDbService implements ResourceProvider {
                 item = key.deepCopy();
             }
 
+            var touchedPaths = new ArrayList<String>();
             // Apply UpdateExpression (modern format: "SET #n = :val, age = :age REMOVE attr")
             if (updateExpression != null) {
-                applyUpdateExpression(item, updateExpression, expressionAttrNames, expressionAttrValues);
+                applyUpdateExpression(item, updateExpression, expressionAttrNames, expressionAttrValues, touchedPaths);
             }
             // Apply attribute updates (legacy format: AttributeUpdates)
             else if (attributeUpdates != null && attributeUpdates.isObject()) {
@@ -824,6 +825,7 @@ public class DynamoDbService implements ResourceProvider {
                 while (fields.hasNext()) {
                     var entry = fields.next();
                     String attrName = entry.getKey();
+                    touchedPaths.add(attrName);
                     JsonNode update = entry.getValue();
                     String action = update.has("Action") ? update.get("Action").asText() : "PUT";
                     JsonNode value = update.get("Value");
@@ -923,7 +925,13 @@ public class DynamoDbService implements ResourceProvider {
                 streamEvent.run();
             }
 
-            return new UpdateResult(item, existing);
+            var touched = new ArrayList<TouchedPath>();
+            for (var path : touchedPaths) {
+                var tokens = updateExpression != null ? parsePath(path, expressionAttrNames) : List.<Object>of(path);
+                touched.add(new TouchedPath(tokens,
+                        existing == null ? null : valueAtTokens(existing, tokens), valueAtTokens(item, tokens)));
+            }
+            return new UpdateResult(item, existing, touched);
         });
     }
 
@@ -2073,6 +2081,13 @@ public class DynamoDbService implements ResourceProvider {
 
     private void applyUpdateExpression(ObjectNode item, String expression,
                                         JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        applyUpdateExpression(item, expression, exprAttrNames, exprAttrValues, new ArrayList<>());
+    }
+
+    // Every action's target path is added to touched, which UPDATED_NEW and UPDATED_OLD read.
+    private void applyUpdateExpression(ObjectNode item, String expression,
+                                        JsonNode exprAttrNames, JsonNode exprAttrValues,
+                                        List<String> touched) {
         // Parse SET and REMOVE clauses from expressions like:
         // "SET #n = :newName, age = :newAge REMOVE oldField"
         if (expression.isBlank()) {
@@ -2092,16 +2107,16 @@ public class DynamoDbService implements ResourceProvider {
             String upper = remaining.toUpperCase();
             if (upper.startsWith("SET ")) {
                 remaining = remaining.substring(4).trim();
-                remaining = applySetClause(item, remaining, exprAttrNames, exprAttrValues);
+                remaining = applySetClause(item, remaining, exprAttrNames, exprAttrValues, touched);
             } else if (upper.startsWith("REMOVE ")) {
                 remaining = remaining.substring(7).trim();
-                remaining = applyRemoveClause(item, remaining, exprAttrNames);
+                remaining = applyRemoveClause(item, remaining, exprAttrNames, touched);
             } else if (upper.startsWith("ADD ")) {
                 remaining = remaining.substring(4).trim();
-                remaining = applyAddClause(item, remaining, exprAttrNames, exprAttrValues);
+                remaining = applyAddClause(item, remaining, exprAttrNames, exprAttrValues, touched);
             } else if (upper.startsWith("DELETE ")) {
                 remaining = remaining.substring(7).trim();
-                remaining = applyDeleteClause(item, remaining, exprAttrNames, exprAttrValues);
+                remaining = applyDeleteClause(item, remaining, exprAttrNames, exprAttrValues, touched);
             } else {
                 // Unknown keyword — syntax error
                 String[] parts = remaining.split("\\s+", 3);
@@ -2116,7 +2131,7 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     private String applySetClause(ObjectNode item, String clause,
-                                   JsonNode exprAttrNames, JsonNode exprAttrValues) {
+                                   JsonNode exprAttrNames, JsonNode exprAttrValues, List<String> touched) {
         // Parse comma-separated assignments: "attr = :val, #name = :val2"
         // Stop when we hit another clause keyword (REMOVE, ADD, DELETE) or end
         LOG.debugv("applySetClause: clause={0}, exprAttrNames={1}, exprAttrValues={2}",
@@ -2139,6 +2154,7 @@ public class DynamoDbService implements ResourceProvider {
             if (eqIdx < 0) break;
 
             String attrPath = clause.substring(0, eqIdx).trim();
+            touched.add(attrPath);
             String attrName = resolveAttributeName(attrPath, exprAttrNames);
 
             String rest = clause.substring(eqIdx + 1).trim();
@@ -2321,7 +2337,8 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
-    private String applyRemoveClause(ObjectNode item, String clause, JsonNode exprAttrNames) {
+    private String applyRemoveClause(ObjectNode item, String clause, JsonNode exprAttrNames,
+                                     List<String> touched) {
         while (!clause.isEmpty()) {
             String upper = clause.toUpperCase();
             if (upper.startsWith("SET ") || upper.startsWith("ADD ") || upper.startsWith("DELETE ")) {
@@ -2346,13 +2363,14 @@ public class DynamoDbService implements ResourceProvider {
                 clause = "";
             }
 
+            touched.add(attrPart);
             removeValueAtPath(item, attrPart, exprAttrNames);
         }
         return clause;
     }
 
     private String applyAddClause(ObjectNode item, String clause,
-                                  JsonNode exprAttrNames, JsonNode exprAttrValues) {
+                                  JsonNode exprAttrNames, JsonNode exprAttrValues, List<String> touched) {
         while (!clause.isEmpty()) {
             String upper = clause.toUpperCase();
             if (upper.startsWith("SET ") || upper.startsWith("REMOVE ") || upper.startsWith("DELETE ")) {
@@ -2364,6 +2382,7 @@ public class DynamoDbService implements ResourceProvider {
             if (parts.length < 2) break;
 
             String attrPath = parts[0];
+            touched.add(attrPath);
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
@@ -2465,7 +2484,7 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     private String applyDeleteClause(ObjectNode item, String clause,
-                                     JsonNode exprAttrNames, JsonNode exprAttrValues) {
+                                     JsonNode exprAttrNames, JsonNode exprAttrValues, List<String> touched) {
         while (!clause.isEmpty()) {
             String upper = clause.toUpperCase();
             if (upper.startsWith("SET ") || upper.startsWith("REMOVE ") || upper.startsWith("ADD ") || upper.startsWith("DELETE ")) {
@@ -2477,6 +2496,7 @@ public class DynamoDbService implements ResourceProvider {
             if (parts.length < 2) break;
 
             String attrPath = parts[0];
+            touched.add(attrPath);
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
@@ -2769,7 +2789,10 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     private JsonNode getValueAtPath(JsonNode item, String path, JsonNode exprAttrNames) {
-        List<Object> tokens = parsePath(path, exprAttrNames);
+        return valueAtTokens(item, parsePath(path, exprAttrNames));
+    }
+
+    private JsonNode valueAtTokens(JsonNode item, List<Object> tokens) {
         if (tokens.isEmpty()) return null;
         JsonNode current = item;
         for (int i = 0; i < tokens.size(); i++) {
@@ -3491,7 +3514,10 @@ public class DynamoDbService implements ResourceProvider {
         return table;
     }
 
-    public record UpdateResult(JsonNode newItem, JsonNode oldItem) {}
+    public record UpdateResult(JsonNode newItem, JsonNode oldItem, List<TouchedPath> touched) {}
+
+    // One path the update expression acted on, with the value there before and after.
+    public record TouchedPath(List<Object> tokens, JsonNode oldValue, JsonNode newValue) {}
 
     // scannedBytes carries the pre-filter size of the read items: DynamoDB bills a
     // Query or Scan on what it read, not on what survived the filter or projection.

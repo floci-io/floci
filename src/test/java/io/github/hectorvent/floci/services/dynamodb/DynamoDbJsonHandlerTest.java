@@ -1533,4 +1533,99 @@ class DynamoDbJsonHandlerTest {
         assertEquals("Nesting Levels have exceeded supported limits: "
                 + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
     }
+
+    private void seedUpdateReturnValuesItem() throws Exception {
+        createUsersTable("eu-west-1");
+        var parent = mapper.createObjectNode();
+        parent.set("keep", attributeValue("S", "k"));
+        parent.set("child", attributeValue("S", "old"));
+        var list = mapper.createArrayNode()
+                .add(attributeValue("S", "l0")).add(attributeValue("S", "l1")).add(attributeValue("S", "l2"));
+        var item = item("userId", "u1");
+        item.set("parent", mapper.createObjectNode().set("M", parent));
+        item.set("l", mapper.createObjectNode().set("L", list));
+        var putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        putRequest.set("Item", item);
+        handler.handle("PutItem", putRequest, "eu-west-1");
+    }
+
+    private JsonNode updateAttributes(String expression, ObjectNode values, String returnValues) throws Exception {
+        var request = updateUserRequest();
+        request.put("UpdateExpression", expression);
+        if (values != null) {
+            request.set("ExpressionAttributeValues", values);
+        }
+        request.put("ReturnValues", returnValues);
+        var body = mapper.convertValue(handler.handle("UpdateItem", request, "eu-west-1").getEntity(), JsonNode.class);
+        return body.get("Attributes");
+    }
+
+    @Test
+    void updateItemUpdatedNewReturnsTheWholeMapWhenTheMapItselfIsSet() throws Exception {
+        seedUpdateReturnValuesItem();
+        var parent = mapper.createObjectNode();
+        parent.set("keep", attributeValue("S", "k"));
+        parent.set("child", attributeValue("S", "new"));
+        var values = mapper.createObjectNode();
+        values.set(":v", mapper.createObjectNode().set("M", parent));
+
+        var attributes = updateAttributes("SET parent = :v", values, "UPDATED_NEW");
+        assertEquals("k", attributes.get("parent").get("M").get("keep").get("S").asText());
+        assertEquals("new", attributes.get("parent").get("M").get("child").get("S").asText());
+    }
+
+    @Test
+    void updateItemUpdatedOldReturnsTheWholeOldMapWhenTheMapItselfIsSet() throws Exception {
+        seedUpdateReturnValuesItem();
+        var values = mapper.createObjectNode();
+        values.set(":v", mapper.createObjectNode().set("M", mapper.createObjectNode().set("child", attributeValue("S", "new"))));
+
+        var attributes = updateAttributes("SET parent = :v", values, "UPDATED_OLD");
+        assertEquals("k", attributes.get("parent").get("M").get("keep").get("S").asText());
+        assertEquals("old", attributes.get("parent").get("M").get("child").get("S").asText());
+    }
+
+    @Test
+    void updateItemUpdatedNewReturnsANestedSetEvenWhenTheValueDidNotChange() throws Exception {
+        seedUpdateReturnValuesItem();
+
+        var attributes = updateAttributes("SET parent.child = :v", singleValueOf("old"), "UPDATED_NEW");
+        assertEquals("old", attributes.get("parent").get("M").get("child").get("S").asText());
+        assertFalse(attributes.get("parent").get("M").has("keep"));
+    }
+
+    @Test
+    void updateItemUpdatedNewPacksTouchedListElementsInIndexOrder() throws Exception {
+        seedUpdateReturnValuesItem();
+        var values = mapper.createObjectNode();
+        values.set(":v", attributeValue("S", "L2"));
+        values.set(":w", attributeValue("S", "L0"));
+
+        var attributes = updateAttributes("SET l[2] = :v, l[0] = :w", values, "UPDATED_NEW");
+        var packed = attributes.get("l").get("L");
+        assertEquals(2, packed.size());
+        assertEquals("L0", packed.get(0).get("S").asText());
+        assertEquals("L2", packed.get(1).get("S").asText());
+    }
+
+    @Test
+    void updateItemUpdatedNewAfterRemovingAListElementReturnsTheElementNowAtThatIndex() throws Exception {
+        seedUpdateReturnValuesItem();
+
+        var attributes = updateAttributes("REMOVE l[1]", null, "UPDATED_NEW");
+        assertEquals(1, attributes.get("l").get("L").size());
+        assertEquals("l2", attributes.get("l").get("L").get(0).get("S").asText());
+    }
+
+    @Test
+    void updateItemUpdatedNewOmitsAttributesWhenAppendingPastTheEndOfAList() throws Exception {
+        seedUpdateReturnValuesItem();
+
+        assertNull(updateAttributes("SET l[5] = :v", singleValueOf("L5"), "UPDATED_NEW"));
+    }
+
+    private ObjectNode singleValueOf(String value) {
+        return (ObjectNode) mapper.createObjectNode().set(":v", attributeValue("S", value));
+    }
 }
