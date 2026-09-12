@@ -562,6 +562,13 @@ These members of `RequestLaunchTemplateData` are stored and read back unchanged 
 Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read back with all
 three of its timeout members.
 
+Both blocks are validated by `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` before
+anything is stored. An `InstanceRequirements` block must carry `VCpuCount` and `MemoryMiB`, each
+with its `Min`, which the service model declares required; a request missing either fails with
+`MissingParameter`. A connection tracking timeout outside the range its member documents fails
+with `InvalidParameterValue`: `TcpEstablishedTimeout` runs from 60 to 432000 seconds,
+`UdpTimeout` from 30 to 60, and `UdpStreamTimeout` from 60 to 180.
+
 Two behaviours worth calling out, because they are what Terraform reads back:
 
 - **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as

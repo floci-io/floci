@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
@@ -576,5 +577,161 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
             .body(DATA + "instanceRequirements.memoryMiB.min", equalTo("1024"))
             .body(DATA + "networkInterfaceSet.item.connectionTrackingSpecification.tcpEstablishedTimeout",
                     equalTo("60"));
+    }
+
+    private ValidatableResponse createWithRequirements(String name, String... requirementParams) {
+        RequestSpecification request = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .header("Authorization", AUTH_HEADER);
+        for (int i = 0; i < requirementParams.length; i += 2) {
+            request = request.formParam(
+                    "LaunchTemplateData.InstanceRequirements." + requirementParams[i], requirementParams[i + 1]);
+        }
+        return request.when().post("/").then();
+    }
+
+    private ValidatableResponse createWithConnectionTracking(String name, String parameter, String value) {
+        return given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", "0")
+            .formParam("LaunchTemplateData.NetworkInterface.1.ConnectionTrackingSpecification." + parameter, value)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then();
+    }
+
+    private void assertInvalidParameterValue(ValidatableResponse response) {
+        response.statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    void instanceRequirementsWithoutVCpuCountIsRejected() {
+        // InstanceRequirementsRequest declares required: ["VCpuCount", "MemoryMiB"], so a block
+        // carrying only an optional member is not a launch template AWS would store.
+        String name = uniqueName("no-vcpu-lt");
+        createWithRequirements(name, "BurstablePerformance", "included")
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateName.1", name)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidLaunchTemplateName.NotFoundException"));
+    }
+
+    @Test
+    void instanceRequirementsWithoutMemoryMiBIsRejected() {
+        createWithRequirements(uniqueName("no-memory-lt"), "VCpuCount.Min", "2")
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    @Test
+    void aRequiredRangeWithoutItsMinIsRejected() {
+        // VCpuCountRangeRequest and MemoryMiBRequest each declare required: ["Min"].
+        createWithRequirements(uniqueName("max-only-lt"), "VCpuCount.Max", "8", "MemoryMiB.Min", "1024")
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+        createWithRequirements(uniqueName("memory-max-only-lt"), "VCpuCount.Min", "2", "MemoryMiB.Max", "4096")
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    @Test
+    void bothRequiredMembersTogetherAreAccepted() {
+        createWithRequirements(uniqueName("required-pair-lt"), "VCpuCount.Min", "2", "MemoryMiB.Min", "1024")
+            .statusCode(200);
+    }
+
+    @Test
+    void tcpEstablishedTimeoutKeepsItsDocumentedRange() {
+        // "Min: 60 seconds. Max: 432000 seconds (5 days)."
+        createWithConnectionTracking(uniqueName("tcp-min-lt"), "TcpEstablishedTimeout", "60").statusCode(200);
+        createWithConnectionTracking(uniqueName("tcp-max-lt"), "TcpEstablishedTimeout", "432000").statusCode(200);
+        assertInvalidParameterValue(
+                createWithConnectionTracking(uniqueName("tcp-under-lt"), "TcpEstablishedTimeout", "59"));
+        assertInvalidParameterValue(
+                createWithConnectionTracking(uniqueName("tcp-over-lt"), "TcpEstablishedTimeout", "432001"));
+    }
+
+    @Test
+    void udpTimeoutKeepsItsDocumentedRange() {
+        // "Min: 30 seconds. Max: 60 seconds."
+        createWithConnectionTracking(uniqueName("udp-min-lt"), "UdpTimeout", "30").statusCode(200);
+        createWithConnectionTracking(uniqueName("udp-max-lt"), "UdpTimeout", "60").statusCode(200);
+        assertInvalidParameterValue(createWithConnectionTracking(uniqueName("udp-under-lt"), "UdpTimeout", "29"));
+        assertInvalidParameterValue(createWithConnectionTracking(uniqueName("udp-over-lt"), "UdpTimeout", "61"));
+    }
+
+    @Test
+    void udpStreamTimeoutKeepsItsDocumentedRange() {
+        // "Min: 60 seconds. Max: 180 seconds (3 minutes)."
+        createWithConnectionTracking(uniqueName("stream-min-lt"), "UdpStreamTimeout", "60").statusCode(200);
+        createWithConnectionTracking(uniqueName("stream-max-lt"), "UdpStreamTimeout", "180").statusCode(200);
+        assertInvalidParameterValue(
+                createWithConnectionTracking(uniqueName("stream-under-lt"), "UdpStreamTimeout", "59"));
+        assertInvalidParameterValue(
+                createWithConnectionTracking(uniqueName("stream-over-lt"), "UdpStreamTimeout", "181"));
+    }
+
+    @Test
+    void createLaunchTemplateVersionValidatesTheSameWayAndStoresNothingWhenItFails() {
+        String name = uniqueName("version-validation-lt");
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "CreateLaunchTemplateVersion")
+            .formParam("LaunchTemplateName", name)
+            .formParam("SourceVersion", "1")
+            .formParam("LaunchTemplateData.InstanceRequirements.BurstablePerformance", "included")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+
+        given()
+            .formParam("Action", "CreateLaunchTemplateVersion")
+            .formParam("LaunchTemplateName", name)
+            .formParam("SourceVersion", "1")
+            .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", "0")
+            .formParam("LaunchTemplateData.NetworkInterface.1.ConnectionTrackingSpecification.UdpTimeout", "999")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateName.1", name)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.latestVersionNumber", equalTo("1"));
     }
 }

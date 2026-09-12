@@ -524,6 +524,7 @@ class Ec2ServiceTest {
 
         LaunchTemplateData.InstanceRequirements requirements = new LaunchTemplateData.InstanceRequirements();
         requirements.setVCpuCount(new LaunchTemplateData.IntRange(2, 8));
+        requirements.setMemoryMiB(new LaunchTemplateData.IntRange(1024, null));
         requirements.setMemoryGiBPerVCpu(new LaunchTemplateData.DoubleRange(0.5, 4.0));
         requirements.setCpuManufacturers(List.of("intel", "amd"));
         source.setInstanceRequirements(requirements);
@@ -555,7 +556,8 @@ class Ec2ServiceTest {
         assertEquals(8, data.getInstanceRequirements().getVCpuCount().getMax());
         assertEquals(0.5, data.getInstanceRequirements().getMemoryGiBPerVCpu().getMin());
         assertEquals(List.of("intel", "amd"), data.getInstanceRequirements().getCpuManufacturers());
-        assertNull(data.getInstanceRequirements().getMemoryMiB(),
+        assertEquals(1024, data.getInstanceRequirements().getMemoryMiB().getMin());
+        assertNull(data.getInstanceRequirements().getNetworkInterfaceCount(),
                 "an unset InstanceRequirements range must stay null rather than default to a range");
         assertNull(data.getInstanceRequirements().getBaselinePerformanceFactors());
         LaunchTemplateData.ConnectionTrackingSpecification inherited =

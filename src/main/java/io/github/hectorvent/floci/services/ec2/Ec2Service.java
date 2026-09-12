@@ -4886,6 +4886,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter LaunchTemplateName", 400);
         }
+        validateLaunchTemplateData(data);
         boolean exists = launchTemplates.scan(k -> true).stream()
                 .anyMatch(lt -> lt.getRegion().equals(region) && name.equals(lt.getLaunchTemplateName()));
         if (exists) {
@@ -4913,6 +4914,60 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return launchTemplate;
     }
 
+    /**
+     * Request-side constraints EC2 applies to {@code RequestLaunchTemplateData} before a template
+     * or a version is stored. {@code InstanceRequirementsRequest} declares {@code VCpuCount} and
+     * {@code MemoryMiB} as required members, each of which in turn requires its {@code Min}, and
+     * the connection tracking timeouts carry the ranges documented on
+     * {@code ConnectionTrackingSpecificationRequest}.
+     */
+    private static void validateLaunchTemplateData(LaunchTemplateData data) {
+        if (data == null) {
+            return;
+        }
+        validateInstanceRequirements(data.getInstanceRequirements());
+        for (LaunchTemplateData.NetworkInterface networkInterface : data.getNetworkInterfaces()) {
+            validateConnectionTracking(networkInterface.getConnectionTrackingSpecification());
+        }
+    }
+
+    private static void validateInstanceRequirements(LaunchTemplateData.InstanceRequirements requirements) {
+        if (requirements == null) {
+            return;
+        }
+        requireInstanceRequirementsRange("VCpuCount", requirements.getVCpuCount());
+        requireInstanceRequirementsRange("MemoryMiB", requirements.getMemoryMiB());
+    }
+
+    private static void requireInstanceRequirementsRange(String parameter, LaunchTemplateData.IntRange range) {
+        if (range == null) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter InstanceRequirements." + parameter, 400);
+        }
+        if (range.getMin() == null) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter InstanceRequirements." + parameter + ".Min", 400);
+        }
+    }
+
+    private static void validateConnectionTracking(LaunchTemplateData.ConnectionTrackingSpecification tracking) {
+        if (tracking == null) {
+            return;
+        }
+        requireTimeoutInRange("TcpEstablishedTimeout", tracking.getTcpEstablishedTimeout(), 60, 432000);
+        requireTimeoutInRange("UdpTimeout", tracking.getUdpTimeout(), 30, 60);
+        requireTimeoutInRange("UdpStreamTimeout", tracking.getUdpStreamTimeout(), 60, 180);
+    }
+
+    private static void requireTimeoutInRange(String parameter, Integer value, int min, int max) {
+        if (value == null || (value >= min && value <= max)) {
+            return;
+        }
+        throw new AwsException("InvalidParameterValue",
+                "Value (" + value + ") for parameter " + parameter + " is invalid. Valid values are between "
+                        + min + " and " + max + ".", 400);
+    }
+
     public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
                                                       String sourceVersion, LaunchTemplateData data) {
         return createLaunchTemplateVersion(region, id, name, sourceVersion, data, null);
@@ -4929,6 +4984,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                                       String sourceVersion, LaunchTemplateData data,
                                                       String versionDescription) {
         ensureDefaultResources(region);
+        validateLaunchTemplateData(data);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         ensureLaunchTemplateVersions(launchTemplate);
         int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
