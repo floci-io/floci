@@ -14,6 +14,7 @@ public class Target {
     private InputTransformer inputTransformer;
     private SqsParameters sqsParameters;
     private BatchParameters batchParameters;
+    private EcsParameters ecsParameters;
 
     public Target() {}
 
@@ -44,4 +45,7 @@ public class Target {
 
     public BatchParameters getBatchParameters() { return batchParameters; }
     public void setBatchParameters(BatchParameters batchParameters) { this.batchParameters = batchParameters; }
+
+    public EcsParameters getEcsParameters() { return ecsParameters; }
+    public void setEcsParameters(EcsParameters ecsParameters) { this.ecsParameters = ecsParameters; }
 }
