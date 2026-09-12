@@ -218,6 +218,76 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
+     * Authorizes a single (action, resource) pair for the caller identified by an
+     * Authorization header, following the same identity resolution and bypass rules
+     * as {@link #filter}. Callers use this for a secondary resource that never appears
+     * in the request URL and so is invisible to {@link ResourceArnBuilder} - such as
+     * the CopyObject/UploadPartCopy source object, which arrives only in the
+     * {@code x-amz-copy-source} header.
+     *
+     * <p>Returns normally when the action is allowed, or when enforcement does not
+     * apply to this request (enforcement disabled, no Authorization header, root or
+     * unknown access key). Throws {@link AwsException} with the same AccessDenied
+     * shape as {@link #filter} when the caller's policies deny the action.
+     */
+    public void authorizeAdditionalResource(String authorizationHeader, String action, String resource) {
+        if (!config.services().iam().enforcementEnabled()) {
+            return;
+        }
+        if (authorizationHeader == null) {
+            return;
+        }
+        String akid = accountResolver.extractAccessKeyId(authorizationHeader);
+        if (akid == null || "test".equals(akid)) {
+            return;
+        }
+        if (extractCredentialScope(authorizationHeader) == null) {
+            return;
+        }
+
+        String accountId = requestContext.getAccountId() == null
+                ? accountResolver.resolve(authorizationHeader)
+                : requestContext.getAccountId();
+
+        List<List<String>> scpLevels = scpProvider.isResolvable()
+                ? scpProvider.get().effectiveScpLevels(accountId) : null;
+
+        boolean accountRootPrincipal = false;
+        CallerContext caller = iamService.resolveCallerContext(akid);
+        if (caller == null) {
+            if (scpLevels == null || !akid.equals(accountId)) {
+                return;
+            }
+            caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
+            accountRootPrincipal = true;
+        }
+        if (scpLevels != null) {
+            caller = caller.withScpLevels(scpLevels);
+        }
+
+        Map<String, List<String>> conditionContext = null;
+        Optional<String> principalArn = accountRootPrincipal
+                ? Optional.of("arn:aws:iam::" + accountId + ":root")
+                : iamService.resolveCallerArn(akid);
+        if (principalArn.isPresent()) {
+            conditionContext = new HashMap<>();
+            conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
+        }
+
+        Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
+        if (decision != Decision.DENY) {
+            return;
+        }
+        LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
+        throw new AwsException("AccessDenied",
+                "User: arn:aws:iam::" + accountId + ":user/" + akid
+                        + " is not authorized to perform: " + action
+                        + " on resource: \"" + resource + "\""
+                        + " because no identity-based policy allows the " + action + " action",
+                403);
+    }
+
+    /**
      * Best-effort CloudTrail emission for S3 access denials. Without this hook,
      * denied requests get aborted before {@code S3Controller}'s try/catch sees
      * them, so denials would never appear in CloudTrail logs — leaving a major

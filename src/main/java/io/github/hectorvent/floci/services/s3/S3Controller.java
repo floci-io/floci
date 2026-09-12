@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -94,6 +95,7 @@ public class S3Controller {
     private final AccountResolver accountResolver;
     private final RequestContext requestContext;
     private final IamService iamService;
+    private final IamEnforcementFilter iamEnforcementFilter;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
@@ -104,7 +106,8 @@ public class S3Controller {
                         CloudTrailService cloudTrailService,
                         AccountResolver accountResolver,
                         RequestContext requestContext,
-                        IamService iamService) {
+                        IamService iamService,
+                        IamEnforcementFilter iamEnforcementFilter) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
@@ -115,6 +118,7 @@ public class S3Controller {
         this.accountResolver = accountResolver;
         this.requestContext = requestContext;
         this.iamService = iamService;
+        this.iamEnforcementFilter = iamEnforcementFilter;
     }
 
     private void emitCloudTrailEvent(String eventName, String bucket, String key,
@@ -2556,6 +2560,7 @@ public class S3Controller {
                                       String contentType, HttpHeaders httpHeaders) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
+        authorizeCopySourceRead(httpHeaders, sourceBucket, sourceObject.objectKey());
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -2635,6 +2640,7 @@ public class S3Controller {
                                            String uploadId, int partNumber, HttpHeaders httpHeaders) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
+        authorizeCopySourceRead(httpHeaders, sourceBucket, sourceObject.objectKey());
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
@@ -3697,6 +3703,19 @@ public class S3Controller {
         }
         s3Service.putBucketWebsite(bucket, new WebsiteConfiguration(indexDoc, errorDoc));
         return Response.ok().build();
+    }
+
+    /**
+     * Authorizes {@code s3:GetObject} on the CopyObject/UploadPartCopy source, which only ever appears
+     * in the {@code x-amz-copy-source} header and is otherwise invisible to the request-level IAM filter
+     * that authorizes the destination from the URL path. Real S3 requires both permissions: a caller
+     * allowed to write to the destination bucket must not be able to exfiltrate an object it cannot read.
+     * A no-op when IAM enforcement is disabled, matching {@link IamEnforcementFilter}'s own bypass rules.
+     */
+    private void authorizeCopySourceRead(HttpHeaders httpHeaders, String sourceBucket, String sourceKey) {
+        String resource = S3PublicAccessEvaluator.objectArn(sourceBucket, sourceKey);
+        iamEnforcementFilter.authorizeAdditionalResource(
+                httpHeaders.getHeaderString("Authorization"), "s3:GetObject", resource);
     }
 
     /**
