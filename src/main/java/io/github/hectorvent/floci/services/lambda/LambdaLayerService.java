@@ -454,24 +454,17 @@ public class LambdaLayerService {
                             + " constraint: Member must satisfy regular expression pattern: "
                             + LAYER_VERSION_ARN_PATTERN, 400);
         }
-        // resolveLayerByArn keys on region/name/version within the caller's own partition, so an
-        // ARN naming another account would otherwise resolve to the caller's same-named layer.
-        // No layer here can be shared cross-account (layer permissions are unimplemented), so a
-        // foreign account is always a miss; this is where sharing would hook in if that changes.
-        // resolveLayerByArn also drops the partition, so an ARN naming another one would
-        // otherwise resolve to the local layer under a foreign-partition ARN. Floci emulates
-        // the aws partition; the live service rejects the others outright.
+        // Floci emulates the aws partition; the live service rejects the others outright, and
+        // with a different error than an unresolvable ARN, so this precedes the lookup.
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(layerVersionArn);
         if (parsed.partition() != null && !parsed.partition().isEmpty()
                 && !"aws".equals(parsed.partition())) {
             throw new AwsException("InvalidParameterValueException",
                     "Invalid layer version " + layerVersionArn, 400);
         }
-        String requestedAccount = AwsArnUtils.accountOrDefault(layerVersionArn, null);
-        if (requestedAccount != null && !requestedAccount.equals(regionResolver.getAccountId())) {
-            throw new AwsException("ResourceNotFoundException",
-                    "The resource you requested does not exist.", 404);
-        }
+        // A foreign account is a miss rather than a substitution: resolveLayerByArn scopes the
+        // lookup to the caller's own account. This is where cross-account sharing would hook in
+        // if layer permissions were ever implemented.
         LambdaLayerVersion lv = resolveLayerByArn(layerVersionArn);
         if (lv == null) {
             throw new AwsException("ResourceNotFoundException",
@@ -496,6 +489,9 @@ public class LambdaLayerService {
         if (resourceParts.length < 3 || !"layer".equals(resourceParts[0])) {
             return null;
         }
+        if (isForeignLayerArn(arn)) {
+            return null;
+        }
         String region = arn.region();
         String layerName = resourceParts[1];
         long version;
@@ -505,6 +501,61 @@ public class LambdaLayerService {
             return null;
         }
         return layerStore.get(region, layerName, version).orElse(null);
+    }
+
+    /**
+     * True when the ARN is a well-formed layer version ARN naming an account or partition other
+     * than the caller's, so Floci cannot decide whether it exists. On the live service such a
+     * layer resolves through its resource policy, measured against ap-southeast-1: an ARN in
+     * another account whose name and version match a layer of the caller's own is
+     * {@code AccessDeniedException}, never a substitution. Floci has no layer permission model
+     * (see the Not Implemented list), so it treats every foreign ARN as unknowable rather than
+     * resolving it inside the caller's own partition.
+     */
+    public boolean isForeignLayerArn(String layerVersionArn) {
+        AwsArnUtils.Arn arn = parseLayerVersionArn(layerVersionArn);
+        if (arn == null) {
+            return false;
+        }
+        return isForeignLayerArn(arn);
+    }
+
+    /**
+     * True when the ARN is a well-formed layer version ARN outside the {@code aws} partition.
+     * Partitions are isolated, so such a layer is unreachable rather than merely unreadable, and
+     * {@link #getLayerVersionByArn} already rejects it outright. Attaching one to a function has
+     * to reject too, or Floci would persist an ARN its own lookup path calls invalid.
+     */
+    public boolean isForeignPartitionLayerArn(String layerVersionArn) {
+        AwsArnUtils.Arn arn = parseLayerVersionArn(layerVersionArn);
+        if (arn == null) {
+            return false;
+        }
+        String partition = arn.partition();
+        return partition != null && !partition.isEmpty() && !"aws".equals(partition);
+    }
+
+    private AwsArnUtils.Arn parseLayerVersionArn(String layerVersionArn) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(layerVersionArn);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        String[] resourceParts = arn.resource().split(":");
+        if (resourceParts.length < 3 || !"layer".equals(resourceParts[0])) {
+            return null;
+        }
+        return arn;
+    }
+
+    private boolean isForeignLayerArn(AwsArnUtils.Arn arn) {
+        String partition = arn.partition();
+        if (partition != null && !partition.isEmpty() && !"aws".equals(partition)) {
+            return true;
+        }
+        String account = arn.accountId();
+        return account != null && !account.isEmpty() && !account.equals(regionResolver.getAccountId());
     }
 
     private byte[] resolveLayerContent(Map<String, Object> content) {
