@@ -40,17 +40,49 @@ class Ec2InstanceCreditSpecificationsIntegrationTest {
         assertCpuCredits(launch("t3.micro", "standard"), "standard");
     }
 
+    /**
+     * The EC2 model, verbatim: "If you specify an instance ID that is not a burstable performance
+     * instance, Amazon EC2 returns the standard credit option." A named m5 is a report, not an
+     * error.
+     */
     @Test
-    void aNonBurstableInstanceIdIsAnError() {
-        given()
-                .formParam("Action", "DescribeInstanceCreditSpecifications")
-                .formParam("InstanceId.1", launch("m5.large", null))
-                .header("Authorization", AUTH_HEADER)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(400)
-                .body("Response.Errors.Error.Code", equalTo("InvalidInstanceID.NotFound"));
+    void aNonBurstableInstanceIdReportsStandard() {
+        assertCpuCredits(launch("m5.large", null), "standard");
+    }
+
+    /**
+     * The EC2 model, verbatim: the unfiltered form returns "instances that were previously
+     * configured as T2, T3, and T3a with the unlimited credit option. For example, if you resize a
+     * T2 instance, while it is configured as unlimited, to an M4 instance, Amazon EC2 returns the
+     * M4 instance."
+     */
+    @Test
+    void theUnlimitedOptionSurvivesAResizeOntoANonBurstableType() {
+        String instanceId = launch("t3.micro", null);
+        resize(instanceId, "m5.large");
+
+        assertCpuCredits(instanceId, "unlimited");
+        assertTrue(unfilteredInstanceIds().contains(instanceId));
+    }
+
+    @Test
+    void aResizeOntoABurstableTypeAcquiresTheFamilyDefault() {
+        String instanceId = launch("m5.large", null);
+        assertCpuCredits(instanceId, "standard");
+
+        resize(instanceId, "t3.micro");
+
+        assertCpuCredits(instanceId, "unlimited");
+        assertTrue(unfilteredInstanceIds().contains(instanceId));
+    }
+
+    @Test
+    void aStandardOptionSurvivesAResizeOntoAnotherBurstableFamily() {
+        String instanceId = launch("t2.micro", null);
+        resize(instanceId, "t3.micro");
+
+        assertCpuCredits(instanceId, "standard");
+        assertFalse(unfilteredInstanceIds().contains(instanceId));
     }
 
     @Test
@@ -92,18 +124,13 @@ class Ec2InstanceCreditSpecificationsIntegrationTest {
     void theUnfilteredFormReportsOnlyUnlimitedInstances() {
         String standardInstance = launch("t2.micro", null);
         String unlimitedInstance = launch("t3.micro", null);
+        String nonBurstableInstance = launch("m5.large", null);
 
-        List<String> reported = given()
-                .formParam("Action", "DescribeInstanceCreditSpecifications")
-                .header("Authorization", AUTH_HEADER)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract().xmlPath().getList(ITEM + "instanceId", String.class);
+        List<String> reported = unfilteredInstanceIds();
 
         assertTrue(reported.contains(unlimitedInstance));
         assertFalse(reported.contains(standardInstance));
+        assertFalse(reported.contains(nonBurstableInstance));
     }
 
     @Test
@@ -158,6 +185,29 @@ class Ec2InstanceCreditSpecificationsIntegrationTest {
                 .statusCode(200)
                 .body("DescribeInstanceTypesResponse.instanceTypeSet.item.burstablePerformanceSupported",
                         equalTo(expected));
+    }
+
+    private List<String> unfilteredInstanceIds() {
+        return given()
+                .formParam("Action", "DescribeInstanceCreditSpecifications")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getList(ITEM + "instanceId", String.class);
+    }
+
+    private void resize(String instanceId, String instanceType) {
+        given()
+                .formParam("Action", "ModifyInstanceAttribute")
+                .formParam("InstanceId", instanceId)
+                .formParam("InstanceType.Value", instanceType)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
     }
 
     private void assertCpuCredits(String instanceId, String expected) {

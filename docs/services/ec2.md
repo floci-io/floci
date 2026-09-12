@@ -175,7 +175,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | StopInstances | Stops running instances and updates their stored lifecycle state. |
 | RebootInstances | Reboots instances through the local EC2 service model. |
 | DescribeInstanceStatus | Returns status records for stored instances. |
-| DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. Named instance ids report the launch's explicit credit option or the instance type family's default, t2 standard and t3, t3a and t4g unlimited. An id with no credit model, such as an m5, is rejected the way an unknown id is. Naming no id returns only the instances running unlimited. |
+| DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. |
 | ModifyInstanceAttribute | Updates supported mutable attributes for an instance. |
 | ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. |
