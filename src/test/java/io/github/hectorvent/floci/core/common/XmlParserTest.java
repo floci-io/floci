@@ -49,8 +49,7 @@ class XmlParserTest {
                 r2.next();
             }
         }, "an entity from the skipped DTD must not expand");
-        assertTrue(e.getMessage().contains("not declared"),
-                "should fail because the DTD never took effect, was: " + e.getMessage());
+        assertFailedOnUndeclaredEntity(e, "x");
     }
 
     @Test
@@ -68,7 +67,8 @@ class XmlParserTest {
                 r.next();
             }
         }, "an external entity must never be resolved");
-        assertTrue(e.getMessage().contains("not declared"),
+        assertFailedOnUndeclaredEntity(e, "secret");
+        assertFalse(e.getMessage().contains("nonexistent"),
                 "must fail without reading the file at all, was: " + e.getMessage());
     }
 
@@ -396,5 +396,16 @@ class XmlParserTest {
         assertNull(XmlParser.rootElementName("garbage {} not xml"));
         assertNull(XmlParser.rootElementName("<AccelerateConfiguration><Status>Enabled"));
         assertNull(XmlParser.rootElementName("<AccelerateConfiguration/>trailing"));
+    }
+
+    /**
+     * Asserts the parse stopped at an entity reference the document never declared. The parser
+     * translates the sentence it reports, so a JVM with a non-English default locale spells this
+     * failure differently, and on macOS that locale comes from system preferences rather than from
+     * LANG. The entity name it quotes is the part no translation touches.
+     */
+    private static void assertFailedOnUndeclaredEntity(XMLStreamException e, String entityName) {
+        assertTrue(e.getMessage().contains('"' + entityName + '"'),
+                "should fail on the undeclared entity " + entityName + ", was: " + e.getMessage());
     }
 }
