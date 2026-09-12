@@ -180,10 +180,14 @@ class MwaaServiceTest {
     }
 
     private EmulatorConfig testConfig() {
+        return testConfig(List.of("2.10.5", "2.9.3", "2.8.4"));
+    }
+
+    private EmulatorConfig testConfig(List<String> supportedVersions) {
         EmulatorConfig.MwaaServiceConfig mwaaConfig = proxy(EmulatorConfig.MwaaServiceConfig.class,
                 (proxy, method, args) -> switch (method.getName()) {
                     case "enabled", "mock" -> true;
-                    case "supportedVersions" -> List.of("2.10.5", "2.9.3", "2.8.4");
+                    case "supportedVersions" -> supportedVersions;
                     case "defaultVersion" -> "2.10.5";
                     case "proxyBasePort" -> 8700;
                     case "proxyMaxPort" -> 8799;
@@ -290,6 +294,35 @@ class MwaaServiceTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> mwaaService.createEnvironment("bad-version-env", request));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void createEnvironmentRejectsAMalformedConfiguredVersionInsteadOfCrashing() {
+        // supported-versions is operator-configurable, so a stray non-numeric entry like "latest"
+        // must be rejected as a clean ValidationException here, not reach
+        // MwaaEnvironmentManager.pythonTagFor and surface as an internal NumberFormatException
+        // well after Postgres has already been created for the environment.
+        StorageFactory storageFactory = new StorageFactory(null, null) {
+            @Override
+            public synchronized <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return AccountAwareStorageBackend.inMemory("000000000000");
+            }
+        };
+        RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
+        when(regionResolver.getRegion()).thenReturn("us-east-1");
+        S3Service s3Service = Mockito.mock(S3Service.class);
+        MwaaService misconfiguredService = new MwaaService(storageFactory, testConfig(List.of("2.10.5", "latest")),
+                regionResolver, null, null, null, s3Service);
+
+        CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+        request.setAirflowVersion("latest");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> misconfiguredService.createEnvironment("latest-version-env", request));
         assertEquals(400, ex.getHttpStatus());
         assertEquals("ValidationException", ex.getErrorCode());
     }

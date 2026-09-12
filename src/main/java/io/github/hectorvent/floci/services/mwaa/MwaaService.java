@@ -36,12 +36,23 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class MwaaService implements TagHandler {
 
     private static final Logger LOG = Logger.getLogger(MwaaService.class);
+
+    /**
+     * Shape {@code MwaaEnvironmentManager.pythonTagFor} requires: at least a numeric
+     * {@code major.minor}, an optional {@code .patch}. {@code supported-versions} is
+     * operator-configurable, so a malformed entry (e.g. a stray {@code latest}) must be rejected
+     * here as a clean {@code ValidationException} rather than reaching {@code pythonTagFor} and
+     * surfacing as an internal {@code NumberFormatException} well after Postgres has already been
+     * created for the environment.
+     */
+    private static final Pattern AIRFLOW_VERSION_PATTERN = Pattern.compile("\\d+\\.\\d+(\\.\\d+)?");
 
     private final StorageBackend<String, Environment> storage;
     private final EmulatorConfig config;
@@ -339,7 +350,7 @@ public class MwaaService implements TagHandler {
     private String resolveAirflowVersion(String requested) {
         List<String> supported = config.services().mwaa().supportedVersions();
         String version = requested != null && !requested.isBlank() ? requested : config.services().mwaa().defaultVersion();
-        if (!supported.contains(version)) {
+        if (!AIRFLOW_VERSION_PATTERN.matcher(version).matches() || !supported.contains(version)) {
             throw new AwsException("ValidationException",
                     "Unsupported AirflowVersion '" + version + "'. Supported versions: " + supported, 400);
         }
