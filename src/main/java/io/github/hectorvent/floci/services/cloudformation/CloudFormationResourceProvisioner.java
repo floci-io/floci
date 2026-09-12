@@ -1461,14 +1461,23 @@ public class CloudFormationResourceProvisioner {
             String databaseName = resolveOptional(props, "DatabaseName", engine);
             boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
             String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
-            if (serverlessV2MinCapacity == null && serverlessV2MaxCapacity == null
-                    && serverlessV2SecondsUntilAutoPause == null) {
-                cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                        masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region);
+            String engineMode = resolveOptional(props, "EngineMode", engine);
+            boolean storageEncrypted = parseBoolProp(props, "StorageEncrypted", engine);
+            if (engineMode == null && !storageEncrypted) {
+                if (serverlessV2MinCapacity == null && serverlessV2MaxCapacity == null
+                        && serverlessV2SecondsUntilAutoPause == null) {
+                    cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
+                            masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region);
+                } else {
+                    cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
+                            masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
+                            serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
+                }
             } else {
                 cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
                         masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
-                        serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
+                        serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
+                        false, null, engineMode, storageEncrypted);
             }
             deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbCluster, "DB cluster");
         }

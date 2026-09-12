@@ -221,6 +221,25 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void provisionsDbClusterWithEngineModeAndStorageEncrypted() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "EngineMode":"serverless","StorageEncrypted":true}
+                """);
+
+        verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
+                null, null, null, false, null, null, null, false, "us-east-1",
+                null, null, null, false, null, "serverless", true);
+    }
+
+    @Test
     void rejectsNonNumericServerlessV2Capacity() {
         // A non-numeric capacity is invalid input, not an absent value: the stack fails rather than
         // silently dropping the scaling configuration.
