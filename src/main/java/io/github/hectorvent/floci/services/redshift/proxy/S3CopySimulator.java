@@ -342,7 +342,7 @@ public final class S3CopySimulator {
         out.flush();
     }
 
-    private static void writeCopyFail(OutputStream out, String reason) throws IOException {
+    static void writeCopyFail(OutputStream out, String reason) throws IOException {
         byte[] message = (reason == null ? "S3 COPY aborted" : reason).getBytes(StandardCharsets.UTF_8);
         out.write('f');
         out.write(intBytes(4 + message.length + 1));
@@ -469,7 +469,7 @@ public final class S3CopySimulator {
         }
     }
 
-    private static byte[] errorBody(String sqlState, String message) {
+    static byte[] errorBody(String sqlState, String message) {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         writeField(bytes, 'S', "ERROR");
         writeField(bytes, 'C', sqlState);
