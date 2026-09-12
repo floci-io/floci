@@ -18,6 +18,7 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `GetWorkGroup` | Returns information about a workgroup |
 | `ListWorkGroups` | Lists all workgroups |
 | `CreateWorkGroup` | Creates a new workgroup |
+| `UpdateWorkGroup` | Updates a workgroup's description, state and configuration |
 | `ListDataCatalogs` | Lists the built-in `AwsDataCatalog` plus every registered data catalog |
 | `GetDataCatalog` | Returns one data catalog, or `InvalidRequestException` when it does not exist |
 | `CreateDataCatalog` | Registers a `LAMBDA`, `GLUE`, `HIVE` or `FEDERATED` data catalog |
