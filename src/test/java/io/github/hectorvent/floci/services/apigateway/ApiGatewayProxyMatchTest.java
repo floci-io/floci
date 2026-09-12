@@ -155,6 +155,71 @@ class ApiGatewayProxyMatchTest {
         assertSame(rootProxy, matched.get(2));
     }
 
+    // ──────────────────────────── arbitrary greedy parameter names ────────────────────────────
+    // AWS: "you can use any string for the greedy path parameter name". Routing must key on the
+    // trailing "+", not on the literal {proxy+}, or a resource such as /assets/{rest+} only half
+    // routes: the single-segment template matcher accepts /assets/foo while the multi-segment
+    // /assets/img/logo.png, the whole point of a greedy resource, matches nothing.
+
+    @Test
+    void greedyResourceMatchesRegardlessOfParameterName() {
+        ApiGatewayResource assets = resource("r1", "root", "{rest+}", "/assets/{rest+}");
+        List<ApiGatewayResource> resources = List.of(assets);
+
+        assertSame(assets, ctrl.matchResource(resources, "/assets/img/logo.png"));
+        assertSame(assets, ctrl.matchResource(resources, "/assets/foo"));
+        assertNull(ctrl.matchResource(resources, "/assets/"));
+        assertNull(ctrl.matchResource(resources, "/other/thing"));
+    }
+
+    @Test
+    void rootGreedyWithNonProxyNameMatchesEverything() {
+        ApiGatewayResource rootGreedy = resource("r1", "root", "{path+}", "/{path+}");
+
+        assertSame(rootGreedy, ctrl.matchResource(List.of(rootGreedy), "/anything"));
+        assertSame(rootGreedy, ctrl.matchResource(List.of(rootGreedy), "/"));
+        assertSame(rootGreedy, ctrl.matchResource(List.of(rootGreedy), "/a/b/c"));
+    }
+
+    @Test
+    void specificityRulesHoldForNonProxyGreedyNames() {
+        ApiGatewayResource exact = resource("r1", "root", "logo.png", "/assets/logo.png");
+        ApiGatewayResource template = resource("r2", "root", "{id}", "/assets/{id}");
+        ApiGatewayResource greedy = resource("r3", "root", "{rest+}", "/assets/{rest+}");
+        List<ApiGatewayResource> resources = List.of(greedy, template, exact);
+
+        // exact > template > greedy, unchanged by the parameter's name
+        assertSame(exact, ctrl.matchResource(resources, "/assets/logo.png"));
+        assertSame(template, ctrl.matchResource(resources, "/assets/banner.png"));
+        assertSame(greedy, ctrl.matchResource(resources, "/assets/img/logo.png"));
+    }
+
+    @Test
+    void longestParentPrefixWinsAcrossMixedGreedyNames() {
+        ApiGatewayResource apiGreedy = resource("r1", "root", "{proxy+}", "/api/{proxy+}");
+        ApiGatewayResource apiV1Greedy = resource("r2", "root", "{rest+}", "/api/v1/{rest+}");
+        List<ApiGatewayResource> resources = List.of(apiGreedy, apiV1Greedy);
+
+        assertSame(apiV1Greedy, ctrl.matchResource(resources, "/api/v1/users"));
+        assertSame(apiGreedy, ctrl.matchResource(resources, "/api/v2/users"));
+
+        List<ApiGatewayResource> matched = ctrl.matchResources(resources, "/api/v1/users/1");
+        assertEquals(2, matched.size());
+        assertSame(apiV1Greedy, matched.get(0));
+        assertSame(apiGreedy, matched.get(1));
+    }
+
+    @Test
+    void aParameterNamedWithATrailingPlusIsNotConfusedWithAnOrdinaryOne() {
+        // {id} is a single-segment template; it must keep matching exactly one segment even when a
+        // greedy sibling exists, and must not be mistaken for greedy by the new prefix helper.
+        ApiGatewayResource template = resource("r1", "root", "{id}", "/items/{id}");
+        List<ApiGatewayResource> resources = List.of(template);
+
+        assertSame(template, ctrl.matchResource(resources, "/items/1"));
+        assertNull(ctrl.matchResource(resources, "/items/1/sub"));
+    }
+
     // ──────────────────────────── trailing-slash preservation (#1557) ────────────────────────────
 
     @Test
