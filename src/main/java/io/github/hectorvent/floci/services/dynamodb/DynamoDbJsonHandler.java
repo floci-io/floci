@@ -1782,6 +1782,11 @@ public class DynamoDbJsonHandler {
                     + "Member must have length less than or equal to 100", 400);
         }
 
+        for (JsonNode txItem : transactItemsNode) {
+            DynamoDbExpressionSize.checkRead(txItem.path("Get").path("ProjectionExpression").textValue(),
+                    "ProjectionExpression");
+        }
+
         Map<String, TableDefinition> tableCache = new HashMap<>();
         Set<String> seenGet = new HashSet<>();
         for (JsonNode txItem : transactItemsNode) {
@@ -1812,7 +1817,6 @@ public class DynamoDbJsonHandler {
             if (get == null) continue;
             String pe = get.has("ProjectionExpression") ? get.get("ProjectionExpression").asText() : null;
             if (pe != null) {
-                DynamoDbExpressionSize.checkRead(pe, "ProjectionExpression");
                 ProjectionEvaluator.validateSyntax(pe, "ProjectionExpression");
             }
         }

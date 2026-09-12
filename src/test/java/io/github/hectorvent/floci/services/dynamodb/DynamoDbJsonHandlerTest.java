@@ -1628,4 +1628,19 @@ class DynamoDbJsonHandlerTest {
     private ObjectNode singleValueOf(String value) {
         return (ObjectNode) mapper.createObjectNode().set(":v", attributeValue("S", value));
     }
+
+    @Test
+    void transactGetItemsRejectsAnOversizedProjectionBeforeTheTableLookup() {
+        var get = mapper.createObjectNode();
+        get.put("TableName", "Missing");
+        get.set("Key", item("userId", "u1"));
+        get.put("ProjectionExpression", nameOfBytes(4097));
+        var request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(mapper.createObjectNode().set("Get", get)));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactGetItems", request, "eu-west-1"));
+        assertEquals("Invalid ProjectionExpression: Expression size has exceeded the maximum allowed size;",
+                ex.getMessage());
+    }
 }
