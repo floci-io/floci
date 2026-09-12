@@ -32,8 +32,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * End-to-end integration test provisioning AWS::Redshift::Cluster,
- * AWS::Redshift::ClusterParameterGroup, and AWS::Redshift::ClusterSubnetGroup
- * through CloudFormation stacks.
+ * AWS::Redshift::ClusterParameterGroup, AWS::Redshift::ClusterSubnetGroup,
+ * and AWS::Redshift::ClusterSecurityGroup through CloudFormation stacks.
  */
 @QuarkusTest
 class RedshiftClusterCfnIntegrationTest {
@@ -161,12 +161,20 @@ class RedshiftClusterCfnIntegrationTest {
                     "Description": "Test subnet group for CFN integration",
                     "SubnetIds": ["subnet-12345678", "subnet-87654321"]
                   }
+                },
+                "SecurityGroup": {
+                  "Type": "AWS::Redshift::ClusterSecurityGroup",
+                  "Properties": {
+                    "Description": "Test security group for CFN integration"
+                  }
                 }
               },
               "Outputs": {
                 "PgRef": {"Value": {"Ref": "ParamGroup"}},
                 "SgRef": {"Value": {"Ref": "SubnetGroup"}},
-                "SgName": {"Value": {"Fn::GetAtt": ["SubnetGroup", "ClusterSubnetGroupName"]}}
+                "SgName": {"Value": {"Fn::GetAtt": ["SubnetGroup", "ClusterSubnetGroupName"]}},
+                "SecurityGroupRef": {"Value": {"Ref": "SecurityGroup"}},
+                "SecurityGroupId": {"Value": {"Fn::GetAtt": ["SecurityGroup", "Id"]}}
               }
             }""".formatted(pgName, sgName);
 
@@ -176,6 +184,7 @@ class RedshiftClusterCfnIntegrationTest {
         assertEquals(pgName, outputValue(stacks, "PgRef"));
         assertEquals(sgName, outputValue(stacks, "SgRef"));
         assertEquals(sgName, outputValue(stacks, "SgName"));
+        assertEquals(outputValue(stacks, "SecurityGroupRef"), outputValue(stacks, "SecurityGroupId"));
 
         assertParameterGroupExists(pgName, "redshift-1.0");
         assertSubnetGroupExists(sgName);

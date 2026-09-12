@@ -240,7 +240,7 @@ class RedshiftClusterCfnProvisionerTest {
             {"Description":"sg desc"}"""), ctx(null));
 
         assertNotNull(r.getPhysicalId());
-        assertTrue(r.getAttributes().isEmpty());
+        assertEquals(r.getPhysicalId(), r.getAttributes().get("Id"));
         verifyNoInteractions(service);
         assertDoesNotThrow(() -> p.delete("AWS::Redshift::ClusterSecurityGroup", r.getPhysicalId(), "us-east-1"));
     }
@@ -265,7 +265,7 @@ class RedshiftClusterCfnProvisionerTest {
         assertEquals("my-cluster", r.getPhysicalId());
         assertEquals("host-my-cluster", r.getAttributes().get("Endpoint.Address"));
         assertEquals("5439", r.getAttributes().get("Endpoint.Port"));
-        assertEquals("my-cluster", r.getAttributes().get("Id"));
+        assertFalse(r.getAttributes().containsKey("Id"));
         assertTrue(r.getAttributes().get("ClusterNamespaceArn")
                 .startsWith("arn:aws:redshift:us-east-1:000000000000:namespace:"));
     }

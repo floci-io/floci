@@ -141,7 +141,6 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         }
 
         r.setPhysicalId(id);
-        r.getAttributes().put("Id", id);
         if (dbName != null && !dbName.isBlank()) {
             r.getAttributes().put("Floci::DBName", dbName);
         }
@@ -217,7 +216,9 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionSecurityGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
-        r.setPhysicalId(ctx.stablePhysicalName(null, r.getLogicalId(), METADATA_NAME_MAX_LENGTH, false));
+        String id = ctx.stablePhysicalName(null, r.getLogicalId(), METADATA_NAME_MAX_LENGTH, false);
+        r.setPhysicalId(id);
+        r.getAttributes().put("Id", id);
     }
 
     @Override
