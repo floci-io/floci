@@ -45,6 +45,12 @@ import java.util.regex.Pattern;
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
  * permissions boundary. Resource-based policies (S3 bucket policy, Lambda resource
  * policy, etc.) are not yet supplied to this filter.
+ *
+ * <p>Reads the signing credential from either the {@code Authorization} header or, for a
+ * presigned URL, the {@code X-Amz-Credential} query parameter - both request shapes get the
+ * same policy evaluation. A presigned POST form carries its credential in the multipart body,
+ * which is unavailable at this JAX-RS filter stage; that shape is authorized separately via
+ * {@link #authorizeAdditionalResource} once {@code S3Controller} has parsed the form fields.
  */
 @Provider
 @ApplicationScoped
@@ -75,6 +81,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final CurrentVertxRequest currentVertxRequest;
     private final ResolvedServiceCatalog catalog;
     private final Instance<ScpProvider> scpProvider;
+    private final SessionAccountLookup sessionAccountLookup;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -88,7 +95,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 CloudTrailService cloudTrailService,
                                 CurrentVertxRequest currentVertxRequest,
                                 ResolvedServiceCatalog catalog,
-                                Instance<ScpProvider> scpProvider) {
+                                Instance<ScpProvider> scpProvider,
+                                SessionAccountLookup sessionAccountLookup) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -101,6 +109,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.currentVertxRequest = currentVertxRequest;
         this.catalog = catalog;
         this.scpProvider = scpProvider;
+        this.sessionAccountLookup = sessionAccountLookup;
     }
 
     @Override
@@ -110,6 +119,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         String auth = ctx.getHeaderString("Authorization");
+        if (auth == null) {
+            auth = presignedCredentialAsAuthorization(ctx);
+        }
         if (auth == null) {
             return;
         }
@@ -229,6 +241,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * apply to this request (enforcement disabled, no Authorization header, root or
      * unknown access key). Throws {@link AwsException} with the same AccessDenied
      * shape as {@link #filter} when the caller's policies deny the action.
+     *
+     * <p>The account used for policy evaluation is always re-resolved from {@code akid} here
+     * (see {@link #resolveCredentialAccountId}) rather than trusted from {@link RequestContext},
+     * because a presigned POST's credential is invisible to {@code AccountContextFilter} - it
+     * arrives only in the multipart body, parsed well after that filter already set the ambient
+     * account to the configured default. The resolved account is pushed onto {@link RequestContext}
+     * for the duration of this call so that {@link IamService#resolveCallerContext} and
+     * {@link IamService#resolveCallerArn}, which both key their per-account lookups off the
+     * ambient account, resolve the credential's actual owner instead of the default account.
      */
     public void authorizeAdditionalResource(String authorizationHeader, String action, String resource) {
         if (!config.services().iam().enforcementEnabled()) {
@@ -245,46 +266,66 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return;
         }
 
-        String accountId = requestContext.getAccountId() == null
-                ? accountResolver.resolve(authorizationHeader)
-                : requestContext.getAccountId();
+        String accountId = resolveCredentialAccountId(akid, authorizationHeader);
+        String previousAccountId = requestContext.getAccountId();
+        requestContext.setAccountId(accountId);
+        try {
+            List<List<String>> scpLevels = scpProvider.isResolvable()
+                    ? scpProvider.get().effectiveScpLevels(accountId) : null;
 
-        List<List<String>> scpLevels = scpProvider.isResolvable()
-                ? scpProvider.get().effectiveScpLevels(accountId) : null;
+            boolean accountRootPrincipal = false;
+            CallerContext caller = iamService.resolveCallerContext(akid);
+            if (caller == null) {
+                if (scpLevels == null || !akid.equals(accountId)) {
+                    return;
+                }
+                caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
+                accountRootPrincipal = true;
+            }
+            if (scpLevels != null) {
+                caller = caller.withScpLevels(scpLevels);
+            }
 
-        boolean accountRootPrincipal = false;
-        CallerContext caller = iamService.resolveCallerContext(akid);
-        if (caller == null) {
-            if (scpLevels == null || !akid.equals(accountId)) {
+            Map<String, List<String>> conditionContext = null;
+            Optional<String> principalArn = accountRootPrincipal
+                    ? Optional.of("arn:aws:iam::" + accountId + ":root")
+                    : iamService.resolveCallerArn(akid);
+            if (principalArn.isPresent()) {
+                conditionContext = new HashMap<>();
+                conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
+            }
+
+            Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
+            if (decision != Decision.DENY) {
                 return;
             }
-            caller = CallerContext.of(List.of(ROOT_ALLOW_ALL));
-            accountRootPrincipal = true;
+            LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
+            throw new AwsException("AccessDenied",
+                    "User: arn:aws:iam::" + accountId + ":user/" + akid
+                            + " is not authorized to perform: " + action
+                            + " on resource: \"" + resource + "\""
+                            + " because no identity-based policy allows the " + action + " action",
+                    403);
+        } finally {
+            requestContext.setAccountId(previousAccountId);
         }
-        if (scpLevels != null) {
-            caller = caller.withScpLevels(scpLevels);
-        }
+    }
 
-        Map<String, List<String>> conditionContext = null;
-        Optional<String> principalArn = accountRootPrincipal
-                ? Optional.of("arn:aws:iam::" + accountId + ":root")
-                : iamService.resolveCallerArn(akid);
-        if (principalArn.isPresent()) {
-            conditionContext = new HashMap<>();
-            conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
+    /**
+     * Resolves the account that owns {@code akid} directly from the credential, following the
+     * same precedence {@link AccountContextFilter} applies to a header or presigned-URL request:
+     * a 12-digit access key ID is the account itself, otherwise {@link SessionAccountLookup}
+     * looks up the owning account for an IAM or session credential, falling back to the configured
+     * default account when neither resolves.
+     */
+    private String resolveCredentialAccountId(String akid, String authorizationHeader) {
+        if (akid != null && !akid.matches("\\d{12}")) {
+            Optional<String> credentialAccount = sessionAccountLookup.resolveAccountId(akid);
+            if (credentialAccount.isPresent()) {
+                return credentialAccount.get();
+            }
         }
-
-        Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
-        if (decision != Decision.DENY) {
-            return;
-        }
-        LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-        throw new AwsException("AccessDenied",
-                "User: arn:aws:iam::" + accountId + ":user/" + akid
-                        + " is not authorized to perform: " + action
-                        + " on resource: \"" + resource + "\""
-                        + " because no identity-based policy allows the " + action + " action",
-                403);
+        return accountResolver.resolve(authorizationHeader);
     }
 
     /**
@@ -390,6 +431,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private String extractCredentialScope(String auth) {
         Matcher m = SERVICE_PATTERN.matcher(auth);
         return m.find() ? m.group(1) : null;
+    }
+
+    /**
+     * Presigned URLs (and presigned POST forms, handled separately via
+     * {@link #authorizeAdditionalResource}) sign via the {@code X-Amz-Credential} query
+     * parameter instead of the {@code Authorization} header, so {@code ctx.getHeaderString}
+     * alone misses them and this filter would silently skip IAM identity-policy evaluation for
+     * every presigned request. {@link AccountContextFilter} already resolves account/region the
+     * same way for the same reason. Synthesizing a {@code Credential=...} string from the query
+     * parameter lets every downstream step here - access key extraction, credential scope,
+     * action resolution, resource ARNs - run unchanged for both signing styles.
+     */
+    private static String presignedCredentialAsAuthorization(ContainerRequestContext ctx) {
+        String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+        return credential == null || credential.isBlank() ? null : "Credential=" + credential;
     }
 
     /**
