@@ -3287,13 +3287,140 @@ public class AslExecutor {
 
     private JsonNode resolveAdvancedJsonPath(String path, JsonNode root) {
         try {
-            Object result = JsonPath.using(jsonPathConfiguration).parse(root).read(path);
+            String compatiblePath = normalizeJsonPathNullNegation(path);
+            Object result = JsonPath.using(jsonPathConfiguration).parse(root).read(compatiblePath);
             return result instanceof JsonNode jsonNode ? jsonNode : objectMapper.valueToTree(result);
         } catch (PathNotFoundException e) {
             return MissingNode.getInstance();
         } catch (InvalidPathException e) {
             throw new FailStateException("States.Runtime", "Invalid JSONPath '" + path + "': " + e.getMessage());
         }
+    }
+
+    /**
+     * Jayway treats {@code !@.key} as a non-existence check. Step Functions also considers an
+     * explicit null value falsy, so expand only simple negated path operands to include that case.
+     */
+    private static String normalizeJsonPathNullNegation(String path) {
+        StringBuilder normalized = null;
+        int copiedThrough = 0;
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = 0; i < path.length(); i++) {
+            char current = path.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"') {
+                quote = current;
+                continue;
+            }
+            if (current != '!' || !isUnaryJsonPathNegation(path, i)) {
+                continue;
+            }
+
+            int operandStart = i + 1;
+            while (operandStart < path.length() && Character.isWhitespace(path.charAt(operandStart))) {
+                operandStart++;
+            }
+            if (operandStart >= path.length()
+                    || (path.charAt(operandStart) != '@' && path.charAt(operandStart) != '$')) {
+                continue;
+            }
+            int operandEnd = jsonPathOperandEnd(path, operandStart);
+            if (operandEnd < 0) {
+                continue;
+            }
+
+            if (normalized == null) {
+                normalized = new StringBuilder(path.length() + 32);
+            }
+            normalized.append(path, copiedThrough, i)
+                    .append('(')
+                    .append(path, i, operandEnd)
+                    .append(" || ")
+                    .append(path, operandStart, operandEnd)
+                    .append(" == null)");
+            copiedThrough = operandEnd;
+            i = operandEnd - 1;
+        }
+        return normalized == null ? path : normalized.append(path, copiedThrough, path.length()).toString();
+    }
+
+    private static boolean isUnaryJsonPathNegation(String path, int index) {
+        int previous = index - 1;
+        while (previous >= 0 && Character.isWhitespace(path.charAt(previous))) {
+            previous--;
+        }
+        return previous < 0 || "([?&|,".indexOf(path.charAt(previous)) >= 0;
+    }
+
+    private static int jsonPathOperandEnd(String path, int operandStart) {
+        int index = operandStart + 1;
+        boolean hasSegment = false;
+        while (index < path.length()) {
+            char current = path.charAt(index);
+            if (current == '.') {
+                int memberStart = ++index;
+                while (index < path.length() && !isJsonPathOperandDelimiter(path.charAt(index))) {
+                    index++;
+                }
+                if (index == memberStart) {
+                    return -1;
+                }
+                hasSegment = true;
+            } else if (current == '[') {
+                int bracketEnd = simpleJsonPathBracketEnd(path, index);
+                if (bracketEnd < 0) {
+                    return -1;
+                }
+                index = bracketEnd;
+                hasSegment = true;
+            } else {
+                break;
+            }
+        }
+        if (index < path.length() && path.charAt(index) == '(') {
+            return -1;
+        }
+        return hasSegment ? index : -1;
+    }
+
+    private static boolean isJsonPathOperandDelimiter(char value) {
+        return Character.isWhitespace(value) || ".[]()&|=!<>,".indexOf(value) >= 0;
+    }
+
+    private static int simpleJsonPathBracketEnd(String path, int openBracket) {
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = openBracket + 1; i < path.length(); i++) {
+            char current = path.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"') {
+                quote = current;
+            } else if (current == ']') {
+                return i + 1;
+            } else if (current == '[' || current == '?' || current == '(' || current == ')') {
+                return -1;
+            }
+        }
+        return -1;
     }
 
     private static FailStateException unresolvedPayloadTemplateReference(String path, String fieldKey,
