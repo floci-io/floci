@@ -2409,9 +2409,9 @@ public class AslExecutor {
             JsonNode branchOutput;
             // AWS evaluates ItemSelector before it records MapIterationStarted, so a failing
             // expression fails the Map state without any event for that iteration.
-            var iterationStarted = false;
+            boolean iterationStarted = false;
             try {
-                var iterInput = item;
+                JsonNode iterInput = item;
                 if (!batchedChild && itemTransform != null) {
                     // $ in ItemSelector resolves against the Map state's effective input, not the item.
                     iterInput = jsonata
@@ -3082,7 +3082,7 @@ public class AslExecutor {
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
 
-        var resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
+        JsonNode resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
         if (bucket == null || key == null) {
@@ -3115,7 +3115,7 @@ public class AslExecutor {
     private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,
                                                  boolean jsonata, ObjectNode variables) throws Exception {
         if (jsonata && itemReader.has("Arguments")) {
-            var statesVar = buildStatesVar(input, null, context);
+            JsonNode statesVar = buildStatesVar(input, null, context);
             return jsonataEvaluator.resolveTemplate(
                     itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
         }
@@ -3124,17 +3124,17 @@ public class AslExecutor {
 
     private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
                                                      boolean jsonata, ObjectNode variables) throws Exception {
-        var parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
-        var bucket = parameters.path("Bucket").asText(null);
+        JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
+        String bucket = parameters.path("Bucket").asText(null);
         if (bucket == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket");
         }
-        var prefix = parameters.path("Prefix").asText(null);
+        String prefix = parameters.path("Prefix").asText(null);
 
-        var items = objectMapper.createArrayNode();
+        ArrayNode items = objectMapper.createArrayNode();
         try {
             // MaxItems keeps the first keys in order, so the listing itself is capped.
-            for (var object : s3Service.listObjects(bucket, prefix, null, maxItems(itemReader))) {
+            for (S3Object object : s3Service.listObjects(bucket, prefix, null, maxItems(itemReader))) {
                 items.add(listObjectsItem(object, jsonata));
             }
         } catch (AwsException e) {
@@ -3146,10 +3146,10 @@ public class AslExecutor {
     // AWS renders LastModified as epoch seconds: a double in JSONPath state machines and an
     // integer in JSONata ones.
     private ObjectNode listObjectsItem(S3Object object, boolean jsonata) {
-        var item = objectMapper.createObjectNode();
+        ObjectNode item = objectMapper.createObjectNode();
         item.put("Etag", object.getETag());
         item.put("Key", object.getKey());
-        var lastModified = object.getLastModified().getEpochSecond();
+        long lastModified = object.getLastModified().getEpochSecond();
         if (jsonata) {
             item.put("LastModified", lastModified);
         } else {
@@ -3190,7 +3190,7 @@ public class AslExecutor {
     }
 
     private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
-        var maxItems = maxItems(itemReader);
+        int maxItems = maxItems(itemReader);
         if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
             return items;
         }
