@@ -86,8 +86,8 @@ public class Ec2QueryHandler {
                 case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
                 // Snapshot block public access
                 case "EnableSnapshotBlockPublicAccess" -> handleEnableSnapshotBlockPublicAccess(params, region);
-                case "DisableSnapshotBlockPublicAccess" -> handleDisableSnapshotBlockPublicAccess(region);
-                case "GetSnapshotBlockPublicAccessState" -> handleGetSnapshotBlockPublicAccessState(region);
+                case "DisableSnapshotBlockPublicAccess" -> handleDisableSnapshotBlockPublicAccess(params, region);
+                case "GetSnapshotBlockPublicAccessState" -> handleGetSnapshotBlockPublicAccessState(params, region);
                 // VPCs
                 case "CreateVpc" -> handleCreateVpc(params, region);
                 case "DescribeVpcs" -> handleDescribeVpcs(params, region);
@@ -590,19 +590,26 @@ public class Ec2QueryHandler {
     }
 
     private Response handleEnableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        // Validate State before honoring DryRun. AWS returns DryRunOperation only once the
+        // request would otherwise have succeeded, so a bad State still fails on its own error.
+        String state = p.getFirst("State");
+        snapshotBlockPublicAccessService.validateEnableState(state);
+        checkDryRun(p);
         return snapshotBlockPublicAccessResponse("EnableSnapshotBlockPublicAccessResponse",
-                snapshotBlockPublicAccessService.enableSnapshotBlockPublicAccess(region, p.getFirst("State")),
+                snapshotBlockPublicAccessService.enableSnapshotBlockPublicAccess(region, state),
                 null);
     }
 
-    private Response handleDisableSnapshotBlockPublicAccess(String region) {
+    private Response handleDisableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return snapshotBlockPublicAccessResponse("DisableSnapshotBlockPublicAccessResponse",
                 snapshotBlockPublicAccessService.disableSnapshotBlockPublicAccess(region), null);
     }
 
-    private Response handleGetSnapshotBlockPublicAccessState(String region) {
+    private Response handleGetSnapshotBlockPublicAccessState(MultivaluedMap<String, String> p, String region) {
         // Only GetSnapshotBlockPublicAccessState carries managedBy, and Floci has no
         // declarative-policy layer, so the account always owns the state.
+        checkDryRun(p);
         return snapshotBlockPublicAccessResponse("GetSnapshotBlockPublicAccessStateResponse",
                 snapshotBlockPublicAccessService.getSnapshotBlockPublicAccessState(region), "account");
     }

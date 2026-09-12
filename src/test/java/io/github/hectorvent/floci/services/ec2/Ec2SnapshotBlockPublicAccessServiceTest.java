@@ -65,6 +65,18 @@ class Ec2SnapshotBlockPublicAccessServiceTest {
     }
 
     @Test
+    void validateEnableStateRejectsWithoutStoringAnything() {
+        service.enableSnapshotBlockPublicAccess("us-east-1", "block-all-sharing");
+
+        assertThrows(AwsException.class, () -> service.validateEnableState("unblocked"));
+        assertThrows(AwsException.class, () -> service.validateEnableState(null));
+        assertEquals("block-all-sharing", service.getSnapshotBlockPublicAccessState("us-east-1"));
+
+        service.validateEnableState("block-new-sharing");
+        assertEquals("block-all-sharing", service.getSnapshotBlockPublicAccessState("us-east-1"));
+    }
+
+    @Test
     void disableReturnsUnblocked() {
         service.enableSnapshotBlockPublicAccess("us-east-1", "block-all-sharing");
 

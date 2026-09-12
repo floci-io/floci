@@ -200,4 +200,109 @@ class Ec2SnapshotBlockPublicAccessIntegrationTest {
             .statusCode(200)
             .body("GetSnapshotBlockPublicAccessStateResponse.state", equalTo("block-all-sharing"));
     }
+
+    @Test
+    @Order(8)
+    void dryRunGetReturnsDryRunOperation() {
+        given()
+            .formParam("Action", "GetSnapshotBlockPublicAccessState")
+            .formParam("DryRun", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(412)
+            .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+    }
+
+    @Test
+    @Order(9)
+    void dryRunEnableLeavesTheStoredStateAlone() {
+        given()
+            .formParam("Action", "EnableSnapshotBlockPublicAccess")
+            .formParam("State", "block-all-sharing")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("EnableSnapshotBlockPublicAccessResponse.state", equalTo("block-all-sharing"));
+
+        given()
+            .formParam("Action", "EnableSnapshotBlockPublicAccess")
+            .formParam("State", "block-new-sharing")
+            .formParam("DryRun", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(412)
+            .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+
+        given()
+            .formParam("Action", "GetSnapshotBlockPublicAccessState")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetSnapshotBlockPublicAccessStateResponse.state", equalTo("block-all-sharing"));
+    }
+
+    @Test
+    @Order(10)
+    void dryRunEnableRejectsAnInvalidStateBeforeReportingDryRun() {
+        given()
+            .formParam("Action", "EnableSnapshotBlockPublicAccess")
+            .formParam("State", "unblocked")
+            .formParam("DryRun", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+
+        given()
+            .formParam("Action", "EnableSnapshotBlockPublicAccess")
+            .formParam("DryRun", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+
+        given()
+            .formParam("Action", "GetSnapshotBlockPublicAccessState")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetSnapshotBlockPublicAccessStateResponse.state", equalTo("block-all-sharing"));
+    }
+
+    @Test
+    @Order(11)
+    void dryRunDisableLeavesTheStoredStateAlone() {
+        given()
+            .formParam("Action", "DisableSnapshotBlockPublicAccess")
+            .formParam("DryRun", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(412)
+            .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+
+        given()
+            .formParam("Action", "GetSnapshotBlockPublicAccessState")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetSnapshotBlockPublicAccessStateResponse.state", equalTo("block-all-sharing"));
+    }
 }

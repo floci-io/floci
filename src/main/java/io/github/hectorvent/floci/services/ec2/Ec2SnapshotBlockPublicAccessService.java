@@ -52,7 +52,12 @@ public class Ec2SnapshotBlockPublicAccessService {
         this.states = states;
     }
 
-    public String enableSnapshotBlockPublicAccess(String region, String state) {
+    /**
+     * Validate the requested State without touching stored state, so a caller can reject a
+     * bad request before it honors DryRun. AWS reports an invalid parameter ahead of
+     * DryRunOperation, which it only returns once the request could otherwise succeed.
+     */
+    public void validateEnableState(String state) {
         if (state == null || state.isBlank()) {
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter State", 400);
@@ -62,6 +67,10 @@ public class Ec2SnapshotBlockPublicAccessService {
                     "Value (" + state + ") for parameter State is invalid. Valid values are "
                             + BLOCK_ALL_SHARING + " and " + BLOCK_NEW_SHARING, 400);
         }
+    }
+
+    public String enableSnapshotBlockPublicAccess(String region, String state) {
+        validateEnableState(state);
         states.put(region, state);
         LOG.infov("Snapshot block public access in {0} set to {1}", region, state);
         return state;

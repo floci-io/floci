@@ -645,6 +645,8 @@ This is an account-level setting scoped per region, not a resource, so there is 
 
 Only `GetSnapshotBlockPublicAccessState` returns `managedBy`, and it always reports `account` because Floci has no declarative-policy layer that could take the setting over. Nothing here changes snapshot permissions: no snapshot's `createVolumePermission` is rewritten when the block goes on or off.
 
+All three actions honor `DryRun`. A request that would otherwise succeed returns `DryRunOperation` with HTTP 412 and leaves the stored state untouched. `EnableSnapshotBlockPublicAccess` validates `State` first, so an invalid or missing `State` is still rejected on its own error even when `DryRun=true` is set.
+
 ### IPAM
 
 | Action | Description |
