@@ -938,17 +938,7 @@ class SqsServiceTest {
     @Test
     void startMessageMoveTask_failedDeliveryLeavesSourceQueueOrderIntact() throws Exception {
         AtomicBoolean destinationStoreDown = new AtomicBoolean();
-        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
-            @Override
-            public void put(String key, List<Message> value) {
-                if (destinationStoreDown.get() && key.endsWith("/fail-replay")) {
-                    throw new IllegalStateException("destination store unavailable");
-                }
-                super.put(key, value);
-            }
-        };
-        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, null, 30, 1048576, BASE_URL,
-                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
+        SqsService service = serviceWithMessageStoreFailingFor("fail-replay", destinationStoreDown);
         Queue dlq = service.createQueue("fail-dlq", null, "us-east-1");
         String dlqArn = queueArn("fail-dlq");
         service.createQueue("fail-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
@@ -967,17 +957,7 @@ class SqsServiceTest {
     @Test
     void startMessageMoveTask_failedDeliveryRestoresTheSourceMessageUnchanged() throws Exception {
         AtomicBoolean destinationStoreDown = new AtomicBoolean();
-        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
-            @Override
-            public void put(String key, List<Message> value) {
-                if (destinationStoreDown.get() && key.endsWith("/held-replay")) {
-                    throw new IllegalStateException("destination store unavailable");
-                }
-                super.put(key, value);
-            }
-        };
-        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, null, 30, 1048576, BASE_URL,
-                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
+        SqsService service = serviceWithMessageStoreFailingFor("held-replay", destinationStoreDown);
         Queue dlq = service.createQueue("held-dlq", null, "us-east-1");
         String dlqArn = queueArn("held-dlq");
         service.createQueue("held-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
@@ -1013,17 +993,7 @@ class SqsServiceTest {
     @Test
     void startMessageMoveTask_failedDeliveryLeavesNoCopyInTheDestination() throws Exception {
         AtomicBoolean destinationStoreDown = new AtomicBoolean();
-        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
-            @Override
-            public void put(String key, List<Message> value) {
-                if (destinationStoreDown.get() && key.endsWith("/dup-replay")) {
-                    throw new IllegalStateException("destination store unavailable");
-                }
-                super.put(key, value);
-            }
-        };
-        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, null, 30, 1048576, BASE_URL,
-                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
+        SqsService service = serviceWithMessageStoreFailingFor("dup-replay", destinationStoreDown);
         Queue dlq = service.createQueue("dup-dlq", null, "us-east-1");
         String dlqArn = queueArn("dup-dlq");
         service.createQueue("dup-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
@@ -1041,6 +1011,21 @@ class SqsServiceTest {
                 List.of("ApproximateNumberOfMessages"), "us-east-1").get("ApproximateNumberOfMessages"));
         assertTrue(service.receiveMessage(replay.getQueueUrl(), 10, 0, 0, "us-east-1").isEmpty());
         assertEquals(List.of("first", "second", "third"), bodies(service.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    /** A service whose message store rejects writes for {@code queueName} while {@code down} is set. */
+    private SqsService serviceWithMessageStoreFailingFor(String queueName, AtomicBoolean down) {
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, List<Message> value) {
+                if (down.get() && key.endsWith("/" + queueName)) {
+                    throw new IllegalStateException("destination store unavailable");
+                }
+                super.put(key, value);
+            }
+        };
+        return new SqsService(new InMemoryStorage<>(), messageStore, null, 30, 1048576, BASE_URL,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
     }
 
     private static String redrivePolicy(String dlqArn) {
