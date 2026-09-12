@@ -40,6 +40,14 @@ public class AutoScalingService {
             "DefaultInstanceWarmup must be greater than or equal to 0, or -1 to remove a previously set value.";
     static final String INSTANCE_REQUIREMENTS_AND_INSTANCE_TYPE_MESSAGE =
             "A launch template override must not specify both InstanceType and InstanceRequirements.";
+    static final String DEFAULT_DESIRED_CAPACITY_TYPE = "units";
+    static final String INSTANCE_REQUIREMENTS_MISSING_RANGES_MESSAGE =
+            "You must specify VCpuCount and MemoryMiB when you specify InstanceRequirements "
+                    + "on a launch template override.";
+    static final String DESIRED_CAPACITY_TYPE_NEEDS_INSTANCE_REQUIREMENTS_MESSAGE =
+            "Amazon EC2 Auto Scaling supports DesiredCapacityType for attribute-based instance type "
+                    + "selection only. Specify InstanceRequirements on a MixedInstancesPolicy launch "
+                    + "template override, or use the default DesiredCapacityType of units.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
             "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
 
@@ -212,6 +220,9 @@ public class AutoScalingService {
         validateEffectiveLaunchImage(region, launchConfigName, launchTemplateId, launchTemplateName,
                 launchTemplateVersion, mixedInstancesPolicy);
         validateOptionalFields(optionalFields);
+        validateDesiredCapacityType(
+                optionalFields != null ? optionalFields.desiredCapacityType() : null,
+                mixedInstancesPolicy);
 
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setAutoScalingGroupName(name);
@@ -276,6 +287,9 @@ public class AutoScalingService {
                 effectiveIdentity.launchTemplateId(),
                 effectiveIdentity.launchTemplateName(),
                 effectiveIdentity.launchTemplateVersion(),
+                effectiveIdentity.mixedInstancesPolicy());
+        validateDesiredCapacityType(
+                effectiveDesiredCapacityType(asg, optionalFields),
                 effectiveIdentity.mixedInstancesPolicy());
         if (launchConfigName != null) {
             asg.setLaunchConfigurationName(launchConfigName);
@@ -1064,17 +1078,73 @@ public class AutoScalingService {
     }
 
     private static void validateLaunchTemplateOverrides(MixedInstancesPolicy mixedInstancesPolicy) {
-        if (mixedInstancesPolicy == null || mixedInstancesPolicy.getLaunchTemplate() == null) {
-            return;
-        }
-        for (MixedInstancesPolicy.LaunchTemplateOverride override
-                : mixedInstancesPolicy.getLaunchTemplate().getOverrides()) {
+        for (MixedInstancesPolicy.LaunchTemplateOverride override : overridesOf(mixedInstancesPolicy)) {
             MixedInstancesPolicy.InstanceRequirements requirements = override.getInstanceRequirements();
-            if (override.getInstanceType() != null && requirements != null && !requirements.isEmpty()) {
+            if (requirements == null || requirements.isEmpty()) {
+                continue;
+            }
+            if (override.getInstanceType() != null) {
                 throw new AwsException("ValidationError",
                         INSTANCE_REQUIREMENTS_AND_INSTANCE_TYPE_MESSAGE, 400);
             }
+            if (requirements.getVCpuCount() == null || requirements.getMemoryMiB() == null) {
+                throw new AwsException("ValidationError",
+                        INSTANCE_REQUIREMENTS_MISSING_RANGES_MESSAGE, 400);
+            }
         }
+    }
+
+    /**
+     * Botocore documents {@code DesiredCapacityType} as supported "for attribute-based instance type
+     * selection only", and it types the member as a plain string rather than an enum, so the rule
+     * lives in prose and not in the model constraints.
+     *
+     * <p>Attribute-based selection here means the mixed instances policy that the request leaves in
+     * effect carries at least one launch template override holding a non-empty
+     * {@code InstanceRequirements}. On create that is the policy the request supplies. On update it
+     * is the policy the request supplies, or the stored one when the request names no launch source
+     * at all, or none when the request switches the group to a launch configuration or a plain
+     * launch template.
+     *
+     * <p>{@code units} is the documented default and stays legal for every group.
+     */
+    private static void validateDesiredCapacityType(String desiredCapacityType,
+                                                    MixedInstancesPolicy effectivePolicy) {
+        if (desiredCapacityType == null || DEFAULT_DESIRED_CAPACITY_TYPE.equals(desiredCapacityType)) {
+            return;
+        }
+        if (!usesInstanceRequirements(effectivePolicy)) {
+            throw new AwsException("ValidationError",
+                    DESIRED_CAPACITY_TYPE_NEEDS_INSTANCE_REQUIREMENTS_MESSAGE, 400);
+        }
+    }
+
+    private static String effectiveDesiredCapacityType(AutoScalingGroup asg,
+                                                       AsgOptionalFields optionalFields) {
+        if (optionalFields != null && optionalFields.desiredCapacityType() != null) {
+            return optionalFields.desiredCapacityType();
+        }
+        return asg.getDesiredCapacityType();
+    }
+
+    private static boolean usesInstanceRequirements(MixedInstancesPolicy mixedInstancesPolicy) {
+        for (MixedInstancesPolicy.LaunchTemplateOverride override : overridesOf(mixedInstancesPolicy)) {
+            MixedInstancesPolicy.InstanceRequirements requirements = override.getInstanceRequirements();
+            if (requirements != null && !requirements.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<MixedInstancesPolicy.LaunchTemplateOverride> overridesOf(
+            MixedInstancesPolicy mixedInstancesPolicy) {
+        if (mixedInstancesPolicy == null || mixedInstancesPolicy.getLaunchTemplate() == null) {
+            return List.of();
+        }
+        List<MixedInstancesPolicy.LaunchTemplateOverride> overrides =
+                mixedInstancesPolicy.getLaunchTemplate().getOverrides();
+        return overrides != null ? overrides : List.of();
     }
 
     private static void validateOptionalFields(AsgOptionalFields optionalFields) {

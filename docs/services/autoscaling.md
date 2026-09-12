@@ -133,9 +133,17 @@ Auto Scaling groups preserve either a launch configuration, a top-level launch t
 - `InstancesDistribution.SpotAllocationStrategy`
 
 An override selects instance types either by name or by attribute. Setting both `InstanceType` and
-`InstanceRequirements` on the same override raises `ValidationError`, matching AWS. Every member of
-the `InstanceRequirements` shape round-trips except `BaselinePerformanceFactors`, which is accepted
-and dropped.
+`InstanceRequirements` on the same override raises `ValidationError`, matching AWS. An override that
+specifies `InstanceRequirements` must specify both `VCpuCount` and `MemoryMiB`, the two members the
+AWS model marks required on that shape, and raises `ValidationError` otherwise. Every member of the
+`InstanceRequirements` shape round-trips except `BaselinePerformanceFactors`, which is accepted and
+dropped.
+
+A group uses attribute-based instance type selection when the mixed instances policy left in effect
+by the request carries at least one launch template override with `InstanceRequirements`. On create
+that is the policy the request supplies. On update it is the policy the request supplies, the stored
+policy when the request names no launch source, or none when the request switches the group to a
+launch configuration or a plain launch template.
 
 ## Optional Group Fields
 
@@ -145,7 +153,7 @@ never set a field omits it from the response rather than reporting a default.
 
 | Field | Notes |
 |---|---|
-| `DesiredCapacityType` | One of `units`, `vcpu`, `memory-mib`. Any other value raises `ValidationError` |
+| `DesiredCapacityType` | One of `units`, `vcpu`, `memory-mib`. Any other value raises `ValidationError`. AWS supports it for attribute-based instance type selection only, so `vcpu` and `memory-mib` raise `ValidationError` unless the effective mixed instances policy uses `InstanceRequirements`. `units` is the documented default and is always accepted |
 | `CapacityRebalance` | Stored and echoed as a boolean |
 | `MaxInstanceLifetime` | Seconds. Must be `0` or at least `86400`. `0` means no maximum and is echoed back as `0` |
 | `DefaultInstanceWarmup` | Seconds. Pass `-1` to remove a value already set, after which the field is omitted again |

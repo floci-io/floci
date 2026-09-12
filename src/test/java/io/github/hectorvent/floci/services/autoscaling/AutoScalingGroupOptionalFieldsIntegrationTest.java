@@ -30,8 +30,14 @@ class AutoScalingGroupOptionalFieldsIntegrationTest {
     private static final String BARE_GROUP = "opt-fields-bare-asg";
     private static final String REQUIREMENTS_GROUP = "opt-fields-requirements-asg";
 
+    private static final String OVERRIDE_REQUIREMENTS =
+            "MixedInstancesPolicy.LaunchTemplate.Overrides.member.1.InstanceRequirements";
+
     private static String launchTemplateId;
 
+    // DesiredCapacityType is legal only for attribute-based instance type selection, so the group the
+    // later ordered tests build on is created from a mixed instances policy whose override selects
+    // instance types by InstanceRequirements rather than from a launch template naming t3.micro.
     @Test
     @Order(1)
     void createGroupCarryingEveryOptionalField() {
@@ -40,8 +46,13 @@ class AutoScalingGroupOptionalFieldsIntegrationTest {
         given()
                 .formParam("Action", "CreateAutoScalingGroup")
                 .formParam("AutoScalingGroupName", GROUP)
-                .formParam("LaunchTemplate.LaunchTemplateId", launchTemplateId)
-                .formParam("LaunchTemplate.Version", "1")
+                .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId",
+                        launchTemplateId)
+                .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version", "1")
+                .formParam(OVERRIDE_REQUIREMENTS + ".VCpuCount.Min", "2")
+                .formParam(OVERRIDE_REQUIREMENTS + ".VCpuCount.Max", "8")
+                .formParam(OVERRIDE_REQUIREMENTS + ".MemoryMiB.Min", "2048")
+                .formParam(OVERRIDE_REQUIREMENTS + ".MemoryMiB.Max", "16384")
                 .formParam("MinSize", "0")
                 .formParam("MaxSize", "4")
                 .formParam("DesiredCapacity", "0")
@@ -61,7 +72,9 @@ class AutoScalingGroupOptionalFieldsIntegrationTest {
                 .body(containsString("<DesiredCapacityType>vcpu</DesiredCapacityType>"))
                 .body(containsString("<CapacityRebalance>true</CapacityRebalance>"))
                 .body(containsString("<MaxInstanceLifetime>604800</MaxInstanceLifetime>"))
-                .body(containsString("<DefaultInstanceWarmup>120</DefaultInstanceWarmup>"));
+                .body(containsString("<DefaultInstanceWarmup>120</DefaultInstanceWarmup>"))
+                .body(containsString("<VCpuCount><Min>2</Min><Max>8</Max></VCpuCount>"))
+                .body(containsString("<MemoryMiB><Min>2048</Min><Max>16384</Max></MemoryMiB>"));
     }
 
     @Test
@@ -89,6 +102,8 @@ class AutoScalingGroupOptionalFieldsIntegrationTest {
                 .body(not(containsString("<DefaultInstanceWarmup>")));
     }
 
+    // The request names no launch source, so the stored attribute-based policy stays in effect and
+    // memory-mib remains legal.
     @Test
     @Order(3)
     void updateOverwritesOnlyTheOptionalFieldsTheRequestCarries() {
@@ -188,7 +203,7 @@ class AutoScalingGroupOptionalFieldsIntegrationTest {
     @Test
     @Order(8)
     void mixedInstancesPolicyOverrideRoundTripsInstanceRequirements() {
-        String prefix = "MixedInstancesPolicy.LaunchTemplate.Overrides.member.1.InstanceRequirements";
+        String prefix = OVERRIDE_REQUIREMENTS;
 
         given()
                 .formParam("Action", "CreateAutoScalingGroup")
@@ -292,6 +307,112 @@ class AutoScalingGroupOptionalFieldsIntegrationTest {
 
     @Test
     @Order(10)
+    void createRejectsVcpuDesiredCapacityTypeWithoutAttributeBasedSelection() {
+        given()
+                .formParam("Action", "CreateAutoScalingGroup")
+                .formParam("AutoScalingGroupName", "opt-fields-fixed-type-vcpu")
+                .formParam("LaunchTemplate.LaunchTemplateId", launchTemplateId)
+                .formParam("LaunchTemplate.Version", "1")
+                .formParam("MinSize", "0")
+                .formParam("MaxSize", "1")
+                .formParam("AvailabilityZones.member.1", "us-east-1a")
+                .formParam("DesiredCapacityType", "vcpu")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("ValidationError"))
+                .body(containsString("attribute-based instance type selection only"));
+    }
+
+    @Test
+    @Order(11)
+    void updateRejectsMemoryMibDesiredCapacityTypeWithoutAttributeBasedSelection() {
+        given()
+                .formParam("Action", "UpdateAutoScalingGroup")
+                .formParam("AutoScalingGroupName", BARE_GROUP)
+                .formParam("DesiredCapacityType", "memory-mib")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("ValidationError"))
+                .body(containsString("attribute-based instance type selection only"));
+
+        describe(BARE_GROUP).body(not(containsString("<DesiredCapacityType>")));
+    }
+
+    @Test
+    @Order(12)
+    void updateAcceptsVcpuOnceTheSameRequestSuppliesInstanceRequirements() {
+        given()
+                .formParam("Action", "UpdateAutoScalingGroup")
+                .formParam("AutoScalingGroupName", BARE_GROUP)
+                .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId",
+                        launchTemplateId)
+                .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version", "1")
+                .formParam(OVERRIDE_REQUIREMENTS + ".VCpuCount.Min", "4")
+                .formParam(OVERRIDE_REQUIREMENTS + ".MemoryMiB.Min", "8192")
+                .formParam("DesiredCapacityType", "vcpu")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+        describe(BARE_GROUP)
+                .body(containsString("<DesiredCapacityType>vcpu</DesiredCapacityType>"))
+                .body(containsString("<VCpuCount><Min>4</Min></VCpuCount>"))
+                .body(containsString("<MemoryMiB><Min>8192</Min></MemoryMiB>"));
+    }
+
+    @Test
+    @Order(13)
+    void createRejectsAnInstanceRequirementsOverrideMissingMemoryMiB() {
+        given()
+                .formParam("Action", "CreateAutoScalingGroup")
+                .formParam("AutoScalingGroupName", "opt-fields-partial-requirements")
+                .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId",
+                        launchTemplateId)
+                .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version", "1")
+                .formParam(OVERRIDE_REQUIREMENTS + ".VCpuCount.Min", "2")
+                .formParam("MinSize", "0")
+                .formParam("MaxSize", "1")
+                .formParam("AvailabilityZones.member.1", "us-east-1a")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("ValidationError"))
+                .body(containsString("VCpuCount and MemoryMiB"));
+    }
+
+    @Test
+    @Order(14)
+    void updateRejectsAnInstanceRequirementsOverrideMissingVCpuCount() {
+        given()
+                .formParam("Action", "UpdateAutoScalingGroup")
+                .formParam("AutoScalingGroupName", REQUIREMENTS_GROUP)
+                .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId",
+                        launchTemplateId)
+                .formParam("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version", "1")
+                .formParam(OVERRIDE_REQUIREMENTS + ".MemoryMiB.Min", "2048")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("ValidationError"))
+                .body(containsString("VCpuCount and MemoryMiB"));
+
+        describe(REQUIREMENTS_GROUP).body(containsString("<VCpuCount><Min>2</Min><Max>8</Max></VCpuCount>"));
+    }
+
+    @Test
+    @Order(15)
     void cleanUp() {
         for (String name : new String[] {GROUP, BARE_GROUP, REQUIREMENTS_GROUP}) {
             given()

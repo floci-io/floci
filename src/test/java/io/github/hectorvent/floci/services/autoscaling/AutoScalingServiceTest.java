@@ -952,7 +952,8 @@ class AutoScalingServiceTest {
 
     @Test
     void createAutoScalingGroupStoresTheOptionalFieldsAndLeavesUnsetOnesNull() {
-        service.createAutoScalingGroup(REGION, "optional-asg", null, "lt-original", null, "1", null,
+        service.createAutoScalingGroup(REGION, "optional-asg", null, null, null, null,
+                attributeBasedPolicy(2, 2048),
                 0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
                 List.of("Default"), Map.of(), Map.of(),
                 new AsgOptionalFields("vcpu", true, 604800, 120));
@@ -987,7 +988,8 @@ class AutoScalingServiceTest {
 
     @Test
     void updateAutoScalingGroupOverwritesOnlyTheOptionalFieldsTheRequestCarries() {
-        service.createAutoScalingGroup(REGION, "partial-update-asg", null, "lt-original", null, "1", null,
+        service.createAutoScalingGroup(REGION, "partial-update-asg", null, null, null, null,
+                attributeBasedPolicy(2, 2048),
                 0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
                 List.of("Default"), Map.of(), Map.of(),
                 new AsgOptionalFields("vcpu", true, 604800, 120));
@@ -1088,5 +1090,145 @@ class AutoScalingServiceTest {
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.INSTANCE_REQUIREMENTS_AND_INSTANCE_TYPE_MESSAGE, error.getMessage());
+    }
+
+    @Test
+    void createAutoScalingGroupRejectsVcpuDesiredCapacityTypeWhenInstanceTypesAreNamed() {
+        AwsException error = assertThrows(AwsException.class, () -> service.createAutoScalingGroup(REGION,
+                "fixed-type-vcpu-asg", null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(),
+                new AsgOptionalFields("vcpu", null, null, null)));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(AutoScalingService.DESIRED_CAPACITY_TYPE_NEEDS_INSTANCE_REQUIREMENTS_MESSAGE,
+                error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createAutoScalingGroupRejectsMemoryMibDesiredCapacityTypeForOverridesNamingInstanceTypes() {
+        MixedInstancesPolicy.LaunchTemplateOverride override = new MixedInstancesPolicy.LaunchTemplateOverride();
+        override.setInstanceType("m6i.large");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createAutoScalingGroup(REGION,
+                "named-override-memory-asg", null, null, null, null, policyWithOverrides(List.of(override)),
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(),
+                new AsgOptionalFields("memory-mib", null, null, null)));
+
+        assertEquals(AutoScalingService.DESIRED_CAPACITY_TYPE_NEEDS_INSTANCE_REQUIREMENTS_MESSAGE,
+                error.getMessage());
+    }
+
+    @Test
+    void createAutoScalingGroupAcceptsUnitsDesiredCapacityTypeWithoutInstanceRequirements() {
+        service.createAutoScalingGroup(REGION, "units-asg", null, "lt-original", null, "1", null,
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(),
+                new AsgOptionalFields("units", null, null, null));
+
+        assertEquals("units", service.describeAutoScalingGroups(REGION, List.of("units-asg"))
+                .getFirst().getDesiredCapacityType());
+    }
+
+    @Test
+    void updateAutoScalingGroupRejectsVcpuDesiredCapacityTypeWhenInstanceTypesAreNamed() {
+        AwsException error = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(REGION,
+                "test-asg", null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null,
+                new AsgOptionalFields("vcpu", null, null, null)));
+
+        assertEquals(AutoScalingService.DESIRED_CAPACITY_TYPE_NEEDS_INSTANCE_REQUIREMENTS_MESSAGE,
+                error.getMessage());
+        assertNull(service.describeAutoScalingGroups(REGION, List.of("test-asg"))
+                .getFirst().getDesiredCapacityType());
+    }
+
+    @Test
+    void updateAutoScalingGroupAcceptsVcpuWhenTheSameRequestSuppliesInstanceRequirements() {
+        service.updateAutoScalingGroup(REGION, "test-asg", null, null, null, null,
+                attributeBasedPolicy(4, 8192),
+                null, null, null, null, null, null, null, null, null,
+                new AsgOptionalFields("vcpu", null, null, null));
+
+        assertEquals("vcpu", service.describeAutoScalingGroups(REGION, List.of("test-asg"))
+                .getFirst().getDesiredCapacityType());
+    }
+
+    @Test
+    void updateAutoScalingGroupRejectsDroppingInstanceRequirementsWhileVcpuStaysInEffect() {
+        service.createAutoScalingGroup(REGION, "drop-requirements-asg", null, null, null, null,
+                attributeBasedPolicy(2, 2048),
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(),
+                new AsgOptionalFields("vcpu", null, null, null));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(REGION,
+                "drop-requirements-asg", null, "lt-replacement", null, "1", null,
+                null, null, null, null, null, null, null, null, null,
+                AsgOptionalFields.none()));
+
+        assertEquals(AutoScalingService.DESIRED_CAPACITY_TYPE_NEEDS_INSTANCE_REQUIREMENTS_MESSAGE,
+                error.getMessage());
+    }
+
+    @Test
+    void createAutoScalingGroupRejectsAnOverrideMissingMemoryMiB() {
+        MixedInstancesPolicy.InstanceRequirements requirements = new MixedInstancesPolicy.InstanceRequirements();
+        requirements.setVCpuCount(intRange(2));
+        MixedInstancesPolicy.LaunchTemplateOverride override = new MixedInstancesPolicy.LaunchTemplateOverride();
+        override.setInstanceRequirements(requirements);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createAutoScalingGroup(REGION,
+                "partial-requirements-asg", null, null, null, null, policyWithOverrides(List.of(override)),
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(), "EC2", 0,
+                List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none()));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(AutoScalingService.INSTANCE_REQUIREMENTS_MISSING_RANGES_MESSAGE, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void updateAutoScalingGroupRejectsAnOverrideMissingVCpuCount() {
+        MixedInstancesPolicy.InstanceRequirements requirements = new MixedInstancesPolicy.InstanceRequirements();
+        requirements.setMemoryMiB(intRange(2048));
+        MixedInstancesPolicy.LaunchTemplateOverride override = new MixedInstancesPolicy.LaunchTemplateOverride();
+        override.setInstanceRequirements(requirements);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(REGION,
+                "test-asg", null, null, null, null, policyWithOverrides(List.of(override)),
+                null, null, null, null, null, null, null, null, null, AsgOptionalFields.none()));
+
+        assertEquals(AutoScalingService.INSTANCE_REQUIREMENTS_MISSING_RANGES_MESSAGE, error.getMessage());
+    }
+
+    private static MixedInstancesPolicy attributeBasedPolicy(int minVCpuCount, int minMemoryMiB) {
+        MixedInstancesPolicy.InstanceRequirements requirements = new MixedInstancesPolicy.InstanceRequirements();
+        requirements.setVCpuCount(intRange(minVCpuCount));
+        requirements.setMemoryMiB(intRange(minMemoryMiB));
+        MixedInstancesPolicy.LaunchTemplateOverride override = new MixedInstancesPolicy.LaunchTemplateOverride();
+        override.setInstanceRequirements(requirements);
+        return policyWithOverrides(List.of(override));
+    }
+
+    private static MixedInstancesPolicy policyWithOverrides(
+            List<MixedInstancesPolicy.LaunchTemplateOverride> overrides) {
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                new MixedInstancesPolicy.LaunchTemplateSpecification();
+        specification.setLaunchTemplateId("lt-original");
+        MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
+        launchTemplate.setLaunchTemplateSpecification(specification);
+        launchTemplate.setOverrides(overrides);
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+        policy.setLaunchTemplate(launchTemplate);
+        return policy;
+    }
+
+    private static MixedInstancesPolicy.IntRange intRange(int min) {
+        MixedInstancesPolicy.IntRange range = new MixedInstancesPolicy.IntRange();
+        range.setMin(min);
+        return range;
     }
 }
