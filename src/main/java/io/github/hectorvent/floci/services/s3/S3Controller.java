@@ -3227,6 +3227,22 @@ public class S3Controller {
             lcFields.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
         }
 
+        /*
+         * IamEnforcementFilter's own filter() method only ever sees the Authorization header or,
+         * for a presigned URL, the X-Amz-Credential query parameter - a presigned POST's
+         * credential arrives only inside this multipart form body, invisible at that JAX-RS
+         * filter stage. Evaluate the signing principal's IAM identity policy here whenever a
+         * credential is present, independent of whether S3's own presigned-POST signature and
+         * condition checks (s3.enforce-auth) are enabled, so an IAM deny is not bypassed by
+         * running S3 without its own presigned-POST enforcement. authorizeAdditionalResource
+         * itself no-ops when IAM enforcement is disabled.
+         */
+        String credential = lcFields.get("x-amz-credential");
+        if (credential != null && !credential.isEmpty()) {
+            iamEnforcementFilter.authorizeAdditionalResource(
+                    "Credential=" + credential, "s3:PutObject", S3PublicAccessEvaluator.objectArn(bucket, key));
+        }
+
         if (s3Service.isAuthEnforced()) {
             validatePresignedPostAuth(lcFields, bucket, key, fileData.length);
         } else {
@@ -3317,11 +3333,8 @@ public class S3Controller {
                             + "Check your key and signing method.", 403);
         }
 
-        // Route through the same authorization check every other S3 write path uses, so this
-        // path automatically inherits any future strengthening (e.g. per-principal IAM policy
-        // evaluation) instead of silently staying behind. Today it only confirms accessKeyId is
-        // known - strictly weaker than the signature check just performed above - but that will
-        // change if authorizeObjectWrite grows real policy evaluation.
+        // Route through the same bucket-policy/ACL check every other S3 write path uses, so this
+        // path automatically inherits any future strengthening there too.
         s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject",
                 new S3Service.RequestAuthorization(true, accessKeyId, fields.get("x-amz-security-token")));
 
