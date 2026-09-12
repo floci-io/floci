@@ -3063,8 +3063,7 @@ public class AslExecutor {
                                                     ObjectNode variables) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
-            throw new FailStateException("States.ItemReaderFailed",
-                    "ItemReader resource arn:aws:states:::s3:listObjectsV2 is not yet implemented by the emulator");
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables);
         }
         if (!"arn:aws:states:::s3:getObject".equals(resource)) {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
@@ -3076,15 +3075,7 @@ public class AslExecutor {
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
 
-        JsonNode resolvedParameters;
-        if (jsonata && itemReader.has("Arguments")) {
-            JsonNode statesVar = buildStatesVar(input, null, context);
-            resolvedParameters = jsonataEvaluator.resolveTemplate(
-                    itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
-        } else {
-            JsonNode parameters = itemReader.path("Parameters");
-            resolvedParameters = resolveParameters(parameters, input, context);
-        }
+        var resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
         if (bucket == null || key == null) {
@@ -3112,6 +3103,58 @@ public class AslExecutor {
             throw new FailStateException("States.ItemReaderFailed",
                     e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
         }
+    }
+
+    private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,
+                                                 boolean jsonata, ObjectNode variables) throws Exception {
+        if (jsonata && itemReader.has("Arguments")) {
+            var statesVar = buildStatesVar(input, null, context);
+            return jsonataEvaluator.resolveTemplate(
+                    itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
+        }
+        return resolveParameters(itemReader.path("Parameters"), input, context);
+    }
+
+    private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
+                                                     boolean jsonata, ObjectNode variables) throws Exception {
+        var parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
+        var bucket = parameters.path("Bucket").asText(null);
+        if (bucket == null) {
+            throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket");
+        }
+        var prefix = parameters.path("Prefix").asText(null);
+
+        var items = objectMapper.createArrayNode();
+        try {
+            String continuationToken = null;
+            do {
+                var page = s3Service.listObjectsWithPrefixes(bucket, prefix, null, 1000, continuationToken, null);
+                for (var object : page.objects()) {
+                    items.add(listObjectsItem(object, jsonata));
+                }
+                continuationToken = page.nextContinuationToken();
+            } while (continuationToken != null);
+        } catch (AwsException e) {
+            throw new FailStateException("States.ItemReaderFailed", e.getMessage());
+        }
+        return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
+    }
+
+    // AWS renders LastModified as epoch seconds: a double in JSONPath state machines and an
+    // integer in JSONata ones.
+    private ObjectNode listObjectsItem(S3Object object, boolean jsonata) {
+        var item = objectMapper.createObjectNode();
+        item.put("Etag", object.getETag());
+        item.put("Key", object.getKey());
+        var lastModified = object.getLastModified().getEpochSecond();
+        if (jsonata) {
+            item.put("LastModified", lastModified);
+        } else {
+            item.put("LastModified", (double) lastModified);
+        }
+        item.put("Size", object.getSize());
+        item.put("StorageClass", object.getStorageClass());
+        return item;
     }
 
     private ArrayNode normalizeObjectItems(JsonNode items) {
