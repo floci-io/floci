@@ -8,8 +8,11 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -1035,6 +1038,50 @@ class CodePipelineIntegrationTest {
                 .body("__type", containsString("InvalidStructureException"));
     }
 
+    @Test
+    void parallelPipelineRejectsExecutionAfterAwsActiveLimit() throws Exception {
+        String pipelineName = "parallel-limit-pipeline";
+        post("CreatePipeline", approvalPipeline(pipelineName, "PARALLEL")).then().statusCode(200);
+        List<String> executionIds = new ArrayList<>();
+        try {
+            while (executionIds.size() < 50) {
+                executionIds.add(startExecution(pipelineName));
+            }
+            waitForActiveExecutions(pipelineName, 50);
+
+            post("StartPipelineExecution", "{\"name\": \"%s\"}".formatted(pipelineName))
+                    .then()
+                    .statusCode(400)
+                    .body("__type", containsString("ConcurrentPipelineExecutionsLimitExceededException"));
+        } finally {
+            stopExecutions(pipelineName, executionIds);
+        }
+    }
+
+    @Test
+    void queuedPipelineAcceptsStartsWhileAnExecutionRunsAndRejectsTheFiftyFirst() throws Exception {
+        String pipelineName = "queued-limit-pipeline";
+        post("CreatePipeline", approvalPipeline(pipelineName, "QUEUED")).then().statusCode(200);
+        List<String> executionIds = new ArrayList<>();
+        try {
+            executionIds.add(startExecution(pipelineName));
+            waitForApprovalToken(pipelineName);
+
+            assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+                while (executionIds.size() < 50) {
+                    executionIds.add(startExecution(pipelineName));
+                }
+            }, "StartPipelineExecution waited for the running execution to finish");
+
+            post("StartPipelineExecution", "{\"name\": \"%s\"}".formatted(pipelineName))
+                    .then()
+                    .statusCode(400)
+                    .body("__type", containsString("ConcurrentPipelineExecutionsLimitExceededException"));
+        } finally {
+            stopExecutions(pipelineName, executionIds);
+        }
+    }
+
     private Response waitForJob() throws Exception {
         Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
         Response response;
@@ -1107,6 +1154,74 @@ class CodePipelineIntegrationTest {
             Thread.sleep(50);
         } while (Instant.now().isBefore(deadline));
         throw new AssertionError("Approval token was not issued for pipeline " + pipelineName);
+    }
+
+    private void waitForActiveExecutions(String pipelineName, int expected) throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
+        do {
+            int active = post("ListPipelineExecutions", "{\"pipelineName\": \"%s\"}".formatted(pipelineName))
+                    .jsonPath().getList("pipelineExecutionSummaries.status", String.class).stream()
+                    .filter("InProgress"::equals)
+                    .toList()
+                    .size();
+            if (active >= expected) {
+                return;
+            }
+            Thread.sleep(50);
+        } while (Instant.now().isBefore(deadline));
+        throw new AssertionError("Pipeline did not reach " + expected + " active executions");
+    }
+
+    private static String approvalPipeline(String name, String executionMode) {
+        return """
+                {
+                    "pipeline": {
+                        "name": "%s",
+                        "roleArn": "arn:aws:iam::000000000000:role/codepipeline-role",
+                        "pipelineType": "V2",
+                        "executionMode": "%s",
+                        "artifactStore": {"type": "S3", "location": "codepipeline-artifacts"},
+                        "stages": [{
+                            "name": "Approve",
+                            "actions": [{
+                                "name": "ManualApproval",
+                                "actionTypeId": {
+                                    "category": "Approval",
+                                    "owner": "AWS",
+                                    "provider": "Manual",
+                                    "version": "1"
+                                }
+                            }]
+                        }, {
+                            "name": "Complete",
+                            "actions": [{
+                                "name": "ManualApprovalComplete",
+                                "actionTypeId": {
+                                    "category": "Approval",
+                                    "owner": "AWS",
+                                    "provider": "Manual",
+                                    "version": "1"
+                                }
+                            }]
+                        }]
+                    }
+                }
+                """.formatted(name, executionMode);
+    }
+
+    private static String startExecution(String pipelineName) {
+        return post("StartPipelineExecution", "{\"name\": \"%s\"}".formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().jsonPath().getString("pipelineExecutionId");
+    }
+
+    private static void stopExecutions(String pipelineName, List<String> executionIds) {
+        for (String executionId : executionIds) {
+            post("StopPipelineExecution", """
+                    {"pipelineName": "%s", "pipelineExecutionId": "%s", "abandon": true}
+                    """.formatted(pipelineName, executionId)).then().statusCode(200);
+        }
     }
 
     private static Response post(String action, String body) {

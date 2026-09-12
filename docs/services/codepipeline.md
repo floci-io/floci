@@ -22,6 +22,8 @@ state use Floci's configured storage backend.
 Stages execute in declaration order. Actions with the same `runOrder` execute in parallel.
 `SUPERSEDED`, `QUEUED`, and `PARALLEL` execution modes are recognized, with `QUEUED` and
 `PARALLEL` restricted to V2 pipelines.
+A `QUEUED` or `PARALLEL` pipeline holds at most 50 active executions, as on AWS;
+`StartPipelineExecution` beyond that returns `ConcurrentPipelineExecutionsLimitExceededException`.
 
 The following providers execute against local Floci services:
 
