@@ -11,6 +11,12 @@ import java.util.Properties;
 @ApplicationScoped
 class RdsDataConnectionFactory {
 
+    static {
+        // quarkus-jdbc-mysql set this at startup in JVM mode. Connector/J reads it once, in
+        // the static initializer that otherwise starts its abandoned connection cleanup thread.
+        System.setProperty("com.mysql.cj.disableAbandonedConnectionCleanup", "true");
+    }
+
     Connection open(RdsDataResourceResolver.DatabaseTarget target,
                     String username,
                     String password,
