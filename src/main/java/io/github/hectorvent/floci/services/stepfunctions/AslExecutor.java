@@ -2817,8 +2817,7 @@ public class AslExecutor {
                                                     ObjectNode variables) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
-            throw new FailStateException("States.ItemReaderFailed",
-                    "ItemReader resource arn:aws:states:::s3:listObjectsV2 is not yet implemented by the emulator");
+            return resolveS3ListObjectsV2Items(itemReader, input, context, jsonata, variables);
         }
         if (!"arn:aws:states:::s3:getObject".equals(resource)) {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
@@ -2866,6 +2865,70 @@ public class AslExecutor {
             throw new FailStateException("States.ItemReaderFailed",
                     e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
         }
+    }
+
+    /**
+     * Resolves ItemReader items for the {@code arn:aws:states:::s3:listObjectsV2} resource.
+     * Pages through S3's ListObjectsV2 continuation token so a Distributed Map sees every object
+     * under the prefix rather than just the first page, and emits one item per object shaped the
+     * way AWS documents it: {@code Etag}, {@code Key}, {@code LastModified}, {@code Size} and
+     * {@code StorageClass}.
+     */
+    private ResolvedMapItems resolveS3ListObjectsV2Items(JsonNode itemReader, JsonNode input,
+                                                         JsonNode context, boolean jsonata,
+                                                         ObjectNode variables) throws Exception {
+        String transformation = itemReader.path("ReaderConfig").path("Transformation").asText("NONE");
+        if (!"NONE".equals(transformation)) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader ReaderConfig.Transformation " + transformation
+                            + " is not yet implemented by the emulator");
+        }
+
+        JsonNode resolvedParameters;
+        if (jsonata && itemReader.has("Arguments")) {
+            JsonNode statesVar = buildStatesVar(input, null, context);
+            resolvedParameters = jsonataEvaluator.resolveTemplate(
+                    itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
+        } else {
+            JsonNode parameters = itemReader.path("Parameters");
+            resolvedParameters = resolveParameters(parameters, input, context);
+        }
+        String bucket = resolvedParameters.path("Bucket").asText(null);
+        if (bucket == null) {
+            throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket");
+        }
+        String prefix = resolvedParameters.path("Prefix").asText(null);
+
+        try {
+            ArrayNode items = objectMapper.createArrayNode();
+            String continuationToken = null;
+            do {
+                S3Service.ListObjectsResult page = s3Service.listObjectsWithPrefixes(
+                        bucket, prefix, null, 1000, continuationToken, null);
+                for (S3Object object : page.objects()) {
+                    items.add(toS3ListObjectsV2Item(object));
+                }
+                continuationToken = page.isTruncated() ? page.nextContinuationToken() : null;
+            } while (continuationToken != null);
+            return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
+        } catch (AwsException e) {
+            throw new FailStateException("States.ItemReaderFailed", e.getMessage());
+        } catch (FailStateException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    e.getMessage() != null ? e.getMessage() : "Failed to list ItemReader objects");
+        }
+    }
+
+    private ObjectNode toS3ListObjectsV2Item(S3Object object) {
+        ObjectNode item = objectMapper.createObjectNode();
+        item.put("Etag", object.getETag());
+        item.put("Key", object.getKey());
+        item.put("LastModified", object.getLastModified().getEpochSecond());
+        item.put("Size", object.getSize());
+        item.put("StorageClass", object.getStorageClass());
+        return item;
     }
 
     private ArrayNode normalizeObjectItems(JsonNode items) {

@@ -2235,9 +2235,11 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
-    void distributedMapWithListObjectsV2ItemReader_failsWithNotImplementedItemReaderError() throws Exception {
+    void distributedMapWithListObjectsV2ItemReader_fansOutOneIterationPerObjectUnderPrefix() throws Exception {
         createBucket("map-inputs-list-objects");
-        putObject("map-inputs-list-objects", "workers/a.json", "[]");
+        putObject("map-inputs-list-objects", "workers/a.json", "{\"workerId\":\"w1\"}");
+        putObject("map-inputs-list-objects", "workers/b.json", "{\"workerId\":\"w2\"}");
+        putObject("map-inputs-list-objects", "other/c.json", "{\"workerId\":\"w3\"}");
 
         String definition = """
                 {
@@ -2247,9 +2249,6 @@ class StepFunctionsJsonataIntegrationTest {
                             "Type": "Map",
                             "ItemReader": {
                                 "Resource": "arn:aws:states:::s3:listObjectsV2",
-                                "ReaderConfig": {
-                                    "InputType": "JSON"
-                                },
                                 "Parameters": {
                                     "Bucket": "map-inputs-list-objects",
                                     "Prefix": "workers/"
@@ -2276,11 +2275,102 @@ class StepFunctionsJsonataIntegrationTest {
 
         String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-test", definition);
         String execArn = startExecution(smArn, "{}");
+        JsonNode output = objectMapper.readTree(waitForExecution(execArn));
+
+        assertTrue(output.isArray());
+        assertEquals(2, output.size());
+        for (JsonNode item : output) {
+            assertTrue(item.path("Key").asText().startsWith("workers/"));
+            assertTrue(item.has("Etag"));
+            assertTrue(item.has("LastModified"));
+            assertTrue(item.has("Size"));
+            assertEquals("STANDARD", item.path("StorageClass").asText());
+        }
+    }
+
+    @Test
+    void distributedMapWithListObjectsV2ItemReader_emptyPrefixProducesNoIterations() throws Exception {
+        createBucket("map-inputs-list-objects-empty");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:listObjectsV2",
+                                "Parameters": {
+                                    "Bucket": "map-inputs-list-objects-empty",
+                                    "Prefix": "nothing-here/"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-empty-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertEquals("[]", output);
+    }
+
+    @Test
+    void distributedMapWithListObjectsV2ItemReader_missingBucketFailsWithItemReaderError() throws Exception {
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:listObjectsV2",
+                                "Parameters": {
+                                    "Bucket": "map-inputs-list-objects-missing-bucket",
+                                    "Prefix": "workers/"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-missing-bucket-test", definition);
+        String execArn = startExecution(smArn, "{}");
         Response failure = waitForExecutionFailure(execArn);
 
         assertEquals("FAILED", failure.jsonPath().getString("status"));
         assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
-        assertTrue(failure.jsonPath().getString("cause").contains("not yet implemented by the emulator"));
     }
 
     @Test
