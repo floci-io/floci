@@ -2405,28 +2405,24 @@ public class AslExecutor {
                     ? ((ObjectNode) context).deepCopy()
                     : mapItemContext(context, resolvedItems, items.get(i), i);
 
+            long startMs = hasResultWriter ? System.currentTimeMillis() : 0L;
+            JsonNode branchOutput;
             // AWS evaluates ItemSelector before it records MapIterationStarted, so a failing
             // expression fails the Map state without any event for that iteration.
-            var iterInput = item;
-            if (!batchedChild && itemTransform != null) {
-                try {
+            var iterationStarted = false;
+            try {
+                var iterInput = item;
+                if (!batchedChild && itemTransform != null) {
                     // $ in ItemSelector resolves against the Map state's effective input, not the item.
                     iterInput = jsonata
                             ? jsonataEvaluator.resolveTemplate(itemTransform, "ItemSelector",
                                     buildStatesVar(mapInput, null, iterContext), variables)
                             : resolveParameters(itemTransform, mapInput, iterContext);
-                } catch (FailStateException e) {
-                    failedItems.incrementAndGet();
-                    throw new IterationFailure(i, e);
                 }
-            }
-
-            long startMs = hasResultWriter ? System.currentTimeMillis() : 0L;
-            JsonNode branchOutput;
-            try {
                 if (!distributed) {
                     iterationChain.publish("MapIterationStarted", Map.of("name", name, "index", i));
                 }
+                iterationStarted = true;
                 if (hasResultWriter) {
                     childInputsByIndex[i] = iterInput;
                 }
@@ -2440,7 +2436,7 @@ public class AslExecutor {
             } catch (FailStateException e) {
                 int failedSoFar = failedItems.addAndGet(itemsInChild);
                 failedExecutions.incrementAndGet();
-                if (!distributed && !e.isRuntimeError()) {
+                if (iterationStarted && !distributed && !e.isRuntimeError()) {
                     iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
                 }
                 if (!tolerated.declared()) {
@@ -3137,14 +3133,9 @@ public class AslExecutor {
 
         var items = objectMapper.createArrayNode();
         try {
-            String continuationToken = null;
-            do {
-                var page = s3Service.listObjectsWithPrefixes(bucket, prefix, null, 1000, continuationToken, null);
-                for (var object : page.objects()) {
-                    items.add(listObjectsItem(object, jsonata));
-                }
-                continuationToken = page.nextContinuationToken();
-            } while (continuationToken != null);
+            for (var object : s3Service.listObjects(bucket, prefix, null, 0)) {
+                items.add(listObjectsItem(object, jsonata));
+            }
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
         }
