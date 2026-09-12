@@ -694,6 +694,27 @@ class GlueSchemaRegistryServiceTest {
     }
 
     @Test
+    void deleteSchemaVersionsRejectsHugeRangeBeforeExpansion() {
+        preCreateRegistry();
+        service.createSchema(new RegistryId("reg", null), "a", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.deleteSchemaVersions(new SchemaId("reg", "a", null), "1-9223372036854775807", REGION));
+
+        assertEquals("InvalidInputException", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteSchemaVersionsAcceptsRangeOfExactlyTwentyFiveVersions() {
+        preCreateRegistry();
+        service.createSchema(new RegistryId("reg", null), "a", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION);
+
+        var results = service.deleteSchemaVersions(new SchemaId("reg", "a", null), "1-25", REGION);
+
+        assertEquals(25, results.size());
+    }
+
+    @Test
     void deleteSchemaVersionsReportsErrorsForMissingVersions() {
         preCreateRegistry();
         service.createSchema(new RegistryId("reg", null), "a", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION);
