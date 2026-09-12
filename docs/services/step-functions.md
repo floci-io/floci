@@ -119,6 +119,15 @@ Results remain in input order even when iterations finish out of order. If an it
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
 iterations.
 
+## Distributed Map ItemReader
+
+`ItemReader` supports `arn:aws:states:::s3:getObject` with `InputType: JSON` and
+`arn:aws:states:::s3:listObjectsV2`. The listing reads every page under `Prefix`, and each item
+carries the AWS fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`.
+An empty prefix gives zero iterations and the Map succeeds. `ReaderConfig.MaxItems` applies to
+both readers; `MaxItemsPath` is not supported. The `CSV`, `JSONL`, `PARQUET` and `MANIFEST` input
+types are accepted by `CreateStateMachine` and fail the execution with `States.ItemReaderFailed`.
+
 ## Retry policies
 
 `Task`, `Parallel`, and `Map` states honor their `Retry` field. `ErrorEquals` matching

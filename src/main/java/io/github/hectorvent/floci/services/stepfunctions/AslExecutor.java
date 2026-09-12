@@ -2392,15 +2392,22 @@ public class AslExecutor {
 
             long startMs = hasResultWriter ? System.currentTimeMillis() : 0L;
             JsonNode branchOutput;
+            // AWS evaluates ItemSelector before it records MapIterationStarted, so a failing
+            // expression fails the Map state without any event for that iteration.
+            boolean iterationStarted = false;
             try {
-                if (!distributed) {
-                    iterationChain.publish("MapIterationStarted", Map.of("name", name, "index", i));
-                }
                 JsonNode iterInput = item;
                 if (itemTransform != null) {
                     // $ in ItemSelector resolves against the Map state's effective input, not the item.
-                    iterInput = resolveParameters(itemTransform, mapInput, iterContext);
+                    iterInput = jsonata
+                            ? jsonataEvaluator.resolveTemplate(itemTransform, "ItemSelector",
+                                    buildStatesVar(mapInput, null, iterContext), variables)
+                            : resolveParameters(itemTransform, mapInput, iterContext);
                 }
+                if (!distributed) {
+                    iterationChain.publish("MapIterationStarted", Map.of("name", name, "index", i));
+                }
+                iterationStarted = true;
                 if (hasResultWriter) {
                     childInputsByIndex[i] = iterInput;
                 }
@@ -2413,7 +2420,7 @@ public class AslExecutor {
                         topLevelQueryLanguage, iterContext, variables.deepCopy());
             } catch (FailStateException e) {
                 failedItems.incrementAndGet();
-                if (!distributed && !e.isRuntimeError()) {
+                if (iterationStarted && !distributed && !e.isRuntimeError()) {
                     iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
                 }
                 throw new IterationFailure(i, e);
@@ -2817,8 +2824,7 @@ public class AslExecutor {
                                                     ObjectNode variables) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
-            throw new FailStateException("States.ItemReaderFailed",
-                    "ItemReader resource arn:aws:states:::s3:listObjectsV2 is not yet implemented by the emulator");
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables);
         }
         if (!"arn:aws:states:::s3:getObject".equals(resource)) {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
@@ -2830,15 +2836,7 @@ public class AslExecutor {
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
 
-        JsonNode resolvedParameters;
-        if (jsonata && itemReader.has("Arguments")) {
-            JsonNode statesVar = buildStatesVar(input, null, context);
-            resolvedParameters = jsonataEvaluator.resolveTemplate(
-                    itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
-        } else {
-            JsonNode parameters = itemReader.path("Parameters");
-            resolvedParameters = resolveParameters(parameters, input, context);
-        }
+        JsonNode resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
         if (bucket == null || key == null) {
@@ -2868,6 +2866,54 @@ public class AslExecutor {
         }
     }
 
+    private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,
+                                                 boolean jsonata, ObjectNode variables) throws Exception {
+        if (jsonata && itemReader.has("Arguments")) {
+            JsonNode statesVar = buildStatesVar(input, null, context);
+            return jsonataEvaluator.resolveTemplate(
+                    itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
+        }
+        return resolveParameters(itemReader.path("Parameters"), input, context);
+    }
+
+    private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
+                                                     boolean jsonata, ObjectNode variables) throws Exception {
+        JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
+        String bucket = parameters.path("Bucket").asText(null);
+        if (bucket == null) {
+            throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket");
+        }
+        String prefix = parameters.path("Prefix").asText(null);
+
+        ArrayNode items = objectMapper.createArrayNode();
+        try {
+            // MaxItems keeps the first keys in order, so the listing itself is capped.
+            for (S3Object object : s3Service.listObjects(bucket, prefix, null, maxItems(itemReader))) {
+                items.add(listObjectsItem(object, jsonata));
+            }
+        } catch (AwsException e) {
+            throw new FailStateException("States.ItemReaderFailed", e.getMessage());
+        }
+        return new ResolvedMapItems(items, MapItemsSource.ITEM_READER_ARRAY);
+    }
+
+    // AWS renders LastModified as epoch seconds: a double in JSONPath state machines and an
+    // integer in JSONata ones.
+    private ObjectNode listObjectsItem(S3Object object, boolean jsonata) {
+        ObjectNode item = objectMapper.createObjectNode();
+        item.put("Etag", object.getETag());
+        item.put("Key", object.getKey());
+        long lastModified = object.getLastModified().getEpochSecond();
+        if (jsonata) {
+            item.put("LastModified", lastModified);
+        } else {
+            item.put("LastModified", (double) lastModified);
+        }
+        item.put("Size", object.getSize());
+        item.put("StorageClass", object.getStorageClass());
+        return item;
+    }
+
     private ArrayNode normalizeObjectItems(JsonNode items) {
         ArrayNode normalized = objectMapper.createArrayNode();
         items.fields().forEachRemaining(entry -> {
@@ -2893,8 +2939,12 @@ public class AslExecutor {
         return pointedItems;
     }
 
+    private int maxItems(JsonNode itemReader) {
+        return itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+    }
+
     private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
-        int maxItems = itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+        int maxItems = maxItems(itemReader);
         if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
             return items;
         }
