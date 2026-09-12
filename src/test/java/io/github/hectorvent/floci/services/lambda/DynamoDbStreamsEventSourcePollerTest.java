@@ -417,6 +417,83 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
     }
 
+    // ──────────────────── FilterCriteria + partial batch failure ────────────────────
+
+    /**
+     * The retry boundary is computed against the full FETCHED batch, while the function only ever
+     * sees the post-filter records. A filtered-out record sitting immediately before the lowest
+     * failed record is therefore the checkpoint: it is consumed (never re-read), and the failed
+     * record plus everything after it is retried.
+     */
+    @Test
+    void partialFailureWithFilterCheckpointsAtFilteredOutRecordBeforeLowestFailure() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"inactive\"}}"), // filtered out
+                ddbRecord("s3", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                ddbRecord("s4", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s4\"},{\"itemIdentifier\":\"s3\"}]}".getBytes());
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm(PATTERN);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+
+        pollerWith(store).pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode records = readRecords(payload.getValue());
+        assertEquals(3, records.size(), "only the post-filter records are delivered");
+        assertEquals("s1", records.get(0).path("dynamodb").path("SequenceNumber").asText());
+        assertEquals("s3", records.get(1).path("dynamodb").path("SequenceNumber").asText());
+        assertEquals("s4", records.get(2).path("dynamodb").path("SequenceNumber").asText());
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        // s2 was never sent to the function, yet it is the record immediately before the lowest
+        // failure (s3) in the fetched batch — so it is the checkpoint: s1 and s2 are consumed and
+        // the next poll resumes AFTER s2, re-delivering s3 and s4.
+        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    /**
+     * A reported identifier that names a record the filter removed is a record the function never
+     * received. It cannot be a legitimate failure, so it is treated as malformed and the whole batch
+     * is retried instead of silently advancing past it.
+     */
+    @Test
+    void partialFailureReportingFilteredOutRecordRetriesWholeBatch() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"inactive\"}}"), // filtered out
+                ddbRecord("s3", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        InvokeResult result = new InvokeResult();
+        // s2 is in the fetched batch but was never delivered to the function.
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s2\"}]}".getBytes());
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm(PATTERN);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, "s0");
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.pollAndInvoke(esm);
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode records = readRecords(payload.getValue());
+        assertEquals(2, records.size());
+        assertEquals("s1", records.get(0).path("dynamodb").path("SequenceNumber").asText());
+        assertEquals("s3", records.get(1).path("dynamodb").path("SequenceNumber").asText());
+        awaitPollCompletedViaSecondFetch(p, esm);
+
+        // Had the identifier been accepted, the checkpoint would have landed on s1 (the record
+        // before s2). Instead the prior checkpoint is kept and the entire window is retried.
+        verify(store, never()).saveForAccount(anyString(), any());
+        assertEquals("s0", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
     /**
      * A checkpoint that has aged out of the retained window names a cursor that can never succeed.
      * Retrying it wedges the ESM for good: later writes keep reaching the stream and none is ever
