@@ -140,7 +140,7 @@ public class MwaaEnvironmentManager {
         lifecycleManager.ensureVolume(dagsVolume);
         lifecycleManager.ensureVolume(logsVolume);
 
-        String image = "apache/airflow:%s-python3.12".formatted(airflowVersion);
+        String image = "apache/airflow:%s-%s".formatted(airflowVersion, pythonTagFor(airflowVersion));
         String adminUser = "admin";
         String adminPassword = generateSecret(24);
         String sqlAlchemyConn = "postgresql+psycopg2://airflow:" + dbPassword + "@" + dbIp + ":" + POSTGRES_PORT + "/airflow";
@@ -363,6 +363,20 @@ public class MwaaEnvironmentManager {
 
     static String environmentRegion(Environment environment) {
         return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1");
+    }
+
+    /**
+     * The Python minor version tag real Amazon MWAA runs for a given {@code AirflowVersion}, so
+     * the emulated image matches the same Airflow/Python pairing a requirements.txt built the way
+     * AWS documents (a constraint file pinned to that pairing) expects. Per AWS's own Airflow
+     * versions table, every version through 2.10.x runs Python 3.11, and 2.11.0 onward (including
+     * every 3.x release) runs Python 3.12.
+     */
+    static String pythonTagFor(String airflowVersion) {
+        String[] parts = airflowVersion.split("\\.", 3);
+        int major = Integer.parseInt(parts[0]);
+        int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+        return (major > 2 || (major == 2 && minor >= 11)) ? "python3.12" : "python3.11";
     }
 
     /**

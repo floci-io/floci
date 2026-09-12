@@ -131,7 +131,21 @@ class MwaaEnvironmentManagerTest {
     @Test
     void airflowImageTagSubstitutesTheRequestedVersion() {
         ContainerSpec spec = startAirflowAndCaptureSpec(false);
-        assertEquals("apache/airflow:2.10.5-python3.12", spec.image());
+        // Real Amazon MWAA runs 2.10.x on Python 3.11, not 3.12.
+        assertEquals("apache/airflow:2.10.5-python3.11", spec.image());
+    }
+
+    @Test
+    void pythonTagForMatchesRealMwaasAirflowPythonPairing() {
+        // Every version through 2.10.x runs Python 3.11 on real Amazon MWAA.
+        assertEquals("python3.11", MwaaEnvironmentManager.pythonTagFor("2.7.2"));
+        assertEquals("python3.11", MwaaEnvironmentManager.pythonTagFor("2.8.4"));
+        assertEquals("python3.11", MwaaEnvironmentManager.pythonTagFor("2.9.3"));
+        assertEquals("python3.11", MwaaEnvironmentManager.pythonTagFor("2.10.5"));
+        // 2.11.0 onward, and every 3.x release, runs Python 3.12.
+        assertEquals("python3.12", MwaaEnvironmentManager.pythonTagFor("2.11.0"));
+        assertEquals("python3.12", MwaaEnvironmentManager.pythonTagFor("2.11.2"));
+        assertEquals("python3.12", MwaaEnvironmentManager.pythonTagFor("3.0.6"));
     }
 
     @Test

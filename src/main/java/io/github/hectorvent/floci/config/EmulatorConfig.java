@@ -2514,7 +2514,9 @@ public interface EmulatorConfig {
         String defaultPostgresImage();
 
         /** Airflow versions environments may request. Combined with the image tag
-         *  {@code apache/airflow:<version>-python3.12}. */
+         *  {@code apache/airflow:<version>-<pythonTag>}, where the Python tag matches the
+         *  version real Amazon MWAA runs for that Airflow version: see
+         *  {@code MwaaEnvironmentManager.pythonTagFor}. */
         @WithDefault("2.10.5,2.9.3,2.8.4")
         List<String> supportedVersions();
 
