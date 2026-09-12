@@ -1677,4 +1677,75 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
     }
+
+    @Test
+    @Order(30)
+    void v1SendRawEmail_xSesControlHeaders_selectConfigurationSetAndSupplyTags() throws Exception {
+        drainQueue();
+        // Neither ConfigurationSetName nor Tags is sent as a request field: AWS reads both from the
+        // message itself on a raw send, so the events only reach the topic if the headers are honoured.
+        String raw = "From: " + SENDER + "\r\n"
+                + "To: success@simulator.amazonses.com\r\n"
+                + "Subject: header-driven\r\n"
+                + "X-SES-CONFIGURATION-SET: " + CS + "\r\n"
+                + "X-SES-MESSAGE-TAGS: campaign=headercampaign, env=headerenv\r\n"
+                + "\r\nbody";
+        String rawB64 = java.util.Base64.getEncoder().encodeToString(
+                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", SES_AUTH)
+                .body("Action=SendRawEmail"
+                        + "&Source=" + java.net.URLEncoder.encode(SENDER, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&RawMessage.Data=" + java.net.URLEncoder.encode(rawB64, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&Version=2010-12-01")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        List<JsonNode> events = receiveSesEvents(2);
+        JsonNode send = events.stream()
+                .filter(e -> "Send".equals(e.path("eventType").asText()))
+                .findFirst().orElseThrow();
+        JsonNode tags = send.path("mail").path("tags");
+        assertEquals(CS, tags.path("ses:configuration-set").get(0).asText());
+        assertEquals("headercampaign", tags.path("campaign").get(0).asText());
+        assertEquals("headerenv", tags.path("env").get(0).asText());
+    }
+
+    @Test
+    @Order(31)
+    void v1SendRawEmail_requestTagsOverrideTheHeaderTagsOfTheSameName() throws Exception {
+        drainQueue();
+        String raw = "From: " + SENDER + "\r\n"
+                + "To: success@simulator.amazonses.com\r\n"
+                + "Subject: header-vs-request\r\n"
+                + "X-SES-MESSAGE-TAGS: campaign=fromheader, only=inheader\r\n"
+                + "\r\nbody";
+        String rawB64 = java.util.Base64.getEncoder().encodeToString(
+                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", SES_AUTH)
+                .body("Action=SendRawEmail"
+                        + "&Source=" + java.net.URLEncoder.encode(SENDER, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&RawMessage.Data=" + java.net.URLEncoder.encode(rawB64, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&Tags.member.1.Name=campaign&Tags.member.1.Value=fromrequest"
+                        + "&ConfigurationSetName=" + CS
+                        + "&Version=2010-12-01")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        List<JsonNode> events = receiveSesEvents(2);
+        JsonNode send = events.stream()
+                .filter(e -> "Send".equals(e.path("eventType").asText()))
+                .findFirst().orElseThrow();
+        JsonNode tags = send.path("mail").path("tags");
+        assertEquals("fromrequest", tags.path("campaign").get(0).asText());
+        assertEquals("inheader", tags.path("only").get(0).asText(),
+                "a header tag with no request counterpart must survive the merge");
+    }
 }

@@ -226,11 +226,12 @@ public class SesQueryHandler {
         String bodyText = getParam(params, "Message.Body.Text.Data");
         String bodyHtml = getParam(params, "Message.Body.Html.Data");
         String configurationSetName = getParam(params, "ConfigurationSetName");
+        String returnPath = getParam(params, "ReturnPath");
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
         // ListManagementOptions is a v2-only SendEmail field; the v1 Query API has no equivalent.
         String messageId = sesService.sendEmail(source, toAddresses, ccAddresses, bccAddresses,
-                replyToAddresses, subject, bodyText, bodyHtml, configurationSetName,
+                replyToAddresses, returnPath, subject, bodyText, bodyHtml, configurationSetName,
                 emailTags, List.of(), null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
@@ -249,7 +250,7 @@ public class SesQueryHandler {
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
         String messageId = sesService.sendRawEmail(source, destinations, rawMessage,
-                configurationSetName, emailTags, null, region);
+                null, configurationSetName, emailTags, null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendRawEmail", AwsNamespaces.SES, result)).build();
@@ -573,9 +574,10 @@ public class SesQueryHandler {
 
         JsonNode templateData = parseTemplateData(templateDataRaw);
         String configurationSetName = getParam(params, "ConfigurationSetName");
+        String returnPath = getParam(params, "ReturnPath");
         List<MessageTag> emailTags = extractMessageTags(params, "Tags");
         String messageId = sesService.sendTemplatedEmail(source, toAddresses, ccAddresses,
-                bccAddresses, replyToAddresses, resolvedName, templateData,
+                bccAddresses, replyToAddresses, returnPath, resolvedName, templateData,
                 configurationSetName, emailTags, List.of(), null, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
@@ -715,9 +717,10 @@ public class SesQueryHandler {
         }
 
         String configurationSetName = getParam(params, "ConfigurationSetName");
+        String returnPath = getParam(params, "ReturnPath");
         List<MessageTag> defaultEmailTags = extractMessageTags(params, "DefaultTags");
         List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(source, replyToAddresses,
-                template.getSubject(), template.getTextPart(), template.getHtmlPart(),
+                returnPath, template.getSubject(), template.getTextPart(), template.getHtmlPart(),
                 defaultTemplateData, entries, configurationSetName,
                 defaultEmailTags, List.of(), region);
 
