@@ -18,7 +18,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -438,6 +440,41 @@ class S3VirtualHostFilterTest {
         ArgumentCaptor<URI> rewritten = ArgumentCaptor.forClass(URI.class);
         verify(ctx).setRequestUri(rewritten.capture());
         assertEquals("/www.example.com/index.html", rewritten.getValue().getRawPath());
+    }
+
+    @Test
+    void filterRewritesFormRequestExplicitlySignedForS3() {
+        URI requestUri = URI.create("http://vhost-bucket.localhost:4566/archive.zip?uploads=");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(requestUri);
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getHeaderString("Host")).thenReturn("vhost-bucket.localhost:4566");
+        when(ctx.getHeaderString("Authorization")).thenReturn(
+                "AWS4-HMAC-SHA256 Credential=test/20260912/us-east-1/s3/aws4_request, Signature=fake");
+        when(ctx.getHeaderString("Content-Type")).thenReturn("application/x-www-form-urlencoded; charset=UTF-8");
+
+        new S3VirtualHostFilter().filter(ctx);
+
+        ArgumentCaptor<URI> rewritten = ArgumentCaptor.forClass(URI.class);
+        verify(ctx).setRequestUri(rewritten.capture());
+        assertEquals("/vhost-bucket/archive.zip", rewritten.getValue().getRawPath());
+        assertEquals("uploads=", rewritten.getValue().getRawQuery());
+    }
+
+    @Test
+    void filterStillIgnoresUnsignedFormRequests() {
+        URI requestUri = URI.create("http://vhost-bucket.localhost:4566/archive.zip?uploads=");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(requestUri);
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getHeaderString("Host")).thenReturn("vhost-bucket.localhost:4566");
+        when(ctx.getHeaderString("Content-Type")).thenReturn("application/x-www-form-urlencoded");
+
+        new S3VirtualHostFilter().filter(ctx);
+
+        verify(ctx, never()).setRequestUri(any(URI.class));
     }
 
     // --- Other services' virtual-host schemes must not be swallowed as dotted buckets ---
