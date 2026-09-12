@@ -66,6 +66,13 @@ public class FirehoseService implements ResourceProvider {
     private final AccountAwareStorageBackend<DeliveryStreamDescription> streamStore;
     private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
     private final Map<String, Instant> bufferSince = new ConcurrentHashMap<>();
+    // One delivery at a time per stream, from taking the buffer to committing or
+    // restoring its checkpoint. The buffer monitor alone only makes the snapshot atomic:
+    // a second flush could still take records polled past a first flush's checkpoint,
+    // deliver them and commit that position while the first write is still in flight.
+    // If the first write then failed, the durable checkpoint would already sit past its
+    // records, and a restart before the retry would skip them for good.
+    private final Map<String, Object> flushLocks = new ConcurrentHashMap<>();
     private final S3Service s3Service;
     private final KinesisService kinesisService;
     private final RegionResolver regionResolver;
@@ -848,32 +855,34 @@ public class FirehoseService implements ResourceProvider {
             return;
         }
 
-        List<byte[]> toFlush;
-        // Taken with the records, under the same lock: this is the position the records
-        // about to be written cover, and committing it is this flush's job.
-        Map<String, String> checkpoint;
-        Instant since;
-        synchronized (buffer) {
-            toFlush = new ArrayList<>(buffer);
-            buffer.clear();
-            since = bufferSince.remove(streamName);
-            checkpoint = pendingSourceIterators.remove(streamName);
-        }
-        if (toFlush.isEmpty()) {
-            // Lost the race against a concurrent flush; nothing left to deliver. Any
-            // checkpoint taken here covers no undelivered records -- it can only have
-            // come from a poll that read an empty page -- so it commits as it stands.
-            commitSourceIterators(streamName, checkpoint);
-            return;
-        }
+        synchronized (flushLocks.computeIfAbsent(streamName, k -> new Object())) {
+            List<byte[]> toFlush;
+            // Taken with the records, under the same lock: this is the position the records
+            // about to be written cover, and committing it is this flush's job.
+            Map<String, String> checkpoint;
+            Instant since;
+            synchronized (buffer) {
+                toFlush = new ArrayList<>(buffer);
+                buffer.clear();
+                since = bufferSince.remove(streamName);
+                checkpoint = pendingSourceIterators.remove(streamName);
+            }
+            if (toFlush.isEmpty()) {
+                // Lost the race for the stream lock; nothing left to deliver. Any
+                // checkpoint taken here covers no undelivered records -- it can only have
+                // come from a poll that read an empty page -- so it commits as it stands.
+                commitSourceIterators(streamName, checkpoint);
+                return;
+            }
 
-        // Every store this delivery touches, Glue and S3 included, reads the account
-        // from the request context, and a scheduled flush has none. Without this the
-        // work would run as the default account rather than the stream's owner: the
-        // stream's Glue table would be missed and its objects would land in the wrong
-        // partition. The sidecar follows the same context, so both sides stay together.
-        RequestScopes.runAs(stream.getAccountId(),
-                () -> deliverBuffer(streamName, stream, toFlush, since, checkpoint));
+            // Every store this delivery touches, Glue and S3 included, reads the account
+            // from the request context, and a scheduled flush has none. Without this the
+            // work would run as the default account rather than the stream's owner: the
+            // stream's Glue table would be missed and its objects would land in the wrong
+            // partition. The sidecar follows the same context, so both sides stay together.
+            RequestScopes.runAs(stream.getAccountId(),
+                    () -> deliverBuffer(streamName, stream, toFlush, since, checkpoint));
+        }
     }
 
     private void deliverBuffer(String streamName, DeliveryStreamDescription stream,

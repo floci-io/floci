@@ -27,7 +27,16 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,6 +49,7 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -79,6 +89,14 @@ class FirehoseServiceTest {
     }
 
     private FirehoseService newService(int flushRecordCount) {
+        return newService(flushRecordCount, UnaryOperator.identity());
+    }
+
+    /**
+     * @param kinesisDecorator applied to the source service before the poller sees it,
+     *                         e.g. {@code Mockito::spy} to park a poll mid-way.
+     */
+    private FirehoseService newService(int flushRecordCount, UnaryOperator<KinesisService> kinesisDecorator) {
         EmulatorConfig.FirehoseServiceConfig firehoseCfg = mock(EmulatorConfig.FirehoseServiceConfig.class);
         when(firehoseCfg.enabled()).thenReturn(true);
         when(firehoseCfg.tickIntervalSeconds()).thenReturn(10L);
@@ -91,10 +109,35 @@ class FirehoseServiceTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         // A real KinesisService, not a mock: the point of the source poller is that it
         // sees what a GetRecords consumer sees, and a stubbed one could not show that.
-        kinesisService = new KinesisService(storageFactory, regionResolver);
+        kinesisService = kinesisDecorator.apply(new KinesisService(storageFactory, regionResolver));
         return new FirehoseService(storageFactory, s3Service, kinesisService,
                 regionResolver, clock, config, mock(FirehoseParquetConverter.class),
                 mock(FirehoseLambdaTransformer.class));
+    }
+
+    /** The committed source checkpoint, as a restarted service would read it back. */
+    @SuppressWarnings("unchecked")
+    private Optional<Map<String, String>> durableCheckpoint(String deliveryStream) {
+        AccountAwareStorageBackend<Map<String, String>> store =
+                (AccountAwareStorageBackend<Map<String, String>>) backends.get("firehose/source-iterators.json");
+        return store.getForAccount("000000000000", "us-east-1/" + deliveryStream);
+    }
+
+    /**
+     * Spin until {@code thread} is parked entering a monitor or {@code task} has finished,
+     * whichever comes first, so the assertions that follow see a settled state rather than
+     * a thread that was merely never scheduled.
+     */
+    private static void awaitParkedOrDone(AtomicReference<Thread> thread, Future<?> task)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline && !task.isDone()) {
+            Thread th = thread.get();
+            if (th != null && th.getState() == Thread.State.BLOCKED) {
+                return;
+            }
+            Thread.sleep(5);
+        }
     }
 
     private static S3Destination destination(String bucketArn, String compressionFormat) {
@@ -746,6 +789,86 @@ class FirehoseServiceTest {
 
         firehoseService.flush("keep-stream");
         assertEquals("second\n", delivered("sink", 2).text());
+    }
+
+    @Test
+    void aLaterFlushCannotCommitItsCheckpointWhileAnEarlierBatchIsUnresolved() throws Exception {
+        // A spy, so one poll can be parked between reading its page and buffering it.
+        firehoseService = newService(0, Mockito::spy);
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "first".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        firehoseService.pollKinesisSources();
+
+        // The first S3 write parks until released and then fails, like a slow S3 that
+        // eventually answers with an error. Later writes succeed.
+        CountDownLatch firstWriteStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstWrite = new CountDownLatch(1);
+        AtomicBoolean firstWrite = new AtomicBoolean(true);
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenAnswer(invocation -> {
+            if (firstWrite.getAndSet(false)) {
+                firstWriteStarted.countDown();
+                releaseFirstWrite.await();
+                throw new RuntimeException("s3 unavailable");
+            }
+            return null;
+        });
+        // The next poll parks once it has read its page, before it buffers the records
+        // and advances the pending checkpoint past them.
+        kinesisService.putRecord("src-stream", "second".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        CountDownLatch pollRead = new CountDownLatch(1);
+        CountDownLatch resumePoll = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            Object page = invocation.callRealMethod();
+            pollRead.countDown();
+            resumePoll.await();
+            return page;
+        }).when(kinesisService).getRecordsForAccount(anyString(), anyString(), any(), anyString());
+
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            // P reads "second" from the position "first" was polled to, then parks.
+            Future<?> poll = pool.submit(firehoseService::pollKinesisSources);
+            assertTrue(pollRead.await(2, TimeUnit.SECONDS), "the poll must read its page");
+            // A takes "first" with its checkpoint and parks inside the S3 write.
+            Future<?> flushA = pool.submit(() -> firehoseService.flush("sourced-stream"));
+            assertTrue(firstWriteStarted.await(2, TimeUnit.SECONDS), "flush A must reach its S3 write");
+            // P buffers "second" and leaves a checkpoint past both records pending.
+            resumePoll.countDown();
+            poll.get(2, TimeUnit.SECONDS);
+            // B finds "second" buffered while A still owes "first" to S3.
+            AtomicReference<Thread> bThread = new AtomicReference<>();
+            Future<?> flushB = pool.submit(() -> {
+                bThread.set(Thread.currentThread());
+                firehoseService.flush("sourced-stream");
+            });
+            awaitParkedOrDone(bThread, flushB);
+
+            // Committing B's checkpoint now would persist a position past "first" while
+            // "first" is not durable: a restart before A's retry would skip it forever.
+            assertTrue(durableCheckpoint("sourced-stream").isEmpty(),
+                    "no checkpoint may be committed while an earlier batch is unresolved");
+            verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                    anyMap(), any(PutObjectOptions.class));
+            assertThrows(TimeoutException.class, () -> flushB.get(500, TimeUnit.MILLISECONDS),
+                    "a later flush must wait for the earlier batch to resolve");
+
+            releaseFirstWrite.countDown();
+            flushA.get(2, TimeUnit.SECONDS);
+            flushB.get(2, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        // A's failure hands "first" back ahead of "second"; B then delivers both.
+        assertEquals("first\nsecond\n", delivered("sink", 2).text());
+
+        // Restart: the committed checkpoint covers exactly what reached S3, so nothing
+        // is re-read and nothing is skipped.
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        verify(s3Service, times(2)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
     }
 
     @Test
