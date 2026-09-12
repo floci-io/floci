@@ -1427,4 +1427,63 @@ class DynamoDbJsonHandlerTest {
         assertEquals("ConditionalCheckFailed", reason.get("Code").asText());
         assertEquals("The conditional request failed", reason.get("Message").asText());
     }
+
+    @Test
+    void updateItemRejectsAnOutOfRangeAddOperandBeforeTheTableLookup() {
+        var request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", "ADD n :a");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":a", attributeValue("N", "1e126")));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Number overflow. "
+                + "Attempting to store a number with magnitude larger than supported range", ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsATooSmallExpressionAttributeValue() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "SET x = :a");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":a", attributeValue("N", "1e-131")));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Number underflow. "
+                + "Attempting to store a number with magnitude smaller than supported range", ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsAnAttributeUpdatesValueWithTooManyDigits() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        var update = mapper.createObjectNode();
+        update.put("Action", "ADD");
+        update.set("Value", attributeValue("N", "123456789012345678901234567890123456789"));
+        request.set("AttributeUpdates", mapper.createObjectNode().set("n", update));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Attempting to store more than 38 significant digits in a Number",
+                ex.getMessage());
+    }
+
+    @Test
+    void queryRejectsAnOutOfRangeExpressionAttributeValueWithoutTheEnvelope() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.put("KeyConditionExpression", "userId = :p");
+        request.put("FilterExpression", "n = :a");
+        var values = singleValue(":p");
+        values.set(":a", attributeValue("N", "1e126"));
+        request.set("ExpressionAttributeValues", values);
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("Query", request, "eu-west-1"));
+        assertEquals("Number overflow. Attempting to store a number with magnitude larger than supported range",
+                ex.getMessage());
+    }
 }

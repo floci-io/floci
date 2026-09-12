@@ -414,6 +414,7 @@ public class DynamoDbJsonHandler {
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
         String conditionalOperator = request.has("ConditionalOperator")
@@ -545,6 +546,7 @@ public class DynamoDbJsonHandler {
         }
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
 
         // EAN/EAV with no expression to reference them: AWS reports "can only be specified
         // when using expressions", not the "unused in expressions" wording (#2893).
@@ -611,6 +613,9 @@ public class DynamoDbJsonHandler {
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
+        var attributeUpdateValues = legacyValues(attributeUpdates);
+        DynamoDbNumberUtils.requireStorable(attributeUpdateValues, true);
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
         JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
@@ -849,6 +854,24 @@ public class DynamoDbJsonHandler {
 
     private static final int MAX_TOTAL_SEGMENTS = 1_000_000;
 
+    // The AttributeValues inside a legacy container, carried under Value or AttributeValueList.
+    private ObjectNode legacyValues(JsonNode container) {
+        var values = objectMapper.createObjectNode();
+        if (container == null || !container.isObject()) {
+            return values;
+        }
+        var i = 0;
+        for (var spec : container) {
+            if (spec.has("Value")) {
+                values.set("v" + i++, spec.get("Value"));
+            }
+            for (var value : spec.path("AttributeValueList")) {
+                values.set("v" + i++, value);
+            }
+        }
+        return values;
+    }
+
     // UPDATED_NEW and UPDATED_OLD report only the changed part of a map, not the whole
     // attribute. Returns null when the map changed only by losing an entry, which sets
     // nothing to a new value.
@@ -946,6 +969,7 @@ public class DynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpression);
@@ -1117,6 +1141,7 @@ public class DynamoDbJsonHandler {
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpressionScan);
 
