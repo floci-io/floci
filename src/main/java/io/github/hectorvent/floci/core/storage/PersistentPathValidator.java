@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.ResolvedServiceCatalog;
 import io.github.hectorvent.floci.core.common.ServiceDescriptor;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -19,6 +20,8 @@ import java.util.List;
  */
 @ApplicationScoped
 public class PersistentPathValidator {
+
+    private static final Logger LOG = Logger.getLogger(PersistentPathValidator.class);
 
     private final ResolvedServiceCatalog catalog;
     private final EmulatorConfig config;
@@ -37,10 +40,13 @@ public class PersistentPathValidator {
                 .filter(d -> d.enabled() && d.supportsStorage() && !"memory".equals(d.storageMode()))
                 .toList();
         if (persistent.isEmpty()) {
+            LOG.info("Storage mode: memory (state is NOT persisted across restarts)");
             return;
         }
 
         Path root = Path.of(config.storage().persistentPath());
+        LOG.infov("Storage mode: persistent (state for {0} is written to {1})",
+                describe(persistent), root.toAbsolutePath());
         try {
             probeWritable(root);
             Path s3Root = root.resolve("s3");
@@ -49,18 +55,21 @@ public class PersistentPathValidator {
                 probeWritable(s3Root);
             }
         } catch (IOException | SecurityException e) {
-            String services = persistent.stream()
-                    .map(d -> d.storageKey() + "=" + d.storageMode())
-                    .distinct()
-                    .limit(8)
-                    .reduce((a, b) -> a + ", " + b)
-                    .orElse("");
             throw new IllegalStateException(
                     "Persistent storage path '" + root.toAbsolutePath()
-                            + "' is not writable, but non-memory storage is enabled (" + services
+                            + "' is not writable, but non-memory storage is enabled (" + describe(persistent)
                             + "). Fix the volume mount permissions (it may be read-only or root-owned),"
                             + " or point FLOCI_STORAGE_PERSISTENT_PATH at a writable directory.", e);
         }
+    }
+
+    private static String describe(List<ServiceDescriptor> persistent) {
+        return persistent.stream()
+                .map(d -> d.storageKey() + "=" + d.storageMode())
+                .distinct()
+                .limit(8)
+                .reduce((a, b) -> a + ", " + b)
+                .orElse("");
     }
 
     static void probeWritable(Path dir) throws IOException {
