@@ -16,7 +16,6 @@ import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -267,16 +266,39 @@ class CloudFormationCloudFrontPoliciesIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(400)
-            .body(containsString("Stack with id " + stackName + " does not exist"));
+        awaitStackDeleted(stackName);
+    }
+
+    /**
+     * github.com/floci-io/floci/issues/3365: DeleteStack answers before the stack is actually
+     * gone - deletion runs on an executor (CloudFormationService.deleteStack) - so a DescribeStacks
+     * call made immediately after DeleteStack's 200 races that executor and intermittently still
+     * finds the stack. Polls until DescribeStacks reports the stack unknown, matching the
+     * awaitStackDeleted helper CloudFormationIntegrationTest already uses for the same race.
+     */
+    private static void awaitStackDeleted(String stackName) {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            String body = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .extract().body().asString();
+            if (body.contains("Stack with id " + stackName + " does not exist")) {
+                return;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Interrupted while waiting for stack " + stackName + " to be deleted", e);
+            }
+        }
+        fail("Stack " + stackName + " did not become unknown to DescribeStacks within timeout");
     }
 
     private static String describeStacks(String stackName) {
