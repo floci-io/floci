@@ -1643,4 +1643,40 @@ class DynamoDbJsonHandlerTest {
         assertEquals("Invalid ProjectionExpression: Expression size has exceeded the maximum allowed size;",
                 ex.getMessage());
     }
+
+    @Test
+    void executeStatementRejectsATooDeepParameter() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("Statement", "UPDATE \"Users\" SET deep=? WHERE userId=?");
+        request.set("Parameters", mapper.createArrayNode().add(nestedMaps(32)).add(attributeValue("S", "u1")));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("ExecuteStatement", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+    }
+
+    @Test
+    void executeTransactionCancelsOnATooDeepParameterWithThatStatementsReason() throws Exception {
+        createUsersTable("eu-west-1");
+        var fine = mapper.createObjectNode();
+        fine.put("Statement", "UPDATE \"Users\" SET x=? WHERE userId=?");
+        fine.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "x")).add(attributeValue("S", "u1")));
+        var deep = mapper.createObjectNode();
+        deep.put("Statement", "INSERT INTO \"Users\" VALUE {'userId': ?, 'deep': ?}");
+        deep.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "u2")).add(nestedMaps(32)));
+        var request = mapper.createObjectNode();
+        request.set("TransactStatements", mapper.createArrayNode().add(fine).add(deep));
+
+        var response = handler.handle("ExecuteTransaction", request, "eu-west-1");
+        assertEquals(400, response.getStatus());
+        var body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("TransactionCanceledException", body.get("__type").asText());
+        var reasons = body.get("CancellationReasons");
+        assertEquals("None", reasons.get(0).get("Code").asText());
+        assertEquals("ValidationError", reasons.get(1).get("Code").asText());
+        assertEquals("Nesting Levels have exceeded supported limits", reasons.get(1).get("Message").asText());
+        assertNull(service.getItem("Users", item("userId", "u2"), "eu-west-1"));
+    }
 }

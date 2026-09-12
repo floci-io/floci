@@ -2662,12 +2662,13 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
         }
         List<JsonNode> transactItems = new ArrayList<>();
-        for (JsonNode s : stmts) {
-            DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
-                    s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
-            transactItems.add(partiQLHandler.toTransactItem(stmt, region));
-        }
         try {
+            cancelOnTooDeepParameters(stmts);
+            for (JsonNode s : stmts) {
+                DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
+                        s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
+                transactItems.add(partiQLHandler.toTransactItem(stmt, region));
+            }
             dynamoDbService.transactWriteItems(transactItems, region);
             ObjectNode resp = objectMapper.createObjectNode();
             resp.set("Responses", objectMapper.createArrayNode());
@@ -2680,13 +2681,34 @@ public class DynamoDbJsonHandler {
             for (TransactionCanceledException.CancellationReason reason : e.getCancellationReasons()) {
                 ObjectNode r = objectMapper.createObjectNode();
                 r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
-                r.put("Message", reason.code().isEmpty() ? "" : "The conditional request failed");
+                r.put("Message", reason.code().isEmpty() ? ""
+                        : reason.message() != null ? reason.message() : "The conditional request failed");
                 if (reason.item() != null) {
                     r.set("Item", reason.item());
                 }
                 reasons.add(r);
             }
             return Response.status(400).entity(body).build();
+        }
+    }
+
+    // AWS cancels the transaction, with that statement's reason, when a parameter is too deep.
+    private void cancelOnTooDeepParameters(JsonNode stmts) {
+        var reasons = new ArrayList<TransactionCanceledException.CancellationReason>();
+        var cancelled = false;
+        for (JsonNode s : stmts) {
+            var tooDeep = false;
+            for (var parameter : s.path("Parameters")) {
+                tooDeep |= !DynamoDbAttributeValueValidator.valueNestingWithinLimit(parameter);
+            }
+            cancelled |= tooDeep;
+            reasons.add(tooDeep
+                    ? new TransactionCanceledException.CancellationReason("ValidationError", null,
+                            DynamoDbAttributeValueValidator.NESTING_EXCEEDED)
+                    : new TransactionCanceledException.CancellationReason("", null));
+        }
+        if (cancelled) {
+            throw new TransactionCanceledException(reasons);
         }
     }
 

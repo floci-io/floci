@@ -170,6 +170,7 @@ public class DynamoDbPartiQLParser {
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
+        parameters.forEach(DynamoDbAttributeValueValidator::requireParameterNestingWithinLimit);
         return new DynamoDbPartiQLParser(tokenize(statement.trim()), parameters).parseStmt();
     }
 
