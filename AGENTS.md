@@ -323,13 +323,77 @@ References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
 
 ## Code Style
 
+### General
+
 - Use constructor injection
 - Prefer self-explanatory code over comments
 - Avoid unnecessary comments
 - Always use braces in conditionals
 - Never leave a `catch` block empty. If an exception is intentionally tolerated, log it with enough context to diagnose it later.
+  When swallowing really is correct and logging would be noise, name the variable
+  `ignored` or `expected` and say in a comment why it is safe. A bare
+  `catch (Exception e) {}` is never acceptable.
 - Follow existing project patterns
 - Use modern Java features only when they improve clarity
+
+### Types and names
+
+- **Do not use `var`. Write the explicit type.** Floci reproduces AWS wire
+  contracts, so the concrete type at a call site is usually the thing under
+  review: whether a value is a `LinkedHashMap` or a `Map`, an AWS model type or a
+  JDK one, is exactly what a reviewer needs to see. This covers local
+  declarations, enhanced-for (`for (Tag tag : tags)`), classic for-init, and
+  try-with-resources. The one exception is a record deconstruction pattern
+  (`case Node(var left, var right) ->`), where naming the component types is pure
+  noise.
+- **Import the classes you use. Do not write fully-qualified names inline.**
+  `new ArrayList<>()`, never `new java.util.ArrayList<>()`. The only reason to
+  qualify inline is a genuine name collision inside one file: import the type used
+  more often, qualify the other, and leave a short comment naming the clash.
+  Real examples in this repo are `apigateway` versus `apigatewayv2` model types,
+  CDI `jakarta.enterprise.inject.Instance` versus the EC2 model `Instance`,
+  `jakarta.inject.Provider` versus `jakarta.ws.rs.ext.Provider`, and a service's
+  own `Record` model versus `java.lang.Record`.
+
+### Imports
+
+- No wildcard imports in `src/main`. Static wildcards stay fine in tests, where
+  `Assertions.*`, `Mockito.*` and `Matchers.*` are the established idiom.
+- Import order: non-`java`/`javax` imports alphabetically, then `java.*` and
+  `javax.*` last. This is the IntelliJ default layout and what most of the tree
+  already uses.
+
+### Conventions the codebase already follows
+
+Written down so they stay true. New code should match them without thinking.
+A handful of files predate them; a violation you find in the tree is a straggler,
+not a precedent.
+
+- 4-space indentation, K&R braces. Never indent with a tab.
+- JBoss Logging, in a field named `LOG`, using the parameterized `...v()` form.
+  No string concatenation in log calls.
+- No `System.out` or `System.err`, and no `printStackTrace`. The one exception is a
+  command-line entry point under `tools/`, where stdout is the program's output.
+- `java.time` for everything Floci owns. `Calendar` and `SimpleDateFormat` appear
+  nowhere and must not be introduced. `java.util.Date` survives only where a
+  third-party signature forces it, currently the BouncyCastle certificate builder
+  and the JAX-RS `HttpHeaders.getDate()` override. Convert at that boundary with
+  `Date.from(instant)` and keep `java.time` on Floci's side of it.
+- Constructor injection in `src/main`. Field injection is fine in tests, and
+  `Instance<T>` field injection is a legitimate CDI pattern.
+- `Optional` as a return type only, never as a field or a parameter.
+- Switch expressions over switch statements. Pattern-matching `instanceof` over
+  cast-after-check.
+- `AwsException` for domain errors.
+- `final` on service fields, but not on locals or parameters.
+
+### Tests
+
+- Name test methods either as a camelCase sentence (`putAndGetFromMemory`) or as
+  `method_scenario_expectation`. Both are established here. Never `testX`.
+- JUnit 5 assertions with Hamcrest and RestAssured matchers. Do not introduce
+  AssertJ.
+- `@DisplayName` is deliberately not used. The method name carries the intent.
 
 ---
 
