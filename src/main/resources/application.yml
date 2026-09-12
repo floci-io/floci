@@ -37,20 +37,20 @@ quarkus:
   native:
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), IAM reads its AWS managed-policy
-      # catalog (iam/managed-policies.yaml, iam/managed-policy-documents.json and
-      # iam/managed-policy-versions.json), AppSync's GraphQL parser reads its
+      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
       # message bundles, and API Gateway's Velocity engine reads its default
-      # properties at runtime via
-      # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
-      # cannot detect these dynamically-built paths, so they are registered
-      # explicitly to ensure GraalVM includes every file in the native image.
+      # properties at runtime via ClassLoader#getResourceAsStream. Quarkus's
+      # static resource analysis cannot detect these dynamically-built paths,
+      # so they are registered explicitly to ensure GraalVM includes every
+      # file in the native image.
+      # The IAM managed-policy catalog (iam/*) is not listed on purpose.
+      # AwsManagedPolicies parses it while the image is built and the parsed
+      # catalog lives in the image heap, so the 3.5 MB of source files would
+      # only be a second copy of the same data.
       includes:
         - pricing-snapshots/**
         - ui/*.html
         - ec2/*.yaml
-        - iam/*.yaml
-        - iam/*.json
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
