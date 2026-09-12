@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 final class ExtendedQuerySession {
@@ -87,7 +88,19 @@ final class ExtendedQuerySession {
     }
 
     synchronized void transactionEnded() {
-        portals.clear();
+        if (journal.isEmpty()) {
+            portals.clear();
+            return;
+        }
+
+        Map<String, String> expiredPortals = journal.get(0).portalsBefore();
+        removeUnchangedExpiredPortals(portals, expiredPortals);
+        for (int i = 0; i < journal.size(); i++) {
+            JournalEntry entry = journal.get(i);
+            Map<String, String> portalsBefore = new LinkedHashMap<>(entry.portalsBefore());
+            removeUnchangedExpiredPortals(portalsBefore, expiredPortals);
+            journal.set(i, new JournalEntry(entry.mutation(), entry.statementsBefore(), portalsBefore));
+        }
     }
 
     synchronized void clear() {
@@ -103,6 +116,12 @@ final class ExtendedQuerySession {
                 new LinkedHashMap<>(statements),
                 new LinkedHashMap<>(portals)));
         return mutation;
+    }
+
+    private static void removeUnchangedExpiredPortals(Map<String, String> candidates,
+            Map<String, String> expiredPortals) {
+        candidates.entrySet().removeIf(entry -> expiredPortals.containsKey(entry.getKey())
+                && Objects.equals(expiredPortals.get(entry.getKey()), entry.getValue()));
     }
 
     record Mutation(long id) {

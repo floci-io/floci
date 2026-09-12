@@ -139,6 +139,26 @@ class BackendResponseCoordinatorTest {
     }
 
     @Test
+    void idleReadyForQueryKeepsPortalsStagedForTheNextPipelinedCycle() {
+        ExtendedQuerySession session = new ExtendedQuerySession();
+        BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
+        CopyStatementParser.S3Statement copy = CopyStatementParser.parse("COPY t FROM 's3://b/k'");
+        session.confirm(session.stageParse("s", copy));
+        session.confirm(session.stageBind("old", "s"));
+        coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
+        coordinator.register(BackendResponseCoordinator.Operation.BIND, session.stageBind("next", "s"));
+
+        coordinator.onBackendFrame('Z', new byte[]{'I'});
+
+        assertTrue(session.portal("old").isEmpty());
+        assertSame(copy, session.portal("next").orElseThrow());
+
+        coordinator.onBackendFrame('E', EMPTY_BODY);
+        assertTrue(session.portal("old").isEmpty());
+        assertTrue(session.portal("next").isEmpty());
+    }
+
+    @Test
     void closeWakesABlockedWaiter() throws Exception {
         ExtendedQuerySession session = new ExtendedQuerySession();
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
