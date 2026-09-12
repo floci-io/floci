@@ -14,9 +14,11 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -68,24 +70,100 @@ class RedshiftInterceptorIntegrationTest {
         }
     }
 
-    private static String jdbcUrl(Cluster c) {
+    private static String jdbcUrl(Cluster cluster) {
         // Use 127.0.0.1 explicitly instead of c.getEndpoint().getAddress() to avoid UnknownHostException
         // in CI environments where floci.emulator.hostname is set to host.docker.internal.
-        // preferQueryMode=simple forces pgjdbc to use the simple query protocol ('Q' messages)
-        // rather than extended query protocol ('P'/'B'/'E'/'S' messages).
-        return "jdbc:postgresql://127.0.0.1:" + c.getEndpoint().getPort() + "/dev?preferQueryMode=simple";
+        return "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
+    }
+
+    private static String namedPreparedJdbcUrl(Cluster cluster) {
+        return jdbcUrl(cluster) + "?prepareThreshold=1";
     }
 
     private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
+        return waitForConnection(jdbcUrl(cluster), username, password);
+    }
+
+    private static Connection waitForConnection(String jdbcUrl, String username, String password) throws SQLException {
         try {
             return Awaitility.await()
                     .atMost(Duration.ofSeconds(30))
                     .pollInterval(Duration.ofMillis(500))
                     .ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(jdbcUrl(cluster), username, password), Objects::nonNull);
+                    .until(() -> DriverManager.getConnection(jdbcUrl, username, password), Objects::nonNull);
         } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection(jdbcUrl(cluster), username, password); // throw original
+            return DriverManager.getConnection(jdbcUrl, username, password); // throw original
         }
+    }
+
+    @Test
+    void preparedDdlCopyAndUnloadUseDefaultExtendedQuery() throws Exception {
+        clusterId = "it-extended-prepared";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-extended";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "copy/data.txt",
+                "1|alice\n2|bob\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+
+        try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
+                PreparedStatement ddl = connection.prepareStatement(
+                        "CREATE TABLE ext_sales (id int ENCODE az64, name text) "
+                                + "DISTSTYLE KEY DISTKEY (id)");
+                PreparedStatement copy = connection.prepareStatement(
+                        "COPY ext_sales FROM 's3://redshift-extended/copy/data.txt'");
+                PreparedStatement unload = connection.prepareStatement(
+                        "UNLOAD ('select id, name from ext_sales order by id') "
+                                + "TO 's3://redshift-extended/unload/' ALLOWOVERWRITE")) {
+            ddl.execute();
+            copy.execute();
+            unload.execute();
+            try (ResultSet rows = connection.createStatement().executeQuery(
+                    "SELECT count(*) FROM ext_sales")) {
+                assertTrue(rows.next());
+                assertEquals(2, rows.getInt(1));
+            }
+        }
+
+        List<S3Object> objects = s3.listObjects(bucket, "unload/", null, 100);
+        assertEquals(1, objects.size());
+        assertEquals("1|alice\n2|bob\n", new String(
+                s3.getObject(bucket, objects.get(0).getKey()).getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void namedPreparedCopyAndUnloadCanBeExecutedTwice() throws Exception {
+        clusterId = "it-extended-named";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-extended-named";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "copy/data.txt", "7|seven\n".getBytes(StandardCharsets.UTF_8),
+                "text/plain", Map.of());
+
+        try (Connection connection = waitForConnection(
+                namedPreparedJdbcUrl(cluster), "admin", "Secret123")) {
+            connection.createStatement().execute("CREATE TABLE named_sales (id int, name text)");
+            try (PreparedStatement copy = connection.prepareStatement(
+                    "COPY named_sales FROM 's3://redshift-extended-named/copy/data.txt'")) {
+                copy.execute();
+                copy.execute();
+            }
+            try (PreparedStatement unload = connection.prepareStatement(
+                    "UNLOAD ('select id, name from named_sales order by id') "
+                            + "TO 's3://redshift-extended-named/unload/' ALLOWOVERWRITE")) {
+                unload.execute();
+                unload.execute();
+            }
+            try (ResultSet rows = connection.createStatement().executeQuery(
+                    "SELECT count(*) FROM named_sales")) {
+                assertTrue(rows.next());
+                assertEquals(2, rows.getInt(1));
+            }
+        }
+
+        List<S3Object> objects = s3.listObjects(bucket, "unload/", null, 100);
+        assertEquals(1, objects.size());
+        assertEquals("7|seven\n7|seven\n", new String(
+                s3.getObject(bucket, objects.get(0).getKey()).getData(), StandardCharsets.UTF_8));
     }
 
     @Test
@@ -273,12 +351,12 @@ class RedshiftInterceptorIntegrationTest {
             c.createStatement().execute("UNLOAD ('select id from g_src order by id') TO 's3://redshift-unload-it-gzip/g/' GZIP");
         }
 
-        var objs = s3.listObjects(bucket, "g/", null, 100);
+        List<S3Object> objs = s3.listObjects(bucket, "g/", null, 100);
         assertEquals(1, objs.size());
         assertTrue(objs.get(0).getKey().endsWith(".gz"), objs.get(0).getKey());
         byte[] data = s3.getObject(bucket, objs.get(0).getKey()).getData();
         ByteArrayOutputStream raw = new ByteArrayOutputStream();
-        try (var in = new GZIPInputStream(new ByteArrayInputStream(data))) {
+        try (InputStream in = new GZIPInputStream(new ByteArrayInputStream(data))) {
             in.transferTo(raw);
         }
         assertEquals("7\n8\n", raw.toString(StandardCharsets.UTF_8));
@@ -297,7 +375,7 @@ class RedshiftInterceptorIntegrationTest {
             c.createStatement().execute("UNLOAD ('select id from m_src') TO 's3://redshift-unload-it-manifest/m/' MANIFEST");
         }
 
-        var manifest = s3.getObject(bucket, "m/manifest");
+        S3Object manifest = s3.getObject(bucket, "m/manifest");
         assertNotNull(manifest);
         String json = new String(manifest.getData(), StandardCharsets.UTF_8);
         assertTrue(json.contains("\"entries\""), json);
