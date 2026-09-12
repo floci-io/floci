@@ -752,8 +752,8 @@ public class FirehoseService implements ResourceProvider {
     }
 
     // Rebased on whatever is current rather than on a map carried across the shard loop,
-    // so that a flush which discarded pending (because its S3 write failed) rolls the
-    // other shards back to committed instead of having this poll re-assert them.
+    // so that a flush which took pending (and, if its S3 write failed, restored it) is
+    // never overwritten by a stale copy this poll carried past that flush.
     private void advanceSourceIterator(String streamKey, String shardId, String iterator) {
         Map<String, String> advanced = new LinkedHashMap<>(sourceIteratorsInUse(streamKey));
         advanced.put(shardId, iterator);
@@ -852,10 +852,11 @@ public class FirehoseService implements ResourceProvider {
         // Taken with the records, under the same lock: this is the position the records
         // about to be written cover, and committing it is this flush's job.
         Map<String, String> checkpoint;
+        Instant since;
         synchronized (buffer) {
             toFlush = new ArrayList<>(buffer);
             buffer.clear();
-            bufferSince.remove(streamName);
+            since = bufferSince.remove(streamName);
             checkpoint = pendingSourceIterators.remove(streamName);
         }
         if (toFlush.isEmpty()) {
@@ -872,11 +873,11 @@ public class FirehoseService implements ResourceProvider {
         // stream's Glue table would be missed and its objects would land in the wrong
         // partition. The sidecar follows the same context, so both sides stay together.
         RequestScopes.runAs(stream.getAccountId(),
-                () -> deliverBuffer(streamName, stream, toFlush, checkpoint));
+                () -> deliverBuffer(streamName, stream, toFlush, since, checkpoint));
     }
 
     private void deliverBuffer(String streamName, DeliveryStreamDescription stream,
-                               List<byte[]> toFlush, Map<String, String> checkpoint) {
+                               List<byte[]> toFlush, Instant since, Map<String, String> checkpoint) {
         try {
             String bucket = resolveBucket(stream);
             S3Destination s3 = stream.s3Destination();
@@ -935,10 +936,34 @@ public class FirehoseService implements ResourceProvider {
             // Only now: the records these iterators were read past are durable.
             commitSourceIterators(streamName, checkpoint);
         } catch (Exception e) {
-            LOG.errorv("Failed to flush Firehose stream {0}: {1}", streamName, e.getMessage());
-            // checkpoint is deliberately neither committed nor put back. The durable
-            // checkpoint stays where it was, so the next poll reads these records again
-            // and this failed delivery repairs itself.
+            LOG.errorv("Failed to flush Firehose stream {0}; keeping {1} records buffered for retry: {2}",
+                    streamName, toFlush.size(), e.getMessage());
+            restoreFailedFlush(streamName, toFlush, since, checkpoint);
+        }
+    }
+
+    private void restoreFailedFlush(String streamName, List<byte[]> toFlush, Instant since,
+                                    Map<String, String> checkpoint) {
+        List<byte[]> buffer = buffers.get(streamName);
+        if (buffer != null) {
+            synchronized (buffer) {
+                List<byte[]> restored = new ArrayList<>(toFlush);
+                restored.addAll(buffer);
+                buffer.clear();
+                buffer.addAll(restored);
+                // The restored batch is the oldest data in the buffer again, so the buffering
+                // window starts where it did before the failed flush, not at a record that
+                // arrived while the write was in flight.
+                bufferSince.put(streamName, since != null ? since : clock.instant());
+                if (checkpoint != null) {
+                    Map<String, String> pending = new LinkedHashMap<>(checkpoint);
+                    Map<String, String> concurrent = pendingSourceIterators.get(streamName);
+                    if (concurrent != null) {
+                        pending.putAll(concurrent);
+                    }
+                    pendingSourceIterators.put(streamName, Collections.unmodifiableMap(pending));
+                }
+            }
         }
     }
 

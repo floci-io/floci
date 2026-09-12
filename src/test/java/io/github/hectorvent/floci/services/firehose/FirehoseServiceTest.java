@@ -21,11 +21,13 @@ import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -125,13 +127,18 @@ class FirehoseServiceTest {
     }
 
     private Delivered delivered(String expectedBucket) {
+        return delivered(expectedBucket, 1);
+    }
+
+    /** The most recent of exactly {@code attempts} S3 writes. */
+    private Delivered delivered(String expectedBucket, int attempts) {
         ArgumentCaptor<String> bucket = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
         ArgumentCaptor<String> contentType = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<PutObjectOptions> options = ArgumentCaptor.forClass(PutObjectOptions.class);
-        verify(s3Service).putObject(bucket.capture(), key.capture(), body.capture(), contentType.capture(),
-                anyMap(), options.capture());
+        verify(s3Service, times(attempts)).putObject(bucket.capture(), key.capture(), body.capture(),
+                contentType.capture(), anyMap(), options.capture());
         assertEquals(expectedBucket, bucket.getValue());
         return new Delivered(key.getValue(), body.getValue(), contentType.getValue(),
                 options.getValue().getContentEncoding());
@@ -671,6 +678,74 @@ class FirehoseServiceTest {
         firehoseService.flush("sourced-stream");
 
         assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void aFailedDeliveryRestoresTheBatchAheadOfRecordsAddedDuringDelivery() {
+        firehoseService.createDeliveryStream("retry-stream", destination("arn:aws:s3:::sink", null));
+        firehoseService.putRecord("retry-stream", new Record("first".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.putRecord("retry-stream", new Record("second".getBytes(StandardCharsets.UTF_8)));
+        AtomicBoolean s3Down = new AtomicBoolean(true);
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenAnswer(invocation -> {
+            if (s3Down.getAndSet(false)) {
+                firehoseService.putRecord("retry-stream", new Record("third".getBytes(StandardCharsets.UTF_8)));
+                throw new RuntimeException("s3 unavailable");
+            }
+            return null;
+        });
+
+        firehoseService.flush("retry-stream");
+        firehoseService.flush("retry-stream");
+
+        assertEquals("first\nsecond\nthird\n", delivered("sink", 2).text());
+    }
+
+    @Test
+    void aRestoredBatchIsRetriedOnTheNextScheduledFlush() {
+        firehoseService.createDeliveryStream("retry-stream", destination("arn:aws:s3:::sink", null));
+        firehoseService.putRecord("retry-stream", new Record("first".getBytes(StandardCharsets.UTF_8)));
+        AtomicBoolean s3Down = new AtomicBoolean(true);
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenAnswer(invocation -> {
+            if (s3Down.getAndSet(false)) {
+                // A record arrives while the write is in flight; it must not push the
+                // restored batch's buffering start forward.
+                clock.advance(Duration.ofSeconds(1));
+                firehoseService.putRecord("retry-stream", new Record("second".getBytes(StandardCharsets.UTF_8)));
+                throw new RuntimeException("s3 unavailable");
+            }
+            return null;
+        });
+        clock.advance(Duration.ofSeconds(300));
+        firehoseService.flushDueBuffers(clock.instant());
+        verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+
+        clock.advance(Duration.ofSeconds(10));
+        firehoseService.flushDueBuffers(clock.instant());
+
+        assertEquals("first\nsecond\n", delivered("sink", 2).text());
+    }
+
+    @Test
+    void aSuccessfulDeliveryClearsOnlyTheRecordsItWrote() {
+        firehoseService.createDeliveryStream("keep-stream", destination("arn:aws:s3:::sink", null));
+        firehoseService.putRecord("keep-stream", new Record("first".getBytes(StandardCharsets.UTF_8)));
+        AtomicBoolean firstWrite = new AtomicBoolean(true);
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenAnswer(invocation -> {
+            if (firstWrite.getAndSet(false)) {
+                firehoseService.putRecord("keep-stream", new Record("second".getBytes(StandardCharsets.UTF_8)));
+            }
+            return null;
+        });
+
+        firehoseService.flush("keep-stream");
+        assertEquals("first\n", delivered("sink").text());
+
+        firehoseService.flush("keep-stream");
+        assertEquals("second\n", delivered("sink", 2).text());
     }
 
     @Test
