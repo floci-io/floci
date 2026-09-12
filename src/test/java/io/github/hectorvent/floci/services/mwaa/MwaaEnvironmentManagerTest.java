@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Mount;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -347,6 +348,68 @@ class MwaaEnvironmentManagerTest {
 
             verify(lifecycleManager).removeIfExists("airflow-container-id");
             verify(lifecycleManager, never()).startCreated(anyString(), any());
+        }
+    }
+
+    /** Crash detection the readiness poller relies on to stop waiting on a dead container,
+     *  verified against a mocked DockerClient (mirrors BatchDockerRunnerTest's deep-stub style). */
+    @Nested
+    class ContainerExitDetection {
+
+        private DockerClient dockerClient;
+
+        @BeforeEach
+        void setUpDockerClient() {
+            dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        }
+
+        private Environment environmentWithContainerId(String containerId) {
+            Environment environment = new Environment();
+            environment.setName("my-env");
+            environment.setAirflowContainerId(containerId);
+            return environment;
+        }
+
+        @Test
+        void reportsNotExitedWhileTheContainerIsStillRunning() {
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
+
+            assertFalse(manager.hasAirflowContainerExited(environmentWithContainerId("airflow-container-id")));
+        }
+
+        @Test
+        void reportsExitedOnceTheContainerHasStopped() {
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec().getState().getRunning())
+                    .thenReturn(false);
+
+            assertTrue(manager.hasAirflowContainerExited(environmentWithContainerId("airflow-container-id")));
+        }
+
+        @Test
+        void reportsExitedWhenTheContainerHasBeenRemoved() {
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec())
+                    .thenThrow(new NotFoundException("no such container"));
+
+            assertTrue(manager.hasAirflowContainerExited(environmentWithContainerId("airflow-container-id")));
+        }
+
+        @Test
+        void reportsNotExitedWhenNoContainerHasBeenCreatedYet() {
+            assertFalse(manager.hasAirflowContainerExited(new Environment()));
+        }
+
+        @Test
+        void reportsNotExitedWhenTheDockerDaemonInspectFailsForAnUnrelatedReason() {
+            // Anything other than NotFoundException is inconclusive, not "the container is gone" -
+            // must not propagate, since the readiness poller shares one loop across every CREATING
+            // environment and a thrown exception here would starve every other environment's check
+            // for this poll tick, not just this one's.
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec())
+                    .thenThrow(new RuntimeException("docker daemon connection reset"));
+
+            assertFalse(manager.hasAirflowContainerExited(environmentWithContainerId("airflow-container-id")));
         }
     }
 }

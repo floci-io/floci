@@ -540,5 +540,89 @@ class MwaaServiceTest {
             verify(environmentManager).stopEnvironment(environment);
             verify(proxyManager).stopProxy(MwaaService.environmentIdentity(environment));
         }
+
+        @Test
+        void checkReadinessMarksEnvironmentAvailableOnceReady() {
+            Environment environment = realModeService.createEnvironment("ready-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            when(environmentManager.isReady(environment)).thenReturn(true);
+
+            realModeService.checkReadiness(environment);
+
+            assertEquals(EnvironmentStatus.AVAILABLE, environment.getStatus());
+        }
+
+        @Test
+        void checkReadinessLeavesEnvironmentCreatingWhileContainerIsStillStartingUp() {
+            Environment environment = realModeService.createEnvironment("starting-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            when(environmentManager.isReady(environment)).thenReturn(false);
+            when(environmentManager.hasAirflowContainerExited(environment)).thenReturn(false);
+
+            realModeService.checkReadiness(environment);
+
+            assertEquals(EnvironmentStatus.CREATING, environment.getStatus());
+        }
+
+        @Test
+        void checkReadinessMarksCreateFailedWhenTheAirflowContainerHasExited() {
+            // e.g. a startup script or `airflow db migrate` failed after docker start returned;
+            // without this, the environment would poll a dead container forever and never leave
+            // CREATING.
+            Environment environment = realModeService.createEnvironment("crashed-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            when(environmentManager.isReady(environment)).thenReturn(false);
+            when(environmentManager.hasAirflowContainerExited(environment)).thenReturn(true);
+
+            realModeService.checkReadiness(environment);
+
+            assertEquals(EnvironmentStatus.CREATE_FAILED, environment.getStatus());
+        }
+
+        @Test
+        void checkReadinessIgnoresEnvironmentsNotInCreatingStatus() {
+            Environment environment = realModeService.createEnvironment("available-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            environment.setStatus(EnvironmentStatus.AVAILABLE);
+
+            realModeService.checkReadiness(environment);
+
+            assertEquals(EnvironmentStatus.AVAILABLE, environment.getStatus());
+            verify(environmentManager, Mockito.never()).isReady(any());
+            verify(environmentManager, Mockito.never()).hasAirflowContainerExited(any());
+        }
+
+        @Test
+        void checkReadinessDoesNotOverwriteAStatusChangedConcurrentlyWhileWaitingOnIsReady() {
+            // isReady() is a blocking HTTP call; simulate a concurrent DeleteEnvironment moving the
+            // same Environment instance to DELETING while that call is in flight.
+            Environment environment = realModeService.createEnvironment("deleted-mid-check-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            when(environmentManager.isReady(environment)).thenAnswer(invocation -> {
+                environment.setStatus(EnvironmentStatus.DELETING);
+                return true;
+            });
+
+            realModeService.checkReadiness(environment);
+
+            assertEquals(EnvironmentStatus.DELETING, environment.getStatus());
+        }
+
+        @Test
+        void checkReadinessDoesNotOverwriteAStatusChangedConcurrentlyWhileWaitingOnContainerExitCheck() {
+            // Same race, on the hasAirflowContainerExited() branch: without the re-check, this would
+            // resurrect a just-deleted environment into storage as CREATE_FAILED.
+            Environment environment = realModeService.createEnvironment("deleted-mid-crash-check-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            when(environmentManager.isReady(environment)).thenReturn(false);
+            when(environmentManager.hasAirflowContainerExited(environment)).thenAnswer(invocation -> {
+                environment.setStatus(EnvironmentStatus.DELETING);
+                return true;
+            });
+
+            realModeService.checkReadiness(environment);
+
+            assertEquals(EnvironmentStatus.DELETING, environment.getStatus());
+        }
     }
 }

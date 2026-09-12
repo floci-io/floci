@@ -432,17 +432,45 @@ public class MwaaService implements TagHandler {
         readinessPoller.scheduleAtFixedRate(() -> {
             try {
                 for (Environment environment : allEnvironments()) {
-                    if (environment.getStatus() == EnvironmentStatus.CREATING
-                            && environmentManager.isReady(environment)) {
-                        LOG.infov("MWAA environment {0} is now AVAILABLE", environment.getName());
-                        environment.setStatus(EnvironmentStatus.AVAILABLE);
-                        putEnvironment(environment);
-                    }
+                    checkReadiness(environment);
                 }
             } catch (Exception e) {
                 LOG.error("Error in MWAA readiness poller", e);
             }
         }, 2, 3, TimeUnit.SECONDS);
+    }
+
+    // Package-private (not private) so MwaaServiceTest can exercise a single poll pass directly,
+    // without waiting on the scheduled executor.
+    void checkReadiness(Environment environment) {
+        if (environment.getStatus() != EnvironmentStatus.CREATING) {
+            return;
+        }
+        boolean ready = environmentManager.isReady(environment);
+        boolean exited = !ready && environmentManager.hasAirflowContainerExited(environment);
+
+        // isReady()/hasAirflowContainerExited() are blocking Docker/HTTP calls, long enough for a
+        // concurrent DeleteEnvironment (which sets DELETING on this same Environment instance
+        // before tearing down its containers) to have moved this environment past CREATING in the
+        // meantime. Re-checking right before writing avoids resurrecting a just-deleted environment
+        // into storage with a status decided from stale, pre-delete information.
+        if (environment.getStatus() != EnvironmentStatus.CREATING) {
+            return;
+        }
+        if (ready) {
+            LOG.infov("MWAA environment {0} is now AVAILABLE", environment.getName());
+            environment.setStatus(EnvironmentStatus.AVAILABLE);
+            putEnvironment(environment);
+        } else if (exited) {
+            // docker start returns as soon as the entrypoint launches, so a script or migration
+            // failing partway through never surfaces here on its own; without this check the
+            // environment would poll a dead container and report CREATING forever instead of the
+            // CREATE_FAILED a real failure should be.
+            LOG.errorv("MWAA environment {0}''s Airflow container exited before becoming ready; "
+                    + "marking CREATE_FAILED", environment.getName());
+            environment.setStatus(EnvironmentStatus.CREATE_FAILED);
+            putEnvironment(environment);
+        }
     }
 
     private void startDagSyncPoller() {

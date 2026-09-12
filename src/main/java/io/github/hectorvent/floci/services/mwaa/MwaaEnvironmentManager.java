@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -258,6 +259,36 @@ public class MwaaEnvironmentManager {
             return body.contains("\"metadatabase\"") && body.contains("\"scheduler\"")
                     && healthySection(body, "metadatabase") && healthySection(body, "scheduler");
         } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * True when the Airflow container was created but is no longer running, for example because a
+     * startup script or {@code airflow db migrate} failed after {@code docker start} returned.
+     * {@code docker start} only launches the entrypoint and returns immediately, so nothing else
+     * observes a failure like that; {@link MwaaService}'s readiness poller uses this to stop
+     * waiting on a container that will never answer {@code /health}, instead of leaving the
+     * environment at CREATING forever.
+     */
+    public boolean hasAirflowContainerExited(Environment environment) {
+        String containerId = environment.getAirflowContainerId();
+        if (containerId == null) {
+            return false;
+        }
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec();
+            return !Boolean.TRUE.equals(inspect.getState().getRunning());
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            // Inconclusive (a transient Docker daemon issue, not "the container is gone"): treat as
+            // still running, like isReady()'s own catch-all does for a failed /health call, so one
+            // bad inspect doesn't wrongly fail this environment or, since the readiness poller
+            // shares one loop across every CREATING environment, escape and starve every other
+            // environment's check for this poll tick.
+            LOG.warnv("Could not inspect Airflow container {0} for environment {1}: {2}",
+                    containerId, environment.getName(), e.getMessage());
             return false;
         }
     }
