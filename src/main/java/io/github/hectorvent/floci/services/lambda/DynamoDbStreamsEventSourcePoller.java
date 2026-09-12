@@ -1,6 +1,11 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
@@ -10,16 +15,16 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.vertx.core.Vertx;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,9 +46,13 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     private final EsmStore esmStore;
     private final ObjectMapper objectMapper;
     private final PipesFilterMatcher filterMatcher;
+    private final SqsService sqsService;
+    private final SnsService snsService;
+    private final String baseUrl;
     private final long pollIntervalMs;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
+    final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Integer> retryCounts = new ConcurrentHashMap<>();
     private final ExecutorService pollExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "dynamodb-streams-esm-poller");
         t.setDaemon(true);
@@ -57,7 +66,9 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                                             EsmStore esmStore,
                                             ObjectMapper objectMapper,
                                             EmulatorConfig config,
-                                            PipesFilterMatcher filterMatcher) {
+                                            PipesFilterMatcher filterMatcher,
+                                            SqsService sqsService,
+                                            SnsService snsService) {
         this.vertx = vertx;
         this.streamService = streamService;
         this.executorService = executorService;
@@ -65,7 +76,10 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         this.esmStore = esmStore;
         this.objectMapper = objectMapper;
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
+        this.baseUrl = config.effectiveBaseUrl();
         this.filterMatcher = filterMatcher;
+        this.sqsService = sqsService;
+        this.snsService = snsService;
     }
 
     public void startPersistedPollers() {
@@ -114,6 +128,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         timerIds.values().forEach(vertx::cancelTimer);
         timerIds.clear();
         activePolls.clear();
+        retryCounts.clear();
     }
 
     public void startPolling(EventSourceMapping esm) {
@@ -138,7 +153,9 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
             vertx.cancelTimer(timerId);
             LOG.debugv("Stopped DynamoDB Streams polling for ESM {0}", uuid);
         }
+        retryCounts.keySet().removeIf(k -> k.startsWith(uuid + ":"));
     }
+
 
     void pollAndInvoke(EventSourceMapping esm) {
         if (activePolls.putIfAbsent(esm.getUuid(), Boolean.TRUE) != null) {
@@ -157,6 +174,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                 String shardId = DynamoDbStreamService.SHARD_ID;
                 String lastSeq = esm.getShardSequenceNumbers().get(shardId);
 
+                boolean checkpointTrimmed = false;
                 DynamoDbStreamService.GetRecordsResult result;
                 try {
                     String iterator = lastSeq == null
@@ -167,6 +185,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                     if (!TRIMMED_DATA_ACCESS_EXCEPTION.equals(e.getErrorCode())) {
                         throw e;
                     }
+                    checkpointTrimmed = true;
                     // The checkpoint fell outside the retained window, so the cursor it names can
                     // never succeed again. Retrying it wedges the ESM permanently: every later
                     // write reaches the stream and none is ever delivered. Resume from the oldest
@@ -222,11 +241,24 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                     throw e;
                 }
 
+                String checkpointSeq = (lastSeq == null || checkpointTrimmed) ? "TRIM_HORIZON" : lastSeq;
+                String batchKey = esm.getUuid() + ":" + shardId + ":" + checkpointSeq;
                 if (invokeResult.getFunctionError() == null) {
+                    retryCounts.remove(batchKey);
                     advanceCheckpoint(esm, shardId, newestFetchedSeq);
                 } else {
-                    LOG.warnv("DynamoDB Streams ESM {0}: Lambda returned error [{1}], records will be retried",
-                            esm.getUuid(), invokeResult.getFunctionError());
+                    Integer maxRetries = esm.getMaximumRetryAttempts();
+                    int currentRetries = retryCounts.merge(batchKey, 1, Integer::sum);
+                    if (maxRetries != null && maxRetries >= 0 && currentRetries > maxRetries) {
+                        LOG.warnv("DynamoDB Streams ESM {0}: maximum retry attempts ({1}) exhausted for batch ending at {2}",
+                                esm.getUuid(), maxRetries, newestFetchedSeq);
+                        sendToOnFailureDestination(esm, shardId, matched, invokeResult, currentRetries);
+                        retryCounts.remove(batchKey);
+                        advanceCheckpoint(esm, shardId, newestFetchedSeq);
+                    } else {
+                        LOG.warnv("DynamoDB Streams ESM {0}: Lambda returned error [{1}], retry {2}, records will be retried",
+                                esm.getUuid(), invokeResult.getFunctionError(), currentRetries);
+                    }
                 }
             } catch (Exception e) {
                 LOG.warnv("DynamoDB Streams ESM {0} poll error: {1}", esm.getUuid(), e.getMessage());
@@ -234,6 +266,86 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                 activePolls.remove(esm.getUuid());
             }
         });
+    }
+
+    private void sendToOnFailureDestination(EventSourceMapping esm, String shardId,
+                                           List<DynamoDbStreamRecord> records,
+                                           InvokeResult invokeResult,
+                                           int invokeCount) {
+        if (esm.getDestinationConfig() == null || esm.getDestinationConfig().getOnFailure() == null) {
+            return;
+        }
+        String destinationArn = esm.getDestinationConfig().getOnFailure().getDestination();
+        if (destinationArn == null || destinationArn.isBlank()) {
+            return;
+        }
+
+        try {
+            String payload = buildOnFailurePayload(esm, shardId, records, invokeResult, invokeCount);
+            String region = AwsArnUtils.regionOrDefault(destinationArn, esm.getRegion());
+
+            if (destinationArn.contains(":sqs:")) {
+                String queueUrl = AwsArnUtils.arnToQueueUrl(destinationArn, baseUrl);
+                sqsService.sendMessage(queueUrl, payload, 0, region);
+                LOG.infov("DynamoDB Streams ESM {0}: sent failed batch to SQS DLQ {1}", esm.getUuid(), destinationArn);
+            } else if (destinationArn.contains(":sns:")) {
+                snsService.publish(destinationArn, null, payload, "ESM OnFailure", region);
+                LOG.infov("DynamoDB Streams ESM {0}: sent failed batch to SNS DLQ {1}", esm.getUuid(), destinationArn);
+            } else {
+                LOG.warnv("DynamoDB Streams ESM {0}: unsupported OnFailure destination ARN {1}",
+                        esm.getUuid(), destinationArn);
+            }
+        } catch (Exception e) {
+            LOG.errorv("DynamoDB Streams ESM {0}: failed to send to OnFailure destination {1}: {2}",
+                    esm.getUuid(), destinationArn, e.getMessage());
+        }
+    }
+
+    private String buildOnFailurePayload(EventSourceMapping esm, String shardId,
+                                         List<DynamoDbStreamRecord> records,
+                                         InvokeResult invokeResult,
+                                         int invokeCount) {
+        try {
+            ObjectNode root = objectMapper.createObjectNode();
+            root.put("version", "1.0");
+            root.put("timestamp", DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+
+            ObjectNode requestContext = root.putObject("requestContext");
+            requestContext.put("requestId", invokeResult.getRequestId() != null ? invokeResult.getRequestId() : "");
+            requestContext.put("functionArn", esm.getFunctionArn() != null ? esm.getFunctionArn() : "");
+            requestContext.put("condition", "RetryAttemptsExhausted");
+            requestContext.put("approximateInvokeCount", invokeCount);
+
+            ObjectNode responseContext = root.putObject("responseContext");
+            responseContext.put("statusCode", invokeResult.getStatusCode() != 0 ? invokeResult.getStatusCode() : 200);
+            responseContext.put("executedVersion", invokeResult.getExecutedVersion() != null ? invokeResult.getExecutedVersion() : "$LATEST");
+            if (invokeResult.getFunctionError() != null) {
+                responseContext.put("functionError", invokeResult.getFunctionError());
+            }
+
+            ObjectNode batchInfo = root.putObject("DDBStreamBatchInfo");
+            batchInfo.put("shardId", shardId);
+            String startSeq = records.isEmpty() ? "" : records.get(0).getSequenceNumber();
+            String endSeq = records.isEmpty() ? "" : records.get(records.size() - 1).getSequenceNumber();
+            batchInfo.put("startSequenceNumber", startSeq);
+            batchInfo.put("endSequenceNumber", endSeq);
+
+            if (!records.isEmpty()) {
+                long firstArrival = records.get(0).getApproximateCreationDateTime();
+                long lastArrival = records.get(records.size() - 1).getApproximateCreationDateTime();
+                batchInfo.put("approximateArrivalOfFirstRecord",
+                        DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(firstArrival)));
+                batchInfo.put("approximateArrivalOfLastRecord",
+                        DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(lastArrival)));
+            }
+            batchInfo.put("batchSize", records.size());
+            batchInfo.put("streamArn", esm.getEventSourceArn());
+
+            return objectMapper.writeValueAsString(root);
+        } catch (Exception e) {
+            LOG.warnv("Failed to serialize OnFailure payload: {0}", e.getMessage());
+            return "{}";
+        }
     }
 
     private String buildDynamoDbEvent(List<DynamoDbStreamRecord> records, EventSourceMapping esm) {
