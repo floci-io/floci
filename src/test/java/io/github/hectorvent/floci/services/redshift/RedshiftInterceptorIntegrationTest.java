@@ -33,6 +33,7 @@ import java.util.zip.GZIPOutputStream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -290,24 +291,26 @@ class RedshiftInterceptorIntegrationTest {
         s3.createBucket(bucket, "us-east-1");
 
         try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
-            c.createStatement().execute("CREATE TABLE tx_test (id int)");
-            c.setAutoCommit(false);
-            Statement st = c.createStatement();
-            st.execute("INSERT INTO tx_test VALUES (1)");
-            assertThrows(
-                    SQLException.class,
-                    () -> st.execute("COPY tx_test FROM 's3://redshift-copy-it-tx/does/not/exist'"));
-            // The backend must now be in the aborted transaction state ('E').
-            // Subsequent statements in this transaction block must fail.
-            assertThrows(
-                    SQLException.class,
-                    () -> st.execute("INSERT INTO tx_test VALUES (2)"));
-            c.rollback();
-            c.setAutoCommit(true);
-            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*) FROM tx_test")) {
-                assertTrue(rs.next());
-                assertEquals(0, rs.getInt(1));
-            }
+            assertTimeoutPreemptively(Duration.ofSeconds(15), () -> {
+                c.createStatement().execute("CREATE TABLE tx_test (id int)");
+                c.setAutoCommit(false);
+                Statement st = c.createStatement();
+                st.execute("INSERT INTO tx_test VALUES (1)");
+                assertThrows(
+                        SQLException.class,
+                        () -> st.execute("COPY tx_test FROM 's3://redshift-copy-it-tx/does/not/exist'"));
+                // The backend must now be in the aborted transaction state ('E').
+                // Subsequent statements in this transaction block must fail.
+                assertThrows(
+                        SQLException.class,
+                        () -> st.execute("INSERT INTO tx_test VALUES (2)"));
+                c.rollback();
+                c.setAutoCommit(true);
+                try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*) FROM tx_test")) {
+                    assertTrue(rs.next());
+                    assertEquals(0, rs.getInt(1));
+                }
+            });
         }
     }
 

@@ -7,6 +7,9 @@ import java.net.Socket;
 
 final class ExtendedS3Exchange {
 
+    private record CopyResult(boolean succeeded, byte[] deferredReadyForQuery) {
+    }
+
     private ExtendedS3Exchange() {
     }
 
@@ -26,13 +29,17 @@ final class ExtendedS3Exchange {
         }
 
         boolean failed = true;
+        byte[] deferredReadyForQuery = null;
         try {
-            failed = !switch (statement) {
-                case CopyStatementParser.S3CopyFrom copy -> runCopy(
-                        client, backend, executeFrame, copy, s3Service, coordinator);
-                case CopyStatementParser.S3Unload unload -> runUnload(
+            switch (statement) {
+                case CopyStatementParser.S3CopyFrom copy -> {
+                    CopyResult result = runCopy(client, backend, executeFrame, copy, s3Service, coordinator);
+                    failed = !result.succeeded();
+                    deferredReadyForQuery = result.deferredReadyForQuery();
+                }
+                case CopyStatementParser.S3Unload unload -> failed = !runUnload(
                         client, backend, executeFrame, unload, s3Service, coordinator);
-            };
+            }
         } catch (IOException | RuntimeException e) {
             closeQuietly(client);
             closeQuietly(backend);
@@ -40,22 +47,26 @@ final class ExtendedS3Exchange {
         } finally {
             coordinator.completeOwnedExecute(ticket, failed);
         }
+        if (deferredReadyForQuery != null) {
+            coordinator.onBackendFrame('Z', deferredReadyForQuery);
+        }
     }
 
-    private static boolean runCopy(Socket client, Socket backend,
+    private static CopyResult runCopy(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3CopyFrom spec, S3Service s3Service,
             BackendResponseCoordinator coordinator) throws IOException {
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(executeFrame.toPacketBytes());
         backendOut.flush();
-        forwardClientSyncToBackend(client, backendOut, coordinator);
+        PostgresWireDecoder.FrontendMessage sync = readClientSync(client);
 
         PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
         PostgresWireDecoder.FrontendMessage first = nextOwnedFrame(client, decoder, coordinator);
         if (first.type() == 'E') {
             forward(client, first);
-            return false;
+            forwardClientSyncToBackend(sync, backendOut, coordinator);
+            return new CopyResult(false, null);
         }
         if (first.type() != 'G') {
             throw unexpected(first, "CopyInResponse");
@@ -66,9 +77,10 @@ final class ExtendedS3Exchange {
             input = S3CopySimulator.prepareCopy(spec, s3Service);
         } catch (S3CopySimulator.S3TransferException e) {
             S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
+            forwardClientSyncToBackend(sync, backendOut, coordinator);
             drainExecute(client, decoder, coordinator, false);
             sendError(client, e.sqlState(), e.getMessage());
-            return false;
+            return new CopyResult(false, drainReadyForQuery(client, decoder, coordinator));
         }
 
         try {
@@ -77,14 +89,16 @@ final class ExtendedS3Exchange {
             backendOut.flush();
         } catch (RuntimeException | IOException e) {
             S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
+            forwardClientSyncToBackend(sync, backendOut, coordinator);
             drainExecute(client, decoder, coordinator, false);
             String detail = e.getMessage() != null ? e.getMessage() : e.toString();
             sendError(client, "XX000", "S3 COPY failed: " + detail);
-            return false;
+            return new CopyResult(false, drainReadyForQuery(client, decoder, coordinator));
         }
 
+        forwardClientSyncToBackend(sync, backendOut, coordinator);
         PostgresWireDecoder.FrontendMessage terminal = drainExecute(client, decoder, coordinator, true);
-        return terminal.type() != 'E';
+        return new CopyResult(terminal.type() != 'E', null);
     }
 
     private static boolean runUnload(Socket client, Socket backend,
@@ -167,6 +181,16 @@ final class ExtendedS3Exchange {
         }
     }
 
+    private static byte[] drainReadyForQuery(Socket client, PostgresWireDecoder decoder,
+            BackendResponseCoordinator coordinator) throws IOException {
+        PostgresWireDecoder.FrontendMessage message = nextOwnedFrame(client, decoder, coordinator);
+        if (message.type() != 'Z') {
+            throw unexpected(message, "ReadyForQuery");
+        }
+        forward(client, message);
+        return message.body();
+    }
+
     private static PostgresWireDecoder.FrontendMessage nextOwnedFrame(Socket client,
             PostgresWireDecoder decoder, BackendResponseCoordinator coordinator) throws IOException {
         while (true) {
@@ -189,12 +213,21 @@ final class ExtendedS3Exchange {
         }
     }
 
-    private static void forwardClientSyncToBackend(Socket client, OutputStream backendOut,
-            BackendResponseCoordinator coordinator) throws IOException {
+    private static PostgresWireDecoder.FrontendMessage readClientSync(Socket client) throws IOException {
         PostgresWireDecoder.FrontendMessage sync = new PostgresWireDecoder(client.getInputStream()).nextMessage();
         if (sync == null || sync.type() != 'S') {
             throw new IOException("Expected Sync after an Extended Query S3 Execute");
         }
+        return sync;
+    }
+
+    private static void forwardClientSyncToBackend(Socket client, OutputStream backendOut,
+            BackendResponseCoordinator coordinator) throws IOException {
+        forwardClientSyncToBackend(readClientSync(client), backendOut, coordinator);
+    }
+
+    private static void forwardClientSyncToBackend(PostgresWireDecoder.FrontendMessage sync, OutputStream backendOut,
+            BackendResponseCoordinator coordinator) throws IOException {
         coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
         backendOut.write(sync.toPacketBytes());
         backendOut.flush();
