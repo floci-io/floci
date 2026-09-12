@@ -34,7 +34,7 @@ class SmtpRelayTest {
     }
 
     private static SmtpRelay.RawRelayMessage raw(String from, List<String> destinations, String rawMessage) {
-        return new SmtpRelay.RawRelayMessage(from, null, destinations, rawMessage, null, null);
+        return new SmtpRelay.RawRelayMessage(from, null, destinations, rawMessage, null);
     }
 
     private SmtpRelay enabledRelay() {
@@ -435,12 +435,10 @@ class SmtpRelayTest {
     }
 
     @Test
-    void formatMessageId_matchesTheAwsShape() {
-        assertEquals("<abc-123@eu-west-1.amazonses.com>",
-                SmtpRelay.formatMessageId("abc-123", "eu-west-1"));
-        assertEquals("<abc-123@us-east-1.amazonses.com>",
-                SmtpRelay.formatMessageId("abc-123", null));
-        assertNull(SmtpRelay.formatMessageId(null, "eu-west-1"));
+    void formatMessageId_usesTheReturnedMessageIdAsTheLocalPart() {
+        assertEquals("<abc-123@email.amazonses.com>", SmtpRelay.formatMessageId("abc-123"));
+        assertNull(SmtpRelay.formatMessageId(null));
+        assertNull(SmtpRelay.formatMessageId("  "));
     }
 
     // ── Envelope sender and Message-ID ──
@@ -477,15 +475,14 @@ class SmtpRelayTest {
                 .subject("Subject")
                 .bodyText("text")
                 .messageId("msg-1")
-                .region("eu-west-1")
                 .build());
 
-        assertEquals("<msg-1@eu-west-1.amazonses.com>",
+        assertEquals("<msg-1@email.amazonses.com>",
                 captureSent().getHeaders().get("Message-ID"));
     }
 
     @Test
-    void relay_callerSuppliedMessageIdHeader_isNotOverwritten() {
+    void relay_callerSuppliedMessageIdHeader_isOverridden() {
         SmtpRelay relay = enabledRelay();
 
         relay.relay(SmtpRelay.RelayMessage.builder("from@example.com")
@@ -494,10 +491,10 @@ class SmtpRelayTest {
                 .bodyText("text")
                 .headers(List.of(new MessageHeader("Message-ID", "<caller@example.com>")))
                 .messageId("msg-1")
-                .region("eu-west-1")
                 .build());
 
-        assertEquals(List.of("<caller@example.com>"),
+        // AWS overrides a caller-supplied Message-ID with the id it assigned.
+        assertEquals(List.of("<msg-1@email.amazonses.com>"),
                 captureSent().getHeaders().getAll("Message-ID"));
     }
 
@@ -507,7 +504,7 @@ class SmtpRelayTest {
 
         relay.relayRaw(new SmtpRelay.RawRelayMessage("from@example.com", "bounces@example.com",
                 List.of("to@example.com"), "From: s@example.com\r\nSubject: x\r\n\r\nbody",
-                "msg-1", "us-east-1"));
+                "msg-1"));
 
         assertEquals("bounces@example.com", captureSent().getBounceAddress());
     }
@@ -518,24 +515,42 @@ class SmtpRelayTest {
 
         relay.relayRaw(new SmtpRelay.RawRelayMessage("from@example.com", null,
                 List.of("to@example.com"), "From: s@example.com\r\nSubject: x\r\n\r\nbody",
-                "msg-1", "ap-south-1"));
+                "msg-1"));
 
-        assertEquals("<msg-1@ap-south-1.amazonses.com>",
+        assertEquals("<msg-1@email.amazonses.com>",
                 captureSent().getHeaders().get("Message-ID"));
     }
 
     @Test
-    void relayRaw_keepsACallerSuppliedMessageId() {
+    void relayRaw_overridesACallerSuppliedMessageId() {
         SmtpRelay relay = enabledRelay();
 
         String rawMime = "From: s@example.com\r\n"
                 + "Message-ID: <caller-supplied@example.com>\r\n"
                 + "Subject: x\r\n\r\nbody";
         relay.relayRaw(new SmtpRelay.RawRelayMessage("from@example.com", null,
-                List.of("to@example.com"), rawMime, "msg-1", "us-east-1"));
+                List.of("to@example.com"), rawMime, "msg-1"));
 
-        assertEquals(List.of("<caller-supplied@example.com>"),
+        // AWS overrides a caller-supplied Message-ID with the id it assigned.
+        assertEquals(List.of("<msg-1@email.amazonses.com>"),
                 captureSent().getHeaders().getAll("Message-ID"));
+    }
+
+    @Test
+    void relayRaw_dropsACallerSuppliedDate() {
+        SmtpRelay relay = enabledRelay();
+
+        String rawMime = "From: s@example.com\r\n"
+                + "Date: Mon, 08 Oct 2018 14:05:45 +0000\r\n"
+                + "Subject: x\r\n\r\nbody";
+        relay.relayRaw(new SmtpRelay.RawRelayMessage("from@example.com", null,
+                List.of("to@example.com"), rawMime, "msg-1"));
+
+        // AWS replaces the caller's Date with the time it accepted the message, so the stale value
+        // must not be carried onto the relayed message; the encoder generates the send-time Date.
+        MailMessage sent = captureSent();
+        assertNull(sent.getHeaders().get("Date"));
+        assertEquals("<msg-1@email.amazonses.com>", sent.getHeaders().get("Message-ID"));
     }
 
     // ── Raw relay fidelity: headers and attachments ──
@@ -568,6 +583,7 @@ class SmtpRelayTest {
         assertFalse(sent.getHeaders().contains("Content-Type"));
         assertFalse(sent.getHeaders().contains("MIME-Version"));
         assertFalse(sent.getHeaders().contains("Return-Path"));
+        assertFalse(sent.getHeaders().contains("Date"));
         assertFalse(sent.getHeaders().contains("Subject"));
         assertFalse(sent.getHeaders().contains("From"));
     }

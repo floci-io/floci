@@ -145,6 +145,10 @@ re-encoded message that preserves the original content:
   are regenerated for the re-encoded message, and the address, subject,
   and `Return-Path` headers are applied to the outgoing message
   directly rather than copied.
+- `Date` and `Message-ID` are replaced rather than copied, matching the
+  [SES header fields reference](https://docs.aws.amazon.com/ses/latest/dg/header-fields.html):
+  AWS overrides a caller's `Date` with the time it accepted the message,
+  and a caller's `Message-ID` with the id it assigned.
 - Display names on addresses are kept, so
   `Alice <alice@example.com>` is delivered as written. The bare
   addresses are what the SMTP envelope, the suppression checks, and the
@@ -154,29 +158,40 @@ re-encoded message that preserves the original content:
 
 #### Envelope sender
 
-The SMTP `MAIL FROM` address, which is where a receiving mail server
-routes bounces, is resolved in the order AWS uses:
+AWS routes bounce and complaint notifications to the address in the
+`Return-Path` header. Floci resolves that address in the order:
 
 1. The `Return-Path` header on a raw MIME message
 2. The `ReturnPath` request field (v1) or
    `FeedbackForwardingEmailAddress` (v2)
 3. The source address
 
-The resolved value is also recorded as `ReturnPath` on the stored
-message, so the inspection endpoint shows it.
+The resolved value is used as the SMTP `MAIL FROM` address, which is
+where a receiving mail server routes bounces, and is recorded as
+`ReturnPath` on the stored message so the inspection endpoint shows it.
 
-!!! note
-    Floci does not deliver bounce and complaint notifications to the
-    return path. Notification targets are resolved from the identity
-    (`SetIdentityNotificationTopic`) and from the configuration set's
-    event destinations instead.
+!!! note "Deviations"
+    On AWS the delivered message carries a `Return-Path` that differs
+    from the one you supplied, because AWS routes bounces through its
+    own address and forwards them on. Floci has no bounce-handling
+    pipeline, so it puts the resolved address directly in `MAIL FROM`
+    instead, which is the closest local equivalent.
+
+    Floci also does not deliver bounce and complaint notifications to
+    the return path at all. Notification targets are resolved from the
+    identity (`SetIdentityNotificationTopic`) and from the configuration
+    set's event destinations instead.
 
 #### Message-ID
 
-Relayed messages are stamped with
-`<{MessageId}@{region}.amazonses.com>`, matching the `MessageId`
-returned by the API. A `Message-ID` already present on a raw message is
-left in place, as it is on AWS.
+AWS overrides any caller-supplied `Message-ID` with the id it assigned,
+which is the `MessageId` returned by the API. Floci does the same,
+stamping `<{MessageId}@email.amazonses.com>`.
+
+!!! note
+    The local part is the returned `MessageId`, which is the documented
+    part of this behaviour. The `email.amazonses.com` domain is not
+    specified in the AWS documentation and follows observed SES output.
 
 #### X-SES control headers
 
@@ -186,7 +201,17 @@ from the relayed message rather than forwarding them:
 | Header | Effect |
 |---|---|
 | `X-SES-CONFIGURATION-SET` | Names the configuration set to apply when the request does not specify one |
-| `X-SES-MESSAGE-TAGS` | Comma-separated `name=value` message tags, used for event publishing. Tags on the request field override header tags of the same name |
+| `X-SES-MESSAGE-TAGS` | Comma-separated `name=value` message tags, used for event publishing |
+
+Per
+[Step 3: Specify your configuration set](https://docs.aws.amazon.com/ses/latest/dg/event-publishing-send-email.html),
+when message tags are supplied both as a request field and as a header,
+AWS uses only the request field's tags and does not join the two sets.
+Floci matches this: header tags apply only when the request passes none.
+
+All other `X-SES-*` headers, including the sending-authorization headers
+`X-SES-SOURCE-ARN`, `X-SES-FROM-ARN`, and `X-SES-RETURN-PATH-ARN`, are
+stripped from the relayed message without being acted on.
 
 ## Local Inspection Endpoint
 

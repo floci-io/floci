@@ -288,7 +288,6 @@ public class SesService {
                     .bodyHtml(bodyHtml)
                     .headers(additionalHeaders)
                     .messageId(messageId)
-                    .region(region)
                     .build());
         } else {
             LOG.infov("SES email accepted but not relayed (all recipients suppressed): messageId={0}",
@@ -320,9 +319,12 @@ public class SesService {
         String requestedConfigSet = firstNonBlank(configurationSetName, headers.configurationSet());
         String effectiveConfigSet = resolveDefaultConfigurationSet(requestedConfigSet, source, region);
         configSetService.validateForSending(effectiveConfigSet, region);
-        // Same for message tags: X-SES-MESSAGE-TAGS supplies defaults that a Tags / EmailTags
-        // request field overrides by name.
-        List<MessageTag> effectiveTags = mergeEmailTags(headers.messageTags(), emailTags);
+        // Message tags work differently: AWS uses only the request field's tags when both are
+        // present and does not join the two sets, so the header tags apply only when no tag was
+        // passed as a parameter.
+        List<MessageTag> effectiveTags = (emailTags == null || emailTags.isEmpty())
+                ? headers.messageTags()
+                : emailTags;
         String effectiveSource = sourceOmitted && !headers.from().isBlank()
                 ? headers.from()
                 : source;
@@ -369,7 +371,7 @@ public class SesService {
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
         if (!relayedDestinations.isEmpty()) {
             smtpRelay.relayRaw(new SmtpRelay.RawRelayMessage(effectiveSource, effectiveReturnPath,
-                    relayedDestinations, rawMessage, messageId, region));
+                    relayedDestinations, rawMessage, messageId));
         } else {
             LOG.infov("SES raw email accepted but not relayed (all recipients suppressed): messageId={0}",
                     messageId);
@@ -835,7 +837,6 @@ public class SesService {
                 .bodyHtml(renderedHtml)
                 .headers(List.of())
                 .messageId(messageId)
-                .region(region)
                 .build());
         LOG.infov("SES custom verification email sent: to={0}, template={1}, messageId={2}",
                 emailAddress, templateName, messageId);

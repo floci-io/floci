@@ -73,7 +73,6 @@ class SesServiceSmtpTest {
         assertEquals("<p>html</p>", relayed.bodyHtml());
         assertEquals(List.of(), relayed.headers());
         assertEquals(messageId, relayed.messageId());
-        assertEquals("us-east-1", relayed.region());
     }
 
     @Test
@@ -116,7 +115,6 @@ class SesServiceSmtpTest {
         assertEquals(List.of("to@example.com"), relayed.destinations());
         assertEquals("raw MIME", relayed.rawMessage());
         assertEquals(messageId, relayed.messageId());
-        assertEquals("us-east-1", relayed.region());
     }
 
     @Test

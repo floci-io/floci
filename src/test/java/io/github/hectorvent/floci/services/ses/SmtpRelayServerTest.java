@@ -111,8 +111,7 @@ class SmtpRelayServerTest {
                 + "--outer--";
 
         relayAgainstServer().relayRaw(new SmtpRelay.RawRelayMessage("sender@example.com",
-                "bounces@example.com", List.of("dest@example.com"), rawMime,
-                "msg-42", "eu-west-1"));
+                "bounces@example.com", List.of("dest@example.com"), rawMime, "msg-42"));
 
         assertTrue(server.awaitDelivery(), "the stub server should have accepted a message");
         assertEquals("bounces@example.com", server.mailFrom(),
@@ -120,7 +119,7 @@ class SmtpRelayServerTest {
         assertEquals(List.of("dest@example.com"), server.recipients());
 
         String data = server.data();
-        assertTrue(data.contains("Message-ID: <msg-42@eu-west-1.amazonses.com>"), data);
+        assertTrue(data.contains("Message-ID: <msg-42@email.amazonses.com>"), data);
         assertTrue(data.contains("From: Alice Sender <sender@example.com>"),
                 "the display name must survive the relay: " + data);
         assertTrue(data.contains("X-Custom: keep-me"), data);
@@ -145,7 +144,6 @@ class SmtpRelayServerTest {
                 .bodyText("plain body")
                 .headers(List.of(new MessageHeader("X-Custom", "kept")))
                 .messageId("msg-7")
-                .region("us-west-2")
                 .build());
 
         assertTrue(server.awaitDelivery(), "the stub server should have accepted a message");
@@ -153,7 +151,7 @@ class SmtpRelayServerTest {
         assertEquals(List.of("to@example.com", "cc@example.com"), server.recipients());
 
         String data = server.data();
-        assertTrue(data.contains("Message-ID: <msg-7@us-west-2.amazonses.com>"), data);
+        assertTrue(data.contains("Message-ID: <msg-7@email.amazonses.com>"), data);
         assertTrue(data.contains("X-Custom: kept"), data);
         assertTrue(data.contains("plain body"), data);
     }

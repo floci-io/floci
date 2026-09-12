@@ -65,6 +65,7 @@ public class SmtpRelay {
 
     private static final String X_SES_PREFIX = "x-ses-";
     private static final String HEADER_RETURN_PATH = "Return-Path";
+    private static final String MESSAGE_ID_DOMAIN = "email.amazonses.com";
 
     /**
      * Top-level headers of a raw message that are not copied onto the relayed message. The MIME
@@ -72,12 +73,15 @@ public class SmtpRelay {
      * the originals through would announce a content type and boundary that no longer describe the
      * body. The address and subject headers are set on {@link MailMessage} directly, and
      * {@code Return-Path} becomes the envelope sender (the receiving MTA writes its own).
-     * {@code Message-ID} is handled explicitly so a caller-supplied id survives.
+     *
+     * <p>{@code Date} and {@code Message-ID} are excluded because AWS overrides both: a caller's
+     * {@code Date} is replaced with the time the message was accepted, and a caller's
+     * {@code Message-ID} with the id SES assigned (SES header fields reference).
      */
     private static final Set<String> SUPPRESSED_RELAY_HEADERS = Set.of(
             "mime-version", "content-type", "content-transfer-encoding",
             "content-disposition", "content-id",
-            "from", "to", "cc", "bcc", "subject", "return-path", "message-id");
+            "from", "to", "cc", "bcc", "subject", "return-path", "message-id", "date");
 
     private final MailClient mailClient;
     private final ExecutorService relayExecutor;
@@ -171,7 +175,7 @@ public class SmtpRelay {
                                List<String> replyTo,
                                String subject, String bodyText, String bodyHtml,
                                List<MessageHeader> headers,
-                               String messageId, String region) {
+                               String messageId) {
 
         public static Builder builder(String from) {
             return new Builder(from);
@@ -189,7 +193,6 @@ public class SmtpRelay {
             private String bodyHtml;
             private List<MessageHeader> headers;
             private String messageId;
-            private String region;
 
             private Builder(String from) {
                 this.from = from;
@@ -205,11 +208,10 @@ public class SmtpRelay {
             public Builder bodyHtml(String bodyHtml) { this.bodyHtml = bodyHtml; return this; }
             public Builder headers(List<MessageHeader> headers) { this.headers = headers; return this; }
             public Builder messageId(String messageId) { this.messageId = messageId; return this; }
-            public Builder region(String region) { this.region = region; return this; }
 
             public RelayMessage build() {
                 return new RelayMessage(from, returnPath, to, cc, bcc, replyTo,
-                        subject, bodyText, bodyHtml, headers, messageId, region);
+                        subject, bodyText, bodyHtml, headers, messageId);
             }
         }
     }
@@ -219,7 +221,7 @@ public class SmtpRelay {
      * list; when empty the MIME To / Cc / Bcc headers are used instead.
      */
     public record RawRelayMessage(String from, String returnPath, List<String> destinations,
-                                  String rawMessage, String messageId, String region) {
+                                  String rawMessage, String messageId) {
     }
 
     /**
@@ -253,7 +255,6 @@ public class SmtpRelay {
             if (message.replyTo() != null && !message.replyTo().isEmpty()) {
                 mail.addHeader("Reply-To", String.join(", ", message.replyTo()));
             }
-            boolean callerSuppliedMessageId = false;
             if (message.headers() != null) {
                 for (MessageHeader header : message.headers()) {
                     if (!header.isSafe()) {
@@ -261,13 +262,15 @@ public class SmtpRelay {
                                 + "name/value (possible header injection) for from={0}", message.from());
                         continue;
                     }
+                    if (FieldName.MESSAGE_ID.equalsIgnoreCase(header.name())) {
+                        // AWS overrides a caller-supplied Message-ID, and rejects it outright as a
+                        // custom header on Simple / Templated content.
+                        continue;
+                    }
                     mail.addHeader(header.name(), header.value());
-                    callerSuppliedMessageId |= FieldName.MESSAGE_ID.equalsIgnoreCase(header.name());
                 }
             }
-            if (!callerSuppliedMessageId) {
-                applyMessageId(mail, message.messageId(), message.region());
-            }
+            applyMessageId(mail, message.messageId());
             mail.setSubject(message.subject() != null ? message.subject() : "");
             if (message.bodyText() != null) {
                 mail.setText(message.bodyText());
@@ -347,15 +350,7 @@ public class SmtpRelay {
 
             applyMimeParts(message, mail);
             copyRawHeaders(message, mail);
-
-            // AWS returns its own message id for a raw send but leaves a caller-supplied
-            // Message-ID in place on the delivered message.
-            String callerMessageId = headerValue(message, FieldName.MESSAGE_ID);
-            if (callerMessageId != null) {
-                mail.addHeader(FieldName.MESSAGE_ID, callerMessageId);
-            } else {
-                applyMessageId(mail, relayMessage.messageId(), relayMessage.region());
-            }
+            applyMessageId(mail, relayMessage.messageId());
 
             send(mail);
             LOG.debugv("SMTP relay: sent raw from={0}, destinations={1}",
@@ -383,24 +378,25 @@ public class SmtpRelay {
         }
     }
 
-    private static void applyMessageId(MailMessage mail, String messageId, String region) {
-        String header = formatMessageId(messageId, region);
+    private static void applyMessageId(MailMessage mail, String messageId) {
+        String header = formatMessageId(messageId);
         if (header != null) {
             mail.addHeader(FieldName.MESSAGE_ID, header);
         }
     }
 
     /**
-     * Formats the SES message id the way AWS stamps it on the delivered message:
-     * {@code <messageId@region.amazonses.com>}, matching the {@code MessageId} returned to the
-     * caller. Returns null when there is no id to stamp.
+     * Formats the Message-ID that AWS stamps on the delivered message. AWS documents that it
+     * overrides any caller-supplied Message-ID with its own value, and that the id it assigns is
+     * the {@code MessageId} returned to the caller; the local part here is therefore that id. The
+     * {@code @email.amazonses.com} domain is not documented and follows observed SES output.
+     * Returns null when there is no id to stamp.
      */
-    static String formatMessageId(String messageId, String region) {
+    static String formatMessageId(String messageId) {
         if (messageId == null || messageId.isBlank()) {
             return null;
         }
-        String domain = (region == null || region.isBlank() ? "us-east-1" : region) + ".amazonses.com";
-        return "<" + messageId + "@" + domain + ">";
+        return "<" + messageId + "@" + MESSAGE_ID_DOMAIN + ">";
     }
 
     // ──────────────────────────── Raw MIME walking ────────────────────────────

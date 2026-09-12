@@ -1716,7 +1716,7 @@ class SesEventPublishingV2IntegrationTest {
 
     @Test
     @Order(31)
-    void v1SendRawEmail_requestTagsOverrideTheHeaderTagsOfTheSameName() throws Exception {
+    void v1SendRawEmail_requestTagsReplaceTheHeaderTagsEntirely() throws Exception {
         drainQueue();
         String raw = "From: " + SENDER + "\r\n"
                 + "To: success@simulator.amazonses.com\r\n"
@@ -1745,7 +1745,9 @@ class SesEventPublishingV2IntegrationTest {
                 .findFirst().orElseThrow();
         JsonNode tags = send.path("mail").path("tags");
         assertEquals("fromrequest", tags.path("campaign").get(0).asText());
-        assertEquals("inheader", tags.path("only").get(0).asText(),
-                "a header tag with no request counterpart must survive the merge");
+        // AWS uses only the API parameter's tags when both are given and does not join the two
+        // sets, so a header-only tag is dropped rather than merged in.
+        assertTrue(tags.path("only").isMissingNode() || tags.path("only").isEmpty(),
+                "header tags must be discarded entirely when the request supplies tags: " + tags);
     }
 }
