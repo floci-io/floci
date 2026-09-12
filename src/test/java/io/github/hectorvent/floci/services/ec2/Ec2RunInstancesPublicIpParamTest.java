@@ -63,7 +63,7 @@ class Ec2RunInstancesPublicIpParamTest {
 
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
-                mock(Ec2IpamService.class));
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class));
         handler.handle("RunInstances", p, REGION);
 
         ArgumentCaptor<Boolean> associatePublicIp = ArgumentCaptor.forClass(Boolean.class);

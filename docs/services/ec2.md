@@ -633,6 +633,18 @@ These are account-level settings scoped per region, not per volume, and nothing 
 
 An account that has never set a key reports `alias/aws/ebs`, the AWS-managed EBS key every account starts with, rather than an empty value — the module runner fails hard on a missing `KmsKeyId`, so the fallback is what keeps it running. `ResetEbsDefaultKmsKeyId` returns to that same alias. `ModifyEbsDefaultKmsKeyId` requires `KmsKeyId` and rejects a blank one with `MissingParameter`; the key is stored as given and is not checked against KMS.
 
+### Snapshot Block Public Access
+
+| Action | Description |
+|--------|-------------|
+| EnableSnapshotBlockPublicAccess | Sets the region's snapshot sharing block to `block-all-sharing` or `block-new-sharing`. |
+| DisableSnapshotBlockPublicAccess | Returns the region to `unblocked`. |
+| GetSnapshotBlockPublicAccessState | Reads the region's current state. |
+
+This is an account-level setting scoped per region, not a resource, so there is no id and nothing to tag. A region that was never configured reads back `unblocked`. `EnableSnapshotBlockPublicAccess` accepts only `block-all-sharing` and `block-new-sharing`, and rejects `unblocked` with `InvalidParameterValue` the way AWS does: disabling goes through `DisableSnapshotBlockPublicAccess`, which returns the resulting `unblocked` rather than the prior state. A missing `State` is rejected with `MissingParameter`.
+
+Only `GetSnapshotBlockPublicAccessState` returns `managedBy`, and it always reports `account` because Floci has no declarative-policy layer that could take the setting over. Nothing here changes snapshot permissions: no snapshot's `createVolumePermission` is rewritten when the block goes on or off.
+
 ### IPAM
 
 | Action | Description |

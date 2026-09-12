@@ -41,15 +41,19 @@ public class Ec2QueryHandler {
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
     private final Ec2EbsEncryptionService ebsEncryptionService;
+    private final Ec2SnapshotBlockPublicAccessService snapshotBlockPublicAccessService;
     private final Ec2IpamService ipamService;
 
     @Inject
     public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
-                           Ec2EbsEncryptionService ebsEncryptionService, Ec2IpamService ipamService) {
+                           Ec2EbsEncryptionService ebsEncryptionService,
+                           Ec2SnapshotBlockPublicAccessService snapshotBlockPublicAccessService,
+                           Ec2IpamService ipamService) {
         this.service = service;
         this.config = config;
         this.flowLogService = flowLogService;
         this.ebsEncryptionService = ebsEncryptionService;
+        this.snapshotBlockPublicAccessService = snapshotBlockPublicAccessService;
         this.ipamService = ipamService;
     }
 
@@ -80,6 +84,10 @@ public class Ec2QueryHandler {
                 case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
                 case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
                 case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
+                // Snapshot block public access
+                case "EnableSnapshotBlockPublicAccess" -> handleEnableSnapshotBlockPublicAccess(params, region);
+                case "DisableSnapshotBlockPublicAccess" -> handleDisableSnapshotBlockPublicAccess(region);
+                case "GetSnapshotBlockPublicAccessState" -> handleGetSnapshotBlockPublicAccessState(region);
                 // VPCs
                 case "CreateVpc" -> handleCreateVpc(params, region);
                 case "DescribeVpcs" -> handleDescribeVpcs(params, region);
@@ -577,6 +585,34 @@ public class Ec2QueryHandler {
                 .start(rootElement, AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("ebsEncryptionByDefault", String.valueOf(enabled))
+                .end(rootElement);
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleEnableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        return snapshotBlockPublicAccessResponse("EnableSnapshotBlockPublicAccessResponse",
+                snapshotBlockPublicAccessService.enableSnapshotBlockPublicAccess(region, p.getFirst("State")),
+                null);
+    }
+
+    private Response handleDisableSnapshotBlockPublicAccess(String region) {
+        return snapshotBlockPublicAccessResponse("DisableSnapshotBlockPublicAccessResponse",
+                snapshotBlockPublicAccessService.disableSnapshotBlockPublicAccess(region), null);
+    }
+
+    private Response handleGetSnapshotBlockPublicAccessState(String region) {
+        // Only GetSnapshotBlockPublicAccessState carries managedBy, and Floci has no
+        // declarative-policy layer, so the account always owns the state.
+        return snapshotBlockPublicAccessResponse("GetSnapshotBlockPublicAccessStateResponse",
+                snapshotBlockPublicAccessService.getSnapshotBlockPublicAccessState(region), "account");
+    }
+
+    private Response snapshotBlockPublicAccessResponse(String rootElement, String state, String managedBy) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(rootElement, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("state", state)
+                .elem("managedBy", managedBy)
                 .end(rootElement);
         return xmlResponse(xml.build());
     }
