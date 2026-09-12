@@ -370,6 +370,22 @@ public class AppSyncService {
 
     // ──────────────────────────── Resolvers ────────────────────────────
 
+    /**
+     * The {@code AppSyncRuntime} shape ({@code {name, runtimeVersion}}) AWS accepts on a resolver
+     * and on a pipeline function alike, or null when the request omits it. Shared so the two paths
+     * cannot drift: a pipeline whose function and resolver disagreed on the runtime would not run.
+     */
+    private Resolver.ResolverRuntime parseRuntime(Object runtimeValue) {
+        Map<String, Object> runtime = castMap(runtimeValue);
+        if (runtime == null) {
+            return null;
+        }
+        Resolver.ResolverRuntime rt = new Resolver.ResolverRuntime();
+        rt.setName(parseEnum(ResolverRuntimeName.class, runtime.get("name")));
+        rt.setRuntimeVersion((String) runtime.get("runtimeVersion"));
+        return rt;
+    }
+
     public Resolver createResolver(String apiId, Map<String, Object> request, String region) {
         assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
@@ -378,7 +394,17 @@ public class AppSyncService {
             throw new AwsException("BadRequestException", "A resolver field name is required", 400);
         }
         String dataSourceName = (String) request.get("dataSourceName");
-        if (dataSourceName == null || dataSourceName.isBlank()) {
+        ResolverKind kind = parseEnum(ResolverKind.class, request.getOrDefault("kind", "UNIT"));
+        // Only a UNIT resolver names a data source. A PIPELINE resolver reaches its data through the
+        // functions in pipelineConfig, and AWS refuses dataSourceName on one, so requiring it here
+        // made every pipeline resolver unprovisionable: the shape the AppSync JS resolvers that
+        // Serverless and Amplify generate use throughout.
+        if (kind == ResolverKind.PIPELINE) {
+            if (dataSourceName != null && !dataSourceName.isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "A PIPELINE resolver cannot specify a data source name", 400);
+            }
+        } else if (dataSourceName == null || dataSourceName.isBlank()) {
             throw new AwsException("BadRequestException", "A data source name is required for the resolver", 400);
         }
         String typeName = (String) request.get("typeName");
@@ -386,7 +412,9 @@ public class AppSyncService {
             throw new AwsException("BadRequestException", "A type name is required for the resolver", 400);
         }
         // Validate data source exists
-        getDataSource(apiId, dataSourceName);
+        if (dataSourceName != null && !dataSourceName.isBlank()) {
+            getDataSource(apiId, dataSourceName);
+        }
         Resolver resolver = new Resolver();
         resolver.setApiId(apiId);
         resolver.setTypeName(typeName);
@@ -395,7 +423,7 @@ public class AppSyncService {
         resolver.setFunctionId((String) request.get("functionId"));
         resolver.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
         resolver.setResponseMappingTemplate((String) request.get("responseMappingTemplate"));
-        resolver.setKind(parseEnum(ResolverKind.class, request.getOrDefault("kind", "UNIT")));
+        resolver.setKind(kind);
         resolver.setCode((String) request.get("code"));
         resolver.setCachingConfig(castMap(request.get("cachingConfig")));
         resolver.setMaxBatchSize(castInt(request.get("maxBatchSize")));
@@ -405,13 +433,7 @@ public class AppSyncService {
         resolver.setResolverArn(regionResolver.buildArn("appsync", region,
             "apis/" + apiId + "/types/" + typeName + "/resolvers/" + fieldName));
 
-        Map<String, Object> runtime = castMap(request.get("runtime"));
-        if (runtime != null) {
-            Resolver.ResolverRuntime rt = new Resolver.ResolverRuntime();
-            rt.setName(parseEnum(ResolverRuntimeName.class, runtime.get("name")));
-            rt.setRuntimeVersion((String) runtime.get("runtimeVersion"));
-            resolver.setRuntime(rt);
-        }
+        resolver.setRuntime(parseRuntime(request.get("runtime")));
 
         String key = resolverKey(apiId, resolver.getTypeName(), resolver.getFieldName());
         if (resolverStore.get(key).isPresent()) {
@@ -458,13 +480,7 @@ public class AppSyncService {
         if (request.containsKey("metricsConfig")) existing.setMetricsConfig((String) request.get("metricsConfig"));
         if (request.containsKey("pipelineConfig")) existing.setPipelineConfig((Map<String, Object>) request.get("pipelineConfig"));
         if (request.containsKey("syncConfig")) existing.setSyncConfig((Map<String, Object>) request.get("syncConfig"));
-        if (request.containsKey("runtime")) {
-            Map<String, Object> runtime = (Map<String, Object>) request.get("runtime");
-            Resolver.ResolverRuntime rt = new Resolver.ResolverRuntime();
-            rt.setName(parseEnum(ResolverRuntimeName.class, runtime.get("name")));
-            rt.setRuntimeVersion((String) runtime.get("runtimeVersion"));
-            existing.setRuntime(rt);
-        }
+        if (request.containsKey("runtime")) existing.setRuntime(parseRuntime(request.get("runtime")));
         resolverStore.put(resolverKey(apiId, typeName, fieldName), existing);
         return existing;
     }
@@ -498,6 +514,8 @@ public class AppSyncService {
         fn.setFunctionVersion((String) request.getOrDefault("functionVersion", "2018-05-29"));
         fn.setFunctionArn(buildFunctionArn(apiId, fn.getFunctionId(), region));
         fn.setCode((String) request.get("code"));
+        fn.setRuntime(parseRuntime(request.get("runtime")));
+        fn.setMaxBatchSize(castInt(request.get("maxBatchSize")));
 
         functionStore.put(apiKey(apiId, fn.getFunctionId()), fn);
         return fn;
@@ -516,12 +534,18 @@ public class AppSyncService {
     public FunctionConfiguration updateFunction(String apiId, String functionId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         FunctionConfiguration existing = getFunction(apiId, functionId);
+        // UpdateFunction takes a new name on AWS, and CloudFormation drives FunctionConfiguration
+        // renames through it. Leaving the name alone let a stack complete while GetFunction still
+        // reported the old one.
+        if (request.containsKey("name")) existing.setName((String) request.get("name"));
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         if (request.containsKey("dataSourceName")) existing.setDataSourceName((String) request.get("dataSourceName"));
         if (request.containsKey("requestMappingTemplate")) existing.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
         if (request.containsKey("responseMappingTemplate")) existing.setResponseMappingTemplate((String) request.get("responseMappingTemplate"));
         if (request.containsKey("functionVersion")) existing.setFunctionVersion((String) request.get("functionVersion"));
         if (request.containsKey("code")) existing.setCode((String) request.get("code"));
+        if (request.containsKey("runtime")) existing.setRuntime(parseRuntime(request.get("runtime")));
+        if (request.containsKey("maxBatchSize")) existing.setMaxBatchSize(castInt(request.get("maxBatchSize")));
         functionStore.put(apiKey(apiId, functionId), existing);
         return existing;
     }

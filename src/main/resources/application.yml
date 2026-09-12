@@ -48,6 +48,7 @@ quarkus:
       includes:
         - pricing-snapshots/**
         - ui/*.html
+        - appsync/*.mjs
         - ec2/*.yaml
         - iam/*.yaml
         - iam/*.json

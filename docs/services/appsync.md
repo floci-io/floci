@@ -190,7 +190,7 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 
 | Case | HTTP | Notes |
 |---|---|---|
-| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Nullable fields may be `null` until DataFetchers (Phase 8) |
+| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Fields with an `APPSYNC_JS` resolver are resolved (see [Resolver execution](#resolver-execution)). A field with no resolver is `null`; one with a VTL mapping template fails with an error saying so, rather than resolving to `null` |
 | HTTP subscription operation | 200 | `OperationNotSupported` (realtime WebSocket is a later phase) |
 | Empty body / `{}` / `[]` / unparseable JSON / bad Content-Type | 400 | `MalformedHttpRequestException` |
 | Missing `operationName` with multiple operations | 400 | `BadRequestException` — `Missing operation name.` |
@@ -229,6 +229,81 @@ Configured modes are the API default `authenticationType` plus `additionalAuthen
 SDL field auth: unmarked fields require the API **default** mode. Additional modes unlock fields tagged `@aws_api_key` / `@aws_iam` / `@aws_oidc` / `@aws_cognito_user_pools` / `@aws_lambda`. Multiple directives on a field are OR. Field-level directives override type-level. `@aws_auth` is allowed on `OBJECT \| FIELD_DEFINITION` and is ignored when additional modes exist.
 
 Duplicate `API_KEY` / `AWS_IAM` / `AWS_LAMBDA` (and the same Cognito pool or OIDC issuer) between default and additional providers is rejected on create/update with management 400 `BadRequestException`: `Authentication type {TYPE} for additional authentication provider {N} already specified on the API. It can only be specified once.` (`N` is 1-based in `additionalAuthenticationProviders`).
+
+## Resolver execution
+
+A field with an `APPSYNC_JS` resolver is executed, not stubbed: the resolver's own code runs, its
+data source is called, and the field gets the value the code returned.
+
+`VTL` mapping templates are **not** executed. A resolver declaring the VTL runtime fails its field
+with a message saying so, rather than resolving to `null`: a null that means "not implemented" is
+indistinguishable from a null that means "no rows".
+
+### How the code runs
+
+Resolver JavaScript runs in a **Node sidecar container**, started lazily on the first JS resolver
+and reused for every evaluation after it. Floci's published image is a Mandrel native executable,
+which carries no Truffle languages, so there is no in-process JavaScript to embed; running real Node
+also means a bundle executes as written, ES modules and all.
+
+`@aws-appsync/utils` and `@aws-appsync/utils/rds` resolve to a shim the sidecar writes at boot, not
+the published package, so a resolver call never depends on npm being reachable. Covered:
+`util.error` / `appendError` / `unauthorized`, `util.autoId`, `util.time.*`, `util.dynamodb.*`,
+`util.parseJson` / `toJson` and the type predicates, `runtime.earlyReturn`, `extensions.*` (accepted,
+no-ops), and from `/rds`: `toJsonObject`, `sql`, `select`, `insert`, `update`, `remove`,
+`createPgStatement` and `typeHint`. Anything outside that set throws by name rather than answering
+`undefined`, so a gap is visible instead of silent.
+
+| Setting | Env | Default |
+|---|---|---|
+| `floci.services.appsync.js-runtime.enabled` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENABLED` | `true` |
+| `floci.services.appsync.js-runtime.image` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_IMAGE` | `node:22-alpine` |
+| `floci.services.appsync.js-runtime.container-name` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_CONTAINER_NAME` | `appsync-js-runtime` |
+| `floci.services.appsync.js-runtime.port` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_PORT` | `0` (Docker picks) |
+| `floci.services.appsync.js-runtime.start-timeout-seconds` | … `_START_TIMEOUT_SECONDS` | `60` |
+| `floci.services.appsync.js-runtime.evaluation-timeout-seconds` | … `_EVALUATION_TIMEOUT_SECONDS` | `30` |
+| `floci.services.appsync.js-runtime.keep-running-on-shutdown` | … `_KEEP_RUNNING_ON_SHUTDOWN` | `false` |
+
+Resolver execution therefore needs Docker. Without it, a JS resolver fails its field with a message
+naming the sidecar; the management API is unaffected.
+
+### Pipelines
+
+A UNIT resolver is `request()` → data source → `response()`. A PIPELINE resolver runs its own
+`request()` as the before step, then each function in `pipelineConfig.functions` in order as its own
+request / data source / response, then its `response()` as the after step.
+
+- `ctx.stash` is threaded through every stage, so the before step can hand work to the functions.
+- Each stage sees the previous one's return value as `ctx.prev.result`.
+- A function that exports no `response()` passes its data source result straight through.
+- `runtime.earlyReturn(value)` makes `value` the field's result immediately, skipping every
+  remaining stage including the after step.
+- `util.error(...)` fails the field, carrying the resolver's own `errorType`, `errorInfo` and `data`
+  onto the GraphQL error.
+- `util.appendError(...)` stops nothing: the errors are returned **beside** the data.
+- A **data source failure** does not fail the field by itself. The stage's `response()` handler is
+  called with `ctx.error` set to `{message, type}` and no `ctx.result`, and it decides: re-raise
+  with `util.error` / collect with `util.appendError`, or return a value and **suppress** the error.
+  Suppression is AWS behaviour, and it is why resolvers carry an explicit `if (ctx.error)` branch:
+  without one a failed query silently returns whatever the handler returned. A stage that exports
+  no `response()` has nothing to make that decision, so there the error fails the field.
+
+`ctx` carries `arguments` / `args`, `source`, `stash`, `prev`, `identity`, `request.authType`,
+`info` (`fieldName`, `parentTypeName`, `variables`, `selectionSetList`) and `env` (the API's
+environment variables). `ctx.request.headers` is empty: the GraphQL context does not carry them.
+
+### Data sources
+
+| Type | Behaviour |
+|---|---|
+| `NONE` | The request is the result; a `payload` member is unwrapped, as on AWS. |
+| `AWS_LAMBDA` | `Invoke` and `BatchInvoke`. Only `payload` reaches the function. A function error fails the field rather than resolving to the error object. |
+| `RELATIONAL_DATABASE` | Statements run over the RDS Data API against `rdsHttpEndpointConfig`. Accepts `{statements, variableMap}`, the `{statement, parameters}` the `/rds` helpers build, a list of either, or a bare SQL string. `variableTypeHintMap` is honoured, without it a bound date binds as text and PostgreSQL refuses the comparison (`operator does not exist: timestamp with time zone >= character varying`), so a resolver's date filters need it. The result is wrapped as `{sqlStatementResults: […]}`, which is what `toJsonObject()` reads. |
+| `AMAZON_DYNAMODB` | `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `Scan`, through the native DynamoDB path so expressions, conditions and indexes all apply. Items come back as **plain JSON**, not attribute values, as AppSync returns them. `nextToken` is an opaque encoding of `LastEvaluatedKey`. `BatchGetItem`, `TransactWriteItems` and `Sync` are not implemented and say so. |
+| `HTTP`, `AMAZON_EVENTBRIDGE`, `AMAZON_OPENSEARCH_SERVICE`, `AMAZON_BEDROCK_RUNTIME` | Not implemented; a resolver using one fails its field naming the type. |
+
+A field with no resolver falls back to reading its value off the parent object, which is how the
+fields of an object a resolver returned are populated.
 
 ## Pagination
 
