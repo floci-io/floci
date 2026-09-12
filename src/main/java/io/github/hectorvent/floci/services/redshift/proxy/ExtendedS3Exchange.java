@@ -124,6 +124,7 @@ final class ExtendedS3Exchange {
         try {
             collector = S3CopySimulator.prepareUnload(spec, s3Service);
         } catch (S3CopySimulator.S3TransferException e) {
+            S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
             drainExecute(client, decoder, coordinator, false);
             sendError(client, e.sqlState(), e.getMessage());
             return false;
@@ -137,6 +138,7 @@ final class ExtendedS3Exchange {
                         collector.accept(message.body());
                     } catch (S3CopySimulator.S3TransferException e) {
                         collector.abort();
+                        S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
                         drainExecute(client, decoder, coordinator, false);
                         sendError(client, e.sqlState(), e.getMessage());
                         return false;
@@ -151,6 +153,7 @@ final class ExtendedS3Exchange {
                     try {
                         collector.complete();
                     } catch (S3CopySimulator.S3TransferException e) {
+                        S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
                         sendError(client, e.sqlState(), e.getMessage());
                         return false;
                     }
