@@ -4700,6 +4700,15 @@ public class Ec2QueryHandler {
                     }
                     xml.end("groupSet");
                 }
+                LaunchTemplateData.ConnectionTrackingSpecification tracking =
+                        networkInterface.getConnectionTrackingSpecification();
+                if (tracking != null) {
+                    xml.start("connectionTrackingSpecification")
+                            .elem("tcpEstablishedTimeout", str(tracking.getTcpEstablishedTimeout()))
+                            .elem("udpTimeout", str(tracking.getUdpTimeout()))
+                            .elem("udpStreamTimeout", str(tracking.getUdpStreamTimeout()))
+                            .end("connectionTrackingSpecification");
+                }
                 xml.end("item");
             }
             xml.end("networkInterfaceSet");
@@ -4745,6 +4754,23 @@ public class Ec2QueryHandler {
                     .elem("threadsPerCore", str(cpuOptions.getThreadsPerCore()))
                     .elem("amdSevSnp", cpuOptions.getAmdSevSnp())
                     .end("cpuOptions");
+        }
+
+        LaunchTemplateData.InstanceMarketOptions marketOptions = data.getInstanceMarketOptions();
+        if (marketOptions != null) {
+            xml.start("instanceMarketOptions")
+                    .elem("marketType", marketOptions.getMarketType());
+            LaunchTemplateData.SpotOptions spotOptions = marketOptions.getSpotOptions();
+            if (spotOptions != null) {
+                xml.start("spotOptions")
+                        .elem("maxPrice", spotOptions.getMaxPrice())
+                        .elem("spotInstanceType", spotOptions.getSpotInstanceType())
+                        .elem("blockDurationMinutes", str(spotOptions.getBlockDurationMinutes()))
+                        .elem("validUntil", spotOptions.getValidUntil())
+                        .elem("instanceInterruptionBehavior", spotOptions.getInstanceInterruptionBehavior())
+                        .end("spotOptions");
+            }
+            xml.end("instanceMarketOptions");
         }
 
         LaunchTemplateData.CreditSpecification creditSpecification = data.getCreditSpecification();
@@ -4797,6 +4823,10 @@ public class Ec2QueryHandler {
             xml.end("capacityReservationSpecification");
         }
 
+        if (data.getInstanceRequirements() != null) {
+            appendInstanceRequirements(xml, data.getInstanceRequirements());
+        }
+
         if (!data.getSecurityGroupIds().isEmpty()) {
             xml.start("securityGroupIdSet");
             for (String securityGroupId : data.getSecurityGroupIds()) {
@@ -4816,6 +4846,79 @@ public class Ec2QueryHandler {
             xml.end("tagSpecificationSet");
         }
         return xml.build();
+    }
+
+    /** Renders {@code InstanceRequirements}, whose element names differ from the request's. */
+    private void appendInstanceRequirements(XmlBuilder xml, LaunchTemplateData.InstanceRequirements requirements) {
+        xml.start("instanceRequirements");
+        appendIntRange(xml, "vCpuCount", requirements.getVCpuCount());
+        appendIntRange(xml, "memoryMiB", requirements.getMemoryMiB());
+        appendStringSet(xml, "cpuManufacturerSet", requirements.getCpuManufacturers());
+        appendDoubleRange(xml, "memoryGiBPerVCpu", requirements.getMemoryGiBPerVCpu());
+        appendStringSet(xml, "excludedInstanceTypeSet", requirements.getExcludedInstanceTypes());
+        appendStringSet(xml, "instanceGenerationSet", requirements.getInstanceGenerations());
+        xml.elem("spotMaxPricePercentageOverLowestPrice",
+                        str(requirements.getSpotMaxPricePercentageOverLowestPrice()))
+                .elem("onDemandMaxPricePercentageOverLowestPrice",
+                        str(requirements.getOnDemandMaxPricePercentageOverLowestPrice()))
+                .elem("bareMetal", requirements.getBareMetal())
+                .elem("burstablePerformance", requirements.getBurstablePerformance())
+                .elem("requireHibernateSupport", str(requirements.getRequireHibernateSupport()));
+        appendIntRange(xml, "networkInterfaceCount", requirements.getNetworkInterfaceCount());
+        xml.elem("localStorage", requirements.getLocalStorage());
+        appendStringSet(xml, "localStorageTypeSet", requirements.getLocalStorageTypes());
+        appendDoubleRange(xml, "totalLocalStorageGB", requirements.getTotalLocalStorageGB());
+        appendIntRange(xml, "baselineEbsBandwidthMbps", requirements.getBaselineEbsBandwidthMbps());
+        appendStringSet(xml, "acceleratorTypeSet", requirements.getAcceleratorTypes());
+        appendIntRange(xml, "acceleratorCount", requirements.getAcceleratorCount());
+        appendStringSet(xml, "acceleratorManufacturerSet", requirements.getAcceleratorManufacturers());
+        appendStringSet(xml, "acceleratorNameSet", requirements.getAcceleratorNames());
+        appendIntRange(xml, "acceleratorTotalMemoryMiB", requirements.getAcceleratorTotalMemoryMiB());
+        appendDoubleRange(xml, "networkBandwidthGbps", requirements.getNetworkBandwidthGbps());
+        appendStringSet(xml, "allowedInstanceTypeSet", requirements.getAllowedInstanceTypes());
+        xml.elem("maxSpotPriceAsPercentageOfOptimalOnDemandPrice",
+                str(requirements.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice()));
+        LaunchTemplateData.BaselinePerformanceFactors factors = requirements.getBaselinePerformanceFactors();
+        if (factors != null && factors.getCpu() != null) {
+            xml.start("baselinePerformanceFactors").start("cpu").start("referenceSet");
+            for (LaunchTemplateData.PerformanceFactorReference reference : factors.getCpu().getReferences()) {
+                xml.start("item").elem("instanceFamily", reference.getInstanceFamily()).end("item");
+            }
+            xml.end("referenceSet").end("cpu").end("baselinePerformanceFactors");
+        }
+        xml.elem("requireEncryptionInTransit", str(requirements.getRequireEncryptionInTransit()))
+                .end("instanceRequirements");
+    }
+
+    private void appendIntRange(XmlBuilder xml, String element, LaunchTemplateData.IntRange range) {
+        if (range == null) {
+            return;
+        }
+        xml.start(element)
+                .elem("min", str(range.getMin()))
+                .elem("max", str(range.getMax()))
+                .end(element);
+    }
+
+    private void appendDoubleRange(XmlBuilder xml, String element, LaunchTemplateData.DoubleRange range) {
+        if (range == null) {
+            return;
+        }
+        xml.start(element)
+                .elem("min", str(range.getMin()))
+                .elem("max", str(range.getMax()))
+                .end(element);
+    }
+
+    private void appendStringSet(XmlBuilder xml, String element, List<String> values) {
+        if (values.isEmpty()) {
+            return;
+        }
+        xml.start(element);
+        for (String value : values) {
+            xml.elem("item", value);
+        }
+        xml.end(element);
     }
 
     /**
@@ -4946,7 +5049,109 @@ public class Ec2QueryHandler {
             }
             data.setCapacityReservationSpecification(spec);
         }
+
+        if (anyParamStartsWith(p, prefix + ".InstanceMarketOptions.")) {
+            data.setInstanceMarketOptions(parseLaunchTemplateInstanceMarketOptions(
+                    p, prefix + ".InstanceMarketOptions."));
+        }
+
+        if (anyParamStartsWith(p, prefix + ".InstanceRequirements.")) {
+            data.setInstanceRequirements(parseLaunchTemplateInstanceRequirements(
+                    p, prefix + ".InstanceRequirements."));
+        }
         return data;
+    }
+
+    private LaunchTemplateData.InstanceMarketOptions parseLaunchTemplateInstanceMarketOptions(
+            MultivaluedMap<String, String> p, String prefix) {
+        LaunchTemplateData.InstanceMarketOptions options = new LaunchTemplateData.InstanceMarketOptions();
+        options.setMarketType(p.getFirst(prefix + "MarketType"));
+        String spotPrefix = prefix + "SpotOptions.";
+        if (anyParamStartsWith(p, spotPrefix)) {
+            LaunchTemplateData.SpotOptions spotOptions = new LaunchTemplateData.SpotOptions();
+            spotOptions.setMaxPrice(p.getFirst(spotPrefix + "MaxPrice"));
+            spotOptions.setSpotInstanceType(p.getFirst(spotPrefix + "SpotInstanceType"));
+            spotOptions.setBlockDurationMinutes(intParam(p, spotPrefix + "BlockDurationMinutes"));
+            spotOptions.setValidUntil(p.getFirst(spotPrefix + "ValidUntil"));
+            spotOptions.setInstanceInterruptionBehavior(p.getFirst(spotPrefix + "InstanceInterruptionBehavior"));
+            options.setSpotOptions(spotOptions);
+        }
+        return options;
+    }
+
+    /**
+     * Parses {@code InstanceRequirementsRequest}. Its scalar-list members carry a singular
+     * {@code locationName}, so the wire names are {@code CpuManufacturer.N} rather than
+     * {@code CpuManufacturers.N}, and the nested performance-factor references arrive as
+     * {@code BaselinePerformanceFactors.Cpu.Reference.N.InstanceFamily}.
+     */
+    private LaunchTemplateData.InstanceRequirements parseLaunchTemplateInstanceRequirements(
+            MultivaluedMap<String, String> p, String prefix) {
+        LaunchTemplateData.InstanceRequirements requirements = new LaunchTemplateData.InstanceRequirements();
+        requirements.setVCpuCount(parseIntRange(p, prefix + "VCpuCount."));
+        requirements.setMemoryMiB(parseIntRange(p, prefix + "MemoryMiB."));
+        requirements.setCpuManufacturers(getList(p, prefix + "CpuManufacturer"));
+        requirements.setMemoryGiBPerVCpu(parseDoubleRange(p, prefix + "MemoryGiBPerVCpu."));
+        requirements.setExcludedInstanceTypes(getList(p, prefix + "ExcludedInstanceType"));
+        requirements.setInstanceGenerations(getList(p, prefix + "InstanceGeneration"));
+        requirements.setSpotMaxPricePercentageOverLowestPrice(
+                intParam(p, prefix + "SpotMaxPricePercentageOverLowestPrice"));
+        requirements.setOnDemandMaxPricePercentageOverLowestPrice(
+                intParam(p, prefix + "OnDemandMaxPricePercentageOverLowestPrice"));
+        requirements.setBareMetal(p.getFirst(prefix + "BareMetal"));
+        requirements.setBurstablePerformance(p.getFirst(prefix + "BurstablePerformance"));
+        requirements.setRequireHibernateSupport(boolParam(p, prefix + "RequireHibernateSupport"));
+        requirements.setNetworkInterfaceCount(parseIntRange(p, prefix + "NetworkInterfaceCount."));
+        requirements.setLocalStorage(p.getFirst(prefix + "LocalStorage"));
+        requirements.setLocalStorageTypes(getList(p, prefix + "LocalStorageType"));
+        requirements.setTotalLocalStorageGB(parseDoubleRange(p, prefix + "TotalLocalStorageGB."));
+        requirements.setBaselineEbsBandwidthMbps(parseIntRange(p, prefix + "BaselineEbsBandwidthMbps."));
+        requirements.setAcceleratorTypes(getList(p, prefix + "AcceleratorType"));
+        requirements.setAcceleratorCount(parseIntRange(p, prefix + "AcceleratorCount."));
+        requirements.setAcceleratorManufacturers(getList(p, prefix + "AcceleratorManufacturer"));
+        requirements.setAcceleratorNames(getList(p, prefix + "AcceleratorName"));
+        requirements.setAcceleratorTotalMemoryMiB(parseIntRange(p, prefix + "AcceleratorTotalMemoryMiB."));
+        requirements.setNetworkBandwidthGbps(parseDoubleRange(p, prefix + "NetworkBandwidthGbps."));
+        requirements.setAllowedInstanceTypes(getList(p, prefix + "AllowedInstanceType"));
+        requirements.setMaxSpotPriceAsPercentageOfOptimalOnDemandPrice(
+                intParam(p, prefix + "MaxSpotPriceAsPercentageOfOptimalOnDemandPrice"));
+        requirements.setRequireEncryptionInTransit(boolParam(p, prefix + "RequireEncryptionInTransit"));
+        String cpuPrefix = prefix + "BaselinePerformanceFactors.Cpu.";
+        if (anyParamStartsWith(p, cpuPrefix)) {
+            LaunchTemplateData.CpuPerformanceFactor cpu = new LaunchTemplateData.CpuPerformanceFactor();
+            List<LaunchTemplateData.PerformanceFactorReference> references = new ArrayList<>();
+            for (int i = 1; ; i++) {
+                String instanceFamily = p.getFirst(cpuPrefix + "Reference." + i + ".InstanceFamily");
+                if (instanceFamily == null) {
+                    break;
+                }
+                references.add(new LaunchTemplateData.PerformanceFactorReference(instanceFamily));
+            }
+            cpu.setReferences(references);
+            LaunchTemplateData.BaselinePerformanceFactors factors =
+                    new LaunchTemplateData.BaselinePerformanceFactors();
+            factors.setCpu(cpu);
+            requirements.setBaselinePerformanceFactors(factors);
+        }
+        return requirements;
+    }
+
+    private LaunchTemplateData.IntRange parseIntRange(MultivaluedMap<String, String> p, String prefix) {
+        Integer min = intParam(p, prefix + "Min");
+        Integer max = intParam(p, prefix + "Max");
+        if (min == null && max == null) {
+            return null;
+        }
+        return new LaunchTemplateData.IntRange(min, max);
+    }
+
+    private LaunchTemplateData.DoubleRange parseDoubleRange(MultivaluedMap<String, String> p, String prefix) {
+        Double min = doubleParam(p, prefix + "Min");
+        Double max = doubleParam(p, prefix + "Max");
+        if (min == null && max == null) {
+            return null;
+        }
+        return new LaunchTemplateData.DoubleRange(min, max);
     }
 
     private List<LaunchTemplateData.BlockDeviceMapping> parseLaunchTemplateBlockDeviceMappings(
@@ -4999,6 +5204,15 @@ public class Ec2QueryHandler {
             networkInterface.setSecondaryPrivateIpAddressCount(intParam(p, base + ".SecondaryPrivateIpAddressCount"));
             networkInterface.setSubnetId(p.getFirst(base + ".SubnetId"));
             networkInterface.setNetworkCardIndex(intParam(p, base + ".NetworkCardIndex"));
+            String trackingPrefix = base + ".ConnectionTrackingSpecification.";
+            if (anyParamStartsWith(p, trackingPrefix)) {
+                LaunchTemplateData.ConnectionTrackingSpecification tracking =
+                        new LaunchTemplateData.ConnectionTrackingSpecification();
+                tracking.setTcpEstablishedTimeout(intParam(p, trackingPrefix + "TcpEstablishedTimeout"));
+                tracking.setUdpTimeout(intParam(p, trackingPrefix + "UdpTimeout"));
+                tracking.setUdpStreamTimeout(intParam(p, trackingPrefix + "UdpStreamTimeout"));
+                networkInterface.setConnectionTrackingSpecification(tracking);
+            }
             networkInterface.setGroups(getList(p, base + ".SecurityGroupId", base + ".Groups", base + ".GroupId"));
             interfaces.add(networkInterface);
         }
@@ -5054,6 +5268,18 @@ public class Ec2QueryHandler {
             return Integer.valueOf(value);
         } catch (NumberFormatException e) {
             throw new AwsException("InvalidParameterValue", name + " is not a valid integer.", 400);
+        }
+    }
+
+    private Double doubleParam(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (!isSet(value)) {
+            return null;
+        }
+        try {
+            return Double.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " is not a valid number.", 400);
         }
     }
 

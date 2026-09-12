@@ -351,4 +351,230 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
         assertFalse(describeBody(name).contains("my-app-sg"),
                 "SecurityGroups (by name) is accepted and ignored, not stored");
     }
+
+    @Test
+    void instanceMarketOptionsRoundTrips() {
+        // aws_launch_template's instance_market_options block. Dropping it made every spot
+        // launch template diff forever, because Terraform read back no market options at all.
+        String name = uniqueName("spot-lt");
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.MarketType", "spot")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.SpotOptions.MaxPrice", "0.05")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.SpotOptions.SpotInstanceType", "one-time")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.SpotOptions.BlockDurationMinutes", "60")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.SpotOptions.ValidUntil", "2030-01-01T00:00:00Z")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.SpotOptions.InstanceInterruptionBehavior",
+                    "terminate")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        describeLatest(name)
+            .body(DATA + "instanceMarketOptions.marketType", equalTo("spot"))
+            .body(DATA + "instanceMarketOptions.spotOptions.maxPrice", equalTo("0.05"))
+            .body(DATA + "instanceMarketOptions.spotOptions.spotInstanceType", equalTo("one-time"))
+            .body(DATA + "instanceMarketOptions.spotOptions.blockDurationMinutes", equalTo("60"))
+            .body(DATA + "instanceMarketOptions.spotOptions.validUntil", equalTo("2030-01-01T00:00:00Z"))
+            .body(DATA + "instanceMarketOptions.spotOptions.instanceInterruptionBehavior", equalTo("terminate"));
+    }
+
+    @Test
+    void marketOptionsWithoutSpotOptionsOmitsTheSpotBlock() {
+        String name = uniqueName("market-only-lt");
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.MarketType", "spot")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        describeLatest(name)
+            .body(DATA + "instanceMarketOptions.marketType", equalTo("spot"));
+        assertFalse(describeBody(name).contains("<spotOptions>"),
+                "an unset SpotOptions must stay absent rather than read back empty");
+    }
+
+    @Test
+    void instanceRequirementsRoundTrips() {
+        // Attribute-based instance type selection. The scalar lists carry the model's singular
+        // locationName on the wire, so CpuManufacturer.N feeds cpuManufacturerSet on the way out.
+        String name = uniqueName("requirements-lt");
+        String req = "LaunchTemplateData.InstanceRequirements.";
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam(req + "VCpuCount.Min", "2")
+            .formParam(req + "VCpuCount.Max", "8")
+            .formParam(req + "MemoryMiB.Min", "1024")
+            .formParam(req + "MemoryGiBPerVCpu.Min", "0.5")
+            .formParam(req + "MemoryGiBPerVCpu.Max", "4.0")
+            .formParam(req + "CpuManufacturer.1", "intel")
+            .formParam(req + "CpuManufacturer.2", "amd")
+            .formParam(req + "ExcludedInstanceType.1", "t2.*")
+            .formParam(req + "InstanceGeneration.1", "current")
+            .formParam(req + "BareMetal", "excluded")
+            .formParam(req + "BurstablePerformance", "included")
+            .formParam(req + "RequireHibernateSupport", "false")
+            .formParam(req + "LocalStorage", "required")
+            .formParam(req + "LocalStorageType.1", "ssd")
+            .formParam(req + "TotalLocalStorageGB.Max", "100.0")
+            .formParam(req + "NetworkInterfaceCount.Min", "1")
+            .formParam(req + "BaselineEbsBandwidthMbps.Min", "100")
+            .formParam(req + "AcceleratorType.1", "gpu")
+            .formParam(req + "AcceleratorCount.Min", "1")
+            .formParam(req + "AcceleratorManufacturer.1", "nvidia")
+            .formParam(req + "AcceleratorName.1", "t4")
+            .formParam(req + "AcceleratorTotalMemoryMiB.Min", "16")
+            .formParam(req + "NetworkBandwidthGbps.Min", "1.5")
+            .formParam(req + "AllowedInstanceType.1", "m5.*")
+            .formParam(req + "SpotMaxPricePercentageOverLowestPrice", "20")
+            .formParam(req + "OnDemandMaxPricePercentageOverLowestPrice", "30")
+            .formParam(req + "MaxSpotPriceAsPercentageOfOptimalOnDemandPrice", "40")
+            .formParam(req + "RequireEncryptionInTransit", "true")
+            .formParam(req + "BaselinePerformanceFactors.Cpu.Reference.1.InstanceFamily", "m6i")
+            .formParam(req + "BaselinePerformanceFactors.Cpu.Reference.2.InstanceFamily", "c6i")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String set = DATA + "instanceRequirements.";
+        describeLatest(name)
+            .body(set + "vCpuCount.min", equalTo("2"))
+            .body(set + "vCpuCount.max", equalTo("8"))
+            .body(set + "memoryMiB.min", equalTo("1024"))
+            .body(set + "memoryGiBPerVCpu.min", equalTo("0.5"))
+            .body(set + "memoryGiBPerVCpu.max", equalTo("4.0"))
+            .body(set + "cpuManufacturerSet.item", contains("intel", "amd"))
+            .body(set + "excludedInstanceTypeSet.item", equalTo("t2.*"))
+            .body(set + "instanceGenerationSet.item", equalTo("current"))
+            .body(set + "bareMetal", equalTo("excluded"))
+            .body(set + "burstablePerformance", equalTo("included"))
+            .body(set + "requireHibernateSupport", equalTo("false"))
+            .body(set + "localStorage", equalTo("required"))
+            .body(set + "localStorageTypeSet.item", equalTo("ssd"))
+            .body(set + "totalLocalStorageGB.max", equalTo("100.0"))
+            .body(set + "networkInterfaceCount.min", equalTo("1"))
+            .body(set + "baselineEbsBandwidthMbps.min", equalTo("100"))
+            .body(set + "acceleratorTypeSet.item", equalTo("gpu"))
+            .body(set + "acceleratorCount.min", equalTo("1"))
+            .body(set + "acceleratorManufacturerSet.item", equalTo("nvidia"))
+            .body(set + "acceleratorNameSet.item", equalTo("t4"))
+            .body(set + "acceleratorTotalMemoryMiB.min", equalTo("16"))
+            .body(set + "networkBandwidthGbps.min", equalTo("1.5"))
+            .body(set + "allowedInstanceTypeSet.item", equalTo("m5.*"))
+            .body(set + "spotMaxPricePercentageOverLowestPrice", equalTo("20"))
+            .body(set + "onDemandMaxPricePercentageOverLowestPrice", equalTo("30"))
+            .body(set + "maxSpotPriceAsPercentageOfOptimalOnDemandPrice", equalTo("40"))
+            .body(set + "requireEncryptionInTransit", equalTo("true"))
+            .body(set + "baselinePerformanceFactors.cpu.referenceSet.item.instanceFamily",
+                    contains("m6i", "c6i"));
+        // A range the request never set must not read back as an empty element.
+        assertFalse(describeBody(name).contains("<totalLocalStorageGB><min>"),
+                "an unset range bound must stay absent");
+    }
+
+    @Test
+    void connectionTrackingSpecificationRoundTripsInsideANetworkInterface() {
+        String name = uniqueName("tracking-lt");
+        String tracking = "LaunchTemplateData.NetworkInterface.1.ConnectionTrackingSpecification.";
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", "0")
+            .formParam("LaunchTemplateData.NetworkInterface.1.SubnetId", "subnet-0123456789abcdef0")
+            .formParam(tracking + "TcpEstablishedTimeout", "60")
+            .formParam(tracking + "UdpStreamTimeout", "120")
+            .formParam(tracking + "UdpTimeout", "30")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String item = DATA + "networkInterfaceSet.item.";
+        describeLatest(name)
+            .body(item + "deviceIndex", equalTo("0"))
+            .body(item + "connectionTrackingSpecification.tcpEstablishedTimeout", equalTo("60"))
+            .body(item + "connectionTrackingSpecification.udpStreamTimeout", equalTo("120"))
+            .body(item + "connectionTrackingSpecification.udpTimeout", equalTo("30"));
+    }
+
+    @Test
+    void aTemplateSettingNoneOfTheseBlocksReadsBackWithoutThem() {
+        String name = uniqueName("bare-lt");
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+            .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", "0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String body = describeBody(name);
+        assertFalse(body.contains("instanceMarketOptions"),
+                "an unset InstanceMarketOptions must stay absent");
+        assertFalse(body.contains("instanceRequirements"),
+                "an unset InstanceRequirements must stay absent");
+        assertFalse(body.contains("connectionTrackingSpecification"),
+                "an unset ConnectionTrackingSpecification must stay absent");
+    }
+
+    @Test
+    void aNewVersionInheritsMarketOptionsAndRequirementsItDoesNotRestate() {
+        String name = uniqueName("inherit-lt");
+        String tracking = "LaunchTemplateData.NetworkInterface.1.ConnectionTrackingSpecification.";
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.MarketType", "spot")
+            .formParam("LaunchTemplateData.InstanceMarketOptions.SpotOptions.MaxPrice", "0.05")
+            .formParam("LaunchTemplateData.InstanceRequirements.VCpuCount.Min", "2")
+            .formParam("LaunchTemplateData.InstanceRequirements.MemoryMiB.Min", "1024")
+            .formParam("LaunchTemplateData.NetworkInterface.1.DeviceIndex", "0")
+            .formParam(tracking + "TcpEstablishedTimeout", "60")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "CreateLaunchTemplateVersion")
+            .formParam("LaunchTemplateName", name)
+            .formParam("SourceVersion", "1")
+            .formParam("LaunchTemplateData.InstanceType", "t3.small")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        describeLatest(name)
+            .body(DATA + "instanceType", equalTo("t3.small"))
+            .body(DATA + "instanceMarketOptions.marketType", equalTo("spot"))
+            .body(DATA + "instanceMarketOptions.spotOptions.maxPrice", equalTo("0.05"))
+            .body(DATA + "instanceRequirements.vCpuCount.min", equalTo("2"))
+            .body(DATA + "instanceRequirements.memoryMiB.min", equalTo("1024"))
+            .body(DATA + "networkInterfaceSet.item.connectionTrackingSpecification.tcpEstablishedTimeout",
+                    equalTo("60"));
+    }
 }

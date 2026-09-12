@@ -553,8 +553,14 @@ These members of `RequestLaunchTemplateData` are stored and read back unchanged 
 `IamInstanceProfile`, `BlockDeviceMappings`, `NetworkInterfaces`, `TagSpecifications`,
 `MetadataOptions`, `Monitoring`, `Placement`, `CpuOptions`, `CreditSpecification`,
 `EnclaveOptions`, `HibernationOptions`, `MaintenanceOptions`, `PrivateDnsNameOptions`,
-`CapacityReservationSpecification`, `EbsOptimized`, `DisableApiTermination`, `DisableApiStop`,
+`CapacityReservationSpecification`, `InstanceMarketOptions`, `InstanceRequirements`,
+`EbsOptimized`, `DisableApiTermination`, `DisableApiStop`,
 `InstanceInitiatedShutdownBehavior`.
+
+`InstanceRequirements` carries every member of the service model's
+`InstanceRequirementsRequest`, including the nested `BaselinePerformanceFactors.Cpu.References`.
+Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read back with all
+three of its timeout members.
 
 Two behaviours worth calling out, because they are what Terraform reads back:
 
@@ -582,13 +588,12 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   the same field for the initial version it creates.
 
 Members the service model declares that are accepted and ignored rather than stored:
-`InstanceMarketOptions`, `InstanceRequirements`, `LicenseSpecifications`, `ElasticGpuSpecifications`,
-`ElasticInferenceAccelerators`, `NetworkPerformanceOptions`, `Operator`, `SecondaryInterfaces` and
-`SecurityGroups` (security groups by name — resolving names to IDs would need lookup machinery,
+`LicenseSpecifications`, `ElasticGpuSpecifications`, `ElasticInferenceAccelerators`,
+`NetworkPerformanceOptions`, `Operator`, `SecondaryInterfaces` and
+`SecurityGroups` (security groups by name, where resolving names to IDs would need lookup machinery,
 including ambiguity handling across VPCs, that no other EC2 action here has either; `RunInstances`
 itself only accepts `SecurityGroupId`). Within `NetworkInterfaces`, the IPv4/IPv6 address and
-prefix lists, `EnaSrdSpecification`, `ConnectionTrackingSpecification`, `PrimaryIpv6` and
-`EnaQueueCount` are likewise ignored.
+prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likewise ignored.
 
 ### IAM Instance Profiles
 
