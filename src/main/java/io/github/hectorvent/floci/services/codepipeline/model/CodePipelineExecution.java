@@ -27,6 +27,7 @@ public class CodePipelineExecution {
     private Double lastUpdateTime;
     private List<Map<String, Object>> artifactRevisions = new ArrayList<>();
     private List<Map<String, Object>> sourceRevisions = new ArrayList<>();
+    private List<Map<String, Object>> sourceRevisionOverrides = new ArrayList<>();
     private List<Map<String, String>> variables = new ArrayList<>();
     private Map<String, String> trigger = new LinkedHashMap<>();
     private List<ActionExecution> actionExecutions = new ArrayList<>();
@@ -138,6 +139,14 @@ public class CodePipelineExecution {
 
     public void setSourceRevisions(List<Map<String, Object>> sourceRevisions) {
         this.sourceRevisions = sourceRevisions;
+    }
+
+    public List<Map<String, Object>> getSourceRevisionOverrides() {
+        return sourceRevisionOverrides;
+    }
+
+    public void setSourceRevisionOverrides(List<Map<String, Object>> sourceRevisionOverrides) {
+        this.sourceRevisionOverrides = sourceRevisionOverrides == null ? new ArrayList<>() : sourceRevisionOverrides;
     }
 
     public List<Map<String, String>> getVariables() {

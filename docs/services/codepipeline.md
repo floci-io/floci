@@ -25,6 +25,11 @@ Stages execute in declaration order. Actions with the same `runOrder` execute in
 A `QUEUED` or `PARALLEL` pipeline holds at most 50 active executions, as on AWS;
 `StartPipelineExecution` beyond that returns `ConcurrentPipelineExecutionsLimitExceededException`.
 
+S3 source actions resolve `sourceRevisions` from the object actually consumed by the execution.
+Unversioned objects report their ETag as the revision ID; versioned objects report the version ID.
+`StartPipelineExecution.sourceRevisions` is treated as an override, including supported S3 object-key
+and version-ID overrides, rather than being copied directly into execution history.
+
 The following providers execute against local Floci services:
 
 | Category | Provider | Behavior |
