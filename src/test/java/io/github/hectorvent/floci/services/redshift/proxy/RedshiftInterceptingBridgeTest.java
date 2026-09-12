@@ -177,11 +177,11 @@ class RedshiftInterceptingBridgeTest {
                 assertEquals('D', decoder.nextMessage().type());
                 writeBackendFrame('n', new byte[0]);
                 assertEquals('E', decoder.nextMessage().type());
-                assertEquals('S', decoder.nextMessage().type());
                 writeBackendFrame('G', new byte[]{0, 0, 0});
                 while (decoder.nextMessage().type() != 'c') {
                     // Consume CopyData until the bridge completes CopyIn.
                 }
+                assertEquals('S', decoder.nextMessage().type());
                 writeBackendFrame('C', "COPY 1\0".getBytes(StandardCharsets.US_ASCII));
                 writeBackendFrame('Z', new byte[]{'I'});
             } catch (Throwable failure) {

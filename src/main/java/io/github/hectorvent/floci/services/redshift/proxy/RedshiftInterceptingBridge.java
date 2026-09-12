@@ -248,12 +248,25 @@ public class RedshiftInterceptingBridge {
             return;
         }
 
-        boolean locked;
-        try {
-            locked = backendLock.tryLock(PUMP_PARK_WAIT_MS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted while acquiring Extended Query backend ownership", e);
+        long deadlineNanos = System.nanoTime() + PUMP_PARK_WAIT_MS * 1_000_000L;
+        boolean locked = false;
+        while (!pumpFinished && System.nanoTime() < deadlineNanos) {
+            try {
+                long remainingMillis = Math.max(1L,
+                        TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
+                locked = backendLock.tryLock(Math.min(PUMP_PARK_WAIT_MS, remainingMillis), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while acquiring Extended Query backend ownership", e);
+            }
+            if (!locked) {
+                continue;
+            }
+            if (pumpBetweenMessages) {
+                break;
+            }
+            backendLock.unlock();
+            locked = false;
         }
         if (!locked || !pumpBetweenMessages || pumpFinished) {
             if (locked) {
