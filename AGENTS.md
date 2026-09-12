@@ -372,16 +372,22 @@ not a precedent.
 - 4-space indentation, K&R braces. Never indent with a tab.
 - JBoss Logging, in a field named `LOG`, using the parameterized `...v()` form.
   No string concatenation in log calls.
-- No `System.out` or `System.err`, and no `printStackTrace`. The one exception is a
-  command-line entry point under `tools/`, where stdout is the program's output.
+- No `printStackTrace`, anywhere. No `System.out` or `System.err` in `src/main`; the
+  one exception is the CLI entry point `io.github.hectorvent.floci.tools.ami.AmiImageTool`,
+  where stdout is the program's output. A few tests print a failure repro just before
+  failing, which is the only good reason to print from a test: an assertion message
+  usually says it better.
 - `java.time` for everything Floci owns. `Calendar` and `SimpleDateFormat` appear
-  nowhere and must not be introduced. `java.util.Date` survives only where a
-  third-party signature forces it, currently the BouncyCastle certificate builder
-  and the JAX-RS `HttpHeaders.getDate()` override. Convert at that boundary with
-  `Date.from(instant)` and keep `java.time` on Floci's side of it.
+  nowhere and must not be introduced. A `Date` survives only at a third-party boundary
+  that forces one: the BouncyCastle certificate builder, the JAX-RS
+  `HttpHeaders.getDate()` override, and JDBC's `java.sql.Date` in the RDS Data mapper.
+  Convert at that boundary with `Date.from(instant)` and keep `java.time` on Floci's
+  side of it.
 - Constructor injection in `src/main`. Field injection is fine in tests, and
   `Instance<T>` field injection is a legitimate CDI pattern.
-- `Optional` as a return type only, never as a field or a parameter.
+- `Optional` as a return type, and never as a field: there are none, keep it that way.
+  It reaches a parameter only where a Quarkus `@ConfigProperty Optional<T>` is threaded
+  through; do not introduce it as a parameter for anything else.
 - Switch expressions over switch statements. Pattern-matching `instanceof` over
   cast-after-check.
 - `AwsException` for domain errors.
@@ -389,11 +395,16 @@ not a precedent.
 
 ### Tests
 
+These describe `src/test`. `compatibility-tests` is a separate module with the opposite
+idiom, AssertJ and `@DisplayName` in nearly every file. Follow the module you are in.
+
 - Name test methods either as a camelCase sentence (`putAndGetFromMemory`) or as
-  `method_scenario_expectation`. Both are established here. Never `testX`.
-- JUnit 5 assertions with Hamcrest and RestAssured matchers. Do not introduce
-  AssertJ.
-- `@DisplayName` is deliberately not used. The method name carries the intent.
+  `method_scenario_expectation`. Both are established. `testX` names are common in
+  older tests and are not the pattern to copy.
+- JUnit 5 assertions with Hamcrest and RestAssured matchers. AssertJ is a declared test
+  dependency, used by the Lambda launcher tests; prefer the established matchers
+  everywhere else.
+- `@DisplayName` is not used here. The method name carries the intent.
 
 ---
 
