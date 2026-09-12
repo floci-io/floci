@@ -34,9 +34,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -205,30 +209,7 @@ public class EcsContainerManager {
                             specBuilder.withBind(sourcePath, mp.containerPath());
                         }
                     } else if (efs != null) {
-                        // EFS volume: a shared local Docker named volume, so every task
-                        // container that mounts the same EFS file system shares persistent
-                        // storage — the local stand-in for an EFS mount (Docker cannot mount
-                        // a real EFS file system). Initialise the volume root's POSIX ownership
-                        // to emulate the EFS access point's RootDirectory.CreationInfo, so a
-                        // non-root task image USER can write to it (no-op unless configured).
-                        var efsCfg = config.storage().efs();
-                        lifecycleManager.ensureSharedVolume(efsVolumeName(efs.fileSystemId()),
-                                efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
-                                efsCfg.initImage());
-                        specBuilder.withNamedVolume(efsVolumeName(efs.fileSystemId()),
-                                mp.containerPath(), mp.readOnly());
-                        // Emulate the access point's PosixUser: run the container under the
-                        // configured uid[:gid] and/or add the supplementary group, so a non-root
-                        // image can read/write the shared volume owned by ownerUid/ownerGid.
-                        efsCfg.mountUser().ifPresent(u -> {
-                            // Validate the access point PosixUser format before applying it.
-                            if (!u.matches("^\\d+(:\\d+)?$")) {
-                                throw new IllegalArgumentException(
-                                        "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + u);
-                            }
-                            specBuilder.withUser(u);
-                        });
-                        efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
+                        mountEfsVolume(specBuilder, efs, mp);
                     } else {
                         LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
                                 mp.sourceVolume(), def.getName());
@@ -593,9 +574,75 @@ public class EcsContainerManager {
         return slash >= 0 ? taskArn.substring(slash + 1) : taskArn;
     }
 
-    /** Name of the local Docker named volume backing an EFS file system. */
-    private static String efsVolumeName(String fileSystemId) {
-        return "floci-efs-" + fileSystemId;
+    /**
+     * Materialises an EFS-configured task volume as a shared local Docker named volume scoped to
+     * both the file system and the mount's effective root (see {@link #efsVolumeName}), then
+     * initialises the volume root's POSIX ownership to emulate the EFS access point's
+     * RootDirectory.CreationInfo (no-op unless {@code floci.storage.efs} configures owner/permissions)
+     * and applies the configured PosixUser emulation (uid[:gid] and/or supplementary group) so a
+     * non-root task image can read/write the shared volume.
+     */
+    private void mountEfsVolume(ContainerBuilder.Builder specBuilder, EfsVolumeConfiguration efs, MountPoint mp) {
+        String efsVolumeName = efsVolumeName(efs.fileSystemId(), efs.accessPointId(), efs.rootDirectory());
+        var efsCfg = config.storage().efs();
+        lifecycleManager.ensureSharedVolume(efsVolumeName,
+                efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
+                efsCfg.initImage());
+        specBuilder.withNamedVolume(efsVolumeName, mp.containerPath(), mp.readOnly());
+        efsCfg.mountUser().ifPresent(u -> {
+            if (!u.matches("^\\d+(:\\d+)?$")) {
+                throw new IllegalArgumentException(
+                        "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + u);
+            }
+            specBuilder.withUser(u);
+        });
+        efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
+    }
+
+    /**
+     * Name of the local Docker named volume backing an EFS-configured task volume, scoped to
+     * both the file system and the mount's effective root so two mounts of the same file system
+     * with a different {@code rootDirectory}/{@code accessPointId} land on isolated volumes
+     * while identical configurations keep sharing one, matching how AWS scopes an EFS mount to
+     * a subpath. When {@code accessPointId} is set, it determines the effective root: on real
+     * AWS an access point's own root directory takes precedence over any {@code rootDirectory}
+     * on the volume.
+     */
+    static String efsVolumeName(String fileSystemId, String accessPointId, String rootDirectory) {
+        if (accessPointId != null && !accessPointId.isBlank()) {
+            return "floci-efs-" + fileSystemId + "-" + sha256Hex("accessPoint:" + accessPointId);
+        }
+        String normalizedRoot = normalizeRootDirectory(rootDirectory);
+        if ("/".equals(normalizedRoot)) {
+            return "floci-efs-" + fileSystemId;
+        }
+        return "floci-efs-" + fileSystemId + "-" + sha256Hex(normalizedRoot);
+    }
+
+    /**
+     * Canonicalises a {@code rootDirectory} path so syntactically different but equivalent
+     * paths (missing/blank, a missing leading slash, repeated slashes, a trailing slash) resolve
+     * to the same effective root instead of silently splitting shared storage across local
+     * volumes that AWS would treat as identical.
+     */
+    private static String normalizeRootDirectory(String rootDirectory) {
+        if (rootDirectory == null || rootDirectory.isBlank()) {
+            return "/";
+        }
+        String collapsed = rootDirectory.trim().replaceAll("/+", "/");
+        if (collapsed.length() > 1 && collapsed.endsWith("/")) {
+            collapsed = collapsed.substring(0, collapsed.length() - 1);
+        }
+        return collapsed.startsWith("/") ? collapsed : "/" + collapsed;
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required but not available", e);
+        }
     }
 
     // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability

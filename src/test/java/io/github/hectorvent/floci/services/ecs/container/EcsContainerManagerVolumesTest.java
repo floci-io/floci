@@ -123,6 +123,11 @@ class EcsContainerManagerVolumesTest {
         verify(builder, never()).withBind("/app/nope", "/app/nope");
     }
 
+    /**
+     * Each EFS volume resolves to a shared local Docker named volume keyed by file system id
+     * AND effective root (here: rootDirectory, since neither volume sets an accessPointId),
+     * read-write or read-only per the mountPoint.
+     */
     @Test
     void efsVolumeMountPointsResolveToSharedNamedVolumesByAccessMode() {
         ContainerDefinition app = new ContainerDefinition();
@@ -146,10 +151,10 @@ class EcsContainerManagerVolumesTest {
 
         manager.startTask(task, taskDef, List.of(), "us-east-1");
 
-        // Each EFS volume -> a shared local Docker named volume keyed by file system id,
-        // read-write or read-only per the mountPoint.
-        verify(builder, times(1)).withNamedVolume("floci-efs-fs-0123456789abcdef0", "/mnt/efs", false);
-        verify(builder, times(1)).withNamedVolume("floci-efs-fs-00000000000000001", "/mnt/shared", true);
+        verify(builder, times(1)).withNamedVolume(
+                EcsContainerManager.efsVolumeName("fs-0123456789abcdef0", null, "/dps"), "/mnt/efs", false);
+        verify(builder, times(1)).withNamedVolume(
+                EcsContainerManager.efsVolumeName("fs-00000000000000001", null, null), "/mnt/shared", true);
 
         // EFS volumes are never bind-mounted as host paths.
         verify(builder, never()).withBind(any(), any());
@@ -188,7 +193,8 @@ class EcsContainerManagerVolumesTest {
 
         configured.startTask(task, taskDef, List.of(), "us-east-1");
 
-        verify(lifecycleManager, times(1)).ensureSharedVolume("floci-efs-fs-abc",
+        verify(lifecycleManager, times(1)).ensureSharedVolume(
+                EcsContainerManager.efsVolumeName("fs-abc", null, "/dps"),
                 OptionalInt.of(1001), OptionalInt.of(1001), Optional.of("2775"), "busybox:stable");
     }
 

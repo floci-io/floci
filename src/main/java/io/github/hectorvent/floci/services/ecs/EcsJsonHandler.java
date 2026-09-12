@@ -1524,12 +1524,20 @@ public class EcsJsonHandler {
         Integer transitEncryptionPort = node.path("transitEncryptionPort").isNumber()
                 ? node.path("transitEncryptionPort").asInt() : null;
         JsonNode auth = node.path("authorizationConfig");
+        String rootDirectory = node.path("rootDirectory").asText(null);
+        String accessPointId = auth.path("accessPointId").asText(null);
+        if (accessPointId != null && !accessPointId.isBlank()
+                && rootDirectory != null && !rootDirectory.isBlank() && !"/".equals(rootDirectory)) {
+            throw new AwsException("InvalidParameterException",
+                    "Root directory must either be omitted or set to '/' when an EFS access point "
+                            + "is specified in authorizationConfig.accessPointId.", 400);
+        }
         return new EfsVolumeConfiguration(
                 fileSystemId,
-                node.path("rootDirectory").asText(null),
+                rootDirectory,
                 node.path("transitEncryption").asText(null),
                 transitEncryptionPort,
-                auth.path("accessPointId").asText(null),
+                accessPointId,
                 auth.path("iam").asText(null));
     }
 

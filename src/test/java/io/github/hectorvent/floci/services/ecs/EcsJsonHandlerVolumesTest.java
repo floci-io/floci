@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
@@ -12,6 +13,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -116,7 +118,7 @@ class EcsJsonHandlerVolumesTest {
                       "name": "customer-data",
                       "efsVolumeConfiguration": {
                         "fileSystemId": "fs-0123456789abcdef0",
-                        "rootDirectory": "/dps",
+                        "rootDirectory": "/",
                         "transitEncryption": "ENABLED",
                         "transitEncryptionPort": 2999,
                         "authorizationConfig": {"accessPointId": "fsap-0abc", "iam": "ENABLED"}
@@ -136,10 +138,112 @@ class EcsJsonHandlerVolumesTest {
         assertTrue(vol.path("host").isMissingNode(), "EFS volume must not carry a host shape");
         JsonNode efs = vol.path("efsVolumeConfiguration");
         assertEquals("fs-0123456789abcdef0", efs.path("fileSystemId").asText());
-        assertEquals("/dps", efs.path("rootDirectory").asText());
+        assertEquals("/", efs.path("rootDirectory").asText());
         assertEquals("ENABLED", efs.path("transitEncryption").asText());
         assertEquals(2999, efs.path("transitEncryptionPort").asInt());
         assertEquals("fsap-0abc", efs.path("authorizationConfig").path("accessPointId").asText());
         assertEquals("ENABLED", efs.path("authorizationConfig").path("iam").asText());
+    }
+
+    @Test
+    void registerTaskDefinitionRejectsAccessPointWithNonDefaultRootDirectory() throws Exception {
+        String requestJson = """
+                {
+                  "family": "efs-invalid-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "mountPoints": [
+                        {"sourceVolume": "customer-data", "containerPath": "/mnt/efs", "readOnly": false}
+                      ]
+                    }
+                  ],
+                  "volumes": [
+                    {
+                      "name": "customer-data",
+                      "efsVolumeConfiguration": {
+                        "fileSystemId": "fs-0123456789abcdef0",
+                        "rootDirectory": "/dps",
+                        "authorizationConfig": {"accessPointId": "fsap-0abc"}
+                      }
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void registerTaskDefinitionAllowsAccessPointWithOmittedRootDirectory() throws Exception {
+        String requestJson = """
+                {
+                  "family": "efs-valid-access-point-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "mountPoints": [
+                        {"sourceVolume": "customer-data", "containerPath": "/mnt/efs", "readOnly": false}
+                      ]
+                    }
+                  ],
+                  "volumes": [
+                    {
+                      "name": "customer-data",
+                      "efsVolumeConfiguration": {
+                        "fileSystemId": "fs-0123456789abcdef0",
+                        "authorizationConfig": {"accessPointId": "fsap-0abc"}
+                      }
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode efs = objectMapper.valueToTree(response.getEntity())
+                .path("taskDefinition").path("volumes").get(0).path("efsVolumeConfiguration");
+        assertEquals("fsap-0abc", efs.path("authorizationConfig").path("accessPointId").asText());
+        assertTrue(efs.path("rootDirectory").isMissingNode(), "rootDirectory should not be set");
+    }
+
+    @Test
+    void registerTaskDefinitionAllowsNonDefaultRootDirectoryWithoutAccessPoint() throws Exception {
+        String requestJson = """
+                {
+                  "family": "efs-valid-root-directory-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "mountPoints": [
+                        {"sourceVolume": "customer-data", "containerPath": "/mnt/efs", "readOnly": false}
+                      ]
+                    }
+                  ],
+                  "volumes": [
+                    {
+                      "name": "customer-data",
+                      "efsVolumeConfiguration": {
+                        "fileSystemId": "fs-0123456789abcdef0",
+                        "rootDirectory": "/dps"
+                      }
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode efs = objectMapper.valueToTree(response.getEntity())
+                .path("taskDefinition").path("volumes").get(0).path("efsVolumeConfiguration");
+        assertEquals("/dps", efs.path("rootDirectory").asText());
+        assertTrue(efs.path("authorizationConfig").path("accessPointId").isMissingNode(),
+                "accessPointId should not be set");
     }
 }
