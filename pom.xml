@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
+<project xmlns="http://maven.apache.org/POM/4.1.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
+         xsi:schemaLocation="http://maven.apache.org/POM/4.1.0 https://maven.apache.org/xsd/maven-4.1.0.xsd">
+    <modelVersion>4.1.0</modelVersion>
 
     <groupId>io.github.hectorvent</groupId>
     <artifactId>floci</artifactId>
@@ -442,7 +442,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.16.0</version>
+                <version>4.0.0-beta-5</version>
                 <configuration>
                     <release>${maven.compiler.release}</release>
                 </configuration>
@@ -493,6 +493,10 @@
                                     <version>[25,26)</version>
                                     <message>Floci requires JDK 25. Set JAVA_HOME to JDK 25.</message>
                                 </requireJavaVersion>
+                                <requireMavenVersion>
+                                    <version>[4.0.0-rc-6,)</version>
+                                    <message>This build requires Maven 4. Feel free to use maven wrapper (i.e. prefix ./mvnw)</message>
+                                </requireMavenVersion>
                             </rules>
                         </configuration>
                     </execution>
