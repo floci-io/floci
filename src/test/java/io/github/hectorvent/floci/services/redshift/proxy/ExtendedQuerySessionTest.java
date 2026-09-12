@@ -167,6 +167,20 @@ class ExtendedQuerySessionTest {
     }
 
     @Test
+    void rejectingAnEarlierMutationRetainsLaterSyncCycleMutation() {
+        ExtendedQuerySession session = new ExtendedQuerySession();
+        CopyStatementParser.S3Statement copy = CopyStatementParser.parse("COPY t FROM 's3://b/k'");
+
+        ExtendedQuerySession.Mutation rejected = session.stageParse("invalid", null);
+        ExtendedQuerySession.Mutation retained = session.stageParse("copy", copy);
+
+        session.rejectFrom(rejected);
+
+        assertSame(copy, session.statement("copy").orElseThrow());
+        session.confirm(retained);
+    }
+
+    @Test
     void transactionEndClearsPortalsButRetainsStatements() {
         ExtendedQuerySession session = new ExtendedQuerySession();
         CopyStatementParser.S3Statement copy = CopyStatementParser.parse("COPY t FROM 's3://b/k'");
