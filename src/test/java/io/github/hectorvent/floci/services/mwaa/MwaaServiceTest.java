@@ -304,6 +304,60 @@ class MwaaServiceTest {
     }
 
     @Test
+    void createEnvironmentWithValidAirflowConfigurationOptionsRoundTrips() {
+        CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+        request.setAirflowConfigurationOptions(Map.of("core.dags_are_paused_at_creation", "false"));
+
+        Environment environment = mwaaService.createEnvironment("config-options-env", request);
+        assertEquals(Map.of("core.dags_are_paused_at_creation", "false"),
+                environment.getAirflowConfigurationOptions());
+    }
+
+    @Test
+    void createEnvironmentRejectsAnOverlongAirflowConfigurationOptionKey() {
+        CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+        request.setAirflowConfigurationOptions(Map.of("core." + "x".repeat(64), "value"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> mwaaService.createEnvironment("bad-key-length-env", request));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void createEnvironmentRejectsAnAirflowConfigurationOptionKeyWithInvalidCharacters() {
+        CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+        request.setAirflowConfigurationOptions(Map.of("Core.DagsArePaused", "false"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> mwaaService.createEnvironment("bad-key-chars-env", request));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void createEnvironmentRejectsAnOverlongAirflowConfigurationOptionValue() {
+        CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+        request.setAirflowConfigurationOptions(Map.of("core.some_key", "x".repeat(65537)));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> mwaaService.createEnvironment("bad-value-length-env", request));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void createEnvironmentRejectsANonPrintableAirflowConfigurationOptionValue() {
+        CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+        request.setAirflowConfigurationOptions(Map.of("core.some_key", "line one\nline two"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> mwaaService.createEnvironment("bad-value-chars-env", request));
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
     void getEnvironment() {
         mwaaService.createEnvironment("my-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
 

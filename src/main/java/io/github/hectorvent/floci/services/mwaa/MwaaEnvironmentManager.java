@@ -32,6 +32,7 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -159,6 +160,7 @@ public class MwaaEnvironmentManager {
                 "AIRFLOW__CORE__LOAD_EXAMPLES=false",
                 "_AIRFLOW_WWW_USER_USERNAME=" + adminUser,
                 "_AIRFLOW_WWW_USER_PASSWORD=" + adminPassword));
+        env.addAll(airflowConfigurationOptionsEnv(environment.getAirflowConfigurationOptions()));
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(airflowContainerName)
@@ -408,6 +410,41 @@ public class MwaaEnvironmentManager {
         int major = Integer.parseInt(parts[0]);
         int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
         return (major > 2 || (major == 2 && minor >= 11)) ? "python3.12" : "python3.11";
+    }
+
+    /**
+     * Translates {@code AirflowConfigurationOptions} ({@code "section.key"} to value, e.g.
+     * {@code core.dags_are_paused_at_creation}) into the {@code AIRFLOW__SECTION__KEY} environment
+     * variables real Amazon MWAA sets for the same option, matching Airflow's own {@code conf.get}
+     * section/key model. An entry without a non-empty section and key on both sides of the dot is
+     * malformed per AWS's own format and is skipped rather than guessed at. An entry that would
+     * collide with one of {@link #PROTECTED_ENV_VARS} is skipped too and logged: those are Floci's
+     * own required LocalExecutor/DB/security wiring, not something a configuration option request
+     * gets to override.
+     */
+    static List<String> airflowConfigurationOptionsEnv(Map<String, String> options) {
+        if (options == null || options.isEmpty()) {
+            return List.of();
+        }
+        List<String> env = new ArrayList<>();
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            String dotted = entry.getKey();
+            int dot = dotted.indexOf('.');
+            if (dot <= 0 || dot == dotted.length() - 1) {
+                LOG.warnv("Ignoring malformed AirflowConfigurationOptions key ''{0}'', expected "
+                        + "the AWS \"section.key\" format", dotted);
+                continue;
+            }
+            String key = "AIRFLOW__" + dotted.substring(0, dot).toUpperCase(Locale.ROOT)
+                    + "__" + dotted.substring(dot + 1).toUpperCase(Locale.ROOT);
+            if (PROTECTED_ENV_VARS.contains(key)) {
+                LOG.warnv("Ignoring AirflowConfigurationOptions entry ''{0}'': it maps to {1}, "
+                        + "which Floci itself manages for this environment", dotted, key);
+                continue;
+            }
+            env.add(key + "=" + entry.getValue());
+        }
+        return env;
     }
 
     /**

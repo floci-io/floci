@@ -36,6 +36,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -113,6 +114,7 @@ public class MwaaService implements TagHandler {
         }
 
         String version = resolveAirflowVersion(request.getAirflowVersion());
+        validateAirflowConfigurationOptions(request.getAirflowConfigurationOptions());
 
         String arn = AwsArnUtils.Arn.of("airflow", region, accountId, "environment/" + name).toString();
 
@@ -344,6 +346,47 @@ public class MwaaService implements TagHandler {
                     "Unsupported AirflowVersion '" + version + "'. Supported versions: " + supported, 400);
         }
         return version;
+    }
+
+    // CreateEnvironment's botocore model caps AirflowConfigurationOptions to these key/value
+    // shapes, matched below.
+    private static final Pattern AIRFLOW_CONFIGURATION_OPTION_KEY_PATTERN =
+            Pattern.compile("[a-z]+([a-z0-9._]*[a-z0-9_]+)?");
+    private static final Pattern AIRFLOW_CONFIGURATION_OPTION_VALUE_PATTERN = Pattern.compile("[ -~]+");
+    private static final int MAX_AIRFLOW_CONFIGURATION_OPTION_KEY_LENGTH = 64;
+    private static final int MAX_AIRFLOW_CONFIGURATION_OPTION_VALUE_LENGTH = 65536;
+
+    /**
+     * The AWS SDKs enforce {@code AirflowConfigurationOptions}' key/value shape client-side, but
+     * Floci is also reachable via raw HTTP or CLI {@code --cli-input-json}, which bypasses that,
+     * and this map now genuinely flows into the Airflow container's environment
+     * ({@link MwaaEnvironmentManager#airflowConfigurationOptionsEnv}) rather than being inert, so
+     * an oversized or malformed entry is worth rejecting here rather than passing through to
+     * Docker container creation.
+     */
+    private void validateAirflowConfigurationOptions(Map<String, String> options) {
+        if (options == null) {
+            return;
+        }
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || key.length() > MAX_AIRFLOW_CONFIGURATION_OPTION_KEY_LENGTH
+                    || !AIRFLOW_CONFIGURATION_OPTION_KEY_PATTERN.matcher(key).matches()) {
+                throw new AwsException("ValidationException",
+                        "Invalid AirflowConfigurationOptions key '" + key + "': must be 1-"
+                                + MAX_AIRFLOW_CONFIGURATION_OPTION_KEY_LENGTH
+                                + " characters matching " + AIRFLOW_CONFIGURATION_OPTION_KEY_PATTERN.pattern(),
+                        400);
+            }
+            String value = entry.getValue();
+            if (value == null || value.length() > MAX_AIRFLOW_CONFIGURATION_OPTION_VALUE_LENGTH
+                    || !AIRFLOW_CONFIGURATION_OPTION_VALUE_PATTERN.matcher(value).matches()) {
+                throw new AwsException("ValidationException",
+                        "Invalid AirflowConfigurationOptions value for key '" + key + "': must be 1-"
+                                + MAX_AIRFLOW_CONFIGURATION_OPTION_VALUE_LENGTH + " printable ASCII characters",
+                        400);
+            }
+        }
     }
 
     private String buildWebserverUrl(int proxyPort) {
