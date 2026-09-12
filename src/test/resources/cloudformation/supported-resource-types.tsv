@@ -103,6 +103,7 @@ AWS::Lambda::NetworkConnector	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::Permission	LambdaAddressingCfnProvisioner
 AWS::Lambda::Version	LambdaVersionAliasCfnProvisioner
 AWS::Logs::LogGroup	LogsCfnProvisioner
+AWS::Logs::MetricFilter	LogsMetricFilterCfnProvisioner
 AWS::Organizations::Account	OrganizationsCfnProvisioner
 AWS::Organizations::Organization	OrganizationsCfnProvisioner
 AWS::Organizations::OrganizationalUnit	OrganizationsCfnProvisioner
