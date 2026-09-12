@@ -4281,9 +4281,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<Image> catalogImages = imageCatalog.images().stream()
                 .filter(Ec2ImageCatalog.CatalogImage::advertised)
                 .filter(img -> img.matchesIdOrAlias(imageIds))
-                .filter(img -> img.matchesOwner(owners))
+                // Catalog aliases (for example ami-amazonlinux2) are a Floci compatibility layer,
+                // so catalog filters must run before toImage() discards idsAndAliases(). Owner
+                // matching still runs on the materialized image so AWS aliases such as amazon/self
+                // are resolved against the real owner account id consistently with registered images.
                 .filter(img -> matchesImageFilters(img, filters))
                 .map(Ec2ImageCatalog.CatalogImage::toImage)
+                .filter(img -> matchesImageOwners(img, owners))
                 .collect(Collectors.toList());
         List<Image> createdImages = registeredImages.scan(k -> true).stream()
                 .filter(img -> region.equals(img.getRegion()))
