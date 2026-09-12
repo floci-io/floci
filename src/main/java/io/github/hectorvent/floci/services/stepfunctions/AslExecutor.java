@@ -72,6 +72,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.math.BigInteger;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -929,6 +930,31 @@ public class AslExecutor {
         CustomResourceLiveness.tokenIn(payload).ifPresent(customResourceLiveness::touch);
     }
 
+    private FailStateException lambdaFunctionFailure(String functionName, InvokeResult result) {
+        byte[] responsePayload = result.getPayload();
+        String cause = responsePayload == null ? null : new String(responsePayload, StandardCharsets.UTF_8);
+        if (responsePayload == null || responsePayload.length == 0) {
+            LOG.warnf("Lambda function %s returned FunctionError %s without an error payload; using Exception",
+                    functionName, result.getFunctionError());
+            return new FailStateException("Exception", cause);
+        }
+
+        try {
+            JsonNode errorPayload = objectMapper.readTree(responsePayload);
+            JsonNode errorType = errorPayload.path("errorType");
+            if (errorType.isTextual() && !errorType.textValue().isBlank()) {
+                return new FailStateException(errorType.textValue(), cause);
+            }
+            LOG.warnf("Lambda function %s returned FunctionError %s without a non-empty textual errorType; "
+                            + "using Exception",
+                    functionName, result.getFunctionError());
+        } catch (IOException e) {
+            LOG.warnf("Lambda function %s returned an invalid FunctionError payload; using Exception: %s",
+                    functionName, e.getMessage());
+        }
+        return new FailStateException("Exception", cause);
+    }
+
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
                                     long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
@@ -968,7 +994,7 @@ public class AslExecutor {
             InvokeResult result = lambdaExecutor.invoke(fn, payloadBytes, InvocationType.RequestResponse);
 
             if (result.getFunctionError() != null) {
-                throw new FailStateException("Lambda.AWSLambdaException", result.getFunctionError());
+                throw lambdaFunctionFailure(functionName, result);
             }
 
             byte[] responseBytes = result.getPayload();
