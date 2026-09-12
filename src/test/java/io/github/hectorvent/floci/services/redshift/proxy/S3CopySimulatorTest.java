@@ -144,6 +144,58 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void preparedCopyUsesSortedKeysAndBackendSql() {
+        when(s3.objectExists("b", "prefix/")).thenReturn(false);
+        when(s3.listObjectsWithPrefixes(
+                eq("b"), eq("prefix/"), isNull(), anyInt(), isNull(), isNull()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(
+                                new S3Object("b", "prefix/z", new byte[0], "text/plain"),
+                                new S3Object("b", "prefix/a", new byte[0], "text/plain")),
+                        List.of(), false, null));
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "prefix/", null, 0, false, true, null);
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3);
+
+        assertEquals(List.of("prefix/a", "prefix/z"), input.keys());
+        assertEquals("COPY t FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec));
+    }
+
+    @Test
+    void preparedCopyReportsMissingObject() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "missing", "|", 0, false, false, null);
+
+        S3CopySimulator.S3TransferException error = assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(spec, s3));
+
+        assertEquals("XX000", error.sqlState());
+        assertEquals("S3 object s3://b/missing not found", error.getMessage());
+    }
+
+    @Test
+    void unloadCollectorWritesOneEmptyObjectForZeroRows() throws Exception {
+        Map<String, byte[]> written = new ConcurrentHashMap<>();
+        when(s3.putObject(eq("b"), any(), any(), any(), any())).thenAnswer(invocation -> {
+            written.put(invocation.getArgument(1), invocation.getArgument(2));
+            return null;
+        });
+        CopyStatementParser.S3Unload spec = unloadSpec("b", "out/", false, false, true, false, 0);
+
+        try (S3CopySimulator.UnloadCollector collector = S3CopySimulator.prepareUnload(spec, s3)) {
+            collector.complete();
+        }
+
+        assertEquals(1, written.size());
+        assertEquals(0, written.get("out/000").length);
+        assertEquals("COPY (select a,b from t) TO STDOUT WITH (FORMAT text, DELIMITER '|')",
+                S3CopySimulator.unloadBackendSql(spec));
+    }
+
+    @Test
     void unloadWritesSingleObjectAndForwardsCommandComplete() throws Exception {
         Map<String, byte[]> written = new ConcurrentHashMap<>();
         when(s3.putObject(eq("wh"), any(), any(), any(), any())).thenAnswer(inv -> {
