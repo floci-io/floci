@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.services.s3.S3Service;
-
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
@@ -17,7 +16,7 @@ final class ExtendedS3Exchange {
             BackendResponseCoordinator coordinator, BackendResponseCoordinator.Ticket ticket) throws IOException {
         BackendResponseCoordinator.GateResult gate;
         try {
-            gate = coordinator.awaitTurn(ticket);
+            gate = coordinator.awaitExtendedExecuteTurn(ticket);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("Interrupted while awaiting the Extended Query Execute turn", e);
@@ -94,6 +93,7 @@ final class ExtendedS3Exchange {
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(executeFrame.toPacketBytes());
         backendOut.flush();
+        forwardClientSyncToBackend(client, backendOut, coordinator);
 
         PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
         PostgresWireDecoder.FrontendMessage first = nextOwnedFrame(client, decoder, coordinator);
@@ -179,8 +179,24 @@ final class ExtendedS3Exchange {
                 forward(client, message);
                 continue;
             }
+            if (type == '1' || type == '2' || type == 'T' || type == 't' || type == 'n') {
+                coordinator.onBackendFrame(type, message.body());
+                forward(client, message);
+                continue;
+            }
             return message;
         }
+    }
+
+    private static void forwardClientSyncToBackend(Socket client, OutputStream backendOut,
+            BackendResponseCoordinator coordinator) throws IOException {
+        PostgresWireDecoder.FrontendMessage sync = new PostgresWireDecoder(client.getInputStream()).nextMessage();
+        if (sync == null || sync.type() != 'S') {
+            throw new IOException("Expected Sync after an Extended Query S3 Execute");
+        }
+        coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
+        backendOut.write(sync.toPacketBytes());
+        backendOut.flush();
     }
 
     private static IOException unexpected(PostgresWireDecoder.FrontendMessage message, String expected) {

@@ -239,7 +239,7 @@ public class RedshiftInterceptingBridge {
             CopyStatementParser.S3Statement statement, BackendResponseCoordinator.Ticket ticket) throws IOException {
         BackendResponseCoordinator.GateResult gate;
         try {
-            gate = coordinator.awaitTurn(ticket);
+            gate = coordinator.awaitExtendedExecuteTurn(ticket);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("Interrupted while awaiting Extended Query backend ownership", e);

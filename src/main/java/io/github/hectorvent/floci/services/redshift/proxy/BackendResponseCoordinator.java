@@ -66,6 +66,27 @@ final class BackendResponseCoordinator {
         }
     }
 
+    GateResult awaitExtendedExecuteTurn(Ticket ticket) throws InterruptedException {
+        lock.lockInterruptibly();
+        try {
+            while (true) {
+                if (closed) {
+                    return GateResult.CLOSED;
+                }
+                GateResult resolved = resolvedGates.remove(ticket.sequence());
+                if (resolved != null) {
+                    return resolved;
+                }
+                if (!discardingUntilSync && canOwnExtendedExecute(ticket)) {
+                    return GateResult.READY;
+                }
+                changed.await();
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
     boolean awaitIdle(long timeout, TimeUnit unit) throws InterruptedException {
         long remaining = unit.toNanos(timeout);
         lock.lockInterruptibly();
@@ -127,12 +148,18 @@ final class BackendResponseCoordinator {
     void completeOwnedExecute(Ticket ticket, boolean failed) {
         lock.lock();
         try {
-            PendingOperation head = pending.peekFirst();
-            if (head == null || !head.ticket().equals(ticket) || ticket.operation() != Operation.EXECUTE) {
-                throw new IllegalStateException("Owned Execute is not the coordinator head");
+            PendingOperation owned = pending.stream()
+                    .filter(operation -> operation.ticket().equals(ticket))
+                    .findFirst()
+                    .orElse(null);
+            if (owned == null) {
+                return;
             }
-            pending.removeFirst();
-            confirm(head);
+            if (ticket.operation() != Operation.EXECUTE) {
+                throw new IllegalStateException("Only an Execute ticket can be completed as backend-owned");
+            }
+            pending.remove(owned);
+            confirm(owned);
             if (failed) {
                 discardingUntilSync = true;
                 discardQueuedOperationsBeforeSync();
@@ -207,6 +234,25 @@ final class BackendResponseCoordinator {
         if (operation.mutation() != null) {
             session.rejectFrom(operation.mutation());
         }
+    }
+
+    private boolean canOwnExtendedExecute(Ticket ticket) {
+        for (PendingOperation operation : pending) {
+            if (operation.ticket().equals(ticket)) {
+                return true;
+            }
+            if (!isExtendedExecutePreamble(operation.ticket().operation())) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isExtendedExecutePreamble(Operation operation) {
+        return operation == Operation.PARSE
+                || operation == Operation.BIND
+                || operation == Operation.DESCRIBE_STATEMENT
+                || operation == Operation.DESCRIBE_PORTAL;
     }
 
     private static boolean isAsynchronous(char type) {
