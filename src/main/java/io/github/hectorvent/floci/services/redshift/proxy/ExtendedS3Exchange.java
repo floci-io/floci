@@ -80,7 +80,7 @@ final class ExtendedS3Exchange {
             forwardClientSyncToBackend(sync, backendOut, coordinator);
             drainExecute(client, decoder, coordinator, false);
             sendError(client, e.sqlState(), e.getMessage());
-            return new CopyResult(false, drainReadyForQuery(client, decoder, coordinator));
+            return new CopyResult(false, new byte[]{'E'});
         }
 
         try {
@@ -93,7 +93,7 @@ final class ExtendedS3Exchange {
             drainExecute(client, decoder, coordinator, false);
             String detail = e.getMessage() != null ? e.getMessage() : e.toString();
             sendError(client, "XX000", "S3 COPY failed: " + detail);
-            return new CopyResult(false, drainReadyForQuery(client, decoder, coordinator));
+            return new CopyResult(false, new byte[]{'E'});
         }
 
         forwardClientSyncToBackend(sync, backendOut, coordinator);
