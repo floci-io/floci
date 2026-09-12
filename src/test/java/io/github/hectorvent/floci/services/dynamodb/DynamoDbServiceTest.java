@@ -4017,7 +4017,7 @@ class DynamoDbServiceTest {
 
     private static S3Service s3With(S3Object... objects) {
         var s3 = mock(S3Service.class);
-        when(s3.listObjects("bucket", "imp/", null, 0)).thenReturn(List.of(objects));
+        when(s3.listObjects("bucket", "imp/", null, Integer.MAX_VALUE)).thenReturn(List.of(objects));
         for (var object : objects) {
             when(s3.getObjectMetadata("bucket", object.getKey(), null)).thenReturn(object);
             when(s3.openObjectStream("bucket", object.getKey(), null))
@@ -4165,7 +4165,7 @@ class DynamoDbServiceTest {
     @Test
     void runImport_missingBucket_failsWithS3NoSuchBucket() {
         var s3 = mock(S3Service.class);
-        when(s3.listObjects("missing", "imp/", null, 0))
+        when(s3.listObjects("missing", "imp/", null, Integer.MAX_VALUE))
                 .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         var svc = serviceWithS3(s3, new InMemoryStorage<>());
         createUsersTableInCreating(svc);
@@ -4182,7 +4182,7 @@ class DynamoDbServiceTest {
     @Test
     void runImport_otherS3Error_reportsAnS3FailureCode() {
         var s3 = mock(S3Service.class);
-        when(s3.listObjects("bucket", "imp/", null, 0))
+        when(s3.listObjects("bucket", "imp/", null, Integer.MAX_VALUE))
                 .thenThrow(new AwsException("AccessDenied", "Access Denied", 403));
         var svc = serviceWithS3(s3, new InMemoryStorage<>());
         createUsersTableInCreating(svc);

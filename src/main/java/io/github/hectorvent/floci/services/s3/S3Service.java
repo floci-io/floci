@@ -1381,7 +1381,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // see https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
         boolean isTruncated = false;
         String nextContinuationToken = null;
-        if (maxKeys > 0) {
+        if (maxKeys >= 0) {
             List<S3Object> limitedObjects = new ArrayList<>();
             List<String> limitedPrefixes = new ArrayList<>();
             int count = 0;
@@ -1400,7 +1400,10 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
                 count++;
             }
-            isTruncated = directObjectCount < allObjects.size() || commonPrefixCount < commonPrefixes.size();
+            // max-keys=0 is a valid request for an empty page: AWS answers it with IsTruncated=false
+            // and no continuation token even when the bucket has more objects.
+            isTruncated = maxKeys > 0
+                    && (directObjectCount < allObjects.size() || commonPrefixCount < commonPrefixes.size());
             if (isTruncated) {
                 nextContinuationToken = lastEmittedKey;
             }
@@ -1615,7 +1618,7 @@ public class S3Service implements Resettable, ResourceProvider {
         boolean isTruncated = false;
         String nextKeyMarker = null;
         String nextVersionIdMarker = null;
-        if (maxKeys > 0) {
+        if (maxKeys >= 0) {
             List<S3Object> pageVersions = new ArrayList<>();
             List<String> pagePrefixes = new ArrayList<>();
             int vIdx = 0;
@@ -1641,7 +1644,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
             }
 
-            isTruncated = vIdx < versions.size() || cpIdx < commonPrefixes.size();
+            isTruncated = maxKeys > 0 && (vIdx < versions.size() || cpIdx < commonPrefixes.size());
             if (!isTruncated) {
                 nextKeyMarker = null;
                 nextVersionIdMarker = null;
