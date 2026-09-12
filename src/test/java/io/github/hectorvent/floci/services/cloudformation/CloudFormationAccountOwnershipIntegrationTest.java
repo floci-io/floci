@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
 class CloudFormationAccountOwnershipIntegrationTest {
@@ -89,6 +90,60 @@ class CloudFormationAccountOwnershipIntegrationTest {
                 .body(not(containsString("Changed")));
     }
 
+    @Test
+    void listStacksIsScopedToCallerAccount() {
+        createStack(ACCOUNT_1, US_EAST_1, "cfn-list-scope-account-1");
+        createStack(ACCOUNT_2, US_EAST_1, "cfn-list-scope-account-2");
+
+        listStacks(ACCOUNT_1, US_EAST_1)
+                .statusCode(200)
+                .body(containsString("<StackName>cfn-list-scope-account-1</StackName>"))
+                .body(not(containsString("<StackName>cfn-list-scope-account-2</StackName>")));
+        listStacks(ACCOUNT_2, US_EAST_1)
+                .statusCode(200)
+                .body(containsString("<StackName>cfn-list-scope-account-2</StackName>"))
+                .body(not(containsString("<StackName>cfn-list-scope-account-1</StackName>")));
+    }
+
+    @Test
+    void assumedRoleCredentialsScopeListStacksAndDescribeStackResources() {
+        createStack(ACCOUNT_1, US_EAST_1, "cfn-management-stack",
+                "{\"Resources\":{\"ManagementBucket\":{\"Type\":\"AWS::S3::Bucket\"}}}");
+
+        String memberAccessKeyId = given()
+                .header("Authorization", auth(ACCOUNT_1, US_EAST_1, "sts"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "AssumeRole")
+                .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT_2 + ":role/cfn-member-deploy-role")
+                .formParam("RoleSessionName", "cfn-member-session")
+                .when().post("/").then()
+                .statusCode(200)
+                .body("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId", startsWith("ASIA"))
+                .extract().path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+
+        createStack(memberAccessKeyId, US_EAST_1, "cfn-member-stack",
+                "{\"Resources\":{\"MemberBucket\":{\"Type\":\"AWS::S3::Bucket\"}}}");
+
+        listStacks(memberAccessKeyId, US_EAST_1)
+                .statusCode(200)
+                .body(containsString("<StackName>cfn-member-stack</StackName>"))
+                .body(not(containsString("<StackName>cfn-management-stack</StackName>")));
+        listStacks(ACCOUNT_1, US_EAST_1)
+                .statusCode(200)
+                .body(containsString("<StackName>cfn-management-stack</StackName>"))
+                .body(not(containsString("<StackName>cfn-member-stack</StackName>")));
+
+        describeStackResources(memberAccessKeyId, US_EAST_1, "cfn-member-stack")
+                .statusCode(200)
+                .body(containsString("MemberBucket"));
+        describeStackResources(memberAccessKeyId, US_EAST_1, "cfn-management-stack")
+                .statusCode(400)
+                .body(containsString("does not exist"));
+        describeStackResources(ACCOUNT_1, US_EAST_1, "cfn-member-stack")
+                .statusCode(400)
+                .body(containsString("does not exist"));
+    }
+
     private static String createStack(String account, String region, String name) {
         return createStack(account, region, name, "{\"Resources\":{}}");
     }
@@ -132,6 +187,13 @@ class CloudFormationAccountOwnershipIntegrationTest {
                 .when().post("/").then();
     }
 
+    private static io.restassured.response.ValidatableResponse listStacks(String accessKeyId, String region) {
+        return given().header("Authorization", auth(accessKeyId, region))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ListStacks")
+                .when().post("/").then();
+    }
+
     private static io.restassured.response.ValidatableResponse listExports(String account, String region) {
         return given().header("Authorization", auth(account, region))
                 .contentType("application/x-www-form-urlencoded")
@@ -139,9 +201,13 @@ class CloudFormationAccountOwnershipIntegrationTest {
                 .when().post("/").then();
     }
 
-    private static String auth(String account, String region) {
-        return "AWS4-HMAC-SHA256 Credential=" + account
-                + "/20260907/" + region + "/cloudformation/aws4_request,"
+    private static String auth(String accessKeyId, String region) {
+        return auth(accessKeyId, region, "cloudformation");
+    }
+
+    private static String auth(String accessKeyId, String region, String service) {
+        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId
+                + "/20260907/" + region + "/" + service + "/aws4_request,"
                 + " SignedHeaders=host, Signature=abc";
     }
 }
