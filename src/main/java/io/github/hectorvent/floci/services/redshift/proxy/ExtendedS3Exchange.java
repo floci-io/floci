@@ -59,7 +59,7 @@ final class ExtendedS3Exchange {
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(executeFrame.toPacketBytes());
         backendOut.flush();
-        PostgresWireDecoder.FrontendMessage sync = readClientSync(client);
+        PostgresWireDecoder.FrontendMessage sync = readClientSync(client, backendOut);
 
         PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
         PostgresWireDecoder.FrontendMessage first = nextOwnedFrame(client, decoder, coordinator);
@@ -213,12 +213,23 @@ final class ExtendedS3Exchange {
         }
     }
 
-    private static PostgresWireDecoder.FrontendMessage readClientSync(Socket client) throws IOException {
-        PostgresWireDecoder.FrontendMessage sync = new PostgresWireDecoder(client.getInputStream()).nextMessage();
-        if (sync == null || sync.type() != 'S') {
-            throw new IOException("Expected Sync after an Extended Query S3 Execute");
+    private static PostgresWireDecoder.FrontendMessage readClientSync(Socket client, OutputStream backendOut)
+            throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(client.getInputStream());
+        while (true) {
+            PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
+            if (message == null) {
+                throw new IOException("Client closed during an Extended Query S3 exchange");
+            }
+            if (message.type() == 'S') {
+                return message;
+            }
+            if (message.type() != 'H') {
+                throw new IOException("Expected Flush or Sync after an Extended Query S3 Execute");
+            }
+            backendOut.write(message.toPacketBytes());
+            backendOut.flush();
         }
-        return sync;
     }
 
     private static void forwardClientSyncToBackend(Socket client, OutputStream backendOut,
