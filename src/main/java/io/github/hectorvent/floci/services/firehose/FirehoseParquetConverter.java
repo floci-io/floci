@@ -204,9 +204,8 @@ public class FirehoseParquetConverter {
             }
 
             // Still before the Parquet: a failure here delivers nothing at all and the
-            // flush fails as a whole. Nothing is kept for a retry, the staged object goes
-            // on the way out either way, so recovery belongs to the source: a Kinesis
-            // stream re-reads its uncommitted checkpoint, a DirectPut buffer cannot.
+            // flush fails as a whole. The staged object goes on the way out either way;
+            // the batch stays buffered in the service and is retried on the next flush.
             String errorKey = failures.isEmpty()
                     ? null
                     : writeErrorOutput(stream, s3, bucket, failures, deliveryTime, schemaConfig);
