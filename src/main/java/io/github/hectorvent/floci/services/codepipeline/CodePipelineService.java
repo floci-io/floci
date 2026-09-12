@@ -46,6 +46,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
@@ -55,6 +56,9 @@ public class CodePipelineService {
     private static final String DEFAULT_PIPELINE_TYPE = "V1";
     private static final int MAX_ACTIVE_EXECUTIONS = 50;
     private static final long POLL_INTERVAL_MS = 100L;
+    private static final long SOURCE_POLL_INTERVAL_MS = 500L;
+    private static final String SOURCE_POLL_TYPE = "source-poll";
+    private static final String MISSING_SOURCE_REVISION = "missing";
 
     private final AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
     private final AccountAwareStorageBackend<CodePipelineExecution> executionStore;
@@ -65,6 +69,7 @@ public class CodePipelineService {
     private final LambdaService lambdaService;
     private final S3Service s3Service;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ScheduledExecutorService sourcePoller = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Object> pipelineLocks = new ConcurrentHashMap<>();
     // Admission is serialized per pipeline on its own lock. A QUEUED worker holds the pipelineLocks
     // monitor for its whole run, so counting under that monitor would block StartPipelineExecution
@@ -162,6 +167,152 @@ public class CodePipelineService {
                         putExecution(execution);
                     });
         }
+        initializePersistedSourcePollingBaselines();
+        sourcePoller.scheduleWithFixedDelay(
+                this::pollS3SourcesSafely, SOURCE_POLL_INTERVAL_MS, SOURCE_POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void initializePersistedSourcePollingBaselines() {
+        for (CodePipelinePipeline pipeline : pipelineStore.scanAllAccounts()) {
+            ensureSourcePollingBaselines(pipeline);
+        }
+    }
+
+    private void resetSourcePollingBaselines(CodePipelinePipeline pipeline) {
+        deleteSourcePollingBaselines(pipeline.getAccountId(), pipeline.getRegion(), pipeline.getName());
+        ensureSourcePollingBaselines(pipeline);
+    }
+
+    private void ensureSourcePollingBaselines(CodePipelinePipeline pipeline) {
+        forEachPolledS3Source(pipeline, (stageName, action) -> {
+            String cursorId = sourcePollCursorId(pipeline.getName(), stageName, action.path("name").asText());
+            String key = itemKey(pipeline.getRegion(), SOURCE_POLL_TYPE, cursorId);
+            if (itemStore.getForAccount(pipeline.getAccountId(), key).isPresent()) {
+                return;
+            }
+            String revision = observeS3SourceRevision(action);
+            storeSourcePollCursor(pipeline, cursorId, revision);
+        });
+    }
+
+    private void deleteSourcePollingBaselines(String account, String region, String pipelineName) {
+        String prefix = itemKey(region, SOURCE_POLL_TYPE, pipelineName + "::");
+        for (String key : itemStore.keysForAccount(account)) {
+            if (key.startsWith(prefix)) {
+                itemStore.deleteForAccount(account, key);
+            }
+        }
+    }
+
+    private void pollS3SourcesSafely() {
+        try {
+            for (CodePipelinePipeline pipeline : pipelineStore.scanAllAccounts()) {
+                pollS3Sources(pipeline);
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("CodePipeline S3 source polling cycle failed", e);
+        }
+    }
+
+    private void pollS3Sources(CodePipelinePipeline pipeline) {
+        forEachPolledS3Source(pipeline, (stageName, action) -> {
+            String actionName = action.path("name").asText();
+            String cursorId = sourcePollCursorId(pipeline.getName(), stageName, actionName);
+            String key = itemKey(pipeline.getRegion(), SOURCE_POLL_TYPE, cursorId);
+            Optional<CodePipelineStoredItem> existing = itemStore.getForAccount(pipeline.getAccountId(), key);
+            if (existing.isEmpty()) {
+                storeSourcePollCursor(pipeline, cursorId, observeS3SourceRevision(action));
+                return;
+            }
+
+            String previous = existing.get().getData().path("revision").asText(MISSING_SOURCE_REVISION);
+            String current;
+            try {
+                current = observeS3SourceRevision(action);
+            } catch (RuntimeException e) {
+                LOG.debugf(e, "Unable to poll CodePipeline S3 source %s/%s", pipeline.getName(), actionName);
+                return;
+            }
+            if (Objects.equals(previous, current)) {
+                return;
+            }
+
+            if (MISSING_SOURCE_REVISION.equals(current)) {
+                updateSourcePollCursor(existing.get(), current);
+                return;
+            }
+            JsonNode config = action.path("configuration");
+            String bucket = config.path("S3Bucket").asText(config.path("BucketName").asText(null));
+            String objectKey = config.path("S3ObjectKey").asText(config.path("ObjectKey").asText(null));
+            ObjectNode request = mapper.createObjectNode().put("name", pipeline.getName());
+            startPipelineExecution(request, pipeline.getRegion(), pipeline.getAccountId(),
+                    "PollForSourceChanges", "s3://" + bucket + "/" + objectKey);
+            updateSourcePollCursor(existing.get(), current);
+        });
+    }
+
+    private void forEachPolledS3Source(CodePipelinePipeline pipeline, S3SourceConsumer consumer) {
+        for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
+            String stageName = stage.path("name").asText();
+            for (JsonNode action : stage.path("actions")) {
+                JsonNode type = action.path("actionTypeId");
+                if (!"Source".equals(type.path("category").asText())
+                        || !"AWS".equals(type.path("owner").asText())
+                        || !"S3".equals(type.path("provider").asText())) {
+                    continue;
+                }
+                JsonNode config = action.path("configuration");
+                String bucket = config.path("S3Bucket").asText(config.path("BucketName").asText(null));
+                String objectKey = config.path("S3ObjectKey").asText(config.path("ObjectKey").asText(null));
+                if (bucket == null || bucket.isBlank() || objectKey == null || objectKey.isBlank()) {
+                    continue;
+                }
+                if (!Boolean.parseBoolean(config.path("PollForSourceChanges").asText("true"))) {
+                    continue;
+                }
+                consumer.accept(stageName, action);
+            }
+        }
+    }
+
+    private String observeS3SourceRevision(JsonNode action) {
+        JsonNode config = action.path("configuration");
+        String bucket = config.path("S3Bucket").asText(config.path("BucketName").asText(null));
+        String key = config.path("S3ObjectKey").asText(config.path("ObjectKey").asText(null));
+        try {
+            S3Object object = s3Service.headObject(bucket, key);
+            return object.getVersionId() != null
+                    ? "version:" + object.getVersionId() : "etag:" + unquoteETag(object.getETag());
+        } catch (AwsException e) {
+            if ("NoSuchBucket".equals(e.getErrorCode()) || "NoSuchKey".equals(e.getErrorCode())) {
+                return MISSING_SOURCE_REVISION;
+            }
+            throw e;
+        }
+    }
+
+    private void storeSourcePollCursor(CodePipelinePipeline pipeline, String cursorId, String revision) {
+        ObjectNode data = mapper.createObjectNode().put("revision", revision);
+        storeItem(pipeline.getAccountId(), pipeline.getRegion(), SOURCE_POLL_TYPE, cursorId, "ACTIVE", data);
+    }
+
+    private void updateSourcePollCursor(CodePipelineStoredItem item, String revision) {
+        item.setData(mapper.createObjectNode().put("revision", revision));
+        item.setUpdated(now());
+        putItem(item);
+    }
+
+    private static String sourcePollCursorId(String pipelineName, String stageName, String actionName) {
+        return pipelineName + "::" + stageName + "::" + actionName;
+    }
+
+    private static String unquoteETag(String eTag) {
+        return eTag == null ? null : eTag.replace("\"", "");
+    }
+
+    @FunctionalInterface
+    private interface S3SourceConsumer {
+        void accept(String stageName, JsonNode action);
     }
 
     private ObjectNode createPipeline(JsonNode request, String region, String account) {
@@ -183,6 +334,7 @@ public class CodePipelineService {
         pipeline.setTags(parseTags(request.path("tags")));
         initializeTransitions(pipeline);
         putPipeline(pipeline);
+        resetSourcePollingBaselines(pipeline);
         ObjectNode response = mapper.createObjectNode();
         response.set("pipeline", pipeline.getDeclaration());
         if (!pipeline.getTags().isEmpty()) {
@@ -201,6 +353,7 @@ public class CodePipelineService {
         pipeline.setDeclaration(normalizeDeclaration(declaration, version));
         initializeTransitions(pipeline);
         putPipeline(pipeline);
+        resetSourcePollingBaselines(pipeline);
         ObjectNode response = mapper.createObjectNode();
         response.set("pipeline", pipeline.getDeclaration());
         return response;
@@ -231,6 +384,7 @@ public class CodePipelineService {
                 executionStore.deleteForAccount(account, key);
             }
         }
+        deleteSourcePollingBaselines(account, region, name);
         return mapper.createObjectNode();
     }
 
@@ -256,6 +410,11 @@ public class CodePipelineService {
     }
 
     private ObjectNode startPipelineExecution(JsonNode request, String region, String account) {
+        return startPipelineExecution(request, region, account, "StartPipelineExecution", "manual");
+    }
+
+    private ObjectNode startPipelineExecution(JsonNode request, String region, String account,
+                                              String triggerType, String triggerDetail) {
         CodePipelinePipeline pipeline = requirePipeline(account, region, text(request, "name"));
         String clientToken = request.path("clientRequestToken").asText(null);
         if (clientToken != null) {
@@ -282,8 +441,8 @@ public class CodePipelineService {
         execution.setSourceRevisions(objectList(request.path("sourceRevisions")));
         execution.setVariables(variableList(request.path("variables")));
         Map<String, String> trigger = new LinkedHashMap<>();
-        trigger.put("triggerType", "StartPipelineExecution");
-        trigger.put("triggerDetail", "manual");
+        trigger.put("triggerType", triggerType);
+        trigger.put("triggerDetail", triggerDetail);
         if (clientToken != null) {
             trigger.put("clientRequestToken", clientToken);
         }
@@ -1546,6 +1705,7 @@ public class CodePipelineService {
 
     @PreDestroy
     void shutdown() {
+        sourcePoller.shutdownNow();
         executor.shutdownNow();
         try {
             if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
