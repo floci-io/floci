@@ -66,6 +66,11 @@ final class ExtendedQuerySession {
             return;
         }
 
+        if (rejectedIndex < journal.size() - 1) {
+            journal.remove(rejectedIndex);
+            return;
+        }
+
         JournalEntry rejected = journal.get(rejectedIndex);
         statements.clear();
         statements.putAll(rejected.statementsBefore());
