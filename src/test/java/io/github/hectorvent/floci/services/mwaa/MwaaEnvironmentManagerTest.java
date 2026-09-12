@@ -365,8 +365,8 @@ class MwaaEnvironmentManagerTest {
         }
     }
 
-    /** Crash detection the readiness poller relies on to stop waiting on a dead container,
-     *  verified against a mocked DockerClient (mirrors BatchDockerRunnerTest's deep-stub style). */
+    /** Crash detection the readiness poller relies on to stop waiting on dead containers, verified
+     *  against a mocked DockerClient (mirrors BatchDockerRunnerTest's deep-stub style). */
     @Nested
     class ContainerExitDetection {
 
@@ -378,40 +378,60 @@ class MwaaEnvironmentManagerTest {
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         }
 
-        private Environment environmentWithContainerId(String containerId) {
+        private Environment environmentWithContainers(String dbContainerId, String airflowContainerId) {
             Environment environment = new Environment();
             environment.setName("my-env");
-            environment.setAirflowContainerId(containerId);
+            environment.setDbContainerId(dbContainerId);
+            environment.setAirflowContainerId(airflowContainerId);
             return environment;
         }
 
         @Test
-        void reportsNotExitedWhileTheContainerIsStillRunning() {
+        void reportsNotExitedWhileBothContainersAreStillRunning() {
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
             when(dockerClient.inspectContainerCmd("airflow-container-id").exec().getState().getRunning())
                     .thenReturn(true);
 
-            assertFalse(manager.hasAirflowContainerExited(environmentWithContainerId("airflow-container-id")));
+            assertFalse(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
         }
 
         @Test
-        void reportsExitedOnceTheContainerHasStopped() {
+        void reportsExitedOnceTheAirflowContainerHasStopped() {
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
             when(dockerClient.inspectContainerCmd("airflow-container-id").exec().getState().getRunning())
                     .thenReturn(false);
 
-            assertTrue(manager.hasAirflowContainerExited(environmentWithContainerId("airflow-container-id")));
+            assertTrue(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
         }
 
         @Test
-        void reportsExitedWhenTheContainerHasBeenRemoved() {
+        void reportsExitedOnceTheSiblingPostgresContainerHasStopped() {
+            // Airflow itself keeps running when Postgres dies underneath it, it just never reports
+            // metadatabase healthy, so this must be detected independently of the Airflow
+            // container's own running state.
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(false);
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
+
+            assertTrue(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
+        }
+
+        @Test
+        void reportsExitedWhenEitherContainerHasBeenRemoved() {
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
             when(dockerClient.inspectContainerCmd("airflow-container-id").exec())
                     .thenThrow(new NotFoundException("no such container"));
 
-            assertTrue(manager.hasAirflowContainerExited(environmentWithContainerId("airflow-container-id")));
+            assertTrue(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
         }
 
         @Test
-        void reportsNotExitedWhenNoContainerHasBeenCreatedYet() {
-            assertFalse(manager.hasAirflowContainerExited(new Environment()));
+        void reportsNotExitedWhenNeitherContainerHasBeenCreatedYet() {
+            assertFalse(manager.hasAnyContainerExited(new Environment()));
         }
 
         @Test
@@ -420,10 +440,12 @@ class MwaaEnvironmentManagerTest {
             // must not propagate, since the readiness poller shares one loop across every CREATING
             // environment and a thrown exception here would starve every other environment's check
             // for this poll tick, not just this one's.
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
             when(dockerClient.inspectContainerCmd("airflow-container-id").exec())
                     .thenThrow(new RuntimeException("docker daemon connection reset"));
 
-            assertFalse(manager.hasAirflowContainerExited(environmentWithContainerId("airflow-container-id")));
+            assertFalse(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
         }
     }
 }

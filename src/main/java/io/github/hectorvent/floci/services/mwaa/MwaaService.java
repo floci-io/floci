@@ -447,9 +447,9 @@ public class MwaaService implements TagHandler {
             return;
         }
         boolean ready = environmentManager.isReady(environment);
-        boolean exited = !ready && environmentManager.hasAirflowContainerExited(environment);
+        boolean exited = !ready && environmentManager.hasAnyContainerExited(environment);
 
-        // isReady()/hasAirflowContainerExited() are blocking Docker/HTTP calls, long enough for a
+        // isReady()/hasAnyContainerExited() are blocking Docker/HTTP calls, long enough for a
         // concurrent DeleteEnvironment (which sets DELETING on this same Environment instance
         // before tearing down its containers) to have moved this environment past CREATING in the
         // meantime. Re-checking right before writing avoids resurrecting a just-deleted environment
@@ -462,12 +462,12 @@ public class MwaaService implements TagHandler {
             environment.setStatus(EnvironmentStatus.AVAILABLE);
             putEnvironment(environment);
         } else if (exited) {
-            // docker start returns as soon as the entrypoint launches, so a script or migration
-            // failing partway through never surfaces here on its own; without this check the
-            // environment would poll a dead container and report CREATING forever instead of the
-            // CREATE_FAILED a real failure should be.
-            LOG.errorv("MWAA environment {0}''s Airflow container exited before becoming ready; "
-                    + "marking CREATE_FAILED", environment.getName());
+            // docker start returns as soon as a container's entrypoint launches, so its Postgres or
+            // Airflow container dying partway through never surfaces here on its own; without this
+            // check the environment would poll dead containers and report CREATING forever instead
+            // of the CREATE_FAILED a real failure should be.
+            LOG.errorv("MWAA environment {0}''s Postgres or Airflow container exited before "
+                    + "becoming ready; marking CREATE_FAILED", environment.getName());
             environment.setStatus(EnvironmentStatus.CREATE_FAILED);
             putEnvironment(environment);
         }

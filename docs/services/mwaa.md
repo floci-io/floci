@@ -36,7 +36,7 @@ Floci starts two containers per environment:
 Legacy environments retain the region recorded in their ARN. A request in another region does not
 adopt that environment; recreate it in the requested region instead.
 
-Once Airflow's unauthenticated `/health` endpoint reports both `metadatabase` and `scheduler` as `"healthy"`, the environment transitions to `AVAILABLE`. If the Airflow container instead exits before that (a startup script or `airflow db migrate` failing partway through), the same poller detects the stopped container and transitions the environment to `CREATE_FAILED` rather than polling a dead container forever.
+Once Airflow's unauthenticated `/health` endpoint reports both `metadatabase` and `scheduler` as `"healthy"`, the environment transitions to `AVAILABLE`. If the Postgres or Airflow container instead exits before that (a startup script or `airflow db migrate` failing partway through, or Postgres itself dying), the same poller detects the stopped container and transitions the environment to `CREATE_FAILED` rather than polling dead containers forever.
 
 ### Web/CLI proxy
 

@@ -264,15 +264,22 @@ public class MwaaEnvironmentManager {
     }
 
     /**
-     * True when the Airflow container was created but is no longer running, for example because a
-     * startup script or {@code airflow db migrate} failed after {@code docker start} returned.
-     * {@code docker start} only launches the entrypoint and returns immediately, so nothing else
-     * observes a failure like that; {@link MwaaService}'s readiness poller uses this to stop
-     * waiting on a container that will never answer {@code /health}, instead of leaving the
-     * environment at CREATING forever.
+     * True when either container backing this environment, Postgres or Airflow, was created but is
+     * no longer running: for example a startup script or {@code airflow db migrate} failing
+     * partway through kills the Airflow container, or the Postgres container itself dies (out of
+     * memory, its volume filling up), which never surfaces as an Airflow-side failure since the
+     * Airflow process itself keeps running, just never reporting {@code metadatabase} healthy.
+     * {@code docker start} only launches a container's entrypoint and returns immediately, so
+     * nothing else observes either of those; {@link MwaaService}'s readiness poller uses this to
+     * stop waiting on containers that will never let the environment answer {@code /health},
+     * instead of leaving the environment at CREATING forever.
      */
-    public boolean hasAirflowContainerExited(Environment environment) {
-        String containerId = environment.getAirflowContainerId();
+    public boolean hasAnyContainerExited(Environment environment) {
+        return hasContainerExited(environment.getDbContainerId(), "Postgres", environment)
+                || hasContainerExited(environment.getAirflowContainerId(), "Airflow", environment);
+    }
+
+    private boolean hasContainerExited(String containerId, String label, Environment environment) {
         if (containerId == null) {
             return false;
         }
@@ -287,8 +294,8 @@ public class MwaaEnvironmentManager {
             // bad inspect doesn't wrongly fail this environment or, since the readiness poller
             // shares one loop across every CREATING environment, escape and starve every other
             // environment's check for this poll tick.
-            LOG.warnv("Could not inspect Airflow container {0} for environment {1}: {2}",
-                    containerId, environment.getName(), e.getMessage());
+            LOG.warnv("Could not inspect {0} container {1} for environment {2}: {3}",
+                    label, containerId, environment.getName(), e.getMessage());
             return false;
         }
     }
