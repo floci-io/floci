@@ -753,6 +753,22 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void metadataProxyInstallCommandLetsDnfReplaceCurlMinimalWithCurl() {
+        // public.ecr.aws/amazonlinux/amazonlinux:2023 -- the fallback image AmiImageResolver
+        // uses for any unrecognized AMI ID -- ships curl-minimal by default. Without
+        // --allowerasing, "dnf install -y iproute socat curl ca-certificates" fails the whole
+        // transaction on a curl/curl-minimal conflict (they both provide /usr/bin/curl), so
+        // iproute and socat never install either, even though neither of them conflicts with
+        // anything. Reproduced against the real image: dnf reported dozens of
+        // "package curl-minimal-... conflicts with curl provided by curl-..." lines and the
+        // instance was left with no link-local IMDS endpoint.
+        String script = Ec2ContainerManager.metadataProxyInstallCommand()[2];
+
+        assertTrue(script.contains("dnf install -y --allowerasing iproute socat curl ca-certificates"),
+                script);
+    }
+
+    @Test
     void metadataProxyStartCommandBindsAwsLinkLocalMetadataAddress() {
         String[] command = Ec2ContainerManager.metadataProxyStartCommand("floci", 9169);
 
