@@ -50,6 +50,8 @@ import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecification;
+import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecificationListResult;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
@@ -2445,6 +2447,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                     Boolean associatePublicIp, String networkInterfaceId,
                                     int networkInterfaceDeviceIndex, String availabilityZone,
                                     LaunchTemplateData.MetadataOptions metadataOptions) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData,
+                iamInstanceProfileArn, associatePublicIp, networkInterfaceId,
+                networkInterfaceDeviceIndex, availabilityZone, metadataOptions, null);
+    }
+
+    /**
+     * @param creditSpecificationCpuCredits the launch's explicit CreditSpecification.CpuCredits,
+     *                                      or null when the request named none. Null is not
+     *                                      "no credit option": the instance type family's own
+     *                                      documented default applies on read, so a burstable
+     *                                      instance launched without one still reports standard
+     *                                      or unlimited.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -2453,6 +2478,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // their ancestry, so the launch path has to reject it explicitly.
         requireNotDeregistered(region, imageId);
         validateMetadataOptions(metadataOptions);
+        validateCreditSpecification(creditSpecificationCpuCredits);
         LaunchTemplateData.MetadataOptions launchMetadataOptions = LaunchTemplateData.MetadataOptions.merge(
                 LaunchTemplateData.MetadataOptions.launchDefaults(), metadataOptions);
         ensureDefaultResources(region);
@@ -2586,6 +2612,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 inst.setUserData(userData);
                 inst.setIamInstanceProfileArn(iamInstanceProfileArn);
                 inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
+                inst.setCreditSpecificationCpuCredits(creditSpecificationCpuCredits);
                 if (instanceTags != null && !instanceTags.isEmpty()) {
                     inst.setTags(new ArrayList<>(instanceTags));
                     tags.put(instanceId, new ArrayList<>(instanceTags));
@@ -3077,6 +3104,72 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * The credit option for CPU usage of burstable performance instances.
+     *
+     * <p>Two request shapes, and AWS gives them different meanings. Naming instance ids returns
+     * the credit option of exactly those instances, and an id that has no credit option to report
+     * is an error rather than an omission: the EC2 model documents "if you specify an instance ID
+     * that is not valid, such as an instance that is not a burstable performance instance, an
+     * error is returned". Naming none returns only the instances running with the unlimited
+     * option, which is why a t2 on its standard default is absent from an unfiltered call but
+     * present when its id is named.
+     *
+     * <p>The option itself is the launch's explicit CreditSpecification.CpuCredits when it had
+     * one, and the instance type family's documented default otherwise.
+     *
+     * @param instanceIds the ids to report on, or empty for the unfiltered form
+     * @param maxResults  page size, or 0 for no pagination. AWS rejects it together with ids
+     * @param nextToken   the cursor from a previous page, or null
+     */
+    public InstanceCreditSpecificationListResult describeInstanceCreditSpecifications(
+            String region, List<String> instanceIds, int maxResults, String nextToken) {
+        ensureDefaultResources(region);
+        if (maxResults > 0 && !instanceIds.isEmpty()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The parameter instanceIdsSet cannot be used with the parameter maxResults", 400);
+        }
+
+        if (!instanceIds.isEmpty()) {
+            List<InstanceCreditSpecification> named = new ArrayList<>();
+            for (String instanceId : instanceIds) {
+                Instance inst = getRequiredInstance(region, instanceId);
+                String cpuCredits = effectiveCpuCredits(inst);
+                if (cpuCredits == null) {
+                    throw new AwsException("InvalidInstanceID.NotFound",
+                            "The instance ID '" + instanceId + "' does not exist", 400);
+                }
+                named.add(new InstanceCreditSpecification(instanceId, cpuCredits));
+            }
+            return new InstanceCreditSpecificationListResult(named, null);
+        }
+
+        List<InstanceCreditSpecification> unlimited = instances.scan(k -> true).stream()
+                .filter(i -> i.getRegion().equals(region))
+                .filter(i -> "unlimited".equals(effectiveCpuCredits(i)))
+                .map(i -> new InstanceCreditSpecification(i.getInstanceId(), "unlimited"))
+                .collect(Collectors.toList());
+
+        if (maxResults > 0) {
+            int offset = decodeToken(nextToken);
+            int total = unlimited.size();
+            int toIndex = Math.min(offset + maxResults, total);
+            List<InstanceCreditSpecification> page = offset < total
+                    ? unlimited.subList(offset, toIndex)
+                    : Collections.emptyList();
+            String newNextToken = toIndex < total ? encodeToken(toIndex) : null;
+            return new InstanceCreditSpecificationListResult(new ArrayList<>(page), newNextToken);
+        }
+        return new InstanceCreditSpecificationListResult(unlimited, null);
+    }
+
+    private static String effectiveCpuCredits(Instance inst) {
+        if (inst.getCreditSpecificationCpuCredits() != null) {
+            return inst.getCreditSpecificationCpuCredits();
+        }
+        return Ec2InstanceTypeCatalog.defaultCpuCredits(inst.getInstanceType()).orElse(null);
+    }
+
     public Instance describeInstanceAttribute(String region, String instanceId, String attribute) {
         ensureDefaultResources(region);
         Instance inst = getRequiredInstance(region, instanceId);
@@ -3162,6 +3255,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         throw new AwsException("InvalidParameterValue",
                 "Value (" + value + ") for parameter " + parameter + " is invalid. Valid values are: "
                         + String.join(", ", allowed) + ".", 400);
+    }
+
+    private static void validateCreditSpecification(String cpuCredits) {
+        if (cpuCredits == null || "standard".equals(cpuCredits) || "unlimited".equals(cpuCredits)) {
+            return;
+        }
+        throw new AwsException("InvalidParameterValue",
+                "Value (" + cpuCredits + ") for parameter CreditSpecification.CpuCredits is invalid. "
+                        + "Valid values are: standard, unlimited.", 400);
     }
 
     private Instance getRequiredInstance(String region, String instanceId) {

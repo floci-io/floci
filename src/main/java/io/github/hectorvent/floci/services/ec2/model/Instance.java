@@ -61,6 +61,13 @@ public class Instance {
     // AWS's launch defaults through effectiveMetadataOptions().
     private LaunchTemplateData.MetadataOptions metadataOptions;
 
+    // Set only when the launch named an explicit CreditSpecification.CpuCredits. Null means the
+    // instance type family's documented default applies, which is why the default is resolved on
+    // read rather than frozen here: a resize has to move the instance onto its new family's
+    // default. CreditSpecification is not a member of the Instance shape DescribeInstances
+    // returns, so this reaches the wire only through DescribeInstanceCreditSpecifications.
+    private String creditSpecificationCpuCredits;
+
     // Docker backing fields (not serialised to AWS wire format)
     private String dockerContainerId;
     private String containerBridgeIp;
@@ -217,6 +224,9 @@ public class Instance {
 
     public LaunchTemplateData.MetadataOptions getMetadataOptions() { return metadataOptions; }
     public void setMetadataOptions(LaunchTemplateData.MetadataOptions metadataOptions) { this.metadataOptions = metadataOptions; }
+
+    public String getCreditSpecificationCpuCredits() { return creditSpecificationCpuCredits; }
+    public void setCreditSpecificationCpuCredits(String creditSpecificationCpuCredits) { this.creditSpecificationCpuCredits = creditSpecificationCpuCredits; }
 
     /** The stored metadata options, or AWS's launch defaults for a record that has none. */
     public LaunchTemplateData.MetadataOptions effectiveMetadataOptions() {

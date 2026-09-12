@@ -74,6 +74,7 @@ public class Ec2QueryHandler {
                 case "MonitorInstances" -> handleMonitoring(params, region, "MonitorInstances", true);
                 case "UnmonitorInstances" -> handleMonitoring(params, region, "UnmonitorInstances", false);
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
+                case "DescribeInstanceCreditSpecifications" -> handleDescribeInstanceCreditSpecifications(params, region);
                 case "DescribeInstanceAttribute" -> handleDescribeInstanceAttribute(params, region);
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
                 case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
@@ -710,12 +711,17 @@ public class Ec2QueryHandler {
 
         // Absent fields stay null so the launch default, or the launch template's value, applies.
         LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
+        String creditSpecificationCpuCredits = p.getFirst("CreditSpecification.CpuCredits");
 
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(p, region);
         if (launchTemplateData != null) {
             if (launchTemplateData.getMetadataOptions() != null) {
                 metadataOptions = LaunchTemplateData.MetadataOptions.merge(
                         launchTemplateData.getMetadataOptions(), metadataOptions);
+            }
+            if (launchTemplateData.getCreditSpecification() != null) {
+                creditSpecificationCpuCredits = firstNonBlank(creditSpecificationCpuCredits,
+                        launchTemplateData.getCreditSpecification().getCpuCredits());
             }
             imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
             instanceType = firstNonBlank(instanceType, launchTemplateData.getInstanceType());
@@ -736,7 +742,8 @@ public class Ec2QueryHandler {
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions);
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
+                creditSpecificationCpuCredits);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -1286,6 +1293,37 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("instanceStatusSet").end("DescribeInstanceStatusResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * CreditSpecification is not a member of the Instance shape DescribeInstances returns, per the
+     * EC2 model, so this dedicated action is the only place an instance's credit option reaches
+     * the wire. Terraform's aws_instance resource reads credit_specification from here.
+     */
+    private Response handleDescribeInstanceCreditSpecifications(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "InstanceId");
+        int maxResults = parseIntParam(p, "MaxResults", 0);
+        String nextToken = p.getFirst("NextToken");
+
+        InstanceCreditSpecificationListResult result =
+                service.describeInstanceCreditSpecifications(region, ids, maxResults, nextToken);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeInstanceCreditSpecificationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("instanceCreditSpecificationSet");
+        for (InstanceCreditSpecification spec : result.instanceCreditSpecifications()) {
+            xml.start("item")
+                    .elem("instanceId", spec.instanceId())
+                    .elem("cpuCredits", spec.cpuCredits())
+                    .end("item");
+        }
+        xml.end("instanceCreditSpecificationSet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.end("DescribeInstanceCreditSpecificationsResponse");
         return xmlResponse(xml.build());
     }
 
@@ -3935,7 +3973,8 @@ public class Ec2QueryHandler {
                     .start("memoryInfo")
                     .elem("sizeInMiB", String.valueOf(t.get("memoryMib")))
                     .end("memoryInfo")
-                    .elem("instanceStorageSupported", String.valueOf(t.get("instanceStorageSupported")));
+                    .elem("instanceStorageSupported", String.valueOf(t.get("instanceStorageSupported")))
+                    .elem("burstablePerformanceSupported", String.valueOf(t.get("burstablePerformanceSupported")));
             if (Boolean.TRUE.equals(t.get("instanceStorageSupported"))) {
                 xml.start("instanceStorageInfo")
                         .elem("totalSizeInGB", String.valueOf(t.get("localStorageGiB")))
