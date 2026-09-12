@@ -137,6 +137,32 @@ class ApiGatewayIntegrationReadBackTest {
     }
 
     @Test
+    void methodSettingsUnescapeTheJsonPointerTildeEscape() {
+        String deploymentId = given().contentType(ContentType.JSON).body("{}")
+                .when().post("/restapis/" + apiId + "/deployments")
+                .then().statusCode(201).extract().path("id");
+        given().contentType(ContentType.JSON)
+                .body("{\"stageName\":\"tilde\",\"deploymentId\":\"" + deploymentId + "\"}")
+                .when().post("/restapis/" + apiId + "/stages")
+                .then().statusCode(201);
+
+        // RFC 6901 escapes a literal "~" as ~0 and "/" as ~1. "/~1pets~0promo/GET/..." therefore
+        // addresses the resource "/pets~promo"; only ~1 used to be decoded, leaving a stray "~0".
+        // "~01" is an escaped literal "~1", not a slash, so decoding order matters too.
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":["
+                        + "{\"op\":\"replace\",\"path\":\"/~1pets~0promo/GET/throttling/burstLimit\",\"value\":\"12\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/~1v~01/POST/throttling/rateLimit\",\"value\":\"3.5\"}]}")
+                .when().patch("/restapis/" + apiId + "/stages/tilde")
+                .then().statusCode(200);
+
+        given().when().get("/restapis/" + apiId + "/stages/tilde")
+                .then().statusCode(200)
+                .body("methodSettings.'pets~promo/GET'.throttlingBurstLimit", equalTo(12))
+                .body("methodSettings.'v~1/POST'.throttlingRateLimit", equalTo(3.5f));
+    }
+
+    @Test
     void anIntegrationWithNoTypeReportsRatherThanCrashing() {
         given().contentType(ContentType.JSON).body("{\"authorizationType\":\"NONE\"}")
                 .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")

@@ -735,7 +735,7 @@ public class ApiGatewayService {
             // AWS escapes the resource path's slashes as ~1 in the patch path ("/~1pets/GET/...")
             // but reports the setting keyed by the plain path ("pets/GET"), so normalise both the
             // escaped and unescaped spellings onto that one key.
-            String resourcePath = prefix.substring(0, lastSlash).replace("~1", "/");
+            String resourcePath = unescapeJsonPointer(prefix.substring(0, lastSlash));
             if (resourcePath.startsWith("/")) resourcePath = resourcePath.substring(1);
             String httpMethod = prefix.substring(lastSlash + 1);
             String methodKey = resourcePath + "/" + httpMethod;
@@ -745,6 +745,15 @@ public class ApiGatewayService {
             applyMethodSettingValue(setting, settingKey, value);
             return;
         }
+    }
+
+    /**
+     * Reverses RFC 6901 JSON Pointer escaping: {@code ~1} is a literal {@code /} and {@code ~0} a
+     * literal {@code ~}. The order matters: {@code ~1} must be decoded first so that {@code ~01}
+     * (an escaped literal "~1") is not turned into a slash.
+     */
+    static String unescapeJsonPointer(String segment) {
+        return segment.replace("~1", "/").replace("~0", "~");
     }
 
     private void applyMethodSettingValue(MethodSetting setting, String settingKey, String value) {
