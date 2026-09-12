@@ -28,7 +28,9 @@ import static org.mockito.Mockito.mock;
 /**
  * End-to-end coverage for the ResultPath fix: a non-applicable ResultPath fails the execution with
  * {@code States.ResultPathMatchFailure} (was a silent input discard), the error is catchable via a
- * Parallel state's {@code Catch}, and object inputs merge unchanged.
+ * Parallel state's {@code Catch}, object inputs merge unchanged, and a bracket-index ResultPath
+ * (e.g. {@code $[1].payload}) merges into the addressed array element instead of discarding the
+ * array input.
  *
  * <p>CI-only: constructing {@link AslExecutor} pulls in Vert.x (absent in the offline sandbox). The merge
  * logic is covered locally by {@link ResultPathMergeTest}.
@@ -109,6 +111,27 @@ class AslExecutorResultPathTest {
                         + "\"Recover\":{\"Type\":\"Pass\",\"End\":true}}}",
                 "\"just-a-string\"");
         assertEquals("SUCCEEDED", exec.getStatus());
+    }
+
+    @Test
+    void arrayIndexResultPathMergesIntoIndexedElementAndKeepsArrayInput() throws Exception {
+        Execution exec = run(
+                "{\"StartAt\":\"P\",\"States\":{\"P\":{\"Type\":\"Pass\",\"Result\":{\"subject_status\":1},"
+                        + "\"ResultPath\":\"$[1].payload\",\"End\":true}}}",
+                "[{\"a\":1},{\"id\":7},{\"c\":3},4]");
+        assertEquals("SUCCEEDED", exec.getStatus());
+        assertEquals(mapper.readTree("[{\"a\":1},{\"id\":7,\"payload\":{\"subject_status\":1}},{\"c\":3},4]"),
+                mapper.readTree(exec.getOutput()));
+    }
+
+    @Test
+    void arrayIndexOutOfBoundsResultPathFailsExecution() {
+        Execution exec = run(
+                "{\"StartAt\":\"P\",\"States\":{\"P\":{\"Type\":\"Pass\",\"Result\":{\"x\":1},"
+                        + "\"ResultPath\":\"$[10].payload\",\"End\":true}}}",
+                "[{\"a\":1},{\"id\":7},{\"c\":3},4]");
+        assertEquals("FAILED", exec.getStatus());
+        assertEquals("States.ResultPathMatchFailure", exec.getError());
     }
 
     @Test

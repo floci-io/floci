@@ -9,8 +9,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Unit tests for {@link ResultPathMerge}: the extracted ResultPath merge, including the AWS
- * {@code States.ResultPathMatchFailure} case (previously a silent input-discard) and the documented
- * residuals. Plain JUnit5 + Jackson, so it runs in the offline sandbox.
+ * {@code States.ResultPathMatchFailure} case (previously a silent input-discard), bracket-index
+ * ResultPaths (previously an unimplemented residual), and the remaining documented residual.
+ * Plain JUnit5 + Jackson, so it runs in the offline sandbox.
  */
 class ResultPathMergeTest {
 
@@ -65,6 +66,52 @@ class ResultPathMergeTest {
                 () -> ResultPathMerge.merge(n("5"), "$.x", n(j("'r'")), OM));
     }
 
-    // Note: the $[...] and scalar-intermediate residuals are intentionally NOT asserted here (per the
-    // scope decision they are documented in ResultPathMerge, not encoded as correct behavior).
+    @Test
+    void arrayIndexResultPathMergesIntoIndexedElement() {
+        JsonNode input = n(j("[{'a':1},{'id':7},{'c':3},4]"));
+        JsonNode out = ResultPathMerge.merge(input, "$[1].payload", n(j("{'subject_status':1}")), OM);
+        assertEquals(n(j("[{'a':1},{'id':7,'payload':{'subject_status':1}},{'c':3},4]")), out);
+    }
+
+    @Test
+    void bracketIndexMidPathMergesIntoNestedElement() {
+        JsonNode input = n(j("{'a':[{'other':1}]}"));
+        JsonNode out = ResultPathMerge.merge(input, "$.a[0].b", n("5"), OM);
+        assertEquals(5, out.get("a").get(0).get("b").asInt());
+        assertEquals(1, out.get("a").get(0).get("other").asInt());
+    }
+
+    @Test
+    void arrayIndexOutOfBoundsRaisesResultPathMatchFailure() {
+        JsonNode input = n(j("[{'a':1},{'id':7},{'c':3},4]"));
+        assertThrows(ResultPathMerge.ResultPathMatchException.class,
+                () -> ResultPathMerge.merge(input, "$[10].payload", n(j("{'x':1}")), OM));
+    }
+
+    @Test
+    void arrayIndexResultPathAgainstNonArrayInputRaisesResultPathMatchFailure() {
+        assertThrows(ResultPathMerge.ResultPathMatchException.class,
+                () -> ResultPathMerge.merge(n(j("{'a':1}")), "$[0].x", n(j("{'x':1}")), OM));
+    }
+
+    @Test
+    void quotedBracketFieldNameMergesLikeADottedField() {
+        JsonNode out = ResultPathMerge.merge(n(j("{'abc':{}}")), "$.abc.['def ghi']", n("5"), OM);
+        assertEquals(5, out.get("abc").get("def ghi").asInt());
+    }
+
+    @Test
+    void quotedBracketFieldNameAsRootSegmentRequiresObjectInput() {
+        assertThrows(ResultPathMerge.ResultPathMatchException.class,
+                () -> ResultPathMerge.merge(n("[1,2]"), "$.['def ghi']", n("5"), OM));
+    }
+
+    @Test
+    void unterminatedQuotedBracketSegmentRaisesResultPathMatchFailure() {
+        assertThrows(ResultPathMerge.ResultPathMatchException.class,
+                () -> ResultPathMerge.merge(n(j("{'a':1}")), "$.['unterminated", n("5"), OM));
+    }
+
+    // Note: a $.a.b path whose $.a is a scalar (the pre-existing, documented residual) is
+    // intentionally NOT asserted here; it is unchanged by this fix and remains a silent overwrite.
 }
