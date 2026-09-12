@@ -96,6 +96,56 @@ class S3DeleteObjectsIntegrationTest {
             .statusCode(404);
     }
 
+    @Test
+    void deleteObjects_governanceRetentionVersionIdHonorsBypassHeader() {
+        String bucket = createBucket();
+        enableVersioning(bucket);
+
+        String key = "governance.txt";
+        String versionId = putGovernanceLockedObject(bucket, key);
+
+        String deleteBody = """
+                <Delete>
+                  <Object><Key>%s</Key><VersionId>%s</VersionId></Object>
+                </Delete>
+                """.formatted(key, versionId);
+
+        given()
+            .contentType("application/xml")
+            .body(deleteBody)
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Error>"))
+            .body(containsString("<Key>" + key + "</Key>"))
+            .body(containsString("<Code>AccessDenied</Code>"));
+
+        given()
+        .when()
+            .get("/" + bucket + "?versions&prefix=" + key)
+        .then()
+            .statusCode(200)
+            .body(containsString(versionId));
+
+        given()
+            .header("x-amz-bypass-governance-retention", "true")
+            .contentType("application/xml")
+            .body(deleteBody)
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .body(containsString("<VersionId>" + versionId + "</VersionId>"));
+
+        given()
+        .when()
+            .get("/" + bucket + "?versions&prefix=" + key)
+        .then()
+            .statusCode(200)
+            .body(not(containsString(versionId)));
+    }
+
     private static String createBucket() {
         String bucket = "delete-objects-" + UUID.randomUUID().toString().substring(0, 8);
         given()
@@ -122,6 +172,19 @@ class S3DeleteObjectsIntegrationTest {
             .put("/" + bucket + "?versioning")
         .then()
             .statusCode(200);
+    }
+
+    private static String putGovernanceLockedObject(String bucket, String key) {
+        return given()
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2030-01-01T00:00:00Z")
+            .body("locked")
+        .when()
+            .put("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200)
+            .extract()
+            .header("x-amz-version-id");
     }
 
     private static String putVersionedObject(String bucket, String key) {

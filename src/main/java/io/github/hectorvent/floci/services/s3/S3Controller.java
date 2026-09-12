@@ -1457,6 +1457,9 @@ public class S3Controller {
         }
         boolean quiet = XmlParser.containsValue(xml, "Quiet", "true");
 
+        boolean bypass = "true".equalsIgnoreCase(
+                httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+
         S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                 s3Service.isAuthEnforced(), httpHeaders, uriInfo);
         s3Service.authorizeSignedRequest(authorization);
@@ -1465,13 +1468,17 @@ public class S3Controller {
         for (XmlParser.KeyVersion entry : entries) {
             try {
                 s3Service.authorizeDeleteObject(bucket, entry.key(), entry.versionId(), authorization);
+                if (bypass) {
+                    s3Service.authorizeObjectWrite(bucket, entry.key(),
+                            "s3:BypassGovernanceRetention", authorization);
+                }
                 authorizedEntries.add(entry);
             } catch (AwsException e) {
                 authorizationErrors.add(new S3Service.DeleteError(entry.key(), e.getErrorCode(), e.getMessage()));
             }
         }
 
-        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, authorizedEntries);
+        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, authorizedEntries, bypass);
 
         XmlBuilder builder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
