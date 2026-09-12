@@ -457,6 +457,8 @@ public class RdsQueryHandler {
         boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
         boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
         String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
+        String engineMode = params.getFirst("EngineMode");
+        boolean storageEncrypted = "true".equalsIgnoreCase(params.getFirst("StorageEncrypted"));
 
         if (engineVersion == null) {
             engineVersion = defaultEngineVersion(engine);
@@ -471,7 +473,7 @@ public class RdsQueryHandler {
                     masterPassword, databaseName, iamEnabled, paramGroupName,
                     dbSubnetGroupName, availabilityZone, multiAz, region,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                    manageMasterUserPassword, masterUserSecretKmsKeyId);
+                    manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1529,6 +1531,7 @@ public class RdsQueryHandler {
                 .elem("Status", statusStr)
                 .elem("Engine", engineStr.toLowerCase())
                 .elem("EngineVersion", c.getEngineVersion())
+                .elem("EngineMode", c.getEngineMode() != null ? c.getEngineMode() : "provisioned")
                 .elem("MasterUsername", c.getMasterUsername());
         if (c.getDatabaseName() != null && !c.getDatabaseName().isBlank()) {
             xml.elem("DatabaseName", c.getDatabaseName());
@@ -1542,6 +1545,7 @@ public class RdsQueryHandler {
         }
         xml.elem("IAMDatabaseAuthenticationEnabled", c.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", c.isMultiAz())
+           .elem("StorageEncrypted", c.isStorageEncrypted())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")

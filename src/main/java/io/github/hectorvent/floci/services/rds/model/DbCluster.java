@@ -37,6 +37,8 @@ public class DbCluster {
     private Instant createdAt;
     private int proxyPort;
     private Map<String, String> tags = new LinkedHashMap<>();
+    private String engineMode;
+    private boolean storageEncrypted;
 
     private String dockerVolumeName;
     private String volumeId;
@@ -160,6 +162,12 @@ public class DbCluster {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }
+
+    public String getEngineMode() { return engineMode; }
+    public void setEngineMode(String engineMode) { this.engineMode = engineMode; }
+
+    public boolean isStorageEncrypted() { return storageEncrypted; }
+    public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
 
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
