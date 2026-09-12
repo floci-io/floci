@@ -8,6 +8,7 @@ COPY pom.xml .
 RUN mvn dependency:go-offline -q
 
 COPY src/ src/
+COPY sidecars/ sidecars/
 RUN mvn clean package -DskipTests -q
 
 # Stage 2: Runtime
