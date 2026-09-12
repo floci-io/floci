@@ -58,6 +58,107 @@ public final class S3CopySimulator {
     private S3CopySimulator() {
     }
 
+    record CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3) {
+    }
+
+    interface UnloadCollector extends AutoCloseable {
+        void accept(byte[] body) throws IOException;
+
+        void complete() throws IOException;
+
+        void abort();
+
+        @Override
+        void close();
+    }
+
+    static final class S3TransferException extends RuntimeException {
+        private final String sqlState;
+
+        S3TransferException(String sqlState, String message, Throwable cause) {
+            super(message, cause);
+            this.sqlState = sqlState;
+        }
+
+        String sqlState() {
+            return sqlState;
+        }
+    }
+
+    static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3) {
+        try {
+            s3.authorizeAnonymousListBucket(spec.bucket());
+        } catch (AwsException e) {
+            throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), e);
+        }
+
+        List<String> keys;
+        try {
+            keys = resolveKeys(spec, s3);
+        } catch (AwsException e) {
+            throw new S3TransferException(SQLSTATE_INTERNAL,
+                    "S3 COPY could not list s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), e);
+        }
+        if (keys.isEmpty()) {
+            throw new S3TransferException(SQLSTATE_INTERNAL,
+                    "S3 object s3://" + spec.bucket() + "/" + spec.keyOrPrefix() + " not found", null);
+        }
+
+        try {
+            for (String key : keys) {
+                s3.authorizeAnonymousGetObject(spec.bucket(), key);
+            }
+        } catch (AwsException e) {
+            throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), e);
+        }
+        return new CopyInput(spec, List.copyOf(keys), s3);
+    }
+
+    static String copyBackendSql(CopyStatementParser.S3CopyFrom spec) {
+        return fabricateCopy(spec);
+    }
+
+    static void streamCopyInput(CopyInput input, OutputStream backendOut) throws IOException {
+        streamObjects(input.spec(), input.s3(), input.keys(), backendOut);
+    }
+
+    static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3) {
+        String probeKey = unloadDataKey(spec, 0);
+        try {
+            s3.authorizeAnonymousPutObject(spec.bucket(), probeKey);
+            if (spec.manifest()) {
+                s3.authorizeAnonymousPutObject(spec.bucket(), spec.prefix() + "manifest");
+            }
+            if (!spec.allowOverwrite()) {
+                s3.authorizeAnonymousListBucket(spec.bucket());
+                if (targetPrefixHasObjects(spec, s3)) {
+                    throw new S3TransferException(SQLSTATE_INTERNAL,
+                            "S3 prefix s3://" + spec.bucket() + "/" + spec.prefix()
+                                    + " is not empty; specify ALLOWOVERWRITE to overwrite", null);
+                }
+            }
+        } catch (AwsException e) {
+            throw new S3TransferException(unloadWriteSqlState(e), unloadWriteMessage(e, spec), e);
+        }
+
+        if (!UNLOAD_HEAP_MIB.tryAcquire(UNLOAD_INITIAL_MIB)) {
+            throw new S3TransferException(SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
+                    "UNLOAD memory budget exhausted; retry shortly", null);
+        }
+        try {
+            return new S3UnloadCollector(spec, s3);
+        } catch (IOException e) {
+            UNLOAD_HEAP_MIB.release(UNLOAD_INITIAL_MIB);
+            throw new S3TransferException(SQLSTATE_INTERNAL, "UNLOAD failed: " + e.getMessage(), e);
+        }
+    }
+
+    static String unloadBackendSql(CopyStatementParser.S3Unload spec) {
+        return fabricateUnloadCopy(spec);
+    }
+
     /**
      * @param txStatus the transaction-status byte from the client's last {@code ReadyForQuery}
      *                 ({@code 'I'} idle, {@code 'T'} in a block, {@code 'E'} failed block); a
@@ -74,42 +175,17 @@ public final class S3CopySimulator {
     public static boolean runCopyFrom(Socket client, Socket backend,
                                       CopyStatementParser.S3CopyFrom spec, S3Service s3,
                                       char txStatus, IntConsumer onStatusChange) throws IOException {
+        CopyInput input;
         try {
-            s3.authorizeAnonymousListBucket(spec.bucket());
-        } catch (AwsException e) {
-            LOG.debugv(e, "ListBucket denied for COPY from s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
-            sendAccessDenied(client, backend, spec, txStatus, onStatusChange);
-            return true;
-        }
-
-        List<String> keys;
-        try {
-            keys = resolveKeys(spec, s3);
-        } catch (AwsException e) {
-            LOG.warnv(e, "failed to list s3://{0}/{1} for COPY", spec.bucket(), spec.keyOrPrefix());
-            sendError(client, backend, SQLSTATE_INTERNAL,
-                    "S3 COPY could not list s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus, onStatusChange);
-            return true;
-        }
-
-        try {
-            for (String key : keys) {
-                s3.authorizeAnonymousGetObject(spec.bucket(), key);
-            }
-        } catch (AwsException e) {
-            LOG.debugv(e, "GetObject denied for COPY from s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
-            sendAccessDenied(client, backend, spec, txStatus, onStatusChange);
-            return true;
-        }
-
-        if (keys.isEmpty()) {
-            sendError(client, backend, SQLSTATE_INTERNAL,
-                    "S3 object s3://" + spec.bucket() + "/" + spec.keyOrPrefix() + " not found", txStatus, onStatusChange);
+            input = prepareCopy(spec, s3);
+        } catch (S3TransferException e) {
+            LOG.debugv(e, "COPY preparation failed for s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
+            sendError(client, backend, e.sqlState(), e.getMessage(), txStatus, onStatusChange);
             return true;
         }
 
         OutputStream backendOut = backend.getOutputStream();
-        backendOut.write(PostgresWireDecoder.encodeQuery(fabricateCopy(spec)));
+        backendOut.write(PostgresWireDecoder.encodeQuery(copyBackendSql(spec)));
         backendOut.flush();
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
@@ -142,7 +218,7 @@ public final class S3CopySimulator {
         // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
         // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
         try {
-            streamObjects(spec, s3, keys, backendOut);
+            streamCopyInput(input, backendOut);
             writeCopyDone(backendOut);
             drainToReadyForQuery(backendDecoder, client, onStatusChange);
         } catch (RuntimeException | IOException e) {
@@ -318,12 +394,6 @@ public final class S3CopySimulator {
         client.getOutputStream().flush();
     }
 
-    private static void sendAccessDenied(Socket client, Socket backend, CopyStatementParser.S3CopyFrom spec,
-                                         char txStatus, IntConsumer onStatusChange) throws IOException {
-        sendError(client, backend, SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), txStatus, onStatusChange);
-    }
-
     private static void sendError(Socket client, Socket backend, String sqlState, String message,
                                   char txStatus, IntConsumer onStatusChange) throws IOException {
         if (txStatus == 'T' && backend != null && !backend.isClosed()) {
@@ -429,58 +499,29 @@ public final class S3CopySimulator {
     public static boolean runUnload(Socket client, Socket backend,
             CopyStatementParser.S3Unload spec, S3Service s3, char txStatus,
             IntConsumer onStatusChange) throws IOException {
-
-        String probeKey = unloadDataKey(spec, 0);
-        String manifestKey = spec.prefix() + "manifest";
+        UnloadCollector collector;
         try {
-            s3.authorizeAnonymousPutObject(spec.bucket(), probeKey);
-            if (spec.manifest()) {
-                s3.authorizeAnonymousPutObject(spec.bucket(), manifestKey);
-            }
-        } catch (AwsException e) {
-            LOG.debugv(e, "PutObject denied for UNLOAD to s3://{0}/{1}", spec.bucket(), spec.prefix());
-            sendError(client, backend, unloadWriteSqlState(e), unloadWriteMessage(e, spec), txStatus, onStatusChange);
+            collector = prepareUnload(spec, s3);
+        } catch (S3TransferException e) {
+            LOG.debugv(e, "UNLOAD preparation failed for s3://{0}/{1}", spec.bucket(), spec.prefix());
+            sendError(client, backend, e.sqlState(), e.getMessage(), txStatus, onStatusChange);
             return true;
         }
 
-        try {
-            if (!spec.allowOverwrite()) {
-                s3.authorizeAnonymousListBucket(spec.bucket());
-                if (targetPrefixHasObjects(spec, s3)) {
-                    sendError(client, backend, SQLSTATE_INTERNAL,
-                            "S3 prefix s3://" + spec.bucket() + "/" + spec.prefix()
-                                    + " is not empty; specify ALLOWOVERWRITE to overwrite", txStatus, onStatusChange);
-                    return true;
-                }
-            }
-        } catch (AwsException e) {
-            LOG.debugv(e, "bucket check failed for UNLOAD to s3://{0}/{1}", spec.bucket(), spec.prefix());
-            sendError(client, backend, unloadWriteSqlState(e), unloadWriteMessage(e, spec), txStatus, onStatusChange);
-            return true;
-        }
-
-        if (!UNLOAD_HEAP_MIB.tryAcquire(UNLOAD_INITIAL_MIB)) {
-            sendError(client, backend, SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
-                    "UNLOAD memory budget exhausted; retry shortly", txStatus, onStatusChange);
-            return true;
-        }
-        int[] heldMib = {UNLOAD_INITIAL_MIB};
-        try {
-            return runUnloadStreaming(client, backend, spec, s3, txStatus, onStatusChange, heldMib);
-        } finally {
-            UNLOAD_HEAP_MIB.release(heldMib[0]);
+        try (collector) {
+            return runUnloadStreaming(client, backend, spec, collector, txStatus, onStatusChange);
         }
     }
 
     private static boolean runUnloadStreaming(Socket client, Socket backend,
-            CopyStatementParser.S3Unload spec, S3Service s3, char txStatus,
-            IntConsumer onStatusChange, int[] heldMib) throws IOException {
+            CopyStatementParser.S3Unload spec, UnloadCollector collector, char txStatus,
+            IntConsumer onStatusChange) throws IOException {
 
         PostgresWireDecoder.FrontendMessage cmdComplete = null;
         PostgresWireDecoder.FrontendMessage readyForQuery = null;
 
         OutputStream backendOut = backend.getOutputStream();
-        backendOut.write(PostgresWireDecoder.encodeQuery(fabricateUnloadCopy(spec)));
+        backendOut.write(PostgresWireDecoder.encodeQuery(unloadBackendSql(spec)));
         backendOut.flush();
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
@@ -489,6 +530,7 @@ public final class S3CopySimulator {
             first = nextNonAsync(backendDecoder, client);
         } catch (IOException e) {
             LOG.warnv(e, "backend read failed while awaiting CopyOutResponse");
+            collector.abort();
             closeQuietly(backend);
             sendError(client, null, SQLSTATE_INTERNAL,
                     "UNLOAD failed: backend closed or timed out", txStatus, onStatusChange);
@@ -496,6 +538,7 @@ public final class S3CopySimulator {
             return true;
         }
         if (first == null) {
+            collector.abort();
             closeQuietly(backend);
             sendError(client, null, SQLSTATE_INTERNAL,
                     "UNLOAD failed: backend closed before COPY started", txStatus, onStatusChange);
@@ -503,217 +546,65 @@ public final class S3CopySimulator {
             return true;
         }
         if (first.type() != 'H') {
-            // Backend rejected the SELECT itself. Its ErrorResponse + ReadyForQuery are the client's one response.
+            collector.abort();
             forward(client, first);
             drainToReadyForQuery(backendDecoder, client, onStatusChange);
             return true;
         }
 
-        long threshold = spec.maxFileSizeBytes() > 0 ? spec.maxFileSizeBytes() : UNLOAD_TARGET_FILE_BYTES;
-        String contentType = spec.gzip() ? "application/gzip" : "text/plain";
-        List<String> writtenKeys = new ArrayList<>();
-        List<Integer> writtenLengths = new ArrayList<>();
-
-        ByteArrayOutputStream sink = new ByteArrayOutputStream();
-        OutputStream acc = spec.gzip() ? new GZIPOutputStream(sink) : sink;
-        long rawSlice = 0;
-        // Data-row bytes in the current slice, excluding a repeated header. Drives the size split so a
-        // header-only slice is never cut off on its own.
-        long slicePayload = 0;
-        long rawTotal = 0;
-        boolean lastByteNewline = true;
-        boolean warned = false;
-        int sliceIndex = 0;
-
-        // With HEADER the backend emits the header row once, at the top of the stream. Capture it so
-        // it can be repeated at the start of every later slice, the way real Redshift writes one
-        // header per output file.
-        ByteArrayOutputStream headerBuf = spec.header() ? new ByteArrayOutputStream() : null;
-        byte[] headerBytes = null;
-        boolean capturingHeader = spec.header();
-
         try {
             while (true) {
-                PostgresWireDecoder.FrontendMessage m = backendDecoder.nextMessage();
-                if (m == null) {
-                    closeAcc(acc, sink);
+                PostgresWireDecoder.FrontendMessage message = backendDecoder.nextMessage();
+                if (message == null) {
+                    collector.abort();
                     closeQuietly(backend);
-                    if (spec.manifest()) {
-                        deleteWritten(s3, spec, writtenKeys);
-                    }
                     sendError(client, null, SQLSTATE_INTERNAL,
                             "UNLOAD failed: backend closed mid-stream", txStatus, onStatusChange);
                     closeQuietly(client);
                     return true;
                 }
-                char t = m.type();
-                if (t == 'd') {
-                    byte[] body = m.body();
-                    int dataStart = 0;
-                    if (capturingHeader) {
-                        int nl = -1;
-                        for (int i = 0; i < body.length; i++) {
-                            if (body[i] == '\n') {
-                                nl = i;
-                                break;
-                            }
-                        }
-                        int end = nl >= 0 ? nl + 1 : body.length;
-                        headerBuf.write(body, 0, end);
-                        if (nl >= 0) {
-                            headerBytes = headerBuf.toByteArray();
-                            headerBuf = null;
-                            capturingHeader = false;
-                        }
-                        dataStart = end;
-                    } else if (headerBytes != null && sliceIndex > 0 && rawSlice == 0) {
-                        // First data of a later slice: repeat the captured header row.
-                        acc.write(headerBytes);
-                        rawSlice += headerBytes.length;
-                    }
-                    acc.write(body, 0, body.length);
-                    rawSlice += body.length;
-                    rawTotal += body.length;
-                    slicePayload += body.length - dataStart;
-                    if (body.length > 0) {
-                        lastByteNewline = body[body.length - 1] == '\n';
-                    }
-                    if (!warned && rawTotal > UNLOAD_WARN_BYTES) {
-                        warned = true;
-                        LOG.warnv("UNLOAD result passed {0} bytes and is buffered a slice at a time "
-                                + "(bucket={1}, prefix={2})", UNLOAD_WARN_BYTES, spec.bucket(), spec.prefix());
-                    }
-                    int wantMib = (int) ((rawSlice * 3) / (1024 * 1024)) + 1;
-                    while (heldMib[0] < wantMib) {
-                        if (!UNLOAD_HEAP_MIB.tryAcquire(1)) {
-                            return abortUnload(client, backend, backendDecoder, acc, sink,
-                                    SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
-                                    "UNLOAD memory budget exhausted; retry with a smaller result",
-                                    txStatus, onStatusChange);
-                        }
-                        heldMib[0]++;
-                    }
-                    if (rawTotal > UNLOAD_MAX_TOTAL_BYTES) {
-                        closeAcc(acc, sink);
-                        closeQuietly(backend);
-                        if (spec.manifest()) {
-                            deleteWritten(s3, spec, writtenKeys);
-                        }
-                        sendError(client, null,
-                                SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
-                                "UNLOAD result exceeds the " + UNLOAD_MAX_TOTAL_BYTES + "-byte limit",
-                                txStatus, onStatusChange);
-                        closeQuietly(client);
-                        return true;
-                    }
-                    if (slicePayload >= threshold && lastByteNewline) {
-                        byte[] payload = finishSlice(acc, sink);
-                        String key = unloadDataKey(spec, sliceIndex);
-                        try {
-                            s3.authorizeAnonymousPutObject(spec.bucket(), key);
-                            s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
-                        } catch (AwsException e) {
-                            LOG.debugv(e, "UNLOAD slice write to s3://{0}/{1} failed", spec.bucket(), key);
-                            if (spec.manifest()) {
-                                deleteWritten(s3, spec, writtenKeys);
-                            }
-                            return abortUnload(client, backend, backendDecoder, sink, sink,
-                                    unloadWriteSqlState(e), unloadWriteMessage(e, spec), txStatus, onStatusChange);
-                        }
-                        writtenKeys.add(key);
-                        writtenLengths.add(payload.length);
-                        sliceIndex++;
-                        int release = heldMib[0] - UNLOAD_INITIAL_MIB;
-                        if (release > 0) {
-                            UNLOAD_HEAP_MIB.release(release);
-                            heldMib[0] = UNLOAD_INITIAL_MIB;
-                        }
-                        rawSlice = 0;
-                        slicePayload = 0;
-                        lastByteNewline = true;
-                        sink = new ByteArrayOutputStream();
-                        acc = spec.gzip() ? new GZIPOutputStream(sink) : sink;
-                    }
-                } else if (t == 'c') {
-                    // CopyDone, ignore
-                } else if (t == 'C') {
-                    // CommandComplete, hold until we see 'Z'
-                    cmdComplete = m;
-                } else if (t == 'Z') {
-                    readyForQuery = m;
+                char type = message.type();
+                if (type == 'd') {
+                    collector.accept(message.body());
+                } else if (type == 'C') {
+                    cmdComplete = message;
+                } else if (type == 'Z') {
+                    readyForQuery = message;
                     break;
-                } else if (t == 'E') {
-                    closeAcc(acc, sink);
-                    if (spec.manifest()) {
-                        deleteWritten(s3, spec, writtenKeys);
-                    }
-                    forward(client, m);
+                } else if (type == 'E') {
+                    collector.abort();
+                    forward(client, message);
                     drainToReadyForQuery(backendDecoder, client, onStatusChange);
                     return true;
-                } else if (t == 'N' || t == 'A' || t == 'S') {
-                    forward(client, m);
+                } else if (type == 'N' || type == 'A' || type == 'S') {
+                    forward(client, message);
                 }
             }
-        } catch (AwsException e) {
+            collector.complete();
+        } catch (S3TransferException e) {
             LOG.debugv(e, "UNLOAD S3 operation failed during streaming");
-            if (spec.manifest()) {
-                deleteWritten(s3, spec, writtenKeys);
+            if (readyForQuery != null) {
+                sendError(client, backend, e.sqlState(), e.getMessage(), txStatus, onStatusChange);
+                return true;
             }
-            return abortUnload(client, backend, backendDecoder, acc, sink,
-                    unloadWriteSqlState(e), unloadWriteMessage(e, spec), txStatus, onStatusChange);
+            if (SQLSTATE_PROGRAM_LIMIT_EXCEEDED.equals(e.sqlState())) {
+                closeQuietly(backend);
+                sendError(client, null, e.sqlState(), e.getMessage(), txStatus, onStatusChange);
+                closeQuietly(client);
+                return true;
+            }
+            return abortUnload(client, backend, backendDecoder, collector,
+                    e.sqlState(), e.getMessage(), txStatus, onStatusChange);
         } catch (RuntimeException | IOException e) {
             LOG.warnv(e, "UNLOAD streaming failed");
-            if (spec.manifest()) {
-                deleteWritten(s3, spec, writtenKeys);
-            }
             String detail = e.getMessage() != null ? e.getMessage() : e.toString();
-            return abortUnload(client, backend, backendDecoder, acc, sink,
+            if (readyForQuery != null) {
+                sendError(client, backend, SQLSTATE_INTERNAL,
+                        "UNLOAD failed: " + detail, txStatus, onStatusChange);
+                return true;
+            }
+            return abortUnload(client, backend, backendDecoder, collector,
                     SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, txStatus, onStatusChange);
-        }
-
-        // Flush the final slice. Write it when it carries rows, or when nothing has been written yet
-        // (a zero-row UNLOAD still emits one object, header only when HEADER was asked for). A result
-        // that ended exactly on a slice boundary leaves slicePayload == 0 with slices already written,
-        // so neither an empty nor a header-only trailer is produced.
-        byte[] payload = finishSlice(acc, sink);
-        if (slicePayload > 0 || writtenKeys.isEmpty()) {
-            String key = unloadDataKey(spec, sliceIndex);
-            try {
-                s3.authorizeAnonymousPutObject(spec.bucket(), key);
-                s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
-            } catch (AwsException e) {
-                LOG.debugv(e, "UNLOAD final slice write to s3://{0}/{1} failed", spec.bucket(), key);
-                if (spec.manifest()) {
-                    deleteWritten(s3, spec, writtenKeys);
-                }
-                sendError(client, backend, unloadWriteSqlState(e), unloadWriteMessage(e, spec),
-                        txStatus, onStatusChange);
-                return true;
-            } catch (RuntimeException e) {
-                LOG.warnv(e, "UNLOAD final slice write failed");
-                if (spec.manifest()) {
-                    deleteWritten(s3, spec, writtenKeys);
-                }
-                String detail = e.getMessage() != null ? e.getMessage() : e.toString();
-                sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, txStatus, onStatusChange);
-                return true;
-            }
-            writtenKeys.add(key);
-            writtenLengths.add(payload.length);
-        }
-
-        if (spec.manifest()) {
-            try {
-                s3.authorizeAnonymousPutObject(spec.bucket(), spec.prefix() + "manifest");
-                s3.putObject(spec.bucket(), spec.prefix() + "manifest",
-                        manifestJson(spec.bucket(), writtenKeys, writtenLengths).getBytes(StandardCharsets.UTF_8),
-                        "application/json", Map.of());
-            } catch (RuntimeException e) {
-                LOG.warnv(e, "UNLOAD manifest write failed; removing partial data objects");
-                deleteWritten(s3, spec, writtenKeys);
-                sendError(client, backend, SQLSTATE_INTERNAL, "UNLOAD manifest write failed", txStatus, onStatusChange);
-                return true;
-            }
         }
 
         if (cmdComplete != null) {
@@ -749,6 +640,196 @@ public final class S3CopySimulator {
         }
         sql.append(")");
         return sql.toString();
+    }
+
+    private static final class S3UnloadCollector implements UnloadCollector {
+        private final CopyStatementParser.S3Unload spec;
+        private final S3Service s3;
+        private final long threshold;
+        private final String contentType;
+        private final List<String> writtenKeys = new ArrayList<>();
+        private final List<Integer> writtenLengths = new ArrayList<>();
+
+        private ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        private OutputStream acc;
+        private ByteArrayOutputStream headerBuf;
+        private byte[] headerBytes;
+        private long rawSlice;
+        private long slicePayload;
+        private long rawTotal;
+        private boolean lastByteNewline = true;
+        private boolean warned;
+        private boolean capturingHeader;
+        private boolean finished;
+        private boolean aborted;
+        private boolean closed;
+        private int sliceIndex;
+        private int heldMib = UNLOAD_INITIAL_MIB;
+
+        private S3UnloadCollector(CopyStatementParser.S3Unload spec, S3Service s3) throws IOException {
+            this.spec = spec;
+            this.s3 = s3;
+            threshold = spec.maxFileSizeBytes() > 0 ? spec.maxFileSizeBytes() : UNLOAD_TARGET_FILE_BYTES;
+            contentType = spec.gzip() ? "application/gzip" : "text/plain";
+            acc = newAccumulator();
+            headerBuf = spec.header() ? new ByteArrayOutputStream() : null;
+            capturingHeader = spec.header();
+        }
+
+        @Override
+        public void accept(byte[] body) throws IOException {
+            ensureOpen();
+            int dataStart = 0;
+            if (capturingHeader) {
+                int newline = -1;
+                for (int i = 0; i < body.length; i++) {
+                    if (body[i] == '\n') {
+                        newline = i;
+                        break;
+                    }
+                }
+                int end = newline >= 0 ? newline + 1 : body.length;
+                headerBuf.write(body, 0, end);
+                if (newline >= 0) {
+                    headerBytes = headerBuf.toByteArray();
+                    headerBuf = null;
+                    capturingHeader = false;
+                }
+                dataStart = end;
+            } else if (headerBytes != null && sliceIndex > 0 && rawSlice == 0) {
+                acc.write(headerBytes);
+                rawSlice += headerBytes.length;
+            }
+
+            acc.write(body, 0, body.length);
+            rawSlice += body.length;
+            rawTotal += body.length;
+            slicePayload += body.length - dataStart;
+            if (body.length > 0) {
+                lastByteNewline = body[body.length - 1] == '\n';
+            }
+            if (!warned && rawTotal > UNLOAD_WARN_BYTES) {
+                warned = true;
+                LOG.warnv("UNLOAD result passed {0} bytes and is buffered a slice at a time "
+                        + "(bucket={1}, prefix={2})", UNLOAD_WARN_BYTES, spec.bucket(), spec.prefix());
+            }
+            acquireForCurrentSlice();
+            if (rawTotal > UNLOAD_MAX_TOTAL_BYTES) {
+                fail(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+                        "UNLOAD result exceeds the " + UNLOAD_MAX_TOTAL_BYTES + "-byte limit", null);
+            }
+            if (slicePayload >= threshold && lastByteNewline) {
+                writeCurrentSlice();
+                resetSlice();
+            }
+        }
+
+        @Override
+        public void complete() throws IOException {
+            ensureOpen();
+            byte[] payload = finishSlice(acc, sink);
+            if (slicePayload > 0 || writtenKeys.isEmpty()) {
+                writePayload(payload, sliceIndex);
+            }
+            if (spec.manifest()) {
+                try {
+                    String key = spec.prefix() + "manifest";
+                    s3.authorizeAnonymousPutObject(spec.bucket(), key);
+                    s3.putObject(spec.bucket(), key,
+                            manifestJson(spec.bucket(), writtenKeys, writtenLengths)
+                                    .getBytes(StandardCharsets.UTF_8),
+                            "application/json", Map.of());
+                } catch (RuntimeException e) {
+                    fail(SQLSTATE_INTERNAL, "UNLOAD manifest write failed", e);
+                }
+            }
+            finished = true;
+        }
+
+        @Override
+        public void abort() {
+            if (aborted || finished) {
+                return;
+            }
+            closeAcc(acc, sink);
+            if (spec.manifest()) {
+                deleteWritten(s3, spec, writtenKeys);
+            }
+            aborted = true;
+        }
+
+        @Override
+        public void close() {
+            if (closed) {
+                return;
+            }
+            if (!finished && !aborted) {
+                abort();
+            }
+            UNLOAD_HEAP_MIB.release(heldMib);
+            heldMib = 0;
+            closed = true;
+        }
+
+        private void acquireForCurrentSlice() {
+            int wantedMib = (int) ((rawSlice * 3) / (1024 * 1024)) + 1;
+            while (heldMib < wantedMib) {
+                if (!UNLOAD_HEAP_MIB.tryAcquire(1)) {
+                    fail(SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
+                            "UNLOAD memory budget exhausted; retry with a smaller result", null);
+                }
+                heldMib++;
+            }
+        }
+
+        private void writeCurrentSlice() throws IOException {
+            byte[] payload = finishSlice(acc, sink);
+            writePayload(payload, sliceIndex);
+            sliceIndex++;
+        }
+
+        private void writePayload(byte[] payload, int index) {
+            String key = unloadDataKey(spec, index);
+            try {
+                s3.authorizeAnonymousPutObject(spec.bucket(), key);
+                s3.putObject(spec.bucket(), key, payload, contentType, Map.of());
+            } catch (AwsException e) {
+                fail(unloadWriteSqlState(e), unloadWriteMessage(e, spec), e);
+            } catch (RuntimeException e) {
+                String detail = e.getMessage() != null ? e.getMessage() : e.toString();
+                fail(SQLSTATE_INTERNAL, "UNLOAD failed: " + detail, e);
+            }
+            writtenKeys.add(key);
+            writtenLengths.add(payload.length);
+        }
+
+        private void resetSlice() throws IOException {
+            int release = heldMib - UNLOAD_INITIAL_MIB;
+            if (release > 0) {
+                UNLOAD_HEAP_MIB.release(release);
+                heldMib = UNLOAD_INITIAL_MIB;
+            }
+            rawSlice = 0;
+            slicePayload = 0;
+            lastByteNewline = true;
+            sink = new ByteArrayOutputStream();
+            acc = newAccumulator();
+        }
+
+        private OutputStream newAccumulator() throws IOException {
+            return spec.gzip() ? new GZIPOutputStream(sink) : sink;
+        }
+
+        private void ensureOpen() {
+            if (finished || aborted || closed) {
+                throw new IllegalStateException("UNLOAD collector is no longer open");
+            }
+        }
+
+        private void fail(String sqlState, String message, Throwable cause) {
+            abort();
+            throw new S3TransferException(sqlState, message, cause);
+        }
     }
 
     /** {@code 404} from the S3 layer means the bucket is absent, not that access was denied. */
@@ -787,14 +868,12 @@ public final class S3CopySimulator {
     }
 
     private static boolean abortUnload(Socket client, Socket backend, PostgresWireDecoder backendDecoder,
-            OutputStream acc, ByteArrayOutputStream sink, String sqlState, String message,
+            UnloadCollector collector, String sqlState, String message,
             char txStatus, IntConsumer onStatusChange) throws IOException {
-        closeAcc(acc, sink);
+        collector.abort();
         try {
             drainBackendDiscarding(backendDecoder);
         } catch (IOException backendGone) {
-            // The backend is unreachable, so it cannot be resynchronized: close it and hand the
-            // client its one response synthesized, exactly as the backend-EOF branch does.
             LOG.debugv(backendGone, "backend unreachable while draining an aborted UNLOAD; synthesizing client error");
             closeQuietly(backend);
             sendError(client, null, sqlState, message, txStatus, onStatusChange);
