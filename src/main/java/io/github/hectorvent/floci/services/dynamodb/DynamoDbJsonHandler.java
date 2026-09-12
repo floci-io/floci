@@ -1765,7 +1765,7 @@ public class DynamoDbJsonHandler {
                 ObjectNode r = objectMapper.createObjectNode();
                 r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
                 if (!reason.code().isEmpty()) {
-                    r.put("Message", "The conditional request failed");
+                    r.put("Message", reason.message() != null ? reason.message() : "The conditional request failed");
                 }
                 if (reason.item() != null) {
                     r.set("Item", reason.item());

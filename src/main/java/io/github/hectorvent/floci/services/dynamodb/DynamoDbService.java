@@ -1414,8 +1414,10 @@ public class DynamoDbService implements ResourceProvider {
             List<TransactionCanceledException.CancellationReason> cancellationReasons = new ArrayList<>();
             boolean hasFailed = false;
             for (JsonNode transactItem : transactItems) {
-                TransactionCanceledException.CancellationReason failReason =
-                        evaluateTransactCondition(transactItem, region, staged);
+                var failReason = transactUpdateValueTooDeep(transactItem);
+                if (failReason == null) {
+                    failReason = evaluateTransactCondition(transactItem, region, staged);
+                }
                 if (failReason != null) {
                     hasFailed = true;
                     cancellationReasons.add(failReason);
@@ -1516,6 +1518,17 @@ public class DynamoDbService implements ResourceProvider {
         var table = requireActiveTable(storageKey, tableName);
         String itemKey = buildItemKey(table, keyOrItem);
         return new TransactParticipant(storageKey, itemKey);
+    }
+
+    // AWS checks the depth of a transact Update's values as part of that member, so a too
+    // deep value cancels the transaction instead of failing the request up front.
+    private TransactionCanceledException.CancellationReason transactUpdateValueTooDeep(JsonNode transactItem) {
+        var values = transactItem.path("Update").get("ExpressionAttributeValues");
+        if (DynamoDbAttributeValueValidator.nestingWithinLimit(values)) {
+            return null;
+        }
+        return new TransactionCanceledException.CancellationReason("ValidationError", null,
+                "Nesting Levels have exceeded supported limits");
     }
 
     private TransactionCanceledException.CancellationReason evaluateTransactCondition(JsonNode transactItem, String region) {

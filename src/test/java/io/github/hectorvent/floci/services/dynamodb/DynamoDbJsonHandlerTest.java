@@ -1389,4 +1389,42 @@ class DynamoDbJsonHandlerTest {
         assertEquals("Nesting Levels have exceeded supported limits: "
                 + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
     }
+
+    @Test
+    void transactWriteItemsCancelsOnAnUpdateValueWithALeafAtLevel33() throws Exception {
+        createUsersTable("eu-west-1");
+        var update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "SET deep = :deep");
+        update.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+
+        var response = handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1");
+        assertEquals(400, response.getStatus());
+        var body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("TransactionCanceledException", body.get("__type").asText());
+        var reason = body.get("CancellationReasons").get(0);
+        assertEquals("ValidationError", reason.get("Code").asText());
+        assertEquals("Nesting Levels have exceeded supported limits", reason.get("Message").asText());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsDoesNotCheckTheDepthOfAConditionCheckValue() throws Exception {
+        createUsersTable("eu-west-1");
+        var putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        putRequest.set("Item", item("userId", "u1", "marker", "x"));
+        handler.handle("PutItem", putRequest, "eu-west-1");
+        var check = mapper.createObjectNode();
+        check.set("Key", item("userId", "u1"));
+        check.put("ConditionExpression", "#d = :deep");
+        check.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
+        check.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+
+        var response = handler.handle("TransactWriteItems", transactWrite("ConditionCheck", check), "eu-west-1");
+        assertEquals(400, response.getStatus());
+        var reason = mapper.convertValue(response.getEntity(), JsonNode.class).get("CancellationReasons").get(0);
+        assertEquals("ConditionalCheckFailed", reason.get("Code").asText());
+        assertEquals("The conditional request failed", reason.get("Message").asText());
+    }
 }
