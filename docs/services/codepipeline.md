@@ -25,6 +25,11 @@ Stages execute in declaration order. Actions with the same `runOrder` execute in
 A `QUEUED` or `PARALLEL` pipeline holds at most 50 active executions, as on AWS;
 `StartPipelineExecution` beyond that returns `ConcurrentPipelineExecutionsLimitExceededException`.
 
+`RetryStageExecution` resumes the same pipeline execution at a failed stage. `FAILED_ACTIONS`
+reruns failed or not-yet-started actions while preserving successful actions; `ALL_ACTIONS` reruns
+the complete stage. Runtime artifacts from failed executions are retained for the retry, and a
+successful retry continues with the stages that follow rather than restarting from the source.
+
 The following providers execute against local Floci services:
 
 | Category | Provider | Behavior |

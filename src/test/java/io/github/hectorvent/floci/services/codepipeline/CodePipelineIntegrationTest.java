@@ -329,6 +329,360 @@ class CodePipelineIntegrationTest {
     }
 
     @Test
+    void retryStageExecutionReusesExecutionAndRetainedArtifacts() throws Exception {
+        createBucket("retry-stage-source");
+        createBucket("retry-stage-success");
+        putObject("retry-stage-source", "source.zip", "retry artifact");
+
+        String pipelineName = "retry-stage-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "retry-stage-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "SuccessfulDeploy",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "retry-stage-success",
+                            "ObjectKey": "successful.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }, {
+                        "name": "FailedDeploy",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "retry-stage-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        waitForExecution(pipelineName, executionId, "Failed");
+
+        post("ListActionExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"pipelineExecutionId": "%s"}
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("actionExecutionDetails", hasSize(3))
+                .body("actionExecutionDetails.findAll { it.actionName == 'SourceObject' }", hasSize(1))
+                .body("actionExecutionDetails.find { it.actionName == 'SuccessfulDeploy' }.status",
+                        equalTo("Succeeded"))
+                .body("actionExecutionDetails.find { it.actionName == 'FailedDeploy' }.status", equalTo("Failed"));
+
+        createBucket("retry-stage-destination");
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Deploy",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "FAILED_ACTIONS"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionId", equalTo(executionId));
+
+        waitForExecution(pipelineName, executionId, "Succeeded");
+
+        given()
+                .get("/retry-stage-destination/deployed.zip")
+        .then()
+                .statusCode(200)
+                .body(equalTo("retry artifact"));
+
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(1))
+                .body("pipelineExecutionSummaries[0].pipelineExecutionId", equalTo(executionId))
+                .body("pipelineExecutionSummaries[0].status", equalTo("Succeeded"));
+
+        post("ListActionExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"pipelineExecutionId": "%s"}
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("actionExecutionDetails", hasSize(4))
+                .body("actionExecutionDetails.findAll { it.actionName == 'SourceObject' }", hasSize(1))
+                .body("actionExecutionDetails.findAll { it.actionName == 'SuccessfulDeploy' }", hasSize(1))
+                .body("actionExecutionDetails.findAll { it.actionName == 'FailedDeploy' }", hasSize(2))
+                .body("actionExecutionDetails.find { it.actionName == 'FailedDeploy' }.status", equalTo("Succeeded"));
+
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates.find { it.stageName == 'Deploy' }.actionStates"
+                        + ".find { it.actionName == 'SuccessfulDeploy' }.latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates.find { it.stageName == 'Deploy' }.actionStates"
+                        + ".find { it.actionName == 'FailedDeploy' }.latestExecution.status", equalTo("Succeeded"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void retryStageExecutionAllActionsRerunsSuccessfulActions() throws Exception {
+        createBucket("retry-all-source");
+        createBucket("retry-all-success");
+        putObject("retry-all-source", "source.zip", "retry all artifact");
+
+        String pipelineName = "retry-all-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "retry-all-source", "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "SuccessfulDeploy",
+                        "actionTypeId": {
+                            "category": "Deploy", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "retry-all-success", "ObjectKey": "successful.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }, {
+                        "name": "FailedDeploy",
+                        "actionTypeId": {
+                            "category": "Deploy", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "retry-all-destination", "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then().statusCode(200).extract().path("pipelineExecutionId");
+        waitForExecution(pipelineName, executionId, "Failed");
+        createBucket("retry-all-destination");
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Deploy",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "ALL_ACTIONS"
+                }
+                """.formatted(pipelineName, executionId))
+                .then().statusCode(200).body("pipelineExecutionId", equalTo(executionId));
+        waitForExecution(pipelineName, executionId, "Succeeded");
+
+        post("ListActionExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"pipelineExecutionId": "%s"}
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("actionExecutionDetails.findAll { it.actionName == 'SourceObject' }", hasSize(1))
+                .body("actionExecutionDetails.findAll { it.actionName == 'SuccessfulDeploy' }", hasSize(2))
+                .body("actionExecutionDetails.findAll { it.actionName == 'FailedDeploy' }", hasSize(2));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void retryStageExecutionValidatesRetryability() {
+        String pipelineName = "retry-validation-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "missing-retry-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "unused-retry-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        try {
+            waitForExecution(pipelineName, executionId, "Failed");
+        } catch (Exception ignored) {
+            // The source failure is deterministic; keep validation assertions focused on the API.
+        }
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Source",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "INVALID"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"));
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Missing",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "FAILED_ACTIONS"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("StageNotFoundException"));
+
+        post("UpdatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObjectV2",
+                        "actionTypeId": {
+                            "category": "Source", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "missing-retry-source", "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "unused-retry-destination", "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Source",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "FAILED_ACTIONS"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("StageNotRetryableException"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
     void listPipelineExecutionsValidatesFilterAndMaxResults() {
         String pipelineName = "list-executions-validation-pipeline";
         post("CreatePipeline", pipeline(pipelineName, """
