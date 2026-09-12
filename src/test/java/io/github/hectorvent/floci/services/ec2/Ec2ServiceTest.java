@@ -43,6 +43,7 @@ import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachment
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachmentOptions;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import org.bouncycastle.openssl.PEMKeyPair;
@@ -53,6 +54,7 @@ import org.junit.jupiter.api.Test;
 import java.io.StringReader;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -746,6 +748,81 @@ class Ec2ServiceTest {
 
         assertTrue(service.endpointNetworkInterfaces("eu-west-1").isEmpty(),
                 "endpoints are regional");
+    }
+
+    @Test
+    void subnetConfigurationPinsTheEndpointInterfaceAddress() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.60.0.0/16", false).getVpcId();
+        String pinned = service.createSubnet("us-east-1", vpcId, "10.60.1.0/24", "us-east-1a").getSubnetId();
+        String unpinned = service.createSubnet("us-east-1", vpcId, "10.60.2.0/24", "us-east-1b").getSubnetId();
+
+        VpcEndpoint endpoint = service.createVpcEndpoint("us-east-1", vpcId,
+                "com.amazonaws.us-east-1.ecs", "Interface",
+                List.of(), List.of(pinned, unpinned), List.of(), null, null, List.of(),
+                List.of(new VpcEndpointSubnetConfiguration(pinned, "10.60.1.10", "2600:1f18::10")));
+
+        Map<String, String> addresses = endpointAddressesBySubnet(service);
+        assertEquals("10.60.1.10", addresses.get(pinned),
+                "the pinned address must be the one the interface reports");
+        assertNotEquals("10.60.2.10", addresses.get(unpinned),
+                "a subnet with no configuration keeps the synthesized address");
+        assertEquals(addresses, endpointAddressesBySubnet(service),
+                "a second read must answer with the same addresses");
+        assertEquals("2600:1f18::10", endpoint.getSubnetConfigurations().getFirst().getIpv6(),
+                "Ipv6 is stored even though no floci interface field carries it yet");
+    }
+
+    @Test
+    void subnetConfigurationRejectsAnAddressOutsideTheSubnet() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.61.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.61.1.0/24", "us-east-1a").getSubnetId();
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createVpcEndpoint("us-east-1", vpcId, "com.amazonaws.us-east-1.ecs", "Interface",
+                        List.of(), List.of(subnetId), List.of(), null, null, List.of(),
+                        List.of(new VpcEndpointSubnetConfiguration(subnetId, "10.61.9.10", null))));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertTrue(service.describeVpcEndpoints("us-east-1", List.of(), Map.of()).isEmpty(),
+                "a rejected configuration must not leave an endpoint behind");
+    }
+
+    @Test
+    void modifyVpcEndpointReplacesTheConfigurationForOneSubnet() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.62.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.62.1.0/24", "us-east-1a").getSubnetId();
+        VpcEndpoint endpoint = service.createVpcEndpoint("us-east-1", vpcId,
+                "com.amazonaws.us-east-1.ecs", "Interface",
+                List.of(), List.of(subnetId), List.of(), null, null, List.of(),
+                List.of(new VpcEndpointSubnetConfiguration(subnetId, "10.62.1.10", null)));
+
+        service.modifyVpcEndpoint("us-east-1", endpoint.getVpcEndpointId(),
+                List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), null, null, null,
+                List.of(new VpcEndpointSubnetConfiguration(subnetId, "10.62.1.40", null)));
+
+        assertEquals(1, service.describeVpcEndpoints("us-east-1", List.of(endpoint.getVpcEndpointId()), Map.of())
+                .getFirst().getSubnetConfigurations().size(),
+                "a second configuration for the same subnet replaces the first");
+        assertEquals("10.62.1.40", endpointAddressesBySubnet(service).get(subnetId));
+    }
+
+    private static Map<String, String> endpointAddressesBySubnet(Ec2Service service) {
+        Map<String, String> addresses = new HashMap<>();
+        for (NetworkInterface eni : service.endpointNetworkInterfaces("us-east-1")) {
+            addresses.put(eni.getSubnetId(), eni.getPrivateIpAddress());
+        }
+        return addresses;
     }
 
     @Test
