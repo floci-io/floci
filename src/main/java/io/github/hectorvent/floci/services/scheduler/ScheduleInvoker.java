@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
@@ -20,7 +21,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -198,15 +199,25 @@ public class ScheduleInvoker {
         }
         attrsNode.fields().forEachRemaining(entry -> {
             JsonNode valueNode = entry.getValue();
-            String binaryValue = valueNode.path("BinaryValue").asText(null);
-            String dataType = valueNode.path("DataType")
-                    .asText(binaryValue != null ? "Binary" : "String");
-            if (binaryValue != null) {
+            String dataType = valueNode.path("DataType").asText(null);
+            String stringValue = valueNode.path("StringValue").asText(null);
+            String binaryValueBase64 = valueNode.path("BinaryValue").asText(null);
+            if (dataType == null) {
+                return;
+            }
+            if (binaryValueBase64 != null) {
+                byte[] binaryValue;
+                try {
+                    binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                } catch (IllegalArgumentException e) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Invalid binary value for message attribute '" + entry.getKey()
+                                    + "': not valid base64.", 400);
+                }
+                attributes.put(entry.getKey(), new MessageAttributeValue(binaryValue, dataType));
+            } else if (stringValue != null) {
                 attributes.put(entry.getKey(), new MessageAttributeValue(
-                        binaryValue.getBytes(StandardCharsets.UTF_8), dataType));
-            } else {
-                attributes.put(entry.getKey(), new MessageAttributeValue(
-                        valueNode.path("StringValue").asText(null), dataType));
+                        stringValue, dataType));
             }
         });
         return attributes;

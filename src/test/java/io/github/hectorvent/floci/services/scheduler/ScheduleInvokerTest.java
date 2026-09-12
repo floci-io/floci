@@ -163,9 +163,9 @@ class ScheduleInvokerTest {
     }
 
     @Test
-    void universalSqsSendMessageForwardsStringAndRawBinaryMessageAttributes() {
+    void universalSqsSendMessageForwardsStringAndBase64BinaryMessageAttributes() {
         String queueUrl = "http://localhost:4566/000000000000/q.fifo";
-        String rawBinaryValue = "raw-\u00e9";
+        String binaryValueBase64 = "aGVsbG8=";
         Target target = new Target();
         target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");
         target.setRoleArn("arn:aws:iam::000000000000:role/x");
@@ -176,7 +176,7 @@ class ScheduleInvokerTest {
                 + "\"MessageAttributes\":{"
                 + "\"StringAttr\":{\"DataType\":\"String.Custom\",\"StringValue\":\"value\"},"
                 + "\"BinaryAttr\":{\"DataType\":\"Binary.Custom\",\"BinaryValue\":\""
-                + rawBinaryValue + "\"}}}");
+                + binaryValueBase64 + "\"}}}");
 
         invoker.invoke(target, "us-east-1");
 
@@ -196,8 +196,34 @@ class ScheduleInvokerTest {
         MessageAttributeValue binaryAttribute = attributes.get("BinaryAttr");
         assertNotNull(binaryAttribute);
         assertEquals("Binary.Custom", binaryAttribute.getDataType());
-        assertArrayEquals(rawBinaryValue.getBytes(StandardCharsets.UTF_8), binaryAttribute.getBinaryValue());
+        assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), binaryAttribute.getBinaryValue());
         assertNull(binaryAttribute.getStringValue());
+    }
+
+    @Test
+    void universalSqsSendMessageSkipsAttributesWithoutDataType() {
+        String queueUrl = "http://localhost:4566/000000000000/q.fifo";
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        target.setInput("{\"QueueUrl\":\"" + queueUrl + "\","
+                + "\"MessageBody\":\"hi\","
+                + "\"MessageGroupId\":\"g1\","
+                + "\"MessageDeduplicationId\":\"dedup-1\","
+                + "\"MessageAttributes\":{"
+                + "\"MissingType\":{\"StringValue\":\"ignored\"},"
+                + "\"Valid\":{\"DataType\":\"String\",\"StringValue\":\"value\"}"
+                + "}}");
+
+        invoker.invoke(target, "us-east-1");
+
+        ArgumentCaptor<Map<String, MessageAttributeValue>> attributesCaptor = ArgumentCaptor.captor();
+        verify(sqsService).sendMessage(eq(queueUrl), eq("hi"), eq(0), eq("g1"), eq("dedup-1"),
+                attributesCaptor.capture(), eq("us-east-1"));
+
+        Map<String, MessageAttributeValue> attributes = attributesCaptor.getValue();
+        assertEquals(1, attributes.size());
+        assertEquals("value", attributes.get("Valid").getStringValue());
     }
 
     @Test
