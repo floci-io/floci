@@ -99,6 +99,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
@@ -3314,14 +3315,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                          List<String> routeTableIds, List<String> subnetIds,
                                          List<String> securityGroupIds, Boolean privateDnsEnabled,
                                          String policyDocument, List<Tag> endpointTags) {
+        return createVpcEndpoint(region, vpcId, serviceName, endpointType, routeTableIds, subnetIds,
+                securityGroupIds, privateDnsEnabled, policyDocument, endpointTags, List.of());
+    }
+
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled,
+                                         String policyDocument, List<Tag> endpointTags,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
             getRequiredRouteTable(region, routeTableId);
         }
-        for (String subnetId : subnetIds) {
+        // Every subnet a SubnetConfiguration names gets an endpoint interface, so it belongs to
+        // the endpoint whether or not the flat SubnetId list repeats it. AWS expects the two to
+        // agree; taking the union keeps a request that names a subnet only through its
+        // configuration from losing that subnet altogether.
+        List<String> effectiveSubnetIds = new ArrayList<>(subnetIds);
+        for (VpcEndpointSubnetConfiguration config : subnetConfigurations) {
+            if (config.getSubnetId() != null && !effectiveSubnetIds.contains(config.getSubnetId())) {
+                effectiveSubnetIds.add(config.getSubnetId());
+            }
+        }
+        for (String subnetId : effectiveSubnetIds) {
             requireSubnet(region, subnetId);
         }
+        validateSubnetConfigurations(region, subnetConfigurations);
         for (String securityGroupId : securityGroupIds) {
             getRequiredSecurityGroup(region, securityGroupId);
         }
@@ -3336,8 +3357,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         endpoint.setCreationTimestamp(Instant.now());
         endpoint.setRegion(region);
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
-        endpoint.setSubnetIds(new ArrayList<>(subnetIds));
+        endpoint.setSubnetIds(effectiveSubnetIds);
         endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        endpoint.setSubnetConfigurations(new ArrayList<>(subnetConfigurations));
         endpoint.setPolicyDocument(policyDocument);
         if (endpointTags != null && !endpointTags.isEmpty()) {
             endpoint.setTags(new ArrayList<>(endpointTags));
@@ -3361,6 +3383,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                          List<String> addSubnetIds, List<String> removeSubnetIds,
                                          List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
                                          String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled) {
+        return modifyVpcEndpoint(region, endpointId, addRouteTableIds, removeRouteTableIds,
+                addSubnetIds, removeSubnetIds, addSecurityGroupIds, removeSecurityGroupIds,
+                policyDocument, resetPolicy, privateDnsEnabled, List.of());
+    }
+
+    public VpcEndpoint modifyVpcEndpoint(String region, String endpointId,
+                                         List<String> addRouteTableIds, List<String> removeRouteTableIds,
+                                         List<String> addSubnetIds, List<String> removeSubnetIds,
+                                         List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
+                                         String policyDocument, Boolean resetPolicy, Boolean privateDnsEnabled,
+                                         List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
         // VpcEndpointId is the one required member of ModifyVpcEndpointRequest. The model
         // requires it to be present, not to be non-empty, so only an absent value is a
         // MissingParameter; a present-but-unknown id is an InvalidVpcEndpointId.NotFound.
@@ -3379,7 +3412,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return modifyVpcEndpointLocked(region, endpointId,
                     addRouteTableIds, removeRouteTableIds, addSubnetIds, removeSubnetIds,
                     addSecurityGroupIds, removeSecurityGroupIds,
-                    policyDocument, resetPolicy, privateDnsEnabled);
+                    policyDocument, resetPolicy, privateDnsEnabled, subnetConfigurations);
         }
     }
 
@@ -3388,7 +3421,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                                 List<String> addSubnetIds, List<String> removeSubnetIds,
                                                 List<String> addSecurityGroupIds, List<String> removeSecurityGroupIds,
                                                 String policyDocument, Boolean resetPolicy,
-                                                Boolean privateDnsEnabled) {
+                                                Boolean privateDnsEnabled,
+                                                List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
         VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
 
         // Validate every referenced id before mutating anything, so a request naming one
@@ -3402,10 +3436,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         for (String securityGroupId : addSecurityGroupIds) {
             getRequiredSecurityGroup(region, securityGroupId);
         }
+        validateSubnetConfigurations(region, subnetConfigurations);
 
         applyIdChanges(endpoint.getRouteTableIds(), addRouteTableIds, removeRouteTableIds);
         applyIdChanges(endpoint.getSubnetIds(), addSubnetIds, removeSubnetIds);
         applyIdChanges(endpoint.getSecurityGroupIds(), addSecurityGroupIds, removeSecurityGroupIds);
+        applySubnetConfigurations(endpoint, subnetConfigurations, removeSubnetIds);
 
         if (Boolean.TRUE.equals(resetPolicy)) {
             endpoint.setPolicyDocument(null);
@@ -3418,6 +3454,63 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
         vpcEndpoints.put(key(region, endpointId), endpoint);
         return endpoint;
+    }
+
+    /**
+     * Checks a {@code SubnetConfiguration} list before anything is stored. The named subnet has to
+     * exist, and an IPv4 address has to be one the endpoint's interface in that subnet could
+     * actually take. That means inside the subnet's own CIDR, and outside the five addresses AWS
+     * keeps in every subnet. AWS rejects both with {@code InvalidParameterValue}; accepting either
+     * here would hand back an interface address no real endpoint could hold.
+     *
+     * <p>The reserved five are the first four addresses of the subnet and the last one, per the
+     * CreateSubnet documentation in ec2/2016-11-15. Since {@code SubnetConfiguration.Ipv4} is the
+     * address assigned to the endpoint network interface, a reserved value is as unusable as one
+     * from a different subnet.
+     *
+     * <p>IPv6 is stored as given. Floci's subnets carry no IPv6 CIDR to check an address against.
+     */
+    private void validateSubnetConfigurations(String region,
+                                              List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        for (VpcEndpointSubnetConfiguration config : subnetConfigurations) {
+            Subnet subnet = requireSubnet(region, config.getSubnetId());
+            String ipv4 = config.getIpv4();
+            if (ipv4 == null || ipv4.isBlank()) {
+                continue;
+            }
+            String host = ipv4 + "/32";
+            if (!Ipv4Cidrs.isIpv4(host)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid IPv4 address: " + ipv4, 400);
+            }
+            if (subnet.getCidrBlock() == null || !Ipv4Cidrs.contains(subnet.getCidrBlock(), host)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Address " + ipv4 + " does not fall within the address range of subnet "
+                                + subnet.getSubnetId(), 400);
+            }
+            if (Ipv4Cidrs.isSubnetReserved(subnet.getCidrBlock(), host)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Address " + ipv4 + " is reserved by AWS in subnet " + subnet.getSubnetId()
+                                + " and cannot be assigned", 400);
+            }
+        }
+    }
+
+    /**
+     * Applies a ModifyVpcEndpoint {@code SubnetConfiguration} list. Each entry replaces the
+     * configuration for its subnet, which is what AWS does when it rebuilds that subnet's endpoint
+     * interface around the new address. A subnet the same request removes keeps no configuration:
+     * it has no interface left to address.
+     */
+    private static void applySubnetConfigurations(VpcEndpoint endpoint,
+                                                  List<VpcEndpointSubnetConfiguration> subnetConfigurations,
+                                                  List<String> removeSubnetIds) {
+        List<VpcEndpointSubnetConfiguration> current = endpoint.getSubnetConfigurations();
+        current.removeIf(config -> removeSubnetIds.contains(config.getSubnetId()));
+        for (VpcEndpointSubnetConfiguration config : subnetConfigurations) {
+            current.removeIf(existing -> existing.getSubnetId().equals(config.getSubnetId()));
+            current.add(config);
+        }
     }
 
     /** Removals apply before additions, and an id is never added twice. */
@@ -3484,7 +3577,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 ni.setAvailabilityZone(subnet.getAvailabilityZone());
                 ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
                 ni.setInterfaceType("vpc_endpoint");
-                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint.getVpcEndpointId()));
+                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
                 result.add(ni);
             }
         }
@@ -3498,12 +3591,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return "eni-" + hex.substring(0, 17);
     }
 
-    /** Stable host address near the top of the subnet range, clear of the instance counter (starts at 10). */
-    private static String endpointPrivateIp(Subnet subnet, String endpointId) {
+    /**
+     * The interface address for one of the endpoint's subnets. An address the caller pinned
+     * through {@code SubnetConfiguration} wins outright: AWS fixes that address on the interface,
+     * and falling back to a synthesized one would answer a later describe with an address the
+     * caller never asked for. Otherwise it is a stable host address near the top of the subnet
+     * range, clear of the instance counter (starts at 10).
+     */
+    private static String endpointPrivateIp(Subnet subnet, VpcEndpoint endpoint, String subnetId) {
+        for (VpcEndpointSubnetConfiguration config : endpoint.getSubnetConfigurations()) {
+            if (subnetId.equals(config.getSubnetId())
+                    && config.getIpv4() != null && !config.getIpv4().isBlank()) {
+                return config.getIpv4();
+            }
+        }
         String cidr = subnet.getCidrBlock();
         String baseIp = cidr != null ? cidr.split("/")[0] : "172.31.0.0";
         String[] parts = baseIp.split("\\.");
-        int host = 200 + Math.floorMod(endpointId.hashCode(), 50);
+        int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
         return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
     }
 

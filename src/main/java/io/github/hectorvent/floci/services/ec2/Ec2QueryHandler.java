@@ -517,6 +517,27 @@ public class Ec2QueryHandler {
         return tags;
     }
 
+    /**
+     * Reads the {@code SubnetConfiguration.N} list shared by CreateVpcEndpoint and
+     * ModifyVpcEndpoint. The EC2 query protocol flattens the list under the member's
+     * locationName, so the wire form is {@code SubnetConfiguration.1.SubnetId} alongside
+     * {@code .Ipv4} and {@code .Ipv6}, numbered from 1. An entry carrying only addresses and no
+     * subnet ends the list, since the subnet is what an address is assigned within.
+     */
+    private List<VpcEndpointSubnetConfiguration> parseSubnetConfigurations(MultivaluedMap<String, String> p) {
+        List<VpcEndpointSubnetConfiguration> configurations = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "SubnetConfiguration." + i;
+            String subnetId = p.getFirst(prefix + ".SubnetId");
+            if (subnetId == null) {
+                break;
+            }
+            configurations.add(new VpcEndpointSubnetConfiguration(
+                    subnetId, p.getFirst(prefix + ".Ipv4"), p.getFirst(prefix + ".Ipv6")));
+        }
+        return configurations;
+    }
+
     // Apply tags supplied inline on a create call (TagSpecification) to the resource, so
     // they round-trip on the next Describe* — otherwise the provider sees phantom tag drift.
     private void applyResourceTags(MultivaluedMap<String, String> p, String region, String resourceType, String resourceId) {
@@ -1930,7 +1951,8 @@ public class Ec2QueryHandler {
                 getList(p, "SecurityGroupId"),
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
                 p.getFirst("PolicyDocument"),
-                parseTagsForResource(p, "vpc-endpoint"));
+                parseTagsForResource(p, "vpc-endpoint"),
+                parseSubnetConfigurations(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1951,7 +1973,8 @@ public class Ec2QueryHandler {
                 getList(p, "RemoveSecurityGroupId"),
                 p.getFirst("PolicyDocument"),
                 p.getFirst("ResetPolicy") != null ? Boolean.valueOf(p.getFirst("ResetPolicy")) : null,
-                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null);
+                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
+                parseSubnetConfigurations(p));
         // ModifyVpcEndpoint returns only a boolean; the caller re-reads the endpoint
         // through DescribeVpcEndpoints to see the result.
         XmlBuilder xml = new XmlBuilder()
