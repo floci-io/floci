@@ -36,6 +36,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
+import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
@@ -883,7 +884,8 @@ public class CloudFormationResourceProvisioner {
                     blankToNull(launchConfigName),
                     blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
                     mixedInstancesPolicy, minSize, maxSize, desiredCapacity, cooldown,
-                    availabilityZones, subnetIds, healthCheckType, healthCheckGracePeriod, terminationPolicies);
+                    availabilityZones, subnetIds, healthCheckType, healthCheckGracePeriod, terminationPolicies,
+                    AsgOptionalFields.none());
             asg = requireAutoScalingGroup(region, name);
         } else {
             asg = autoScalingService.createAutoScalingGroup(region, name,
@@ -895,7 +897,8 @@ public class CloudFormationResourceProvisioner {
                     resolveStringList(props, "LoadBalancerNames", engine),
                     healthCheckType, healthCheckGracePeriod, terminationPolicies,
                     resolveAsgTags(props, engine),
-                    resolveAsgTagPropagation(props, engine));
+                    resolveAsgTagPropagation(props, engine),
+                    AsgOptionalFields.none());
             deleteRenamedResource(priorPhysicalId, name, n -> autoScalingService.deleteAutoScalingGroup(region, n, true),
                     "Auto Scaling group");
         }

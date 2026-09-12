@@ -200,7 +200,8 @@ public class AutoScalingQueryHandler {
                 intParam(p, "HealthCheckGracePeriod", 0),
                 memberList(p, "TerminationPolicies"),
                 parsedTags.tags(),
-                parsedTags.propagateAtLaunch());
+                parsedTags.propagateAtLaunch(),
+                parseAsgOptionalFields(p));
         return ok(new XmlBuilder()
                 .start("CreateAutoScalingGroupResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
@@ -226,7 +227,8 @@ public class AutoScalingQueryHandler {
                 subnetIds.isEmpty() ? null : subnetIds,
                 p.getFirst("HealthCheckType"),
                 p.getFirst("HealthCheckGracePeriod") != null ? Integer.parseInt(p.getFirst("HealthCheckGracePeriod")) : null,
-                tps.isEmpty() ? null : tps);
+                tps.isEmpty() ? null : tps,
+                parseAsgOptionalFields(p));
         return ok(new XmlBuilder()
                 .start("UpdateAutoScalingGroupResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
@@ -273,6 +275,18 @@ public class AutoScalingQueryHandler {
            .elem("HealthCheckGracePeriod", String.valueOf(asg.getHealthCheckGracePeriod()))
            .elem("CreatedTime", ISO_FMT.format(asg.getCreatedTime()));
 
+        if (asg.getDesiredCapacityType() != null) {
+            xml.elem("DesiredCapacityType", asg.getDesiredCapacityType());
+        }
+        if (asg.getCapacityRebalance() != null) {
+            xml.elem("CapacityRebalance", String.valueOf(asg.getCapacityRebalance()));
+        }
+        if (asg.getMaxInstanceLifetime() != null) {
+            xml.elem("MaxInstanceLifetime", String.valueOf(asg.getMaxInstanceLifetime()));
+        }
+        if (asg.getDefaultInstanceWarmup() != null) {
+            xml.elem("DefaultInstanceWarmup", String.valueOf(asg.getDefaultInstanceWarmup()));
+        }
         if (asg.getLaunchConfigurationName() != null) {
             xml.elem("LaunchConfigurationName", asg.getLaunchConfigurationName());
         }
@@ -567,6 +581,7 @@ public class AutoScalingQueryHandler {
                     if (override.getInstanceType() != null) {
                         xml.elem("InstanceType", override.getInstanceType());
                     }
+                    appendInstanceRequirementsXml(xml, override.getInstanceRequirements());
                     xml.end("member");
                 }
                 xml.end("Overrides");
@@ -589,6 +604,89 @@ public class AutoScalingQueryHandler {
             xml.end("InstancesDistribution");
         }
         xml.end("MixedInstancesPolicy");
+    }
+
+    // LaunchTemplateOverrides.InstanceRequirements from botocore's autoscaling model. Every member
+    // of that shape is echoed back except BaselinePerformanceFactors, whose nested Reference/item
+    // wire names are not covered here.
+    private static void appendInstanceRequirementsXml(
+            XmlBuilder xml, MixedInstancesPolicy.InstanceRequirements requirements) {
+        if (requirements == null || requirements.isEmpty()) {
+            return;
+        }
+        xml.start("InstanceRequirements");
+        appendIntRangeXml(xml, "VCpuCount", requirements.getVCpuCount());
+        appendIntRangeXml(xml, "MemoryMiB", requirements.getMemoryMiB());
+        appendIntRangeXml(xml, "NetworkInterfaceCount", requirements.getNetworkInterfaceCount());
+        appendIntRangeXml(xml, "AcceleratorCount", requirements.getAcceleratorCount());
+        appendIntRangeXml(xml, "AcceleratorTotalMemoryMiB", requirements.getAcceleratorTotalMemoryMiB());
+        appendIntRangeXml(xml, "BaselineEbsBandwidthMbps", requirements.getBaselineEbsBandwidthMbps());
+        appendDoubleRangeXml(xml, "MemoryGiBPerVCpu", requirements.getMemoryGiBPerVCpu());
+        appendDoubleRangeXml(xml, "TotalLocalStorageGB", requirements.getTotalLocalStorageGB());
+        appendDoubleRangeXml(xml, "NetworkBandwidthGbps", requirements.getNetworkBandwidthGbps());
+        appendStringMemberListXml(xml, "CpuManufacturers", requirements.getCpuManufacturers());
+        appendStringMemberListXml(xml, "ExcludedInstanceTypes", requirements.getExcludedInstanceTypes());
+        appendStringMemberListXml(xml, "InstanceGenerations", requirements.getInstanceGenerations());
+        appendStringMemberListXml(xml, "LocalStorageTypes", requirements.getLocalStorageTypes());
+        appendStringMemberListXml(xml, "AcceleratorTypes", requirements.getAcceleratorTypes());
+        appendStringMemberListXml(xml, "AcceleratorManufacturers", requirements.getAcceleratorManufacturers());
+        appendStringMemberListXml(xml, "AcceleratorNames", requirements.getAcceleratorNames());
+        appendStringMemberListXml(xml, "AllowedInstanceTypes", requirements.getAllowedInstanceTypes());
+        if (requirements.getSpotMaxPricePercentageOverLowestPrice() != null) {
+            xml.elem("SpotMaxPricePercentageOverLowestPrice", String.valueOf(requirements.getSpotMaxPricePercentageOverLowestPrice()));
+        }
+        if (requirements.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice() != null) {
+            xml.elem("MaxSpotPriceAsPercentageOfOptimalOnDemandPrice", String.valueOf(requirements.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice()));
+        }
+        if (requirements.getOnDemandMaxPricePercentageOverLowestPrice() != null) {
+            xml.elem("OnDemandMaxPricePercentageOverLowestPrice", String.valueOf(requirements.getOnDemandMaxPricePercentageOverLowestPrice()));
+        }
+        if (requirements.getRequireHibernateSupport() != null) {
+            xml.elem("RequireHibernateSupport", String.valueOf(requirements.getRequireHibernateSupport()));
+        }
+        xml.elem("BareMetal", requirements.getBareMetal());
+        xml.elem("BurstablePerformance", requirements.getBurstablePerformance());
+        xml.elem("LocalStorage", requirements.getLocalStorage());
+        xml.end("InstanceRequirements");
+    }
+
+    private static void appendIntRangeXml(XmlBuilder xml, String element, MixedInstancesPolicy.IntRange range) {
+        if (range == null) {
+            return;
+        }
+        xml.start(element);
+        if (range.getMin() != null) {
+            xml.elem("Min", String.valueOf(range.getMin()));
+        }
+        if (range.getMax() != null) {
+            xml.elem("Max", String.valueOf(range.getMax()));
+        }
+        xml.end(element);
+    }
+
+    private static void appendDoubleRangeXml(XmlBuilder xml, String element, MixedInstancesPolicy.DoubleRange range) {
+        if (range == null) {
+            return;
+        }
+        xml.start(element);
+        if (range.getMin() != null) {
+            xml.elem("Min", String.valueOf(range.getMin()));
+        }
+        if (range.getMax() != null) {
+            xml.elem("Max", String.valueOf(range.getMax()));
+        }
+        xml.end(element);
+    }
+
+    private static void appendStringMemberListXml(XmlBuilder xml, String element, List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return;
+        }
+        xml.start(element);
+        for (String value : values) {
+            xml.elem("member", value);
+        }
+        xml.end(element);
     }
 
     private static void appendMixedLaunchTemplateSpecificationXml(
@@ -1094,19 +1192,90 @@ public class AutoScalingQueryHandler {
         return false;
     }
 
+    // An override that sets only InstanceRequirements is legal, and mutually exclusive with
+    // InstanceType, so InstanceType's presence cannot be the loop's "is there another override"
+    // signal. Using it as one dropped the whole Overrides list rather than one member of it.
     private List<MixedInstancesPolicy.LaunchTemplateOverride> parseMixedLaunchTemplateOverrides(
             MultivaluedMap<String, String> p) {
         List<MixedInstancesPolicy.LaunchTemplateOverride> result = new ArrayList<>();
         for (int i = 1; ; i++) {
-            String instanceType = p.getFirst("MixedInstancesPolicy.LaunchTemplate.Overrides.member."
-                    + i + ".InstanceType");
-            if (instanceType == null) { break; }
+            String prefix = "MixedInstancesPolicy.LaunchTemplate.Overrides.member." + i;
+            if (!hasAnyPrefix(p, prefix + ".")) {
+                break;
+            }
             MixedInstancesPolicy.LaunchTemplateOverride override =
                     new MixedInstancesPolicy.LaunchTemplateOverride();
-            override.setInstanceType(instanceType);
+            override.setInstanceType(p.getFirst(prefix + ".InstanceType"));
+            override.setInstanceRequirements(parseInstanceRequirements(p, prefix + ".InstanceRequirements"));
             result.add(override);
         }
         return result;
+    }
+
+    private MixedInstancesPolicy.InstanceRequirements parseInstanceRequirements(
+            MultivaluedMap<String, String> p, String prefix) {
+        if (!hasAnyPrefix(p, prefix + ".")) {
+            return null;
+        }
+        MixedInstancesPolicy.InstanceRequirements requirements =
+                new MixedInstancesPolicy.InstanceRequirements();
+        requirements.setVCpuCount(parseIntRange(p, prefix + ".VCpuCount"));
+        requirements.setMemoryMiB(parseIntRange(p, prefix + ".MemoryMiB"));
+        requirements.setNetworkInterfaceCount(parseIntRange(p, prefix + ".NetworkInterfaceCount"));
+        requirements.setAcceleratorCount(parseIntRange(p, prefix + ".AcceleratorCount"));
+        requirements.setAcceleratorTotalMemoryMiB(parseIntRange(p, prefix + ".AcceleratorTotalMemoryMiB"));
+        requirements.setBaselineEbsBandwidthMbps(parseIntRange(p, prefix + ".BaselineEbsBandwidthMbps"));
+        requirements.setMemoryGiBPerVCpu(parseDoubleRange(p, prefix + ".MemoryGiBPerVCpu"));
+        requirements.setTotalLocalStorageGB(parseDoubleRange(p, prefix + ".TotalLocalStorageGB"));
+        requirements.setNetworkBandwidthGbps(parseDoubleRange(p, prefix + ".NetworkBandwidthGbps"));
+        requirements.setCpuManufacturers(memberList(p, prefix + ".CpuManufacturers"));
+        requirements.setExcludedInstanceTypes(memberList(p, prefix + ".ExcludedInstanceTypes"));
+        requirements.setInstanceGenerations(memberList(p, prefix + ".InstanceGenerations"));
+        requirements.setLocalStorageTypes(memberList(p, prefix + ".LocalStorageTypes"));
+        requirements.setAcceleratorTypes(memberList(p, prefix + ".AcceleratorTypes"));
+        requirements.setAcceleratorManufacturers(memberList(p, prefix + ".AcceleratorManufacturers"));
+        requirements.setAcceleratorNames(memberList(p, prefix + ".AcceleratorNames"));
+        requirements.setAllowedInstanceTypes(memberList(p, prefix + ".AllowedInstanceTypes"));
+        requirements.setSpotMaxPricePercentageOverLowestPrice(parseOptionalInt(p.getFirst(prefix + ".SpotMaxPricePercentageOverLowestPrice"), prefix + ".SpotMaxPricePercentageOverLowestPrice"));
+        requirements.setMaxSpotPriceAsPercentageOfOptimalOnDemandPrice(parseOptionalInt(p.getFirst(prefix + ".MaxSpotPriceAsPercentageOfOptimalOnDemandPrice"), prefix + ".MaxSpotPriceAsPercentageOfOptimalOnDemandPrice"));
+        requirements.setOnDemandMaxPricePercentageOverLowestPrice(parseOptionalInt(p.getFirst(prefix + ".OnDemandMaxPricePercentageOverLowestPrice"), prefix + ".OnDemandMaxPricePercentageOverLowestPrice"));
+        requirements.setBareMetal(p.getFirst(prefix + ".BareMetal"));
+        requirements.setBurstablePerformance(p.getFirst(prefix + ".BurstablePerformance"));
+        requirements.setLocalStorage(p.getFirst(prefix + ".LocalStorage"));
+        requirements.setRequireHibernateSupport(parseOptionalBoolean(p.getFirst(prefix + ".RequireHibernateSupport"), prefix + ".RequireHibernateSupport"));
+        return requirements.isEmpty() ? null : requirements;
+    }
+
+    private MixedInstancesPolicy.IntRange parseIntRange(MultivaluedMap<String, String> p, String prefix) {
+        Integer min = parseOptionalInt(p.getFirst(prefix + ".Min"), prefix + ".Min");
+        Integer max = parseOptionalInt(p.getFirst(prefix + ".Max"), prefix + ".Max");
+        if (min == null && max == null) {
+            return null;
+        }
+        MixedInstancesPolicy.IntRange range = new MixedInstancesPolicy.IntRange();
+        range.setMin(min);
+        range.setMax(max);
+        return range;
+    }
+
+    private MixedInstancesPolicy.DoubleRange parseDoubleRange(MultivaluedMap<String, String> p, String prefix) {
+        Double min = nullableDoubleParam(p, prefix + ".Min");
+        Double max = nullableDoubleParam(p, prefix + ".Max");
+        if (min == null && max == null) {
+            return null;
+        }
+        MixedInstancesPolicy.DoubleRange range = new MixedInstancesPolicy.DoubleRange();
+        range.setMin(min);
+        range.setMax(max);
+        return range;
+    }
+
+    private AsgOptionalFields parseAsgOptionalFields(MultivaluedMap<String, String> p) {
+        return new AsgOptionalFields(
+                p.getFirst("DesiredCapacityType"),
+                nullableBoolParam(p, "CapacityRebalance"),
+                parseOptionalInt(p.getFirst("MaxInstanceLifetime"), "MaxInstanceLifetime"),
+                parseOptionalInt(p.getFirst("DefaultInstanceWarmup"), "DefaultInstanceWarmup"));
     }
 
     private ParsedTags parseTags(MultivaluedMap<String, String> p) {

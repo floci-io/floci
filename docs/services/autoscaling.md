@@ -127,9 +127,28 @@ Auto Scaling groups preserve either a launch configuration, a top-level launch t
 - `LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateName`
 - `LaunchTemplate.LaunchTemplateSpecification.Version`
 - `LaunchTemplate.Overrides.member.N.InstanceType`
+- `LaunchTemplate.Overrides.member.N.InstanceRequirements`
 - `InstancesDistribution.OnDemandBaseCapacity`
 - `InstancesDistribution.OnDemandPercentageAboveBaseCapacity`
 - `InstancesDistribution.SpotAllocationStrategy`
+
+An override selects instance types either by name or by attribute. Setting both `InstanceType` and
+`InstanceRequirements` on the same override raises `ValidationError`, matching AWS. Every member of
+the `InstanceRequirements` shape round-trips except `BaselinePerformanceFactors`, which is accepted
+and dropped.
+
+## Optional Group Fields
+
+`CreateAutoScalingGroup` and `UpdateAutoScalingGroup` both accept the fields below, and
+`DescribeAutoScalingGroups` returns each one only when the group has a value for it. A group that
+never set a field omits it from the response rather than reporting a default.
+
+| Field | Notes |
+|---|---|
+| `DesiredCapacityType` | One of `units`, `vcpu`, `memory-mib`. Any other value raises `ValidationError` |
+| `CapacityRebalance` | Stored and echoed as a boolean |
+| `MaxInstanceLifetime` | Seconds. Must be `0` or at least `86400`. `0` means no maximum and is echoed back as `0` |
+| `DefaultInstanceWarmup` | Seconds. Pass `-1` to remove a value already set, after which the field is omitted again |
 
 ## Scaling Policy Compatibility
 

@@ -30,6 +30,16 @@ public class AutoScalingService {
     static final String INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE =
             "Valid requests must contain either the InstanceID parameter "
                     + "or both the ImageId and InstanceType parameters.";
+    static final Set<String> DESIRED_CAPACITY_TYPES = Set.of("units", "vcpu", "memory-mib");
+    static final int MIN_MAX_INSTANCE_LIFETIME_SECONDS = 86400;
+    static final String INVALID_DESIRED_CAPACITY_TYPE_MESSAGE =
+            "The specified value for DesiredCapacityType is not valid. Valid values are: units, vcpu, memory-mib.";
+    static final String INVALID_MAX_INSTANCE_LIFETIME_MESSAGE =
+            "MaxInstanceLifetime must be equal to 0 or a value greater than or equal to 86400 seconds.";
+    static final String INVALID_DEFAULT_INSTANCE_WARMUP_MESSAGE =
+            "DefaultInstanceWarmup must be greater than or equal to 0, or -1 to remove a previously set value.";
+    static final String INSTANCE_REQUIREMENTS_AND_INSTANCE_TYPE_MESSAGE =
+            "A launch template override must not specify both InstanceType and InstanceRequirements.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
             "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
 
@@ -185,7 +195,8 @@ public class AutoScalingService {
                                                     String healthCheckType, int healthCheckGracePeriod,
                                                     List<String> terminationPolicies,
                                                     Map<String, String> tags,
-                                                    Map<String, Boolean> tagPropagateAtLaunch) {
+                                                    Map<String, Boolean> tagPropagateAtLaunch,
+                                                    AsgOptionalFields optionalFields) {
         String key = asgKey(region, name);
         if (groups.containsKey(key)) {
             throw new AwsException("AlreadyExists",
@@ -200,6 +211,7 @@ public class AutoScalingService {
         }
         validateEffectiveLaunchImage(region, launchConfigName, launchTemplateId, launchTemplateName,
                 launchTemplateVersion, mixedInstancesPolicy);
+        validateOptionalFields(optionalFields);
 
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setAutoScalingGroupName(name);
@@ -230,6 +242,9 @@ public class AutoScalingService {
         if (tagPropagateAtLaunch != null) {
             asg.getTagPropagateAtLaunch().putAll(tagPropagateAtLaunch);
         }
+        if (optionalFields != null) {
+            optionalFields.applyToNewGroup(asg);
+        }
         groups.put(key, asg);
         return asg;
     }
@@ -243,13 +258,15 @@ public class AutoScalingService {
                                         Integer defaultCooldown, List<String> availabilityZones,
                                         List<String> subnetIds,
                                         String healthCheckType, Integer healthCheckGracePeriod,
-                                        List<String> terminationPolicies) {
+                                        List<String> terminationPolicies,
+                                        AsgOptionalFields optionalFields) {
         AutoScalingGroup asg = requireGroup(region, name);
         validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
         if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
             throw new AwsException("ValidationError",
                     "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
         }
+        validateOptionalFields(optionalFields);
         rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
                 launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
         LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
@@ -290,6 +307,9 @@ public class AutoScalingService {
         if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
         if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
         if (terminationPolicies != null) { asg.setTerminationPolicies(new ArrayList<>(terminationPolicies)); }
+        if (optionalFields != null) {
+            optionalFields.applyToExistingGroup(asg);
+        }
         groups.put(asgKey(region, name), asg);
     }
 
@@ -1039,6 +1059,41 @@ public class AutoScalingService {
             throw new AwsException("ValidationError",
                     "A MixedInstancesPolicy must specify a LaunchTemplate with a LaunchTemplateId "
                             + "or LaunchTemplateName.", 400);
+        }
+        validateLaunchTemplateOverrides(mixedInstancesPolicy);
+    }
+
+    private static void validateLaunchTemplateOverrides(MixedInstancesPolicy mixedInstancesPolicy) {
+        if (mixedInstancesPolicy == null || mixedInstancesPolicy.getLaunchTemplate() == null) {
+            return;
+        }
+        for (MixedInstancesPolicy.LaunchTemplateOverride override
+                : mixedInstancesPolicy.getLaunchTemplate().getOverrides()) {
+            MixedInstancesPolicy.InstanceRequirements requirements = override.getInstanceRequirements();
+            if (override.getInstanceType() != null && requirements != null && !requirements.isEmpty()) {
+                throw new AwsException("ValidationError",
+                        INSTANCE_REQUIREMENTS_AND_INSTANCE_TYPE_MESSAGE, 400);
+            }
+        }
+    }
+
+    private static void validateOptionalFields(AsgOptionalFields optionalFields) {
+        if (optionalFields == null) {
+            return;
+        }
+        String desiredCapacityType = optionalFields.desiredCapacityType();
+        if (desiredCapacityType != null && !DESIRED_CAPACITY_TYPES.contains(desiredCapacityType)) {
+            throw new AwsException("ValidationError", INVALID_DESIRED_CAPACITY_TYPE_MESSAGE, 400);
+        }
+        Integer maxInstanceLifetime = optionalFields.maxInstanceLifetime();
+        if (maxInstanceLifetime != null && maxInstanceLifetime != 0
+                && maxInstanceLifetime < MIN_MAX_INSTANCE_LIFETIME_SECONDS) {
+            throw new AwsException("ValidationError", INVALID_MAX_INSTANCE_LIFETIME_MESSAGE, 400);
+        }
+        Integer defaultInstanceWarmup = optionalFields.defaultInstanceWarmup();
+        if (defaultInstanceWarmup != null
+                && defaultInstanceWarmup < AsgOptionalFields.DEFAULT_INSTANCE_WARMUP_REMOVAL_SENTINEL) {
+            throw new AwsException("ValidationError", INVALID_DEFAULT_INSTANCE_WARMUP_MESSAGE, 400);
         }
     }
 
