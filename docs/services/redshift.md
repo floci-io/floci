@@ -141,7 +141,7 @@ print(cluster["Cluster"]["Endpoint"])
 
 ## SQL Interceptor
 
-Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire protocol (Simple Query `'Q'` protocol) and rewrites common Redshift-specific table DDL so it runs on the plain PostgreSQL backend.
+Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire protocol and rewrites common Redshift-specific table DDL so it runs on the plain PostgreSQL backend.
 
 ### DDL compatibility
 
@@ -170,12 +170,15 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.
 - A multi-statement query whose COPY is followed by another statement is not intercepted; send the
   COPY on its own.
-- Extended Query protocol COPY (a JDBC `PreparedStatement`, or pgjdbc's default
-  `preferQueryMode=extended`) is not intercepted. Use `preferQueryMode=simple`.
+- Extended Query COPY is supported when the complete statement is present in `Parse` and has no
+  bind parameters. Zero-parameter JDBC `PreparedStatement` calls therefore work with pgjdbc's
+  default extended mode. Statements containing bind parameters are forwarded unchanged.
 
 ### Limitations
 
-- Emulation runs on the **Simple Query protocol** (`'Q'`) only. Extended Query protocol statements (`Parse`/`Bind`/`Execute`) pass through untouched, including anything a JDBC `PreparedStatement` sends, and, with the pgjdbc default `preferQueryMode=extended`, plain `Statement` calls too. Connect with `preferQueryMode=simple` to exercise the interceptor from JDBC.
+- DDL rewriting works in both Simple Query (`'Q'`) and Extended Query (`Parse`) flows. COPY and
+  UNLOAD interception in Extended Query is limited to zero-parameter statements fully present in
+  `Parse`; parameterized statements fail open to PostgreSQL.
 - The rewrite is textual (regex-based). It masks single-quoted string literals first, so `DEFAULT` / `CHECK` string values are safe, but it is **not** comment-aware and does not recognize escape strings (`E'...'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe: the statement then reaches PostgreSQL, which returns its own syntax error, but avoid apostrophes-in-comments in `CREATE TABLE` / `ALTER TABLE`.
 - A `rewrite` failure or any statement the interceptor does not recognize is forwarded unmodified (fail-open); PostgreSQL then rejects the Redshift-only syntax itself.
 - Simple Query ('Q') messages larger than 16 MiB bypass the interceptor and stream through verbatim without heap buffering; non-query traffic also streams through with no size limit.
@@ -183,8 +186,8 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 
 ### UNLOAD to S3
 
-`UNLOAD ('<select-statement>') TO 's3://<bucket>/<prefix>' [options]` sent over the
-Simple Query protocol runs the select on the backing PostgreSQL container and writes
+`UNLOAD ('<select-statement>') TO 's3://<bucket>/<prefix>' [options]` runs the select on the
+backing PostgreSQL container and writes
 the result to S3 as one or more objects under `<prefix>`.
 
 - Framing defaults to pipe-delimited text; `FORMAT CSV` (or `CSV`) switches to CSV
@@ -214,7 +217,8 @@ the result to S3 as one or more objects under `<prefix>`.
 - Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `IAM_ROLE` / `CREDENTIALS`,
   `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
-- Extended Query protocol UNLOAD (a JDBC `PreparedStatement`) is not intercepted.
+- Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no
+  bind parameters. Parameterized statements are forwarded unchanged.
 
 ## Out of Scope
 
