@@ -109,8 +109,7 @@ public class TlsConfigSource implements ConfigSource {
             trustAnchor = ca.certificatePath();
 
             if (Files.exists(certFile) && Files.exists(keyFile)) {
-                List<String> currentHostnames = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
-                currentHostnames.addAll(extractCustomHostnames());
+                List<String> currentHostnames = configuredSanHostnames();
 
                 // Regenerate when the hostname config changed, when the existing leaf was not
                 // issued by the current CA (a pre-CA self-signed cert, or the CA was regenerated),
@@ -192,11 +191,45 @@ public class TlsConfigSource implements ConfigSource {
         return defaultValue;
     }
 
+    /**
+     * The full SAN list the server certificate must cover for the current configuration:
+     * defaults, custom hostnames, and the AWS endpoint wildcards when
+     * {@code floci.dns.spoof-aws-endpoints} is enabled. Used both for generation and for the
+     * change detection that triggers regeneration, so flipping the spoof flag regenerates the
+     * certificate.
+     */
+    private List<String> configuredSanHostnames() {
+        List<String> sans = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
+        sans.addAll(extractCustomHostnames());
+        sans.addAll(awsSpoofSans());
+        return sans;
+    }
+
+    /**
+     * SANs covering AWS endpoint hostnames spoofed by the embedded DNS server.
+     * Wildcards match a single label, so {@code *.amazonaws.com} covers global
+     * endpoints ({@code sts.amazonaws.com}) and {@code *.<region>.amazonaws.com}
+     * covers regional ones ({@code sts.us-east-1.amazonaws.com}) for the default
+     * region, the only region resolvable this early (pre-CDI, property-based).
+     */
+    private List<String> awsSpoofSans() {
+        if (!"true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"))) {
+            return List.of();
+        }
+        String region = resolveProperty("floci.default-region", "us-east-1");
+        // A wildcard matches exactly one label (RFC 6125 6.4.3), so the two broad
+        // wildcards miss virtual-hosted addressing, where the bucket adds a label:
+        // my-bucket.s3.amazonaws.com and my-bucket.s3.<region>.amazonaws.com. The DNS
+        // spoof does route those, so without these the handshake fails on a hostname
+        // mismatch rather than the request reaching Floci.
+        return List.of("*.amazonaws.com", "*." + region + ".amazonaws.com",
+                "*.s3.amazonaws.com", "*.s3." + region + ".amazonaws.com");
+    }
+
     private void generateServerCert(Path tlsDir, Path certFile, Path keyFile, FlociCertificateAuthority ca) {
         try {
             Files.createDirectories(tlsDir);
-            List<String> configured = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
-            configured.addAll(extractCustomHostnames());
+            List<String> configured = configuredSanHostnames();
             List<String> learned = readLearnedHostnames(tlsDir, certFile);
             List<String> allSans = new ArrayList<>(configured);
             for (String name : learned) {

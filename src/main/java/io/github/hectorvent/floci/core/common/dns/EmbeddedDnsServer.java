@@ -34,6 +34,10 @@ import java.util.regex.Pattern;
  * Docker network IP so virtual-hosted S3 URLs (my-bucket.floci:4566) work from
  * inside Lambda containers without requiring wildcard Docker aliases.
  *
+ * When floci.dns.spoof-aws-endpoints is enabled, amazonaws.com and all of its
+ * subdomains resolve to Floci's IP as well (transparent endpoint injection), so
+ * clients built with explicit real-AWS endpoints land on the emulator.
+ *
  * All other queries are forwarded to the upstream resolvers read from /etc/resolv.conf
  * (Docker's embedded DNS at 127.0.0.11), falling back to the configured public resolvers
  * (floci.dns.container-fallback-servers) so public hostnames still resolve when the
@@ -58,6 +62,10 @@ public class EmbeddedDnsServer {
     private static final int FORWARD_TIMEOUT_MS = 1500;
     public static final String DEFAULT_SUFFIX = "localhost.floci.io";
     public static final String LOCALSTACK_SUFFIX = "localhost.localstack.cloud";
+    // Transparent endpoint injection (floci.dns.spoof-aws-endpoints): the suffix covers
+    // amazonaws.com itself and *.amazonaws.com at any depth, so explicit SDK endpoints
+    // like sts.us-east-1.amazonaws.com resolve to Floci instead of real AWS.
+    static final String AWS_ENDPOINT_SUFFIX = "amazonaws.com";
     private static final Pattern EC2_PRIVATE_DNS_NAME =
             Pattern.compile("^ip-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})\\.ec2\\.internal$", Pattern.CASE_INSENSITIVE);
 
@@ -73,8 +81,15 @@ public class EmbeddedDnsServer {
     private volatile List<String> upstreamDnsServers = List.of();
 
     EmbeddedDnsServer(List<String> suffixes) {
+        this(suffixes, false);
+    }
+
+    EmbeddedDnsServer(List<String> suffixes, boolean spoofAwsEndpoints) {
         this.suffixes.addAll(BUILTIN_SUFFIXES);
         this.suffixes.addAll(suffixes);
+        if (spoofAwsEndpoints) {
+            this.suffixes.add(AWS_ENDPOINT_SUFFIX);
+        }
     }
 
     @Inject
@@ -90,6 +105,9 @@ public class EmbeddedDnsServer {
             suffixes.addAll(BUILTIN_SUFFIXES);
             config.hostname().ifPresent(suffixes::add);
             config.dns().extraSuffixes().ifPresent(suffixes::addAll);
+            if (config.dns().spoofAwsEndpoints()) {
+                suffixes.add(AWS_ENDPOINT_SUFFIX);
+            }
 
             DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
             socket.listen(DNS_PORT, "0.0.0.0", ar -> {
