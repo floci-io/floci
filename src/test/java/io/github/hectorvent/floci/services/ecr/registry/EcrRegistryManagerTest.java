@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerPresence;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.io.Closeable;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -54,6 +56,7 @@ class EcrRegistryManagerTest {
 
     private PortAllocator portAllocator;
     private ContainerLifecycleManager lifecycleManager;
+    private ContainerLogStreamer logStreamer;
     private ContainerDetector containerDetector;
     private CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private EmulatorConfig.DockerConfig docker;
@@ -77,13 +80,15 @@ class EcrRegistryManagerTest {
 
         lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
         when(lifecycleManager.findByName(anyString())).thenReturn(Optional.empty());
+        when(lifecycleManager.presenceOf(anyString())).thenReturn(ContainerPresence.RUNNING);
         dockerClient = Mockito.mock(DockerClient.class);
         inspectImage = Mockito.mock(InspectImageCmd.class);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         when(dockerClient.inspectImageCmd(anyString())).thenReturn(inspectImage);
         Mockito.doThrow(new NotFoundException("No such image")).when(inspectImage).exec();
 
-        ContainerLogStreamer logStreamer = Mockito.mock(ContainerLogStreamer.class);
+        logStreamer = Mockito.mock(ContainerLogStreamer.class);
+        when(logStreamer.generateLogStreamName(anyString())).thenReturn("registry-log-stream");
         containerDetector = Mockito.mock(ContainerDetector.class);
         currentContainerNetworkResolver = Mockito.mock(CurrentContainerNetworkResolver.class);
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
@@ -162,6 +167,60 @@ class EcrRegistryManagerTest {
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef", Map.of()));
 
         assertTrue(manager.tryEnsureStarted());
+        assertTrue(manager.isStarted());
+    }
+
+    @Test
+    void tryEnsureStarted_recreatesRegistryWhenStartedContainerDisappears() throws Exception {
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("first-container", Map.of()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("second-container", Map.of()));
+        Closeable firstLogStream = Mockito.mock(Closeable.class);
+        Closeable secondLogStream = Mockito.mock(Closeable.class);
+        when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(firstLogStream, secondLogStream);
+
+        assertTrue(manager.tryEnsureStarted());
+        when(lifecycleManager.presenceOf("first-container")).thenReturn(ContainerPresence.ABSENT);
+
+        assertTrue(manager.tryEnsureStarted());
+
+        verify(lifecycleManager, Mockito.times(2)).createAndStart(any());
+        verify(builder, Mockito.times(2)).withPortBinding(5000, BASE_PORT);
+        verify(firstLogStream).close();
+    }
+
+    @Test
+    void ensureStarted_restartsStoppedRegistryByAdoptingIt() {
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        manager.ensureStarted();
+
+        Container existing = Mockito.mock(Container.class);
+        when(existing.getId()).thenReturn("container-id");
+        when(lifecycleManager.presenceOf("container-id")).thenReturn(ContainerPresence.STOPPED);
+        when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
+        when(lifecycleManager.adopt("container-id", List.of(5000)))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        manager.ensureStarted();
+
+        verify(lifecycleManager).adopt("container-id", List.of(5000));
+        verify(lifecycleManager).createAndStart(any());
+        assertTrue(manager.isStarted());
+    }
+
+    @Test
+    void ensureStarted_doesNotReplaceRegistryWhenContainerPresenceIsUnknown() {
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        manager.ensureStarted();
+        when(lifecycleManager.presenceOf("container-id")).thenReturn(ContainerPresence.UNKNOWN);
+
+        manager.ensureStarted();
+
+        verify(lifecycleManager).createAndStart(any());
+        verify(lifecycleManager).findByName(REGISTRY_NAME);
         assertTrue(manager.isStarted());
     }
 
