@@ -725,8 +725,16 @@ public class GlueSchemaRegistryService {
                         throw new AwsException("InvalidInputException",
                                 "Invalid version range: " + token, 400);
                     }
-                    for (long v = start; v <= end; v++) {
-                        versions.add(v);
+                    // Bound the range before expanding it so a request such as 1-9223372036854775807
+                    // is rejected outright instead of materialising every version number.
+                    long rangeSize = end - start;
+                    if (rangeSize >= MAX_DELETE_SCHEMA_VERSIONS) {
+                        throw new AwsException("InvalidInputException",
+                                "Versions expression cannot expand to more than "
+                                        + MAX_DELETE_SCHEMA_VERSIONS + " versions", 400);
+                    }
+                    for (long offset = 0; offset <= rangeSize; offset++) {
+                        versions.add(start + offset);
                     }
                 } else {
                     versions.add(Long.parseLong(token));
