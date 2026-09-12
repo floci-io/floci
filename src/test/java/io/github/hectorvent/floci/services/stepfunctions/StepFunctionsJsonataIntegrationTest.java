@@ -2297,8 +2297,8 @@ class StepFunctionsJsonataIntegrationTest {
      */
     @Test
     void mapItemSelectorEvaluatesJsonataAgainstMapInputAndItemContext() throws Exception {
-        var smArn = createStateMachine("jsonata-map-item-selector-test", JSONATA_MAP_ITEM_SELECTOR_DEFINITION);
-        var output = waitForExecution(startExecution(smArn, "{\"numbers\":[10,20],\"label\":\"x\"}"));
+        String smArn = createStateMachine("jsonata-map-item-selector-test", JSONATA_MAP_ITEM_SELECTOR_DEFINITION);
+        String output = waitForExecution(startExecution(smArn, "{\"numbers\":[10,20],\"label\":\"x\"}"));
 
         assertEquals("[{\"n\":10,\"i\":0,\"label\":\"x\"},{\"n\":20,\"i\":1,\"label\":\"x\"}]", output);
     }
@@ -2306,10 +2306,10 @@ class StepFunctionsJsonataIntegrationTest {
     @Test
     void mapItemSelectorReturningNothingFailsTheStateNamingTheField() throws Exception {
         // Real AWS names 'ItemSelector/<field>'.
-        var smArn = createStateMachine("jsonata-map-item-selector-returned-nothing-test",
+        String smArn = createStateMachine("jsonata-map-item-selector-returned-nothing-test",
                 JSONATA_MAP_ITEM_SELECTOR_DEFINITION);
-        var execArn = startExecution(smArn, "{\"numbers\":[10]}");
-        var failure = waitForExecutionFailure(execArn);
+        String execArn = startExecution(smArn, "{\"numbers\":[10]}");
+        Response failure = waitForExecutionFailure(execArn);
 
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
         assertEquals("An error occurred while executing the state 'M' (entered at the event id #2). "
@@ -2323,7 +2323,7 @@ class StepFunctionsJsonataIntegrationTest {
     @Test
     void mapItemSelectorMissingJsonPathFailsBeforeTheIterationIsRecorded() throws Exception {
         // Real AWS: States.Runtime straight after MapStateStarted, no MapIteration* event.
-        var definition = """
+        String definition = """
                 {
                     "StartAt": "M",
                     "States": {
@@ -2341,9 +2341,9 @@ class StepFunctionsJsonataIntegrationTest {
                 }
                 """;
 
-        var smArn = createStateMachine("jsonpath-map-item-selector-missing-path-test", definition);
-        var execArn = startExecution(smArn, "{\"items\":[{}]}");
-        var failure = waitForExecutionFailure(execArn);
+        String smArn = createStateMachine("jsonpath-map-item-selector-missing-path-test", definition);
+        String execArn = startExecution(smArn, "{\"items\":[{}]}");
+        Response failure = waitForExecutionFailure(execArn);
 
         assertEquals("States.Runtime", failure.jsonPath().getString("error"));
         assertTrue(failure.jsonPath().getString("cause").contains(
@@ -2916,20 +2916,20 @@ class StepFunctionsJsonataIntegrationTest {
         putObject("map-inputs-list-objects", "workers/c.json", "[1]");
         putObject("map-inputs-list-objects", "other/z.json", "[]");
 
-        var definition = listObjectsDefinition("""
+        String definition = listObjectsDefinition("""
                 "Parameters": {
                     "Bucket": "map-inputs-list-objects",
                     "Prefix.$": "$.prefix"
                 }
                 """);
 
-        var smArn = createStateMachine("map-itemreader-s3-list-objects-v2-test", definition);
-        var execArn = startExecution(smArn, "{\"prefix\":\"workers/\"}");
-        var output = waitForExecution(execArn);
-        var items = objectMapper.readTree(output);
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-test", definition);
+        String execArn = startExecution(smArn, "{\"prefix\":\"workers/\"}");
+        String output = waitForExecution(execArn);
+        JsonNode items = objectMapper.readTree(output);
 
         assertEquals(3, items.size(), output);
-        var first = items.get(0);
+        JsonNode first = items.get(0);
         assertEquals("\"d751713988987e9331980363e24189ce\"", first.path("Etag").asText());
         assertEquals("workers/a.json", first.path("Key").asText());
         assertTrue(first.path("LastModified").isDouble(), output);
@@ -2944,15 +2944,15 @@ class StepFunctionsJsonataIntegrationTest {
         createBucket("map-inputs-list-objects-empty");
         putObject("map-inputs-list-objects-empty", "other/z.json", "[]");
 
-        var definition = listObjectsDefinition("""
+        String definition = listObjectsDefinition("""
                 "Parameters": {
                     "Bucket": "map-inputs-list-objects-empty",
                     "Prefix": "workers/"
                 }
                 """);
 
-        var smArn = createStateMachine("map-itemreader-s3-list-objects-v2-empty-test", definition);
-        var execArn = startExecution(smArn, "{}");
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-empty-test", definition);
+        String execArn = startExecution(smArn, "{}");
 
         assertEquals("[]", waitForExecution(execArn));
     }
@@ -2964,7 +2964,7 @@ class StepFunctionsJsonataIntegrationTest {
         putObject("map-inputs-list-objects-max", "workers/b.json", "[]");
         putObject("map-inputs-list-objects-max", "workers/c.json", "[]");
 
-        var definition = """
+        String definition = """
                 {
                     "StartAt": "ProcessWorkers",
                     "States": {
@@ -3003,9 +3003,9 @@ class StepFunctionsJsonataIntegrationTest {
                 }
                 """;
 
-        var smArn = createStateMachine("map-itemreader-s3-list-objects-v2-max-test", definition);
-        var execArn = startExecution(smArn, "{}");
-        var items = objectMapper.readTree(waitForExecution(execArn));
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-max-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        JsonNode items = objectMapper.readTree(waitForExecution(execArn));
 
         assertEquals(2, items.size());
         assertEquals("workers/a.json", items.get(0).path("key").asText());
@@ -3017,21 +3017,21 @@ class StepFunctionsJsonataIntegrationTest {
     void distributedMapWithListObjectsV2ItemReader_readsMoreThanOneThousandObjects() throws Exception {
         // In-process puts; 1001 REST puts are slow.
         s3Service.createBucket("map-inputs-list-objects-pages", "us-east-1");
-        for (var i = 1; i <= 1001; i++) {
+        for (int i = 1; i <= 1001; i++) {
             s3Service.putObject("map-inputs-list-objects-pages", String.format("workers/%04d.json", i),
                     "[]".getBytes(), "application/json", new HashMap<>());
         }
 
-        var definition = listObjectsDefinition("""
+        String definition = listObjectsDefinition("""
                 "Parameters": {
                     "Bucket": "map-inputs-list-objects-pages",
                     "Prefix": "workers/"
                 }
                 """);
 
-        var smArn = createStateMachine("map-itemreader-s3-list-objects-v2-pages-test", definition);
-        var execArn = startExecution(smArn, "{}");
-        var items = objectMapper.readTree(waitForExecution(execArn, 300));
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-pages-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        JsonNode items = objectMapper.readTree(waitForExecution(execArn, 300));
 
         assertEquals(1001, items.size());
         assertEquals("workers/0001.json", items.get(0).path("Key").asText());
@@ -3044,7 +3044,7 @@ class StepFunctionsJsonataIntegrationTest {
         putObject("map-inputs-list-objects-jsonata", "workers/a.json", "[]");
         putObject("map-inputs-list-objects-jsonata", "workers/b.json", "[]");
 
-        var definition = """
+        String definition = """
                 {
                     "QueryLanguage": "JSONata",
                     "StartAt": "ProcessWorkers",
@@ -3082,11 +3082,11 @@ class StepFunctionsJsonataIntegrationTest {
                 }
                 """;
 
-        var smArn = createStateMachine("map-itemreader-s3-list-objects-v2-jsonata-test", definition);
-        var execArn = startExecution(smArn,
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-jsonata-test", definition);
+        String execArn = startExecution(smArn,
                 "{\"bucket\":\"map-inputs-list-objects-jsonata\",\"prefix\":\"workers/\"}");
-        var output = waitForExecution(execArn);
-        var items = objectMapper.readTree(output);
+        String output = waitForExecution(execArn);
+        JsonNode items = objectMapper.readTree(output);
 
         assertEquals(2, items.size(), output);
         assertEquals("map-inputs-list-objects-jsonata", items.get(0).path("bucket").asText());
