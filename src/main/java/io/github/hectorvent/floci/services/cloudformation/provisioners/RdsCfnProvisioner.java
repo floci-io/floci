@@ -250,6 +250,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (instance.getDbInstanceArn() != null) {
             r.getAttributes().put("DBInstanceArn", instance.getDbInstanceArn());
         }
+        if (instance.getDbiResourceId() != null) {
+            r.getAttributes().put("DbiResourceId", instance.getDbiResourceId());
+        }
     }
 
     private void provisionDbCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -321,6 +324,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         if (cluster.getDbClusterArn() != null) {
             r.getAttributes().put("DBClusterArn", cluster.getDbClusterArn());
+        }
+        if (cluster.getDbClusterResourceId() != null) {
+            r.getAttributes().put("DBClusterResourceId", cluster.getDbClusterResourceId());
         }
     }
 

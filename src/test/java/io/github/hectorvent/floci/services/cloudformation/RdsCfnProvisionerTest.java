@@ -122,6 +122,7 @@ class RdsCfnProvisionerTest {
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
         when(instance.getEndpoint()).thenReturn(new DbEndpoint("mydb.local", 5432));
         when(instance.getDbInstanceArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db:mydb");
+        when(instance.getDbiResourceId()).thenReturn("db-ABCDEFGHIJKLMNOP");
         when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), anyMap(), nullable(String.class))).thenReturn(instance);
@@ -137,6 +138,9 @@ class RdsCfnProvisionerTest {
         assertEquals("mydb.local", r.getAttributes().get("Endpoint.Address"));
         assertEquals("5432", r.getAttributes().get("Endpoint.Port"));
         assertEquals("arn:aws:rds:us-east-1:000000000000:db:mydb", r.getAttributes().get("DBInstanceArn"));
+        // The schema declares DbiResourceId readOnly and RdsService already assigns one, so it is
+        // a real GetAtt key rather than a recorded gap.
+        assertEquals("db-ABCDEFGHIJKLMNOP", r.getAttributes().get("DbiResourceId"));
         // CFN properties mapped to the create-method arguments; absent optionals are null.
         verify(rdsService).createDbInstance("mydb", "postgres", "16", "admin", "secret",
                 "appdb", "db.t3.small", 50, false, null, null, null,
@@ -168,6 +172,7 @@ class RdsCfnProvisionerTest {
         when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
         when(cluster.getReaderEndpoint()).thenReturn(new DbEndpoint("mycluster-ro.local", 5432));
         when(cluster.getDbClusterArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:cluster:mycluster");
+        when(cluster.getDbClusterResourceId()).thenReturn("cluster-ABCDEFGHIJKLMNOP");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any()))
                 .thenReturn(cluster);
@@ -181,6 +186,11 @@ class RdsCfnProvisionerTest {
         assertEquals("mycluster.local", r.getAttributes().get("Endpoint.Address"));
         assertEquals("mycluster-ro.local", r.getAttributes().get("ReadEndpoint.Address"));
         assertEquals("5432", r.getAttributes().get("Endpoint.Port"));
+        assertEquals("arn:aws:rds:us-east-1:000000000000:cluster:mycluster",
+                r.getAttributes().get("DBClusterArn"));
+        // Same as DbiResourceId on the instance: declared readOnly and already assigned by the
+        // service, so it belongs in the attributes rather than in the gaps file.
+        assertEquals("cluster-ABCDEFGHIJKLMNOP", r.getAttributes().get("DBClusterResourceId"));
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", "16.3",
                 "admin", "secret", "appdb", false, null, null, null, false, "us-east-1");
     }
