@@ -51,6 +51,32 @@ class VerificationCodeServiceTest {
     }
 
     @Test
+    void consume_consumedCode_throwsExpired() {
+        String code = service.issue("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+        service.consume("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, code);
+
+        VerificationCodeException ex = assertThrows(VerificationCodeException.class,
+            () -> service.consume("pool", "alice",
+                VerificationCode.Purpose.SIGNUP_CONFIRMATION, code));
+
+        assertEquals(VerificationCodeException.Kind.EXPIRED, ex.getKind());
+    }
+
+    @Test
+    void issue_afterConsumedCode_succeedsImmediately() {
+        String code = service.issue("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+        service.consume("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, code);
+
+        assertDoesNotThrow(() ->
+            service.issue("pool", "alice",
+                VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24)));
+    }
+
+    @Test
     void consume_wrongCode_throwsMismatch() {
         service.issue("pool", "alice",
             VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
