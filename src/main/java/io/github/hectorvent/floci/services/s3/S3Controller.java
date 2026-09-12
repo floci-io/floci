@@ -486,7 +486,7 @@ public class S3Controller {
     public Response listObjects(@PathParam("bucket") String bucket,
                                 @QueryParam("prefix") String prefix,
                                 @QueryParam("delimiter") String delimiter,
-                                @QueryParam("max-keys") Integer maxKeys,
+                                @QueryParam("max-keys") String maxKeys,
                                 @QueryParam("list-type") String listType,
                                 @QueryParam("continuation-token") String continuationToken,
                                 @QueryParam("start-after") String startAfter,
@@ -639,7 +639,7 @@ public class S3Controller {
 
             s3Service.authorizeListBucket(bucket, authorization);
 
-            int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
+            int max = resolveMaxKeys(maxKeys);
             boolean v1 = !"2".equals(listType);
             String effectiveStartAfter = v1 && marker != null ? marker : startAfter;
             String effectiveContinuationToken = v1 ? null : continuationToken;
@@ -1655,13 +1655,13 @@ public class S3Controller {
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
-    private Response handleListObjectVersions(String bucket, String prefix, String delimiter, Integer maxKeys,
+    private Response handleListObjectVersions(String bucket, String prefix, String delimiter, String maxKeys,
                                               String keyMarker, String versionIdMarker, String encodingType) {
         if (hasText(versionIdMarker) && !hasText(keyMarker)) {
             throw new AwsException("InvalidArgument",
                     "A version-id marker cannot be specified without a key marker.", 400);
         }
-        int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
+        int max = resolveMaxKeys(maxKeys);
         S3Service.ListVersionsResult result =
                 s3Service.listObjectVersions(bucket, prefix, delimiter, max, keyMarker, versionIdMarker);
         XmlBuilder xml = new XmlBuilder()
@@ -3695,6 +3695,25 @@ public class S3Controller {
         }
         xml.end("WebsiteConfiguration");
         return Response.ok(xml.build()).build();
+    }
+
+    /**
+     * AWS accepts any integer from 0 to {@link Integer#MAX_VALUE} for {@code max-keys} and treats
+     * a missing parameter as 1000. Zero is a valid request for an empty page. Anything else,
+     * negative, non-numeric or overflowing, is rejected with the same InvalidArgument response.
+     */
+    private static int resolveMaxKeys(String maxKeys) {
+        if (maxKeys == null) {
+            return 1000;
+        }
+        if (maxKeys.matches("\\d{1,10}") && Long.parseLong(maxKeys) <= Integer.MAX_VALUE) {
+            return Integer.parseInt(maxKeys);
+        }
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("ArgumentName", "maxKeys");
+        detail.put("ArgumentValue", maxKeys);
+        throw new AwsException("InvalidArgument",
+                "Argument maxKeys must be an integer between 0 and 2147483647", 400, detail);
     }
 
     private Response handlePutBucketWebsite(String bucket, byte[] body) {

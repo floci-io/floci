@@ -3910,7 +3910,7 @@ public class DynamoDbService implements ResourceProvider {
                 throw new AwsException("AccessDenied",
                         "Access Denied (Service: Amazon S3; Status Code: 403; Error Code: AccessDenied)", 403);
             }
-            var objects = s3Service.listObjects(bucket, prefix, null, 0);
+            var objects = s3Service.listObjects(bucket, prefix, null, Integer.MAX_VALUE);
             if (objects.isEmpty()) {
                 failImport(desc, "S3NoSuchKey", "No objects found under s3://" + bucket + "/" + prefix);
             } else {
