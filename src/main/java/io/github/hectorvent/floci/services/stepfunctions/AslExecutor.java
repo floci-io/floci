@@ -3133,13 +3133,14 @@ public class AslExecutor {
 
         var items = objectMapper.createArrayNode();
         try {
-            for (var object : s3Service.listObjects(bucket, prefix, null, 0)) {
+            // MaxItems keeps the first keys in order, so the listing itself is capped.
+            for (var object : s3Service.listObjects(bucket, prefix, null, maxItems(itemReader))) {
                 items.add(listObjectsItem(object, jsonata));
             }
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
         }
-        return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
+        return new ResolvedMapItems(items, MapItemsSource.ITEM_READER_ARRAY);
     }
 
     // AWS renders LastModified as epoch seconds: a double in JSONPath state machines and an
@@ -3184,8 +3185,12 @@ public class AslExecutor {
         return pointedItems;
     }
 
+    private int maxItems(JsonNode itemReader) {
+        return itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+    }
+
     private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
-        int maxItems = itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+        var maxItems = maxItems(itemReader);
         if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
             return items;
         }
