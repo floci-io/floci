@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -127,6 +128,7 @@ public class WafV2Service {
     public IpSet createIpSet(IpSet ipSet, String scope, String name, String region) {
         validateScope(scope);
         requireName(name);
+        requireCidrAddresses(ipSet.getAddresses());
         if (findByName(ipSetStore, scope, name) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate IPSet name: " + name, 400);
         }
@@ -148,6 +150,7 @@ public class WafV2Service {
                               List<String> addresses, String name, String lockToken) {
         IpSet existing = require(ipSetStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
+        requireCidrAddresses(addresses);
         existing.setDescription(description);
         existing.setAddresses(addresses);
         return rotate(existing, ipSetStore, scope);
@@ -478,6 +481,25 @@ public class WafV2Service {
     private void requireName(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("WAFInvalidParameterException", "Name is required.", 400);
+        }
+    }
+
+    /**
+     * An IP set member is a block, not a single address: AWS requires CIDR notation and rejects a
+     * bare address such as {@code 203.0.113.10}, because the prefix length is what defines the
+     * range the set matches. {@link CidrCanonicalizer} supplies exactly the accepted forms (IPv4
+     * and IPv6, prefix in range for the family), so anything it cannot parse is rejected rather
+     * than stored verbatim.
+     */
+    private void requireCidrAddresses(List<String> addresses) {
+        if (addresses == null) {
+            return;
+        }
+        for (String address : addresses) {
+            if (CidrCanonicalizer.canonicalize(address).isEmpty()) {
+                throw new AwsException("WAFInvalidParameterException",
+                        "Address is not a valid CIDR block: " + address, 400);
+            }
         }
     }
 

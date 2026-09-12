@@ -332,4 +332,86 @@ class WafV2IntegrationTest {
                 .then().statusCode(404)
                 .body("__type", equalTo("WAFNonexistentItemException"));
     }
+
+    @Test
+    @Order(17)
+    void ipSetAddressesMustBeCidrBlocks() {
+        // Issue #3328: an IP set member is a block, not a single address. AWS rejects a bare
+        // address because the prefix length is what defines the range the set matches, so
+        // accepting one silently stored a value that could never match as intended.
+        call("CreateIPSet",
+                "{\"Name\":\"floci-waf-bad-ipv4\",\"Scope\":\"REGIONAL\",\"IPAddressVersion\":\"IPV4\","
+                        + "\"Addresses\":[\"203.0.113.10\"]}")
+                .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
+        call("CreateIPSet",
+                "{\"Name\":\"floci-waf-bad-ipv6\",\"Scope\":\"REGIONAL\",\"IPAddressVersion\":\"IPV6\","
+                        + "\"Addresses\":[\"2001:db8::1\"]}")
+                .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
+        call("CreateIPSet",
+                "{\"Name\":\"floci-waf-bad-prefix\",\"Scope\":\"REGIONAL\",\"IPAddressVersion\":\"IPV4\","
+                        + "\"Addresses\":[\"10.0.0.0/33\"]}")
+                .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
+        // A single malformed member rejects the whole call, including when it is not the first.
+        call("CreateIPSet",
+                "{\"Name\":\"floci-waf-mixed\",\"Scope\":\"REGIONAL\",\"IPAddressVersion\":\"IPV4\","
+                        + "\"Addresses\":[\"10.0.0.0/24\",\"203.0.113.10\"]}")
+                .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
+
+        // A rejected create must not leave a partially persisted IP set behind.
+        call("ListIPSets", "{\"Scope\":\"REGIONAL\"}")
+                .then().statusCode(200)
+                .body("IPSets.findAll { it.Name == 'floci-waf-mixed' }", hasSize(0));
+
+        // The guard must not reject well-formed blocks, IPv6 included.
+        Response created = call("CreateIPSet",
+                "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"IPAddressVersion\":\"IPV4\","
+                        + "\"Addresses\":[\"10.1.0.0/16\",\"192.0.2.0/24\"]}");
+        created.then().statusCode(200);
+        String id = created.jsonPath().getString("Summary.Id");
+
+        Response ipv6Created = call("CreateIPSet",
+                "{\"Name\":\"floci-waf-cidr-ipv6\",\"Scope\":\"REGIONAL\","
+                        + "\"IPAddressVersion\":\"IPV6\",\"Addresses\":[\"2001:db8::/32\"]}");
+        ipv6Created.then().statusCode(200);
+        String ipv6Id = ipv6Created.jsonPath().getString("Summary.Id");
+        String ipv6LockToken = call("GetIPSet",
+                "{\"Name\":\"floci-waf-cidr-ipv6\",\"Scope\":\"REGIONAL\",\"Id\":\"" + ipv6Id + "\"}")
+                .then().statusCode(200).extract().jsonPath().getString("LockToken");
+        call("DeleteIPSet",
+                "{\"Name\":\"floci-waf-cidr-ipv6\",\"Scope\":\"REGIONAL\",\"Id\":\"" + ipv6Id
+                        + "\",\"LockToken\":\"" + ipv6LockToken + "\"}")
+                .then().statusCode(200);
+
+        String lockToken = call("GetIPSet",
+                "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\"}")
+                .jsonPath().getString("LockToken");
+
+        call("UpdateIPSet",
+                "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\","
+                        + "\"LockToken\":\"" + lockToken + "\",\"Addresses\":[\"198.51.100.7\"]}")
+                .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
+
+        // The rejected update must leave the stored addresses untouched.
+        call("GetIPSet", "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\"}")
+                .then().statusCode(200)
+                .body("IPSet.Addresses", hasSize(2))
+                .body("IPSet.Addresses[0]", equalTo("10.1.0.0/16"));
+
+        call("UpdateIPSet",
+                "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\","
+                        + "\"LockToken\":\"" + lockToken + "\",\"Addresses\":[\"198.51.100.0/24\"]}")
+                .then().statusCode(200);
+        call("GetIPSet", "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\"}")
+                .then().statusCode(200)
+                .body("IPSet.Addresses", hasSize(1))
+                .body("IPSet.Addresses[0]", equalTo("198.51.100.0/24"));
+
+        String finalLock = call("GetIPSet",
+                "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\"}")
+                .jsonPath().getString("LockToken");
+        call("DeleteIPSet",
+                "{\"Name\":\"floci-waf-cidr\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\","
+                        + "\"LockToken\":\"" + finalLock + "\"}")
+                .then().statusCode(200);
+    }
 }
