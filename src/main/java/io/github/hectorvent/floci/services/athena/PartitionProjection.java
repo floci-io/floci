@@ -4,8 +4,11 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Table;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,6 +26,22 @@ final class PartitionProjection {
 
     /** {@code ${column}} placeholders in a partition location template. */
     private static final Pattern TEMPLATE_PLACEHOLDER = Pattern.compile("\\$\\{[^}]*}");
+
+    /**
+     * Not part of a longer identifier, and not a quoted one either: {@code "limit"} is a column
+     * named after a keyword, and a clause keyword is never written in quotes.
+     */
+    private static final String KEYWORD_BOUNDS = "(?<![A-Za-z0-9_\"`])%s(?![A-Za-z0-9_\"`])";
+
+    /** The {@code WHERE} keyword, as a keyword rather than as an identifier spelling it. */
+    private static final Pattern WHERE_KEYWORD = Pattern.compile(
+            KEYWORD_BOUNDS.formatted("WHERE"), Pattern.CASE_INSENSITIVE);
+
+    /** The keywords that can end a {@code WHERE} clause by starting the next one. */
+    private static final Pattern CLAUSE_AFTER_WHERE = Pattern.compile(
+            KEYWORD_BOUNDS.formatted(
+                    "(?:GROUP|HAVING|ORDER|WINDOW|LIMIT|OFFSET|FETCH|UNION|INTERSECT|EXCEPT)"),
+            Pattern.CASE_INSENSITIVE);
 
     private PartitionProjection() {
     }
@@ -87,27 +106,36 @@ final class PartitionProjection {
     }
 
     /**
-     * Fails a query that names a projecting table but never mentions one of its {@code injected}
-     * partition columns.
+     * Fails a query that names a projecting table but never constrains one of its {@code injected}
+     * partition columns in a {@code WHERE} clause.
      *
      * <p>An injected column has no generatable range: its values come from the query, so Athena
-     * requires an equality condition on it and rejects the query otherwise. Deciding whether a
-     * condition is a *static equality* one needs the query's predicate tree, which is not available
-     * here, so this checks only whether the column is mentioned at all. That is strictly narrower
-     * than the real rule - a query filtering an injected column with, say, a range condition is
-     * rejected by Athena and accepted here - but it never rejects a query Athena would accept, and
-     * it catches the case that silently reads every partition.
+     * requires a static equality condition on it in the {@code WHERE} clause and rejects the query
+     * otherwise. Deciding whether a condition is a <em>static equality</em> one needs the query's
+     * predicate tree, which is not available here, so this checks only whether the column is
+     * mentioned inside a {@code WHERE} clause - any of them, including a subquery's. That is
+     * strictly narrower than the real rule - a query filtering an injected column with, say, a
+     * range condition is rejected by Athena and accepted here - but it never rejects a query Athena
+     * would accept, and it catches the case that silently reads every partition.
+     *
+     * <p>Scoping to the {@code WHERE} clause is what makes the check worth having. A mention
+     * anywhere in the query text also matches the column's own appearance in a {@code SELECT} list
+     * or a {@code GROUP BY}, so {@code SELECT tenant, count(*) FROM audit_events GROUP BY tenant}
+     * would pass while filtering nothing at all - exactly the case this exists to catch.
      */
     static void assertInjectedColumnsFiltered(String query, List<Table> tables) {
         if (query == null || tables == null) {
             return;
         }
+        // Literals and comments are not code: a column name inside either constrains nothing.
+        String code = maskLiteralsAndComments(query);
+        List<String> whereClauses = null;
         for (Table table : tables) {
             if (!enabled(table) || table.getName() == null || table.getPartitionKeys() == null) {
                 continue;
             }
             // A table the query never names cannot be constrained by it, and must not fail it.
-            if (!mentions(query, table.getName())) {
+            if (!mentions(code, table.getName())) {
                 continue;
             }
             for (Column key : table.getPartitionKeys()) {
@@ -115,7 +143,13 @@ final class PartitionProjection {
                     continue;
                 }
                 String type = parameter(table, "projection." + key.getName() + ".type");
-                if (!"injected".equalsIgnoreCase(type) || mentions(query, key.getName())) {
+                if (!"injected".equalsIgnoreCase(type)) {
+                    continue;
+                }
+                if (whereClauses == null) {
+                    whereClauses = whereClauses(code);
+                }
+                if (whereClauses.stream().anyMatch(clause -> mentions(clause, key.getName()))) {
                     continue;
                 }
                 throw new AwsException("InvalidRequestException",
@@ -126,9 +160,96 @@ final class PartitionProjection {
         }
     }
 
-    private static boolean mentions(String query, String identifier) {
+    /**
+     * The text of every {@code WHERE} clause in {@code code}, a subquery's included.
+     *
+     * <p>A clause runs from the keyword to whatever ends it: a following clause keyword, the
+     * {@code )} closing the subquery that holds it, a statement terminator, or the end of the
+     * query. Parentheses opened inside the clause are part of it, so a predicate with its own
+     * subquery is not cut short.
+     */
+    private static List<String> whereClauses(String code) {
+        Set<Integer> clauseStarts = new HashSet<>();
+        Matcher boundaries = CLAUSE_AFTER_WHERE.matcher(code);
+        while (boundaries.find()) {
+            clauseStarts.add(boundaries.start());
+        }
+
+        List<String> clauses = new ArrayList<>();
+        Matcher where = WHERE_KEYWORD.matcher(code);
+        while (where.find()) {
+            int start = where.end();
+            int depth = 0;
+            int i = start;
+            while (i < code.length()) {
+                char c = code.charAt(i);
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')') {
+                    if (depth == 0) {
+                        break;
+                    }
+                    depth--;
+                } else if (depth == 0 && (c == ';' || clauseStarts.contains(i))) {
+                    break;
+                }
+                i++;
+            }
+            clauses.add(code.substring(start, i));
+        }
+        return clauses;
+    }
+
+    /**
+     * Blanks out single-quoted literals and comments, leaving everything else - and every index -
+     * where it was. Double-quoted and backquoted identifiers stay: those are references to a column,
+     * not text that happens to spell its name.
+     */
+    private static String maskLiteralsAndComments(String sql) {
+        char[] chars = sql.toCharArray();
+        int i = 0;
+        while (i < chars.length) {
+            int end;
+            if (chars[i] == '\'') {
+                end = i + 1;
+                while (end < chars.length) {
+                    if (chars[end] != '\'') {
+                        end++;
+                    } else if (end + 1 < chars.length && chars[end + 1] == '\'') {
+                        end += 2;   // an escaped quote, still inside the literal
+                    } else {
+                        end++;
+                        break;
+                    }
+                }
+            } else if (chars[i] == '-' && i + 1 < chars.length && chars[i + 1] == '-') {
+                end = i;
+                while (end < chars.length && chars[end] != '\n') {
+                    end++;
+                }
+            } else if (chars[i] == '/' && i + 1 < chars.length && chars[i + 1] == '*') {
+                end = i + 2;
+                while (end + 1 < chars.length && !(chars[end] == '*' && chars[end + 1] == '/')) {
+                    end++;
+                }
+                end = Math.min(chars.length, end + 2);
+            } else {
+                i++;
+                continue;
+            }
+            for (int k = i; k < end; k++) {
+                if (chars[k] != '\n') {
+                    chars[k] = ' ';
+                }
+            }
+            i = end;
+        }
+        return new String(chars);
+    }
+
+    private static boolean mentions(String code, String identifier) {
         return Pattern.compile("(?<![A-Za-z0-9_])" + Pattern.quote(identifier) + "(?![A-Za-z0-9_])",
-                Pattern.CASE_INSENSITIVE).matcher(query).find();
+                Pattern.CASE_INSENSITIVE).matcher(code).find();
     }
 
     private static String stripTrailingSlash(String value) {

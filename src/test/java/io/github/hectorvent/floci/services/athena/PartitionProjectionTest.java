@@ -138,4 +138,73 @@ class PartitionProjectionTest {
         assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
                 "SELECT * FROM audit_events WHERE tenant_id = 'abc'", List.of(injectedTenantTable())));
     }
+
+    /**
+     * The column names itself in the SELECT list and the GROUP BY, and filters nothing - the case
+     * the check exists to catch, and the one a query-wide text match lets through.
+     */
+    @Test
+    void mentionOutsideAWhereClauseDoesNotCount() {
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT tenant, count(*) FROM audit_events GROUP BY tenant",
+                List.of(injectedTenantTable())));
+    }
+
+    /** A WHERE clause ends where the next one starts, so an ORDER BY mention is outside it. */
+    @Test
+    void mentionAfterTheWhereClauseEndsDoesNotCount() {
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE year = 2026 ORDER BY tenant",
+                List.of(injectedTenantTable())));
+    }
+
+    /** A string that happens to spell the column name constrains nothing. */
+    @Test
+    void mentionInsideAStringLiteralDoesNotCount() {
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE note = 'tenant'", List.of(injectedTenantTable())));
+    }
+
+    /** Nor does one in a comment. */
+    @Test
+    void mentionInsideACommentDoesNotCount() {
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events -- filter by tenant one day\n WHERE year = 2026",
+                List.of(injectedTenantTable())));
+        assertThrows(AwsException.class, () -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events /* tenant */ WHERE year = 2026",
+                List.of(injectedTenantTable())));
+    }
+
+    /** A subquery's WHERE is still a WHERE, and still constrains the read. */
+    @Test
+    void filterInASubqueryCounts() {
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT tenant, count(*) FROM (SELECT * FROM audit_events WHERE tenant = 'abc') "
+                        + "GROUP BY tenant",
+                List.of(injectedTenantTable())));
+    }
+
+    /** A predicate carrying its own subquery is not cut short at the inner parentheses. */
+    @Test
+    void aPredicateWithItsOwnSubqueryIsReadWhole() {
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE year IN (SELECT y FROM years) AND tenant = 'abc'",
+                List.of(injectedTenantTable())));
+    }
+
+    /** Double quotes mark an identifier in Athena, so a quoted column reference counts. */
+    @Test
+    void aQuotedColumnReferenceCounts() {
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE \"tenant\" = 'abc'", List.of(injectedTenantTable())));
+    }
+
+    /** A column named after a clause keyword is quoted, and must not end the clause it sits in. */
+    @Test
+    void aQuotedIdentifierSpellingAClauseKeywordDoesNotEndTheClause() {
+        assertDoesNotThrow(() -> PartitionProjection.assertInjectedColumnsFiltered(
+                "SELECT * FROM audit_events WHERE \"limit\" = 10 AND tenant = 'abc'",
+                List.of(injectedTenantTable())));
+    }
 }
