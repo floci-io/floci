@@ -2,12 +2,16 @@ package io.github.hectorvent.floci.services.sqs;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import io.github.hectorvent.floci.testing.MutableClock;
+import jakarta.enterprise.context.ContextNotActiveException;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -17,11 +21,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class SqsServiceTest {
 
@@ -861,6 +867,111 @@ class SqsServiceTest {
     }
 
     @Test
+    void startMessageMoveTask_withoutDestinationKeepsMessageWithoutOriginalSource() throws Exception {
+        Queue dlq = sqsService.createQueue("orphan-dlq", null, "us-east-1");
+        String dlqArn = queueArn("orphan-dlq");
+        sqsService.createQueue("orphan-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        sqsService.sendMessage(dlq.getQueueUrl(), "orphan", 0, null, null, "us-east-1");
+        sqsService.sendMessage(dlq.getQueueUrl(), "next", 0, null, null, "us-east-1");
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, null, 0, "us-east-1");
+
+        awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of("orphan", "next"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void startMessageMoveTask_withoutDestinationKeepsMessageWhoseOriginalSourceWasDeleted() throws Exception {
+        Queue dlq = sqsService.createQueue("gone-dlq", null, "us-east-1");
+        String dlqArn = queueArn("gone-dlq");
+        Queue source = sqsService.createQueue("gone-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        // A sibling keeps the DLQ referenced by a redrive policy after the original source is gone.
+        sqsService.createQueue("gone-sibling", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        sqsService.sendMessage(source.getQueueUrl(), "stranded", 0, null, null, "us-east-1");
+        // Receiving past maxReceiveCount redrives the message into the DLQ with its original source recorded.
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(0, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(List.of("stranded"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+        sqsService.deleteQueue(source.getQueueUrl(), "us-east-1");
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, null, 0, "us-east-1");
+
+        awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of("stranded"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void startMessageMoveTask_movesEveryMessageOfANonDefaultAccountQueue() throws Exception {
+        String account = "111111111111";
+        RequestContext requestContext = new RequestContext();
+        requestContext.setAccountId(account);
+        Thread caller = Thread.currentThread();
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        // Only the calling thread has a request scope; the move worker runs outside any request.
+        when(requestContextInstance.get()).thenAnswer(invocation -> {
+            if (Thread.currentThread() != caller) {
+                throw new ContextNotActiveException();
+            }
+            return requestContext;
+        });
+        SqsService service = new SqsService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"),
+                null, null, 30, 1048576, BASE_URL, new RegionResolver("us-east-1", account), false, null, clock);
+        String dlqArn = "arn:aws:sqs:us-east-1:" + account + ":acct-dlq";
+        Queue dlq = service.createQueue("acct-dlq", null, "us-east-1");
+        service.createQueue("acct-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        Queue replay = service.createQueue("acct-replay", null, "us-east-1");
+        for (String body : List.of("one", "two", "three")) {
+            service.sendMessage(dlq.getQueueUrl(), body, 0, null, null, "us-east-1");
+        }
+
+        String taskHandle = service.startMessageMoveTask(
+                dlqArn, "arn:aws:sqs:us-east-1:" + account + ":acct-replay", 0, "us-east-1");
+
+        awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of("one", "two", "three"), bodies(service.peekMessages(replay.getQueueUrl(), "us-east-1")));
+        assertEquals(List.of(), bodies(service.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void startMessageMoveTask_failedDeliveryLeavesSourceQueueOrderIntact() throws Exception {
+        AtomicBoolean destinationStoreDown = new AtomicBoolean();
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, List<Message> value) {
+                if (destinationStoreDown.get() && key.endsWith("/fail-replay")) {
+                    throw new IllegalStateException("destination store unavailable");
+                }
+                super.put(key, value);
+            }
+        };
+        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, null, 30, 1048576, BASE_URL,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
+        Queue dlq = service.createQueue("fail-dlq", null, "us-east-1");
+        String dlqArn = queueArn("fail-dlq");
+        service.createQueue("fail-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        service.createQueue("fail-replay", null, "us-east-1");
+        for (String body : List.of("first", "second", "third")) {
+            service.sendMessage(dlq.getQueueUrl(), body, 0, null, null, "us-east-1");
+        }
+        destinationStoreDown.set(true);
+
+        String taskHandle = service.startMessageMoveTask(dlqArn, queueArn("fail-replay"), 0, "us-east-1");
+
+        awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of("first", "second", "third"), bodies(service.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    private static String redrivePolicy(String dlqArn) {
+        return "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
+    }
+
+    private static List<String> bodies(List<Message> messages) {
+        return messages.stream().map(Message::getBody).toList();
+    }
+
+    @Test
     void startMessageMoveTask_sourceIsNotDeadLetterQueue_throwsInvalidParameterValue() {
         sqsService.createQueue("just-a-queue", null, "us-east-1");
         sqsService.createQueue("dest", null, "us-east-1");
@@ -1058,8 +1169,13 @@ class SqsServiceTest {
     }
 
     private void awaitMoveTaskStatus(String sourceArn, String taskHandle, String expectedStatus) throws Exception {
+        awaitMoveTaskStatus(sqsService, sourceArn, taskHandle, expectedStatus);
+    }
+
+    private static void awaitMoveTaskStatus(SqsService service, String sourceArn, String taskHandle,
+                                            String expectedStatus) throws Exception {
         for (int attempt = 0; attempt < 100; attempt++) {
-            boolean reachedStatus = sqsService.listMessageMoveTasks(sourceArn, "us-east-1").stream()
+            boolean reachedStatus = service.listMessageMoveTasks(sourceArn, "us-east-1").stream()
                     .anyMatch(task -> task.taskHandle().equals(taskHandle)
                             && expectedStatus.equals(task.status()));
             if (reachedStatus) {

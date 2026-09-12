@@ -1042,8 +1042,7 @@ public class SqsService implements Resettable, ResourceProvider {
         // remainder runs on the background worker at the requested rate, draining
         // one message at a time so the source queue stays observably populated.
         long initialMoved = 0;
-        Message firstMsg = srcQueueInitial.drainOne();
-        if (firstMsg != null && deliverMovedMessage(firstMsg, destUrl, region)) {
+        if (moveOneMessage(srcQueueInitial, destUrl, region)) {
             initialMoved = 1;
             updateMoveTaskCounter(taskHandle, initialMoved);
         }
@@ -1072,15 +1071,40 @@ public class SqsService implements Resettable, ResourceProvider {
             return true;
         }
         if (msg.getOriginalSourceQueueUrl() != null) {
-            // No request scope on the background worker, so queueStore.get() resolves
-            // to the default account prefix and can't verify the destination. The
-            // in-memory messagesByQueue map is keyed by the full URL (which carries
+            // canDeliverMovedMessage() already confirmed the original source queue exists.
+            // The in-memory messagesByQueue map is keyed by the full URL (which carries
             // the account), so addAll on the right storage key lands the message in
             // the queue any future receive will see.
             String originKey = regionKey(region, msg.getOriginalSourceQueueUrl());
             getOrCreateQueue(originKey).addAll(List.of(msg));
             return true;
         }
+        return false;
+    }
+
+    /** The move worker runs outside any request scope, so the queue lookup must take the
+     *  account from the target URL instead of the (absent) request context. */
+    private boolean canDeliverMovedMessage(Message msg, String destUrl, String region) {
+        String targetUrl = destUrl != null ? destUrl : msg.getOriginalSourceQueueUrl();
+        return targetUrl != null && getQueueByUrl(regionKey(region, targetUrl), targetUrl).isPresent();
+    }
+
+    /** Move the head message of {@code sourceQueue}. Returns {@code false} when there is
+     *  nothing to move, the target queue is missing, or delivery failed; in the latter case
+     *  the message is put back at the head so the source keeps its order. */
+    private boolean moveOneMessage(GuardedMessageQueue sourceQueue, String destUrl, String region) {
+        Message message = sourceQueue.drainFirstIf(msg -> canDeliverMovedMessage(msg, destUrl, region));
+        if (message == null) {
+            return false;
+        }
+        try {
+            if (deliverMovedMessage(message, destUrl, region)) {
+                return true;
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Failed to move a message to {0}", destUrl);
+        }
+        sourceQueue.restoreFirst(message);
         return false;
     }
 
@@ -1110,14 +1134,11 @@ public class SqsService implements Resettable, ResourceProvider {
                         break;
                     }
                 }
-                Message msg = srcQueue.drainOne();
-                if (msg == null) {
+                if (!moveOneMessage(srcQueue, destUrl, region)) {
                     break;
                 }
-                if (deliverMovedMessage(msg, destUrl, region)) {
-                    moved++;
-                    updateMoveTaskCounter(taskHandle, moved);
-                }
+                moved++;
+                updateMoveTaskCounter(taskHandle, moved);
             }
         } finally {
             MoveTask cur = moveTasksByHandle.get(taskHandle);
