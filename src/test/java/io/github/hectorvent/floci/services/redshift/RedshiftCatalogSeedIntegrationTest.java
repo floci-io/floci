@@ -202,13 +202,41 @@ class RedshiftCatalogSeedIntegrationTest {
                 assertEquals(0, rs.getInt("node"));
             }
 
-            // 15. Verify stl_query
+            // 15. Verify stl_query (dynamic view over pg_stat_activity)
             try (ResultSet rs = stmt.executeQuery("SELECT count(*) FROM stl_query")) {
                 assertTrue(rs.next());
-                assertEquals(0, rs.getInt(1));
+                assertTrue(rs.getInt(1) >= 1, "stl_query must report active or recent queries");
             }
 
-            // 16. Verify newly created database inherits catalog views from template1
+            // 16. Verify stv_wlm_query_state
+            try (ResultSet rs = stmt.executeQuery("SELECT count(*) FROM stv_wlm_query_state")) {
+                assertTrue(rs.next());
+            }
+
+            // 17. Verify svv_diskusage
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT name, size, used FROM svv_diskusage WHERE name = ?")) {
+                ps.setString(1, "test_catalog_users");
+                try (ResultSet rs = ps.executeQuery()) {
+                    assertTrue(rs.next(), "svv_diskusage must contain test_catalog_users");
+                    assertEquals("test_catalog_users", rs.getString("name"));
+                }
+            }
+
+            // 18. Verify COPY error records into stl_load_errors
+            try {
+                stmt.execute("COPY test_catalog_users FROM 's3://nonexistent-seed-bucket/bad.csv' FORMAT AS CSV");
+            } catch (SQLException expected) {
+                // Expected to fail because S3 bucket does not exist
+            }
+            try (ResultSet rs = stmt.executeQuery(
+                    "SELECT filename, err_code, err_reason FROM stl_load_errors WHERE filename LIKE '%nonexistent-seed-bucket%'")) {
+                assertTrue(rs.next(), "stl_load_errors must record the failed COPY attempt");
+                assertTrue(rs.getString("filename").contains("nonexistent-seed-bucket"));
+                assertEquals(1204, rs.getInt("err_code"));
+            }
+
+            // 19. Verify newly created database inherits catalog views from template1
             stmt.execute("CREATE DATABASE test_clone_db");
         }
 

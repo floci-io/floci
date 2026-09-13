@@ -106,21 +106,23 @@ CREATE TABLE IF NOT EXISTS pg_catalog.stl_load_errors (
     err_reason character(100)
 );
 
--- 7. svl_qlog: basic query execution log view
+-- 7. svl_qlog: dynamic query execution log view
 CREATE OR REPLACE VIEW pg_catalog.svl_qlog AS
 SELECT
-    1::integer AS userid,
-    1::integer AS query,
+    a.usesysid::integer AS userid,
+    a.pid AS query,
     0::bigint AS xid,
-    pg_backend_pid() AS pid,
-    now() AS starttime,
-    now() AS endtime,
-    0::bigint AS elapsed,
+    a.pid AS pid,
+    COALESCE(a.query_start, now()) AS starttime,
+    COALESCE(a.state_change, now()) AS endtime,
+    COALESCE(EXTRACT(EPOCH FROM (COALESCE(a.state_change, now()) - a.query_start))::bigint * 1000000, 0::bigint) AS elapsed,
     0::integer AS aborted,
     0::integer AS insert_prn,
     0::integer AS concurrency_scaling_status,
     0::integer AS source_query,
-    'default'::character varying(322) AS label;
+    'default'::character varying(322) AS label
+FROM pg_catalog.pg_stat_activity a
+WHERE a.query IS NOT NULL AND a.query != '';
 
 -- 8. pg_user_info: user information view
 CREATE OR REPLACE VIEW pg_catalog.pg_user_info AS
@@ -207,21 +209,52 @@ SELECT
     0::integer AS node,
     1::integer AS cpu;
 
--- 15. stl_query: query execution log table
-CREATE TABLE IF NOT EXISTS pg_catalog.stl_query (
-    query integer DEFAULT 1,
-    userid integer DEFAULT 1,
-    xid bigint DEFAULT 0,
-    pid integer DEFAULT 0,
-    starttime timestamp without time zone DEFAULT now(),
-    endtime timestamp without time zone DEFAULT now(),
-    elapsed bigint DEFAULT 0,
-    label character varying(322) DEFAULT 'default',
-    querytxt character varying(4000) DEFAULT '',
-    database character varying(128) DEFAULT 'dev',
-    aborted integer DEFAULT 0
-);
+-- 15. stl_query: completed and running query execution log view
+DROP TABLE IF EXISTS pg_catalog.stl_query CASCADE;
+CREATE OR REPLACE VIEW pg_catalog.stl_query AS
+SELECT
+    a.pid AS query,
+    a.usesysid::integer AS userid,
+    0::bigint AS xid,
+    a.pid AS pid,
+    COALESCE(a.query_start, now()) AS starttime,
+    COALESCE(a.state_change, now()) AS endtime,
+    COALESCE(EXTRACT(EPOCH FROM (COALESCE(a.state_change, now()) - a.query_start))::bigint * 1000000, 0::bigint) AS elapsed,
+    'default'::character varying(322) AS label,
+    COALESCE(a.query, '')::character varying(4000) AS querytxt,
+    COALESCE(a.datname, current_database())::character varying(128) AS database,
+    CASE WHEN a.state = 'active' THEN 0 ELSE 0 END::integer AS aborted
+FROM pg_catalog.pg_stat_activity a
+WHERE a.query IS NOT NULL AND a.query != '';
 
--- Grant SELECT to all database users (including IAM temporary users)
+-- 16. stv_wlm_query_state: WLM query state view
+CREATE OR REPLACE VIEW pg_catalog.stv_wlm_query_state AS
+SELECT
+    a.pid AS query,
+    1::integer AS service_class,
+    1::integer AS slot_count,
+    COALESCE(a.query_start, now()) AS service_class_start_time,
+    0::bigint AS queue_time,
+    COALESCE(EXTRACT(EPOCH FROM (now() - a.query_start))::bigint * 1000000, 0::bigint) AS exec_time,
+    CASE WHEN a.state = 'active' THEN 'Running'::character varying(16) ELSE 'Returning'::character varying(16) END AS state
+FROM pg_catalog.pg_stat_activity a
+WHERE a.state = 'active';
+
+-- 17. svv_diskusage: disk space usage per relation
+CREATE OR REPLACE VIEW pg_catalog.svv_diskusage AS
+SELECT
+    current_database()::name AS "database",
+    n.nspname::name AS "schema",
+    c.oid::integer AS table_id,
+    c.relname::name AS "name",
+    (pg_total_relation_size(c.oid) / 1048576)::bigint AS size,
+    (pg_relation_size(c.oid) / 1048576)::bigint AS used
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+WHERE c.relkind IN ('r', 'm')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast');
+
+-- Grant access to all database users (including IAM temporary users)
 GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;
+GRANT ALL ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;

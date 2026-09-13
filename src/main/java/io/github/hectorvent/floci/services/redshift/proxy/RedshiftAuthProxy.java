@@ -12,6 +12,9 @@ import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.util.concurrent.Semaphore;
 
 /**
@@ -175,7 +178,7 @@ public class RedshiftAuthProxy {
             if (session != null) {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
-                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service).run();
+                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, this::recordLoadError).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
@@ -190,6 +193,22 @@ public class RedshiftAuthProxy {
             if (session != null) {
                 closeQuietly(session.backend());
             }
+        }
+    }
+
+    void recordLoadError(String filename, long lineNumber, String colname, int errCode, String errReason) {
+        String url = "jdbc:postgresql://" + backendHost + ":" + backendPort + "/" + dbName + "?sslmode=disable";
+        try (Connection conn = DriverManager.getConnection(url, masterUsername, masterPassword);
+             PreparedStatement stmt = conn.prepareStatement(
+                     "INSERT INTO pg_catalog.stl_load_errors (filename, line_number, colname, err_code, err_reason, starttime) VALUES (?, ?, ?, ?, ?, now())")) {
+            stmt.setString(1, filename != null ? (filename.length() > 256 ? filename.substring(0, 256) : filename) : "");
+            stmt.setLong(2, lineNumber);
+            stmt.setString(3, colname != null ? (colname.length() > 127 ? colname.substring(0, 127) : colname) : "");
+            stmt.setInt(4, errCode);
+            stmt.setString(5, errReason != null ? (errReason.length() > 100 ? errReason.substring(0, 100) : errReason) : "");
+            stmt.executeUpdate();
+        } catch (Exception e) {
+            LOG.debugv(e, "Failed to record load error into pg_catalog.stl_load_errors");
         }
     }
 

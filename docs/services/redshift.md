@@ -273,9 +273,12 @@ When a Redshift cluster container starts, Floci bootstraps common Redshift syste
 - `stv_recents`: Recently executed queries (`user_id`, `pid`, `query`, `starttime`, `endtime`, `status`).
 - `svv_transactions`: Current transaction status (`txn_owner`, `txn_db`, `xid`, `pid`, `txn_start`).
 - `stv_slices`: Cluster slice metadata (`slice`, `node`).
-- `stl_query`: Completed query execution log (`query`, `xid`, `pid`, `userid`, `starttime`, `endtime`, `aborted`).
+- `stl_query`: Dynamic query execution log view mapped from `pg_stat_activity` (`query`, `xid`, `pid`, `userid`, `starttime`, `endtime`, `elapsed`, `querytxt`, `database`, `aborted`).
+- `stv_wlm_query_state`: Dynamic WLM query state view (`query`, `service_class`, `slot_count`, `service_class_start_time`, `queue_time`, `exec_time`, `state`).
+- `svv_diskusage`: Disk space usage summary per relation (`database`, `schema`, `table_id`, `name`, `size`, `used`).
+- `stl_load_errors`: Table storing load errors for COPY statements. When an S3 COPY fails (due to missing buckets, access errors, or rejected rows), Floci records the error details (`filename`, `line_number`, `colname`, `err_code`, `err_reason`, `starttime`) directly into `stl_load_errors` so diagnostic queries like `SELECT * FROM stl_load_errors ORDER BY starttime DESC LIMIT 1` return actionable error details.
 
-These views return structural metadata mapped from PostgreSQL internal catalogs (`pg_catalog`, `information_schema`). They provide structural compatibility for client tooling rather than multi-node cluster runtime metrics.
+These views return structural metadata mapped from PostgreSQL internal catalogs (`pg_catalog`, `information_schema`, `pg_stat_activity`). They provide structural compatibility for client tooling rather than multi-node cluster runtime metrics.
 
 ## Out of Scope
 
