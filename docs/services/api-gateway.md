@@ -248,6 +248,13 @@ pair per day of the inclusive range, alongside `usagePlanId`, `startDate` and `e
 element of each pair is the quota limit minus cumulative use on real API Gateway, not the quota
 itself.
 
+The operation pages over the API key entries with `limit` and `position`, defaulting to 25 keys a
+page and emitting `position` only when another page exists. Real API Gateway is an unreliable guide
+at the edges here, so two choices differ deliberately: it answers `limit=0` with an
+`InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected as
+a `BadRequestException`; and it accepts a `limit` past the documented maximum of 500, so anything
+larger is clamped rather than refused.
+
 **Both numbers are always zero.** Nothing meters requests per API key, and a usage plan stores no
 quota to subtract from, so there is no limit to report against. Throttle settings are likewise
 accepted and stored but never enforced. Storing a quota on the usage plan and counting on the

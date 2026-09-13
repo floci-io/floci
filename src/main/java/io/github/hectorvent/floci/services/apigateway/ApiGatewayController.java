@@ -850,6 +850,9 @@ public class ApiGatewayController {
      * {@code GetUsage}. Returns the real response envelope with an entry per attached key and one
      * pair per day of the requested range.
      *
+     * <p>Paginated over the API key entries with {@code limit} and {@code position}, defaulting to
+     * 25 keys a page.
+     *
      * <p>Each pair is {@code [used, remaining]}, not {@code [used, quota]}: measured against real
      * API Gateway, the second element is the quota limit minus the cumulative use so far in the
      * period. Both elements are {@code 0} here because the emulator neither meters requests per API
@@ -864,9 +867,12 @@ public class ApiGatewayController {
                              @PathParam("usagePlanId") String usagePlanId,
                              @QueryParam("startDate") String startDate,
                              @QueryParam("endDate") String endDate,
-                             @QueryParam("keyId") String keyId) {
+                             @QueryParam("keyId") String keyId,
+                             @QueryParam("limit") Integer limit,
+                             @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        ApiGatewayService.UsageReport report = service.getUsage(region, usagePlanId, startDate, endDate, keyId);
+        ApiGatewayService.UsageReport report =
+                service.getUsage(region, usagePlanId, startDate, endDate, keyId, limit, position);
 
         ObjectNode root = objectMapper.createObjectNode();
         ObjectNode items = root.putObject("items");
@@ -881,6 +887,10 @@ public class ApiGatewayController {
         root.put("usagePlanId", report.usagePlanId());
         root.put("startDate", report.startDate());
         root.put("endDate", report.endDate());
+        // Only present when another page exists, matching the terminal page captured from AWS.
+        if (report.position() != null) {
+            root.put("position", report.position());
+        }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 

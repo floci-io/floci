@@ -10,6 +10,8 @@ import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * {@code GetUsage}.
@@ -59,6 +61,8 @@ class ApiGatewayGetUsageIntegrationTest {
                 .body("items", anEmptyMap());
     }
 
+    // API key ids are random and can start with a digit, which a dotted GPath parses as a number.
+    // Every lookup into items therefore uses bracket notation.
     @Test
     void eachKeyGetsOnePairPerDayOfTheInclusiveRange() {
         String planId = createUsagePlan("usage-range");
@@ -67,10 +71,10 @@ class ApiGatewayGetUsageIntegrationTest {
         given().when().get("/usageplans/" + planId + "/usage?startDate=2026-09-01&endDate=2026-09-13")
                 .then().statusCode(200)
                 // 1 to 13 September inclusive is 13 days, matching real API Gateway.
-                .body("items." + keyId, hasSize(13))
-                .body("items." + keyId + "[0]", hasSize(2))
-                .body("items." + keyId + "[0][0]", equalTo(0))
-                .body("items." + keyId + "[0][1]", equalTo(0));
+                .body("items['" + keyId + "']", hasSize(13))
+                .body("items['" + keyId + "'][0]", hasSize(2))
+                .body("items['" + keyId + "'][0][0]", equalTo(0))
+                .body("items['" + keyId + "'][0][1]", equalTo(0));
     }
 
     @Test
@@ -80,7 +84,7 @@ class ApiGatewayGetUsageIntegrationTest {
 
         given().when().get("/usageplans/" + planId + "/usage?startDate=2026-09-05&endDate=2026-09-05")
                 .then().statusCode(200)
-                .body("items." + keyId, hasSize(1));
+                .body("items['" + keyId + "']", hasSize(1));
     }
 
     @Test
@@ -93,7 +97,7 @@ class ApiGatewayGetUsageIntegrationTest {
                         + "?startDate=2026-09-01&endDate=2026-09-02&keyId=" + first)
                 .then().statusCode(200)
                 .body("items", aMapWithSize(1))
-                .body("items." + first, hasSize(2));
+                .body("items['" + first + "']", hasSize(2));
     }
 
     @Test
@@ -127,5 +131,78 @@ class ApiGatewayGetUsageIntegrationTest {
         given().when().get("/usageplans/" + planId + "/usage?startDate=13-09-2026&endDate=2026-09-13")
                 .then().statusCode(400)
                 .body(containsString("YYYY-MM-DD"));
+    }
+
+    @Test
+    void pagingCrossesAKeyBoundaryAndRoundTripsThePosition() {
+        String planId = createUsagePlan("usage-paged");
+        for (int i = 0; i < 3; i++) {
+            createApiKeyOnPlan(planId, "usage-paged-" + i);
+        }
+
+        String position = given()
+                .when().get("/usageplans/" + planId + "/usage"
+                        + "?startDate=2026-09-01&endDate=2026-09-02&limit=2")
+                .then().statusCode(200)
+                .body("items", aMapWithSize(2))
+                .body("position", notNullValue())
+                .extract().path("position");
+
+        given()
+                .when().get("/usageplans/" + planId + "/usage"
+                        + "?startDate=2026-09-01&endDate=2026-09-02&limit=2&position=" + position)
+                .then().statusCode(200)
+                .body("items", aMapWithSize(1))
+                // No token on the terminal page, matching the capture from real AWS.
+                .body("position", nullValue());
+    }
+
+    @Test
+    void aSinglePageCarriesNoPosition() {
+        String planId = createUsagePlan("usage-onepage");
+        createApiKeyOnPlan(planId, "usage-onepage-key");
+
+        given()
+                .when().get("/usageplans/" + planId + "/usage?startDate=2026-09-01&endDate=2026-09-02")
+                .then().statusCode(200)
+                .body("items", aMapWithSize(1))
+                .body("position", nullValue());
+    }
+
+    @Test
+    void anUnrecognisedPositionIsRejected() {
+        String planId = createUsagePlan("usage-badpos");
+        createApiKeyOnPlan(planId, "usage-badpos-key");
+
+        given()
+                .when().get("/usageplans/" + planId + "/usage"
+                        + "?startDate=2026-09-01&endDate=2026-09-02&position=nonsense")
+                .then().statusCode(400)
+                .body(containsString("Invalid position parameter"));
+    }
+
+    @Test
+    void aLimitBelowOneIsRejected() {
+        String planId = createUsagePlan("usage-zerolimit");
+
+        given()
+                .when().get("/usageplans/" + planId + "/usage"
+                        + "?startDate=2026-09-01&endDate=2026-09-02&limit=0")
+                .then().statusCode(400)
+                .body(containsString("Invalid limit parameter"));
+    }
+
+    @Test
+    void aLimitAboveTheMaximumIsClamped() {
+        String planId = createUsagePlan("usage-biglimit");
+        createApiKeyOnPlan(planId, "usage-biglimit-key");
+
+        // Real API Gateway accepts a limit past the documented maximum rather than rejecting it,
+        // so this clamps rather than erroring.
+        given()
+                .when().get("/usageplans/" + planId + "/usage"
+                        + "?startDate=2026-09-01&endDate=2026-09-02&limit=501")
+                .then().statusCode(200)
+                .body("items", aMapWithSize(1));
     }
 }

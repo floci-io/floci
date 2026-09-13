@@ -4,6 +4,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -55,6 +56,11 @@ import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class ApiGatewayService {
+
+    /** Documented default and maximum page size for GetUsage. */
+    private static final int DEFAULT_USAGE_LIMIT = 25;
+    private static final int MAX_USAGE_LIMIT = 500;
+
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayService.class);
 
@@ -1217,7 +1223,8 @@ public class ApiGatewayService {
      * the usage plan and counting on the execute path are the two pieces still missing; this method
      * is where they would surface.
      */
-    public UsageReport getUsage(String region, String usagePlanId, String startDate, String endDate, String keyId) {
+    public UsageReport getUsage(String region, String usagePlanId, String startDate, String endDate,
+                                String keyId, Integer limit, String position) {
         // Resolving the plan first gives the same NotFoundException an unknown id gets on AWS.
         getUsagePlan(region, usagePlanId);
 
@@ -1227,12 +1234,37 @@ public class ApiGatewayService {
             throw new AwsException("BadRequestException", "Usage end date must be after start date", 400);
         }
         int days = (int) ChronoUnit.DAYS.between(start, end) + 1;
+        int pageSize = resolveUsageLimit(limit);
+
+        List<UsagePlanKey> keys = getUsagePlanKeys(region, usagePlanId).stream()
+                .filter(key -> keyId == null || keyId.isBlank() || keyId.equals(key.getId()))
+                .sorted(Comparator.comparing(UsagePlanKey::getId))
+                .toList();
+
+        // The page token is the last key id already returned, so a page resumes after it rather
+        // than at a positional offset a concurrent key attachment could shift. Measured: an
+        // unrecognised token is a BadRequestException, not an empty page.
+        int from = 0;
+        if (position != null && !position.isBlank()) {
+            int previous = -1;
+            for (int i = 0; i < keys.size(); i++) {
+                if (position.equals(keys.get(i).getId())) {
+                    previous = i;
+                    break;
+                }
+            }
+            if (previous < 0) {
+                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+            }
+            from = previous + 1;
+        }
+
+        List<UsagePlanKey> page = keys.subList(Math.min(from, keys.size()),
+                Math.min(from + pageSize, keys.size()));
+        boolean more = from + pageSize < keys.size();
 
         Map<String, List<long[]>> items = new LinkedHashMap<>();
-        for (UsagePlanKey key : getUsagePlanKeys(region, usagePlanId)) {
-            if (keyId != null && !keyId.isBlank() && !keyId.equals(key.getId())) {
-                continue;
-            }
+        for (UsagePlanKey key : page) {
             List<long[]> perDay = new ArrayList<>();
             for (int day = 0; day < days; day++) {
                 // [used, remaining]: nothing is metered, and no quota is stored to subtract from.
@@ -1240,12 +1272,32 @@ public class ApiGatewayService {
             }
             items.put(key.getId(), perDay);
         }
-        return new UsageReport(usagePlanId, start.toString(), end.toString(), items);
+        // A token only when another page exists; its absence is what ends a caller's loop.
+        String next = more && !page.isEmpty() ? page.get(page.size() - 1).getId() : null;
+        return new UsageReport(usagePlanId, start.toString(), end.toString(), items, next);
+    }
+
+    /**
+     * Resolves the page size.
+     *
+     * <p>Real API Gateway is not a good guide at the edges here: it answers {@code limit=0} with an
+     * {@code InternalFailure} and accepts {@code limit=501} despite a documented maximum of 500. A
+     * zero or negative page size is rejected rather than reproducing that fault, and anything above
+     * the documented maximum is clamped to it.
+     */
+    private static int resolveUsageLimit(Integer limit) {
+        if (limit == null) {
+            return DEFAULT_USAGE_LIMIT;
+        }
+        if (limit < 1) {
+            throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
+        }
+        return Math.min(limit, MAX_USAGE_LIMIT);
     }
 
     /** One {@code GetUsage} report: {@code items} maps an API key id to its per-day pairs. */
     public record UsageReport(String usagePlanId, String startDate, String endDate,
-                              Map<String, List<long[]>> items) {}
+                              Map<String, List<long[]>> items, String position) {}
 
     private static LocalDate parseUsageDate(String value, String field) {
         if (value == null || value.isBlank()) {
