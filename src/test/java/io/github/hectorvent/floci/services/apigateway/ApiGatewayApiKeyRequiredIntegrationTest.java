@@ -195,6 +195,65 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .body("ok", org.hamcrest.Matchers.is(true));
     }
 
+    @Test @Order(8)
+    void updateMethodRejectsUnsupportedPatchOperationOnApiKeyRequired() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "patchOperations": [
+                            {"op": "remove", "path": "/apiKeyRequired"}
+                          ]
+                        }
+                        """)
+                .when().patch("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
+                .then().statusCode(400);
+    }
+
+    @Test @Order(9)
+    void updateMethodRejectsInvalidBooleanValueOnApiKeyRequired() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "patchOperations": [
+                            {"op": "replace", "path": "/apiKeyRequired", "value": "garbage"}
+                          ]
+                        }
+                        """)
+                .when().patch("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
+                .then().statusCode(400);
+    }
+
+    @Test @Order(10)
+    void updateMethodSuccessfullyUpdatesApiKeyRequired() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "patchOperations": [
+                            {"op": "replace", "path": "/apiKeyRequired", "value": "false"}
+                          ]
+                        }
+                        """)
+                .when().patch("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("apiKeyRequired", org.hamcrest.Matchers.is(false));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "patchOperations": [
+                            {"op": "replace", "path": "/apiKeyRequired", "value": "true"}
+                          ]
+                        }
+                        """)
+                .when().patch("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("apiKeyRequired", org.hamcrest.Matchers.is(true));
+    }
+
     private static byte[] zipEntries(Map<String, String> entries) throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (ZipOutputStream zos = new ZipOutputStream(baos)) {
