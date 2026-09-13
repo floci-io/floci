@@ -54,11 +54,11 @@ runtimes reach `READY` immediately and hold metadata only. See
 | `GetMemory` | Returns a memory resource |
 | `UpdateMemory` | Updates a memory resource |
 | `DeleteMemory` | Deletes a memory resource |
+| `ListMemories` | Lists memory resources |
 | `CreateEvent` | Appends an event to a memory. `sessionId` is optional and generated when omitted |
 | `ListEvents` | Lists a session's events, newest first. `POST` to the session path, not `GET` |
 | `GetEvent` | Returns one event |
 | `DeleteEvent` | Deletes one event and echoes its id |
-| `ListMemories` | Lists memory resources |
 | `CreateBrowser` | Creates a custom browser |
 | `GetCodeInterpreter` | Returns a custom or system code interpreter |
 | `DeleteCodeInterpreter` | Deletes a custom code interpreter |
