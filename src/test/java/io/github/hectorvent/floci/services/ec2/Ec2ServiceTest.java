@@ -505,6 +505,70 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void launchTemplateVersionInheritsMarketOptionsRequirementsAndConnectionTracking() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        LaunchTemplateData source = new LaunchTemplateData();
+        source.setImageId("ami-source");
+
+        LaunchTemplateData.SpotOptions spotOptions = new LaunchTemplateData.SpotOptions();
+        spotOptions.setMaxPrice("0.05");
+        spotOptions.setSpotInstanceType("one-time");
+        LaunchTemplateData.InstanceMarketOptions marketOptions = new LaunchTemplateData.InstanceMarketOptions();
+        marketOptions.setMarketType("spot");
+        marketOptions.setSpotOptions(spotOptions);
+        source.setInstanceMarketOptions(marketOptions);
+
+        LaunchTemplateData.InstanceRequirements requirements = new LaunchTemplateData.InstanceRequirements();
+        requirements.setVCpuCount(new LaunchTemplateData.IntRange(2, 8));
+        requirements.setMemoryMiB(new LaunchTemplateData.IntRange(1024, null));
+        requirements.setMemoryGiBPerVCpu(new LaunchTemplateData.DoubleRange(0.5, 4.0));
+        requirements.setCpuManufacturers(List.of("intel", "amd"));
+        source.setInstanceRequirements(requirements);
+
+        LaunchTemplateData.ConnectionTrackingSpecification tracking =
+                new LaunchTemplateData.ConnectionTrackingSpecification();
+        tracking.setTcpEstablishedTimeout(60);
+        tracking.setUdpStreamTimeout(120);
+        LaunchTemplateData.NetworkInterface networkInterface = new LaunchTemplateData.NetworkInterface();
+        networkInterface.setDeviceIndex(0);
+        networkInterface.setConnectionTrackingSpecification(tracking);
+        source.setNetworkInterfaces(List.of(networkInterface));
+
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "spot-template", source, List.of());
+
+        // The source selects instance types by attribute, so the new version restates a member
+        // that does not collide with InstanceRequirements.
+        LaunchTemplateData override = new LaunchTemplateData();
+        override.setImageId("ami-override");
+        service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null, "1", override);
+
+        LaunchTemplateData data = service.describeLaunchTemplateVersions(
+                "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst().getData();
+        assertEquals("ami-override", data.getImageId());
+        assertEquals("spot", data.getInstanceMarketOptions().getMarketType());
+        assertEquals("0.05", data.getInstanceMarketOptions().getSpotOptions().getMaxPrice());
+        assertEquals("one-time", data.getInstanceMarketOptions().getSpotOptions().getSpotInstanceType());
+        assertNull(data.getInstanceMarketOptions().getSpotOptions().getBlockDurationMinutes(),
+                "an unset SpotOptions member must not acquire a value on the way through a version");
+        assertEquals(2, data.getInstanceRequirements().getVCpuCount().getMin());
+        assertEquals(8, data.getInstanceRequirements().getVCpuCount().getMax());
+        assertEquals(0.5, data.getInstanceRequirements().getMemoryGiBPerVCpu().getMin());
+        assertEquals(List.of("intel", "amd"), data.getInstanceRequirements().getCpuManufacturers());
+        assertEquals(1024, data.getInstanceRequirements().getMemoryMiB().getMin());
+        assertNull(data.getInstanceRequirements().getNetworkInterfaceCount(),
+                "an unset InstanceRequirements range must stay null rather than default to a range");
+        assertNull(data.getInstanceRequirements().getBaselinePerformanceFactors());
+        LaunchTemplateData.ConnectionTrackingSpecification inherited =
+                data.getNetworkInterfaces().getFirst().getConnectionTrackingSpecification();
+        assertEquals(60, inherited.getTcpEstablishedTimeout());
+        assertEquals(120, inherited.getUdpStreamTimeout());
+        assertNull(inherited.getUdpTimeout(), "an unset UdpTimeout must stay absent");
+    }
+
+    @Test
     void launchTemplateVersionWithoutSourceVersionDoesNotInheritFromLatest() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
