@@ -1398,7 +1398,7 @@ class S3AuthEnforcementIntegrationTest {
         String bucket = "auth-batch-bypass-scope-bucket";
         String unlockedKey = "unlocked.txt";
         String lockedKey = "locked.txt";
-        given().when().put("/" + bucket).then().statusCode(200);
+        given().header("Authorization", LOCAL_AUTH_HEADER).when().put("/" + bucket).then().statusCode(200);
 
         given()
             .header("Authorization", LOCAL_AUTH_HEADER)
@@ -1419,6 +1419,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .header("Authorization", LOCAL_AUTH_HEADER)
             .contentType("application/json")
             .body(publicObjectActionPolicy(bucket, "s3:DeleteObject"))
         .when()
