@@ -33,8 +33,8 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DeleteTags` | Remove tags by key from a resource |
 | `DescribeTags` | List tagged resources and their tags |
 | `CreateClusterSubnetGroup` | Register a cluster subnet group (metadata only) |
-| `CreateIntegration` | Register a zero-ETL integration (metadata only; no data is replicated) |
-| `DescribeIntegrations` | List integrations, or the one an `IntegrationArn` names |
+| `CreateIntegration` | Register a zero-ETL integration (metadata only; no data is replicated). Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
+| `DescribeIntegrations` | List integrations with `Filters`, `MaxRecords` and `Marker` pagination, or the one an `IntegrationArn` names |
 | `DeleteIntegration` | Remove a zero-ETL integration |
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |

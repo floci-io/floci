@@ -9,6 +9,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * Redshift zero-ETL integrations.
@@ -128,9 +129,10 @@ class RedshiftIntegrationsIntegrationTest {
 
     @Test
     void tagsSurviveTheRoundTrip() {
+        // The Query member is TagList, not Tags: an SDK serialises the list under its own name.
         query("Action", "CreateIntegration", "IntegrationName", "zetl-tagged",
                 "SourceArn", SOURCE, "TargetArn", TARGET,
-                "Tags.Tag.1.Key", "Environment", "Tags.Tag.1.Value", "dev")
+                "TagList.Tag.1.Key", "Environment", "TagList.Tag.1.Value", "dev")
                 .then().statusCode(200);
 
         query("Action", "DescribeIntegrations")
@@ -145,5 +147,88 @@ class RedshiftIntegrationsIntegrationTest {
         query("Action", "DescribeIntegrations")
                 .then().statusCode(200)
                 .body(containsString("<DescribeIntegrationsResult>"));
+    }
+
+    @Test
+    void descriptionAndEncryptionContextAreStoredAndReturned() {
+        query("Action", "CreateIntegration", "IntegrationName", "zetl-full",
+                "SourceArn", SOURCE, "TargetArn", TARGET,
+                "Description", "nightly replica",
+                "KMSKeyId", "arn:aws:kms:us-east-1:000000000000:key/abc",
+                "AdditionalEncryptionContext.entry.1.key", "team",
+                "AdditionalEncryptionContext.entry.1.value", "data")
+                .then().statusCode(200);
+
+        query("Action", "DescribeIntegrations")
+                .then().statusCode(200)
+                .body(containsString("<Description>nightly replica</Description>"))
+                .body(containsString("<key>team</key>"))
+                .body(containsString("<value>data</value>"));
+    }
+
+    @Test
+    void encryptionContextWithoutAKmsKeyIsRejected() {
+        query("Action", "CreateIntegration", "IntegrationName", "zetl-nokms",
+                "SourceArn", SOURCE, "TargetArn", TARGET,
+                "AdditionalEncryptionContext.entry.1.key", "team",
+                "AdditionalEncryptionContext.entry.1.value", "data")
+                .then().statusCode(400)
+                .body(containsString("KMSKeyId"));
+    }
+
+    @Test
+    void describePagesWithAMarker() {
+        for (int i = 0; i < 3; i++) {
+            query("Action", "CreateIntegration", "IntegrationName", "zetl-page-" + i,
+                    "SourceArn", SOURCE + "-" + i, "TargetArn", TARGET)
+                    .then().statusCode(200);
+        }
+
+        String body = query("Action", "DescribeIntegrations", "MaxRecords", "20")
+                .then().statusCode(200).extract().body().asString();
+        // Three records fit inside the smallest legal page, so no marker is emitted.
+        assertFalse(body.contains("<Marker>"), "terminal page must omit Marker");
+    }
+
+    @Test
+    void maxRecordsOutsideTheDocumentedRangeIsRejected() {
+        query("Action", "DescribeIntegrations", "MaxRecords", "5")
+                .then().statusCode(400)
+                .body(containsString("MaxRecords"));
+        query("Action", "DescribeIntegrations", "MaxRecords", "101")
+                .then().statusCode(400)
+                .body(containsString("MaxRecords"));
+    }
+
+    @Test
+    void filteringBySourceArnNarrowsTheResult() {
+        query("Action", "CreateIntegration", "IntegrationName", "zetl-filtered",
+                "SourceArn", SOURCE + "-filtered", "TargetArn", TARGET)
+                .then().statusCode(200);
+        query("Action", "CreateIntegration", "IntegrationName", "zetl-unfiltered",
+                "SourceArn", SOURCE + "-other", "TargetArn", TARGET)
+                .then().statusCode(200);
+
+        query("Action", "DescribeIntegrations",
+                "Filters.DescribeIntegrationsFilter.1.Name", "source-arn",
+                "Filters.DescribeIntegrationsFilter.1.Values.Value.1", SOURCE + "-filtered")
+                .then().statusCode(200)
+                .body(containsString("zetl-filtered"))
+                .body(not(containsString("zetl-unfiltered")));
+    }
+
+    @Test
+    void anUnrecognisedFilterNameIsRejected() {
+        query("Action", "DescribeIntegrations",
+                "Filters.DescribeIntegrationsFilter.1.Name", "not-a-filter",
+                "Filters.DescribeIntegrationsFilter.1.Values.Value.1", "x")
+                .then().statusCode(400);
+    }
+
+    @Test
+    void anInvalidMarkerIsRejected() {
+        query("Action", "DescribeIntegrations", "Marker", "nonsense")
+                .then().statusCode(400)
+                .body(containsString("Marker"));
     }
 }

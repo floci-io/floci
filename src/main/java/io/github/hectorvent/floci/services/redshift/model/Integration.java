@@ -19,6 +19,7 @@ public class Integration {
     private String integrationName;
     private String sourceArn;
     private String targetArn;
+    private String description;
     private String status;
     private String kmsKeyId;
     private String createTime;
@@ -36,6 +37,8 @@ public class Integration {
     public void setSourceArn(String sourceArn) { this.sourceArn = sourceArn; }
     public String getTargetArn() { return targetArn; }
     public void setTargetArn(String targetArn) { this.targetArn = targetArn; }
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
     public String getKmsKeyId() { return kmsKeyId; }

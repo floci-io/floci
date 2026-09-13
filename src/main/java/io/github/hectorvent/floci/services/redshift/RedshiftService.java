@@ -33,6 +33,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -50,6 +51,10 @@ public class RedshiftService {
     private final AccountAwareStorageBackend<Snapshot> snapshots;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroups;
+    private static final int MIN_INTEGRATION_RECORDS = 20;
+    private static final int MAX_INTEGRATION_RECORDS = 100;
+    private static final int MAX_INTEGRATION_DESCRIPTION = 1000;
+
     private final AccountAwareStorageBackend<Integration> integrations;
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
@@ -212,7 +217,9 @@ public class RedshiftService {
     // were captured from a live integration in us-west-2.
 
     public synchronized Integration createIntegration(String integrationName, String sourceArn, String targetArn,
-                                                      String kmsKeyId, Map<String, String> tags, String region) {
+                                                      String kmsKeyId, String description,
+                                                      Map<String, String> additionalEncryptionContext,
+                                                      Map<String, String> tags, String region) {
         if (integrationName == null || integrationName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "IntegrationName is required.", 400);
         }
@@ -222,6 +229,17 @@ public class RedshiftService {
         if (targetArn == null || targetArn.isBlank()) {
             throw new AwsException("InvalidParameterValue", "TargetArn is required.", 400);
         }
+        if (description != null && description.length() > MAX_INTEGRATION_DESCRIPTION) {
+            throw new AwsException("InvalidParameterValue",
+                    "Description must be at most " + MAX_INTEGRATION_DESCRIPTION + " characters.", 400);
+        }
+        // AdditionalEncryptionContext only means anything alongside a customer managed key.
+        if (additionalEncryptionContext != null && !additionalEncryptionContext.isEmpty()
+                && (kmsKeyId == null || kmsKeyId.isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "AdditionalEncryptionContext is only valid when KMSKeyId is supplied.", 400);
+        }
+
         boolean nameTaken = integrations.scan(k -> true).stream()
                 .anyMatch(existing -> integrationName.equals(existing.getIntegrationName()));
         if (nameTaken) {
@@ -240,6 +258,8 @@ public class RedshiftService {
         integration.setStatus("active");
         integration.setKmsKeyId(kmsKeyId);
         integration.setCreateTime(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        integration.setDescription(description);
+        integration.setAdditionalEncryptionContext(additionalEncryptionContext);
         integration.setTags(tags);
         integrations.put(integrationId, integration);
         LOG.infov("Created Redshift zero-ETL integration: {0}", integration.getIntegrationArn());
@@ -247,22 +267,94 @@ public class RedshiftService {
     }
 
     /**
-     * Lists integrations, or the single one an ARN names.
+     * Lists integrations with the documented filters and marker pagination.
      *
-     * <p>An unknown ARN is {@code IntegrationNotFoundFault}, measured against real Redshift. An
-     * account with no integrations at all is an empty list rather than an error.
+     * <p>An unknown {@code IntegrationArn} is {@code IntegrationNotFoundFault}, measured against
+     * real Redshift. An account with no integrations at all is an empty list rather than an error,
+     * and no {@code Marker} is emitted on the terminal page.
      */
-    public List<Integration> describeIntegrations(String integrationArn) {
-        List<Integration> all = integrations.scan(k -> true);
-        if (integrationArn == null || integrationArn.isBlank()) {
-            return all;
+    public IntegrationPage describeIntegrations(String integrationArn, Integer maxRecords, String marker,
+                                                List<IntegrationFilter> filters) {
+        List<Integration> all = integrations.scan(k -> true).stream()
+                .sorted(Comparator.comparing(Integration::getIntegrationArn))
+                .toList();
+
+        if (integrationArn != null && !integrationArn.isBlank()) {
+            Integration match = all.stream()
+                    .filter(integration -> integrationArn.equals(integration.getIntegrationArn()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("IntegrationNotFoundFault",
+                            "The requested integration doesn't exist.", 404));
+            all = List.of(match);
         }
-        return all.stream()
-                .filter(integration -> integrationArn.equals(integration.getIntegrationArn()))
-                .findFirst()
-                .map(List::of)
-                .orElseThrow(() -> new AwsException("IntegrationNotFoundFault",
-                        "The requested integration doesn't exist.", 404));
+
+        for (IntegrationFilter filter : filters == null ? List.<IntegrationFilter>of() : filters) {
+            all = all.stream().filter(integration -> matchesFilter(integration, filter)).toList();
+        }
+
+        int pageSize = resolveMaxRecords(maxRecords);
+        int from = 0;
+        if (marker != null && !marker.isBlank()) {
+            int previous = -1;
+            for (int i = 0; i < all.size(); i++) {
+                if (marker.equals(all.get(i).getIntegrationArn())) {
+                    previous = i;
+                    break;
+                }
+            }
+            if (previous < 0) {
+                throw new AwsException("InvalidParameterValue", "Invalid Marker specified.", 400);
+            }
+            from = previous + 1;
+        }
+
+        List<Integration> page = all.subList(Math.min(from, all.size()), Math.min(from + pageSize, all.size()));
+        boolean more = from + pageSize < all.size();
+        // The marker is the last ARN already returned, so a page resumes after a known record
+        // rather than at an offset a concurrent create could shift.
+        String next = more && !page.isEmpty() ? page.get(page.size() - 1).getIntegrationArn() : null;
+        return new IntegrationPage(List.copyOf(page), next);
+    }
+
+    /** One page of integrations plus the marker to continue with, or {@code null} at the end. */
+    public record IntegrationPage(List<Integration> integrations, String marker) {}
+
+    /** One {@code Filters.DescribeIntegrationsFilter.N} entry. */
+    public record IntegrationFilter(String name, List<String> values) {}
+
+    private static boolean matchesFilter(Integration integration, IntegrationFilter filter) {
+        String name = filter.name() == null ? "" : filter.name();
+        List<String> values = filter.values() == null ? List.of() : filter.values();
+        String actual = switch (name) {
+            case "integration-arn" -> integration.getIntegrationArn();
+            case "source-arn" -> integration.getSourceArn();
+            case "status" -> integration.getStatus();
+            // source-types filters on the source's AWS service, which the ARN's third field names.
+            case "source-types" -> sourceType(integration.getSourceArn());
+            default -> throw new AwsException("InvalidParameterValue",
+                    "Unrecognized filter name: " + name, 400);
+        };
+        return actual != null && values.contains(actual);
+    }
+
+    private static String sourceType(String sourceArn) {
+        if (sourceArn == null) {
+            return null;
+        }
+        String[] parts = sourceArn.split(":");
+        return parts.length > 2 ? parts[2] : null;
+    }
+
+    private static int resolveMaxRecords(Integer maxRecords) {
+        if (maxRecords == null) {
+            return MAX_INTEGRATION_RECORDS;
+        }
+        if (maxRecords < MIN_INTEGRATION_RECORDS || maxRecords > MAX_INTEGRATION_RECORDS) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_INTEGRATION_RECORDS + " and "
+                            + MAX_INTEGRATION_RECORDS + ".", 400);
+        }
+        return maxRecords;
     }
 
     public synchronized Integration deleteIntegration(String integrationArn) {

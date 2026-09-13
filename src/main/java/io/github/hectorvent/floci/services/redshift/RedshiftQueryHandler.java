@@ -30,6 +30,9 @@ public class RedshiftQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(RedshiftQueryHandler.class);
 
+    private static final Pattern FILTER_NAME =
+            Pattern.compile("Filters\\.DescribeIntegrationsFilter\\.(\\d+)\\.Name");
+
     // GetClusterCredentials DurationSeconds bounds, inclusive (AWS: 900 to 3600).
     private static final int MIN_CREDENTIAL_DURATION_SECONDS = 900;
     private static final int MAX_CREDENTIAL_DURATION_SECONDS = 3600;
@@ -355,6 +358,8 @@ public class RedshiftQueryHandler {
                     params.getFirst("SourceArn"),
                     params.getFirst("TargetArn"),
                     params.getFirst("KMSKeyId"),
+                    params.getFirst("Description"),
+                    encryptionContextMap(params),
                     tagMap(params),
                     regionResolver.resolveRegionFromAuth(authorizationHeader));
             String xml = new XmlBuilder()
@@ -370,18 +375,25 @@ public class RedshiftQueryHandler {
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
         case "DescribeIntegrations" -> {
-            List<Integration> found = service.describeIntegrations(params.getFirst("IntegrationArn"));
+            RedshiftService.IntegrationPage found = service.describeIntegrations(
+                    params.getFirst("IntegrationArn"),
+                    intParam(params, "MaxRecords"),
+                    params.getFirst("Marker"),
+                    integrationFilters(params));
             XmlBuilder xmlBuilder = new XmlBuilder()
                     .start("DescribeIntegrationsResponse")
                       .start("DescribeIntegrationsResult")
                         .start("Integrations");
-            for (Integration integration : found) {
+            for (Integration integration : found.integrations()) {
                 xmlBuilder.raw(buildIntegrationXml(integration, true));
             }
-            // No Marker element: real Redshift omits it when there is no further page, and the
-            // caller's pagination loop stops on an absent marker.
+            xmlBuilder.end("Integrations");
+            // Marker only when a further page exists: real Redshift omits it on the terminal page,
+            // and an absent marker is what stops a caller's pagination loop.
+            if (found.marker() != null) {
+                xmlBuilder.elem("Marker", found.marker());
+            }
             String xml = xmlBuilder
-                        .end("Integrations")
                       .end("DescribeIntegrationsResult")
                       .start("ResponseMetadata")
                         .elem("RequestId", "test-req-id")
@@ -719,8 +731,22 @@ public class RedshiftQueryHandler {
                   .elem("TargetArn", integration.getTargetArn())
                   .elem("Status", integration.getStatus())
                   .elem("CreateTime", integration.getCreateTime());
+        if (integration.getDescription() != null) {
+            builder.elem("Description", integration.getDescription());
+        }
         if (integration.getKmsKeyId() != null) {
             builder.elem("KMSKeyId", integration.getKmsKeyId());
+        }
+        if (integration.getAdditionalEncryptionContext() != null
+                && !integration.getAdditionalEncryptionContext().isEmpty()) {
+            builder.start("AdditionalEncryptionContext");
+            for (Map.Entry<String, String> entry : integration.getAdditionalEncryptionContext().entrySet()) {
+                builder.start("entry")
+                    .elem("key", entry.getKey())
+                    .elem("value", entry.getValue())
+                  .end("entry");
+            }
+            builder.end("AdditionalEncryptionContext");
         }
         if (includeErrors) {
             builder.start("Errors").end("Errors");
@@ -738,11 +764,16 @@ public class RedshiftQueryHandler {
         return builder.end("Integration").build();
     }
 
-    /** Reads the {@code Tags.Tag.N.Key} / {@code .Value} pairs of a Query request. */
+    /**
+     * Reads the {@code TagList.Tag.N.Key} / {@code .Value} pairs of a Query request.
+     *
+     * <p>The member is {@code TagList}, not {@code Tags}: an SDK serialises the list under its own
+     * member name, so reading {@code Tags.Tag.N} silently drops every tag a real client sends.
+     */
     private static Map<String, String> tagMap(MultivaluedMap<String, String> params) {
         Map<String, String> tags = new LinkedHashMap<>();
         for (String key : params.keySet()) {
-            if (key.matches("Tags\\.Tag\\.\\d+\\.Key")) {
+            if (key.matches("TagList\\.Tag\\.\\d+\\.Key")) {
                 String value = params.getFirst(key.replaceAll("\\.Key$", ".Value"));
                 String name = params.getFirst(key);
                 if (name != null && !name.isBlank()) {
@@ -751,6 +782,54 @@ public class RedshiftQueryHandler {
             }
         }
         return tags;
+    }
+
+    /** Reads an {@code AdditionalEncryptionContext.entry.N.key} / {@code .value} map. */
+    private static Map<String, String> encryptionContextMap(MultivaluedMap<String, String> params) {
+        Map<String, String> context = new LinkedHashMap<>();
+        for (String key : params.keySet()) {
+            if (key.matches("AdditionalEncryptionContext\\.entry\\.\\d+\\.key")) {
+                String value = params.getFirst(key.replaceAll("\\.key$", ".value"));
+                String name = params.getFirst(key);
+                if (name != null && !name.isBlank()) {
+                    context.put(name, value == null ? "" : value);
+                }
+            }
+        }
+        return context;
+    }
+
+    /** Reads {@code Filters.DescribeIntegrationsFilter.N.Name} and its {@code Values.Value.M} list. */
+    private static List<RedshiftService.IntegrationFilter> integrationFilters(MultivaluedMap<String, String> params) {
+        Map<String, RedshiftService.IntegrationFilter> byIndex = new LinkedHashMap<>();
+        for (String key : params.keySet()) {
+            java.util.regex.Matcher matcher = FILTER_NAME.matcher(key);
+            if (!matcher.matches()) {
+                continue;
+            }
+            String index = matcher.group(1);
+            String name = params.getFirst(key);
+            List<String> values = params.keySet().stream()
+                    .filter(candidate -> candidate.matches(
+                            "Filters\\.DescribeIntegrationsFilter\\." + index + "\\.Values\\.Value\\.\\d+"))
+                    .sorted(Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
+                    .map(params::getFirst)
+                    .toList();
+            byIndex.put(index, new RedshiftService.IntegrationFilter(name, values));
+        }
+        return List.copyOf(byIndex.values());
+    }
+
+    private static Integer intParam(MultivaluedMap<String, String> params, String name) {
+        String raw = params.getFirst(name);
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(raw);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " must be an integer.", 400);
+        }
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
