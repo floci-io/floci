@@ -96,6 +96,83 @@ class S3DeleteObjectsIntegrationTest {
             .statusCode(404);
     }
 
+    /**
+     * github.com/floci-io/floci/issues/3355: the singular DELETE handler already threads
+     * x-amz-bypass-governance-retention through to S3Service, but the batch DeleteObjects path
+     * never read the header and always called the 3-arg deleteObject overload, which hardcodes
+     * bypassGovernance=false. A GOVERNANCE-locked object could never be force-deleted through a
+     * batch request, and any AwsException a per-object delete threw (e.g. the resulting
+     * AccessDenied) was flattened to a generic InternalError instead of the real code.
+     */
+    @Test
+    void deleteObjects_governanceLockedObjectWithoutBypass_reportsAccessDeniedNotInternalError() {
+        String bucket = createLockEnabledBucket();
+        String key = "locked.txt";
+        putGovernanceLockedObject(bucket, key);
+
+        given()
+            .contentType("application/xml")
+            .body("<Delete><Object><Key>%s</Key></Object></Delete>".formatted(key))
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Code>AccessDenied</Code>"))
+            .body(not(containsString("InternalError")));
+
+        given()
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void deleteObjects_governanceLockedObjectWithBypassHeader_isDeleted() {
+        String bucket = createLockEnabledBucket();
+        String key = "locked-bypass.txt";
+        putGovernanceLockedObject(bucket, key);
+
+        given()
+            .contentType("application/xml")
+            .header("x-amz-bypass-governance-retention", "true")
+            .body("<Delete><Object><Key>%s</Key></Object></Delete>".formatted(key))
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>" + key + "</Key>"))
+            .body(not(containsString("<Error>")));
+
+        given()
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(404);
+    }
+
+    private static String createLockEnabledBucket() {
+        String bucket = "delete-objects-lock-" + UUID.randomUUID().toString().substring(0, 8);
+        given()
+            .header("x-amz-bucket-object-lock-enabled", "true")
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+        return bucket;
+    }
+
+    private static void putGovernanceLockedObject(String bucket, String key) {
+        given()
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2099-01-01T00:00:00Z")
+            .body("locked content")
+        .when()
+            .put("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200);
+    }
+
     private static String createBucket() {
         String bucket = "delete-objects-" + UUID.randomUUID().toString().substring(0, 8);
         given()

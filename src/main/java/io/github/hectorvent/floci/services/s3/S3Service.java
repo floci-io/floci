@@ -1682,17 +1682,27 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public DeleteObjectsResult deleteObjects(String bucketName, List<XmlParser.KeyVersion> entries) {
+        return deleteObjects(bucketName, entries, false);
+    }
+
+    public DeleteObjectsResult deleteObjects(String bucketName, List<XmlParser.KeyVersion> entries,
+                                             boolean bypassGovernance) {
         ensureBucketExists(bucketName);
         List<DeleteResult> deleted = new ArrayList<>();
         List<DeleteError> errors = new ArrayList<>();
         for (XmlParser.KeyVersion entry : entries) {
             try {
-                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId());
+                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId(), bypassGovernance);
                 if (result != null && result.isDeleteMarker()) {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), true, result.getVersionId()));
                 } else {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), false, null));
                 }
+            } catch (AwsException e) {
+                // A per-object failure (e.g. GOVERNANCE/COMPLIANCE retention, a legal hold) carries
+                // its own AWS error code and message; flattening it to InternalError like the
+                // catch-all below would misreport a 403 as a 500 to the client.
+                errors.add(new DeleteError(entry.key(), e.getErrorCode(), e.getMessage()));
             } catch (Exception e) {
                 errors.add(new DeleteError(entry.key(), "InternalError", e.getMessage()));
             }

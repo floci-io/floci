@@ -1471,7 +1471,9 @@ public class S3Controller {
             }
         }
 
-        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, authorizedEntries);
+        boolean bypassGovernance = "true".equalsIgnoreCase(
+                httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, authorizedEntries, bypassGovernance);
 
         XmlBuilder builder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
