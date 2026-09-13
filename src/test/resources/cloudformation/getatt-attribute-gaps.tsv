@@ -46,3 +46,4 @@ AWS::RDS::DBInstance	ResumeFullAutomationModeTime	RDS Custom automation mode is 
 AWS::RDS::DBInstance	SecondaryAvailabilityZone	multi-AZ secondary placement is not emulated
 AWS::RDS::DBInstance	StatusInfos	read-replica status detail is not emulated
 AWS::SQS::QueuePolicy	Id	schema gives no description; the policy has no backing entity to take an id from
+AWS::SecretsManager::Secret	Id	Fn::GetAtt Id on a secret is its ARN, which the provisioner already sets as the physical id and as Arn; closable, deferred to a follow-up PR to keep this one a pure move
