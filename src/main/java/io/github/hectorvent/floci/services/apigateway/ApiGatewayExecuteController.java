@@ -338,20 +338,35 @@ public class ApiGatewayExecuteController {
 
         ApiGatewayResource matched = null;
         MethodConfig method = null;
+        boolean concreteWithMethodsSeen = false;
         for (ApiGatewayResource r : matchedResources) {
-            if (r.getResourceMethods() != null && !r.getResourceMethods().isEmpty()) {
-                MethodConfig m = r.getResourceMethods().get(httpMethod.toUpperCase());
-                if (m == null) {
-                    m = r.getResourceMethods().get("ANY");
-                }
-                if (m != null) {
-                    matched = r;
-                    method = m;
-                }
-                // Once we match a path that has methods configured, we must not fall back
-                // to less specific sibling resources (e.g. /{proxy+}), even on method mismatch.
+            Map<String, MethodConfig> resourceMethods = r.getResourceMethods();
+            if (resourceMethods == null || resourceMethods.isEmpty()) {
+                continue;
+            }
+
+            boolean greedy = r.getPath() != null && r.getPath().contains("{proxy+}");
+            // A concrete resource that declares methods but not this one is a method
+            // mismatch, not an invitation for a greedy catch-all to absorb the request.
+            if (greedy && concreteWithMethodsSeen) {
                 break;
             }
+
+            MethodConfig m = resourceMethods.get(httpMethod.toUpperCase());
+            if (m == null) {
+                m = resourceMethods.get("ANY");
+            }
+            if (m != null) {
+                matched = r;
+                method = m;
+                break;
+            }
+
+            // Candidates are ordered exact, then parameterised, then greedy. A literal
+            // segment that cannot serve the method yields to a parameterised sibling that
+            // can: /users/me declaring only PATCH must not hide GET /users/{userId}, since
+            // "me" is an ordinary parameter value there.
+            concreteWithMethodsSeen = true;
         }
 
         if (matched == null) {

@@ -128,6 +128,70 @@ class ApiGatewayRoutingFallthroughIntegrationTest {
                 .when().put("/restapis/" + apiId + "/resources/" + devicesResourceId + "/methods/POST/integration/responses/200")
                 .then()
                 .statusCode(201);
+
+        // Create /users, then a parameterised /users/{userId} with GET and a literal
+        // /users/me carrying only PATCH. A request for GET /users/me matches the literal
+        // first, which cannot serve it; AWS resolves it against the {userId} sibling.
+        String usersResourceId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"pathPart\":\"users\"}")
+                .when().post("/restapis/" + apiId + "/resources/" + rootId)
+                .then()
+                .statusCode(201)
+                .extract().path("id");
+
+        String userIdResourceId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"pathPart\":\"{userId}\"}")
+                .when().post("/restapis/" + apiId + "/resources/" + usersResourceId)
+                .then()
+                .statusCode(201)
+                .extract().path("id");
+
+        createMockMethod(userIdResourceId, "GET", "users-get");
+
+        String usersMeResourceId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"pathPart\":\"me\"}")
+                .when().post("/restapis/" + apiId + "/resources/" + usersResourceId)
+                .then()
+                .statusCode(201)
+                .extract().path("id");
+
+        createMockMethod(usersMeResourceId, "PATCH", "users-me-patch");
+    }
+
+    /** Wires {@code httpMethod} on {@code resourceId} to a MOCK integration echoing {@code marker}. */
+    private static void createMockMethod(String resourceId, String httpMethod, String marker) {
+        String base = "/restapis/" + apiId + "/resources/" + resourceId + "/methods/" + httpMethod;
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"authorizationType\":\"NONE\"}")
+                .when().put(base)
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"responseParameters\":{}}")
+                .when().put(base + "/responses/200")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"type\":\"MOCK\",\"requestTemplates\":{\"application/json\":\"{\\\"statusCode\\\": 200}\"}}")
+                .when().put(base + "/integration")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"selectionPattern\":\"\",\"responseTemplates\":{\"application/json\":\"{\\\"matched\\\":\\\"" + marker + "\\\"}\"}}")
+                .when().put(base + "/integration/responses/200")
+                .then()
+                .statusCode(201);
     }
 
     @Test @Order(3)
@@ -207,6 +271,37 @@ class ApiGatewayRoutingFallthroughIntegrationTest {
     }
 
     @Test @Order(9)
+    void getUsersMeFallsBackToTheParameterisedSibling() {
+        // /users/me exists but declares only PATCH. GET must resolve against
+        // /users/{userId} rather than 405 - "me" is an ordinary parameter value.
+        given()
+                .when().get("/execute-api/" + apiId + "/test/users/me")
+                .then()
+                .statusCode(200)
+                .body("matched", equalTo("users-get"));
+    }
+
+    @Test @Order(10)
+    void patchUsersMeStillPrefersTheLiteralResource() {
+        // The literal keeps priority for the method it does declare.
+        given()
+                .contentType(ContentType.JSON)
+                .when().patch("/execute-api/" + apiId + "/test/users/me")
+                .then()
+                .statusCode(200)
+                .body("matched", equalTo("users-me-patch"));
+    }
+
+    @Test @Order(11)
+    void getUsersOtherIdUsesTheParameterisedResource() {
+        given()
+                .when().get("/execute-api/" + apiId + "/test/users/abc123")
+                .then()
+                .statusCode(200)
+                .body("matched", equalTo("users-get"));
+    }
+
+    @Test @Order(12)
     void cleanup() {
         given().when().delete("/restapis/" + apiId).then().statusCode(202);
     }
