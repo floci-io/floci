@@ -10,6 +10,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -128,10 +129,31 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         // Queue object, so build it here from region + accountId + queueName. Without this,
         // Fn::GetAtt [Queue, Arn] references resolve to an empty string.
         String queueArn = AwsArnUtils.Arn.of("sqs", ctx.region(), ctx.accountId(), queueName).toString();
+        reconcileTags(queueUrl, ctx.resolveTags(props, "Tags"), ctx.region());
         r.setPhysicalId(queueUrl);
         r.getAttributes().put("Arn", queueArn);
         r.getAttributes().put("QueueName", queueName);
         r.getAttributes().put("QueueUrl", queueUrl);
+    }
+
+    /**
+     * Drives the queue's tags to the template's desired set, which is what CloudFormation does on
+     * update: a key the template drops is untagged, and a template with no {@code Tags} leaves the
+     * queue untagged. SQS has no replace-tags call, so the removal has to be computed, the same
+     * shape {@code AcmCfnProvisioner} uses.
+     *
+     * <p>Serves the create path too, where {@code listQueueTags} is empty and this is a plain tag.
+     * One path for both keeps a newly created queue and an updated one in the same state for the
+     * same template.
+     */
+    private void reconcileTags(String queueUrl, Map<String, String> desired, String region) {
+        List<String> stale = ProvisionContext.staleTagKeys(sqsService.listQueueTags(queueUrl, region), desired);
+        if (!stale.isEmpty()) {
+            sqsService.untagQueue(queueUrl, stale, region);
+        }
+        if (!desired.isEmpty()) {
+            sqsService.tagQueue(queueUrl, desired, region);
+        }
     }
 
     private void provisionQueuePolicy(StackResource r, ProvisionContext ctx) {
