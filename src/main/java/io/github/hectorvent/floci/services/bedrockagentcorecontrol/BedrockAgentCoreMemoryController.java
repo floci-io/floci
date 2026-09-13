@@ -17,6 +17,12 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
+import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEventService;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.Branch;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.MemoryEvent;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.PayloadType;
+import java.util.List;
+import java.util.Map;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
@@ -40,13 +46,16 @@ public class BedrockAgentCoreMemoryController {
     private static final Logger LOG = Logger.getLogger(BedrockAgentCoreMemoryController.class);
 
     private final BedrockAgentCoreMemoryService service;
+    private final BedrockAgentCoreEventService eventService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public BedrockAgentCoreMemoryController(BedrockAgentCoreMemoryService service,
+                                            BedrockAgentCoreEventService eventService,
                                             RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.service = service;
+        this.eventService = eventService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -198,4 +207,109 @@ public class BedrockAgentCoreMemoryController {
                 .entity(new AwsErrorResponse("ValidationException", e.getMessage()))
                 .build();
     }
+
+    // ── AgentCore Memory events (data plane) ─────────────────────
+    //
+    // These are data-plane operations, but they live under /memories, and a JAX-RS request is
+    // matched against one root resource class only: a class rooted at "/" never gets a look in
+    // once this class claims the subtree. So the endpoints sit here while the behaviour stays in
+    // BedrockAgentCoreEventService.
+
+    @POST
+    @Path("/{memoryId}/events")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response createEvent(@Context HttpHeaders headers,
+                                @PathParam("memoryId") String memoryId,
+                                CreateEventRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            CreateEventRequest body = request == null ? new CreateEventRequest() : request;
+            MemoryEvent event = eventService.createEvent(memoryId, body.actorId(), body.sessionId(),
+                    body.eventTimestamp(), body.payload(), body.branch(), region);
+            return Response.ok(Map.of("event", event)).build();
+        } catch (AwsException e) {
+            return awsError(e);
+        }
+    }
+
+    /** ListEvents is a POST to the session path, not a GET. That is the real wire shape. */
+    @POST
+    @Path("/{memoryId}/actor/{actorId}/sessions/{sessionId}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listEvents(@Context HttpHeaders headers,
+                               @PathParam("memoryId") String memoryId,
+                               @PathParam("actorId") String actorId,
+                               @PathParam("sessionId") String sessionId,
+                               ListEventsRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ListEventsRequest body = request == null ? new ListEventsRequest() : request;
+            List<MemoryEvent> events = eventService.listEvents(memoryId, actorId, sessionId,
+                    body.includePayloads(), body.maxResults(), region);
+            return Response.ok(Map.of("events", events)).build();
+        } catch (AwsException e) {
+            return awsError(e);
+        }
+    }
+
+    @GET
+    @Path("/{memoryId}/actor/{actorId}/sessions/{sessionId}/events/{eventId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getEvent(@Context HttpHeaders headers,
+                             @PathParam("memoryId") String memoryId,
+                             @PathParam("actorId") String actorId,
+                             @PathParam("sessionId") String sessionId,
+                             @PathParam("eventId") String eventId) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            return Response.ok(Map.of("event",
+                    eventService.getEvent(memoryId, actorId, sessionId, eventId, region))).build();
+        } catch (AwsException e) {
+            return awsError(e);
+        }
+    }
+
+    @DELETE
+    @Path("/{memoryId}/actor/{actorId}/sessions/{sessionId}/events/{eventId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteEvent(@Context HttpHeaders headers,
+                                @PathParam("memoryId") String memoryId,
+                                @PathParam("actorId") String actorId,
+                                @PathParam("sessionId") String sessionId,
+                                @PathParam("eventId") String eventId) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            // DeleteEvent echoes the id rather than answering with an empty body.
+            return Response.ok(Map.of("eventId",
+                    eventService.deleteEvent(memoryId, actorId, sessionId, eventId, region))).build();
+        } catch (AwsException e) {
+            return awsError(e);
+        }
+    }
+
+    /**
+     * Renders an {@link AwsException} the way this protocol needs it: the SDK maps the error by the
+     * {@code X-Amzn-Errortype} header, which the shared exception mapper does not set.
+     */
+    private static Response awsError(AwsException e) {
+        return Response.status(e.getHttpStatus())
+                .type(MediaType.APPLICATION_JSON)
+                .header("X-Amzn-Errortype", e.getErrorCode())
+                .entity(new AwsErrorResponse(e.getErrorCode(), e.getMessage()))
+                .build();
+    }
+
+    /** Request body of {@code CreateEvent}; {@code sessionId} and {@code branch} are optional. */
+    public record CreateEventRequest(String actorId, String sessionId, Double eventTimestamp,
+                                     List<PayloadType> payload, Branch branch) {
+        public CreateEventRequest() { this(null, null, null, null, null); }
+    }
+
+    /** Request body of {@code ListEvents}. */
+    public record ListEventsRequest(Boolean includePayloads, Integer maxResults) {
+        public ListEventsRequest() { this(null, null); }
+    }
+
 }
