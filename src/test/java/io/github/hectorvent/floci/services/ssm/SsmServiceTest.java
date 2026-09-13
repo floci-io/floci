@@ -890,4 +890,26 @@ class SsmServiceTest {
         assertEquals(1, retrievedTags.size());
         assertEquals("demo", retrievedTags.get("Project"));
     }
+
+    @Test
+    void listTagsForResourceWithNonAwsPartitionArnNormalized() {
+        String region = "us-gov-west-1";
+        Map<String, String> tags = Map.of("GovProject", "mission");
+        ssmService.putParameter("/app/gov-test", "val", "String", null, false, tags, region);
+
+        String arn = "arn:aws-us-gov:ssm:" + region + ":000000000000:parameter/app/gov-test";
+        Map<String, String> retrievedTags = ssmService.listTagsForResource(arn, region);
+        assertEquals(1, retrievedTags.size());
+        assertEquals("mission", retrievedTags.get("GovProject"));
+    }
+
+    @Test
+    void putParameterOverwriteClearsDescriptionWhenOmitted() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/desc-test", "val1", "String", "Initial description", false, null, region);
+        assertEquals("Initial description", ssmService.getParameter("/app/desc-test", region).getDescription());
+
+        ssmService.putParameter("/app/desc-test", "val2", "String", null, true, null, region);
+        assertNull(ssmService.getParameter("/app/desc-test", region).getDescription());
+    }
 }

@@ -182,7 +182,7 @@ public class SsmService implements ResourceProvider {
 
         Parameter parameter = new Parameter(name, value, type != null ? type : "String");
         parameter.setVersion(version);
-        parameter.setDescription(description != null ? description : (existing != null ? existing.getDescription() : null));
+        parameter.setDescription(description);
         parameter.setArn(regionResolver.buildArn("ssm", region, "parameter" + name));
         parameter.setLastModifiedDate(Instant.now());
 
@@ -415,10 +415,22 @@ public class SsmService implements ResourceProvider {
     }
 
     private static String normalizeResourceId(String resourceId) {
-        if (resourceId != null && resourceId.startsWith("arn:aws:ssm:")) {
-            int idx = resourceId.indexOf(":parameter");
-            if (idx != -1) {
-                return resourceId.substring(idx + ":parameter".length());
+        if (resourceId != null && resourceId.startsWith("arn:")) {
+            try {
+                AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceId);
+                if ("ssm".equals(arn.service())) {
+                    String resource = arn.resource();
+                    if (resource.startsWith("parameter/")) {
+                        return resource.substring("parameter".length());
+                    }
+                    if (resource.startsWith("parameter")) {
+                        return resource.substring("parameter".length());
+                    }
+                }
+            } catch (IllegalArgumentException e) {
+                // Not a valid ARN; fall through and use resourceId directly so callers
+                // querying parameterStore produce the standard InvalidResourceId error.
+                LOG.debugv("Failed to parse resourceId as ARN: {0}", resourceId);
             }
         }
         return resourceId;

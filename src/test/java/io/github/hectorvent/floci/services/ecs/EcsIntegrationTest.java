@@ -1239,4 +1239,30 @@ class EcsIntegrationTest {
             .body("taskDefinition.containerDefinitions[1]", not(hasKey("entryPoint")))
             .body("taskDefinition.containerDefinitions[1]", not(hasKey("command")));
     }
+
+    @Test
+    @Order(71)
+    void registerTaskDefinitionWithHealthCheckMissingCommandReturns400() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "invalid-hc-missing-cmd",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "healthCheck": {
+                                "interval": 30
+                            }
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ClientException"))
+                .body("message", containsString("HealthCheck command is required."));
+    }
 }

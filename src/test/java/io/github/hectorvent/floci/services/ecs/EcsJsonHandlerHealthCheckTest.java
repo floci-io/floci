@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -136,5 +138,53 @@ class EcsJsonHandlerHealthCheckTest {
         assertTrue(hc.path("timeout").isMissingNode(), "timeout should be absent");
         assertTrue(hc.path("retries").isMissingNode(), "retries should be absent");
         assertTrue(hc.path("startPeriod").isMissingNode(), "startPeriod should be absent");
+    }
+
+    @Test
+    void registerTaskDefinitionWithMissingHealthCheckCommandThrowsClientException() throws Exception {
+        String requestJson = """
+                {
+                  "family": "missing-hc-command",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "healthCheck": {
+                        "interval": 30
+                      }
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("ClientException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void registerTaskDefinitionWithEmptyHealthCheckCommandThrowsClientException() throws Exception {
+        String requestJson = """
+                {
+                  "family": "empty-hc-command",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "healthCheck": {
+                        "command": []
+                      }
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("ClientException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 }

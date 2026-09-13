@@ -1534,9 +1534,10 @@ public class EcsJsonHandler {
         if (node == null || !node.isObject()) {
             return null;
         }
-        List<String> command = node.has("command") && node.path("command").isArray()
-                ? jsonArrayToList(node.path("command"))
-                : null;
+        if (!node.hasNonNull("command") || !node.path("command").isArray() || node.path("command").isEmpty()) {
+            throw new AwsException("ClientException", "HealthCheck command is required.", 400);
+        }
+        List<String> command = jsonArrayToList(node.path("command"));
         Integer interval = node.has("interval") ? node.path("interval").asInt() : null;
         Integer timeout = node.has("timeout") ? node.path("timeout").asInt() : null;
         Integer retries = node.has("retries") ? node.path("retries").asInt() : null;
