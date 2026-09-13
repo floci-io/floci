@@ -335,18 +335,15 @@ public class ApiGatewayExecuteController {
 
         ApiGatewayResource matched = null;
         MethodConfig method = null;
-        boolean concreteWithMethodsSeen = false;
+        // Candidates are ordered exact, then parameterised, then greedy. AWS picks the most
+        // specific resource that can serve the method, so one declaring methods but not this
+        // one yields to a less specific sibling that declares it: /users/me carrying only PATCH
+        // does not hide GET /users/{userId}, and /devices carrying only POST falls through to
+        // GET /{proxy+}. The request is refused only when no candidate declares the method.
         for (ApiGatewayResource r : matchedResources) {
             Map<String, MethodConfig> resourceMethods = r.getResourceMethods();
             if (resourceMethods == null || resourceMethods.isEmpty()) {
                 continue;
-            }
-
-            boolean greedy = r.getPath() != null && r.getPath().contains("{proxy+}");
-            // A concrete resource that declares methods but not this one is a method
-            // mismatch, not an invitation for a greedy catch-all to absorb the request.
-            if (greedy && concreteWithMethodsSeen) {
-                break;
             }
 
             MethodConfig m = resourceMethods.get(httpMethod.toUpperCase());
@@ -358,12 +355,6 @@ public class ApiGatewayExecuteController {
                 method = m;
                 break;
             }
-
-            // Candidates are ordered exact, then parameterised, then greedy. A literal
-            // segment that cannot serve the method yields to a parameterised sibling that
-            // can: /users/me declaring only PATCH must not hide GET /users/{userId}, since
-            // "me" is an ordinary parameter value there.
-            concreteWithMethodsSeen = true;
         }
 
         if (matched == null) {

@@ -247,15 +247,15 @@ class ApiGatewayRoutingFallthroughIntegrationTest {
     }
 
     @Test @Order(7)
-    void getDevicesReturns405() {
+    void getDevicesFallsThroughToProxy() {
         // Request GET /devices.
-        // /devices has POST but no GET, so it should return 405 Method Not Allowed,
-        // and NOT fall back to /{proxy+} ANY.
+        // /devices declares POST but no GET. AWS picks the most specific resource that can
+        // serve the method, so this falls through to /{proxy+} ANY rather than being refused.
         given()
                 .when().get("/execute-api/" + apiId + "/test/devices")
                 .then()
-                .statusCode(405)
-                .body("message", equalTo("Method Not Allowed"));
+                .statusCode(200)
+                .body("matched", equalTo("proxy"));
     }
 
     @Test @Order(8)

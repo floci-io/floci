@@ -745,3 +745,97 @@ describe('API Gateway v1 — execute-api data plane', () => {
     });
   });
 });
+
+// ──────────────────────────── Resource/method resolution precedence ────────────────────────────
+
+/**
+ * AWS selects the most specific resource that can serve the requested method, searching
+ * literal, then path parameter, then greedy {proxy+}. A resource that declares methods but
+ * not the requested one yields to a less specific sibling that declares it.
+ *
+ * Captured against a real REST API in us-west-2 (MOCK integrations, no authorizer): with
+ * /users/{userId} GET and a literal /users/me PATCH deployed, GET /users/me is served by
+ * /users/{userId} with userId="me", and with /things/real GET and /things/{proxy+} ANY,
+ * POST /things/real is served by /things/{proxy+}.
+ */
+describe('API Gateway v1 — resource/method resolution precedence', () => {
+  let gw: APIGatewayClient;
+  let apiId: string;
+
+  /** Wire a MOCK method that echoes which resource served the request. */
+  async function mockMethod(resourceId: string, httpMethod: string, marker: string): Promise<void> {
+    await apigwFetch(`/restapis/${apiId}/resources/${resourceId}/methods/${httpMethod}`, 'PUT', {
+      authorizationType: 'NONE',
+    });
+    await apigwFetch(`/restapis/${apiId}/resources/${resourceId}/methods/${httpMethod}/responses/200`, 'PUT', {});
+    await apigwFetch(`/restapis/${apiId}/resources/${resourceId}/methods/${httpMethod}/integration`, 'PUT', {
+      type: 'MOCK',
+      requestTemplates: { 'application/json': '{"statusCode": 200}' },
+    });
+    await apigwFetch(
+      `/restapis/${apiId}/resources/${resourceId}/methods/${httpMethod}/integration/responses/200`,
+      'PUT',
+      { selectionPattern: '', responseTemplates: { 'application/json': `{"servedBy":"${marker}"}` } }
+    );
+  }
+
+  /** Create a child resource and return its id. */
+  async function child(parentId: string, pathPart: string): Promise<string> {
+    const res = await apigwFetch(`/restapis/${apiId}/resources/${parentId}`, 'POST', { pathPart });
+    return (await res.json() as { id: string }).id;
+  }
+
+  beforeAll(async () => {
+    gw = makeClient(APIGatewayClient);
+
+    const api = await gw.send(new CreateRestApiCommand({ name: uniqueName('routing-precedence') }));
+    apiId = api.id!;
+
+    const resources = await gw.send(new GetResourcesCommand({ restApiId: apiId }));
+    const rootId = resources.items![0].id!;
+
+    // /users/{userId} GET alongside a literal /users/me carrying only PATCH.
+    const usersId = await child(rootId, 'users');
+    await mockMethod(await child(usersId, '{userId}'), 'GET', 'users-by-id');
+    await mockMethod(await child(usersId, 'me'), 'PATCH', 'users-me');
+
+    // /things/real carrying only GET alongside a greedy /things/{proxy+} ANY.
+    const thingsId = await child(rootId, 'things');
+    await mockMethod(await child(thingsId, 'real'), 'GET', 'things-real');
+    await mockMethod(await child(thingsId, '{proxy+}'), 'ANY', 'things-proxy');
+
+    const depRes = await apigwFetch(`/restapis/${apiId}/deployments`, 'POST', { description: 'compat-test' });
+    const depId = (await depRes.json() as { id: string }).id;
+    await apigwFetch(`/restapis/${apiId}/stages`, 'POST', { stageName: 'prod', deploymentId: depId });
+  });
+
+  afterAll(async () => {
+    try { if (apiId) await gw.send(new DeleteRestApiCommand({ restApiId: apiId })); } catch { /* ignore */ }
+  });
+
+  async function servedBy(path: string, method: string): Promise<string> {
+    const res = await executeApi(apiId, 'prod', path, { method });
+    expect(res.status).toBe(200);
+    return (await res.json() as { servedBy: string }).servedBy;
+  }
+
+  it('should serve GET /users/me from the parameterised sibling', async () => {
+    expect(await servedBy('/users/me', 'GET')).toBe('users-by-id');
+  });
+
+  it('should keep the literal resource for the method it declares', async () => {
+    expect(await servedBy('/users/me', 'PATCH')).toBe('users-me');
+  });
+
+  it('should serve an ordinary id from the parameterised resource', async () => {
+    expect(await servedBy('/users/abc123', 'GET')).toBe('users-by-id');
+  });
+
+  it('should keep the literal resource for GET /things/real', async () => {
+    expect(await servedBy('/things/real', 'GET')).toBe('things-real');
+  });
+
+  it('should serve POST /things/real from the greedy proxy', async () => {
+    expect(await servedBy('/things/real', 'POST')).toBe('things-proxy');
+  });
+});
