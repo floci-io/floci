@@ -1675,6 +1675,62 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(204);
     }
 
+    @Test
+    @Order(50)
+    void bucketPolicyCannotGrantAnonymousBucketPolicyWrites() {
+        String selfGrantingPolicy = """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy"],
+                    "Resource": "arn:aws:s3:::%s"
+                  }
+                }
+                """.formatted(BUCKET_CONFIG_BUCKET);
+        given()
+            .header("Authorization", LOCAL_AUTH_HEADER)
+            .contentType("application/json")
+            .body(selfGrantingPolicy)
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body(publicGetObjectPolicy(BUCKET_CONFIG_BUCKET))
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+        .when()
+            .delete("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .header("Authorization", LOCAL_AUTH_HEADER)
+        .when()
+            .get("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(200)
+            .body(containsString("s3:DeleteBucketPolicy"))
+            .body(not(containsString("s3:GetObject")));
+
+        given()
+            .header("Authorization", LOCAL_AUTH_HEADER)
+        .when()
+            .delete("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(204);
+    }
+
     private static String presignedSignature(String method, String path,
                                               String accessKeyId, String secretKey, String expires) {
         return presignedSignature(method, path, accessKeyId, secretKey, expires, "UNSIGNED-PAYLOAD");
