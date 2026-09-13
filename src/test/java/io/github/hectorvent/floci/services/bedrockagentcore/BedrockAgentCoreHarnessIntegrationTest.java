@@ -24,8 +24,11 @@ import static org.hamcrest.Matchers.not;
 @QuarkusTest
 class BedrockAgentCoreHarnessIntegrationTest {
 
+    /** Matches the modelled ARN pattern: a name then a ten character suffix. */
     private static final String ARN =
-            "arn:aws:bedrock-agentcore:us-east-1:000000000000:harness/h-1";
+            "arn:aws:bedrock-agentcore:us-east-1:000000000000:harness/myHarness-abc1234567";
+    /** A runtime session id has a documented minimum of 33 characters. */
+    private static final String SESSION = "session-0123456789abcdef0123456789abcdef";
     private static final String SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id";
 
     /**
@@ -66,7 +69,7 @@ class BedrockAgentCoreHarnessIntegrationTest {
 
     @Test
     void theReplyEchoesTheLastUserMessage() {
-        String body = request(ARN, "sess-1")
+        String body = request(ARN, SESSION)
                 .body("""
                         {"messages": [{"role": "user", "content": [{"text": "what is EIDR?"}]}]}
                         """)
@@ -80,7 +83,7 @@ class BedrockAgentCoreHarnessIntegrationTest {
 
     @Test
     void theStreamCarriesTheFullEventSequenceInOrder() {
-        String body = request(ARN, "sess-2")
+        String body = request(ARN, SESSION)
                 .body("""
                         {"messages": [{"role": "user", "content": [{"text": "hello"}]}]}
                         """)
@@ -105,7 +108,7 @@ class BedrockAgentCoreHarnessIntegrationTest {
 
     @Test
     void onlyTheLastUserMessageIsEchoed() {
-        String body = request(ARN, "sess-3")
+        String body = request(ARN, SESSION)
                 .body("""
                         {"messages": [
                            {"role": "user", "content": [{"text": "first question"}]},
@@ -123,7 +126,7 @@ class BedrockAgentCoreHarnessIntegrationTest {
     @Test
     void anEmptyMessagesArrayStillStreamsAWellFormedResponse() {
         // Legitimate: a caller whose memory already holds the current turn sends no messages.
-        String body = invoke(ARN, "sess-4", "{\"messages\": []}", 200);
+        String body = invoke(ARN, SESSION, "{\"messages\": []}", 200);
 
         assertThat(body, containsString("messageStart"));
         assertThat(body, containsString("messageStop"));
@@ -132,7 +135,7 @@ class BedrockAgentCoreHarnessIntegrationTest {
 
     @Test
     void aRequestWithoutAHarnessArnIsRejected() {
-        String body = invoke(null, "sess-5", "{}", 400);
+        String body = invoke(null, SESSION, "{}", 400);
         assertThat(body, containsString("ValidationException"));
         assertThat(body, containsString("harnessArn"));
     }
@@ -147,11 +150,43 @@ class BedrockAgentCoreHarnessIntegrationTest {
     @Test
     void anUnknownHarnessArnIsAccepted() {
         // The emulator models no harness resource, so there is nothing to resolve an ARN against.
-        request("arn:aws:bedrock-agentcore:us-east-1:000000000000:harness/nope", "sess-6")
+        // Well formed but naming no harness: the shape is checked, the resource is not resolved.
+        request("arn:aws:bedrock-agentcore:us-east-1:000000000000:harness/unknownOne-zzzz999999", SESSION)
                 .body("""
                         {"messages": [{"role": "user", "content": [{"text": "hi"}]}]}
                         """)
                 .when().post("/harnesses/invoke")
                 .then().statusCode(200);
+    }
+
+    @Test
+    void anOmittedMessagesMemberIsRejected() {
+        // messages is required. An empty array is a legitimate request; omitting the member is not,
+        // so the two must not collapse into the same canned reply.
+        String body = invoke(ARN, SESSION, "{}", 400);
+        assertThat(body, containsString("messages"));
+    }
+
+    @Test
+    void aNonArrayMessagesMemberIsRejected() {
+        invoke(ARN, SESSION, "{\"messages\": \"hello\"}", 400);
+    }
+
+    @Test
+    void aRuntimeSessionIdShorterThanTheMinimumIsRejected() {
+        String body = invoke(ARN, "short", "{\"messages\": []}", 400);
+        assertThat(body, containsString("runtimeSessionId"));
+    }
+
+    @Test
+    void aMalformedHarnessArnIsRejected() {
+        String body = invoke("anything", SESSION, "{\"messages\": []}", 400);
+        assertThat(body, containsString("harness ARN"));
+    }
+
+    @Test
+    void anArnWithoutTheTenCharacterSuffixIsRejected() {
+        invoke("arn:aws:bedrock-agentcore:us-east-1:000000000000:harness/h-1", SESSION,
+                "{\"messages\": []}", 400);
     }
 }

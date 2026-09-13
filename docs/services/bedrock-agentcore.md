@@ -95,6 +95,11 @@ framing `ConverseStream` uses, so an SDK client's stream iterator works unchange
 arrive in AWS's order: `messageStart`, `contentBlockStart`, one `contentBlockDelta` per chunk,
 `contentBlockStop`, `messageStop`, `metadata`.
 
+`harnessArn`, `runtimeSessionId` and `messages` are all required, and the first two are validated
+against their modelled shapes rather than merely checked for presence: a harness ARN ends in the
+same `name-<10 alphanumerics>` form AgentCore uses elsewhere, and a runtime session id is 33 to 100
+characters. `messages` may be an empty array, but omitting the member is a `ValidationException`.
+
 Note the wire bindings, which are easy to get wrong: `harnessArn` and `qualifier` are **query
 parameters**, `runtimeSessionId` and `runtimeUserId` are **headers**
 (`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` / `-User-Id`), and only `messages`, `model`,
@@ -103,8 +108,8 @@ parameters**, `runtimeSessionId` and `runtimeUserId` are **headers**
 
 There is no agent loop and no model. The assistant's reply **echoes the caller's last user
 message**, so a chat client visibly works end to end and a request that failed to parse is obvious
-rather than hidden behind a fixed string. A request carrying no user message is legitimate, and
-gets a canned reply rather than an error.
+rather than hidden behind a fixed string. A request whose `messages` array is present but empty, or
+carries no user turn, is legitimate and gets a canned reply rather than an error.
 
 The `harnessArn` is not resolved: the emulator models no harness resource, so there is nothing to
 look one up in. Tool execution, skills and multi-turn iteration are not emulated, so no tool-use

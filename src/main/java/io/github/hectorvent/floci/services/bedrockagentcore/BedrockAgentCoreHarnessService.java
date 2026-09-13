@@ -13,6 +13,7 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * {@code InvokeHarness}: the AgentCore Harness data plane.
@@ -29,6 +30,17 @@ import java.util.function.Consumer;
 public class BedrockAgentCoreHarnessService {
 
     private static final String ROLE_USER = "user";
+
+    /**
+     * Modelled constraints, from the service model rather than guessed. A harness ARN ends in the
+     * same {@code name-<10 alphanumerics>} shape AgentCore uses for its other resource ids, and a
+     * runtime session id has a documented minimum length that a short test value does not meet.
+     */
+    private static final Pattern HARNESS_ARN = Pattern.compile(
+            "arn:([^:]+)?:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:harness/[a-zA-Z][a-zA-Z0-9_]{0,39}-[a-zA-Z0-9]{10}");
+    private static final Pattern RUNTIME_SESSION_ID = Pattern.compile("[a-zA-Z0-9][a-zA-Z0-9-_]*");
+    private static final int RUNTIME_SESSION_ID_MIN = 33;
+    private static final int RUNTIME_SESSION_ID_MAX = 100;
     /** Chunked so consumers exercise incremental delivery rather than one blob. */
     private static final int CHUNK_SIZE = 24;
 
@@ -54,15 +66,32 @@ public class BedrockAgentCoreHarnessService {
         // read from the body. Confirmed against the SDK's own request bindings.
         requirePresent(harnessArn, "harnessArn");
         requirePresent(runtimeSessionId, "runtimeSessionId");
-        // harnessArn is deliberately not resolved: the emulator models no harness resource, so
-        // there is nothing to look it up in. InvokeAgentRuntime is permissive for the same reason.
+        if (!HARNESS_ARN.matcher(harnessArn).matches()) {
+            throw new AwsException("ValidationException", "Invalid harness ARN format.", 400);
+        }
+        if (runtimeSessionId.length() < RUNTIME_SESSION_ID_MIN
+                || runtimeSessionId.length() > RUNTIME_SESSION_ID_MAX
+                || !RUNTIME_SESSION_ID.matcher(runtimeSessionId).matches()) {
+            throw new AwsException("ValidationException",
+                    "runtimeSessionId must be " + RUNTIME_SESSION_ID_MIN + " to " + RUNTIME_SESSION_ID_MAX
+                            + " characters and match " + RUNTIME_SESSION_ID.pattern(), 400);
+        }
+        // The ARN's shape is checked but the harness itself is not resolved: the emulator models no
+        // harness resource, so there is nothing to look it up in.
 
-        String reply = buildReply(request);
+        // messages is a required member. An empty array is a legitimate request, but an omitted or
+        // non-array member is not, so the two must not collapse into the same canned reply.
+        JsonNode messages = request.path("messages");
+        if (!messages.isArray()) {
+            throw new AwsException("ValidationException", "messages is required", 400);
+        }
+
+        String reply = buildReply(messages);
         return output -> writeStream(output, reply);
     }
 
-    private String buildReply(ObjectNode request) {
-        String lastUserText = lastUserText(request.path("messages"));
+    private String buildReply(JsonNode messages) {
+        String lastUserText = lastUserText(messages);
         // An empty messages array is legitimate: a caller whose memory already holds the current
         // turn sends none. Answer rather than fail.
         return lastUserText.isBlank() ? emptyReply : echoPrefix + lastUserText;
