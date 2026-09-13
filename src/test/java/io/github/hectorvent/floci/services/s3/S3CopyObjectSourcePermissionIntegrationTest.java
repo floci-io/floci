@@ -79,6 +79,64 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     @Test
+    void copyObjectSucceedsWhenSourceBucketPolicyAllowsCaller() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-resource-allow-source-" + suffix;
+        String destBucket = "copy-resource-allow-dest-" + suffix;
+        String userName = "copy-resource-allow-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "allowed.txt", "resource policy grant");
+
+        String accessKeyId = createUser(userName);
+        putUserPolicy(userName, "DestWriteOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
+                ]}""".formatted(destBucket));
+        putBucketPolicyAsRoot(
+                sourceBucket, allowUserReadPolicy(sourceBucket, userName, "s3:GetObject"));
+
+        given()
+                .header("Authorization", auth(accessKeyId, "s3"))
+                .header("x-amz-copy-source", "/" + sourceBucket + "/allowed.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void versionedCopyUsesGetObjectVersionPermission() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-version-source-" + suffix;
+        String destBucket = "copy-version-dest-" + suffix;
+        String userName = "copy-version-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        enableVersioningAsRoot(sourceBucket);
+        String versionId = putVersionedObjectAsRoot(sourceBucket, "versioned.txt", "versioned source");
+
+        String accessKeyId = createUser(userName);
+        putUserPolicy(userName, "DestWriteOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
+                ]}""".formatted(destBucket));
+        putBucketPolicyAsRoot(
+                sourceBucket, allowUserReadPolicy(sourceBucket, userName, "s3:GetObjectVersion"));
+
+        given()
+                .header("Authorization", auth(accessKeyId, "s3"))
+                .header("x-amz-copy-source",
+                        "/" + sourceBucket + "/versioned.txt?versionId=" + versionId)
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
     void uploadPartCopyIsDeniedWhenCallerCannotReadTheSource() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String sourceBucket = "part-copy-source-" + suffix;
@@ -249,6 +307,30 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 .statusCode(200);
     }
 
+    private static void enableVersioningAsRoot(String bucket) {
+        given()
+                .header("Authorization", auth("test", "s3"))
+                .contentType("application/xml")
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+                .put("/" + bucket + "?versioning")
+        .then()
+                .statusCode(200);
+    }
+
+    private static String putVersionedObjectAsRoot(String bucket, String key, String body) {
+        return given()
+                .header("Authorization", auth("test", "s3"))
+                .contentType("text/plain")
+                .body(body)
+        .when()
+                .put("/" + bucket + "/" + key)
+        .then()
+                .statusCode(200)
+                .extract()
+                .header("x-amz-version-id");
+    }
+
     private static void putBucketPolicyAsRoot(String bucket, String policy) {
         given()
                 .header("Authorization", auth("test", "s3"))
@@ -265,6 +347,14 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*"}
                 ]}""".formatted(bucket);
+    }
+
+    private static String allowUserReadPolicy(String bucket, String userName, String action) {
+        return """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/%1$s"},
+                   "Action":"%2$s","Resource":"arn:aws:s3:::%3$s/*"}
+                ]}""".formatted(userName, action, bucket);
     }
 
     private static String allowPublicPutObjectPolicy(String bucket) {

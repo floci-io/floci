@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
@@ -44,7 +45,7 @@ import java.util.regex.Pattern;
  *
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
  * permissions boundary. Resource-based policies (S3 bucket policy, Lambda resource
- * policy, etc.) are not yet supplied to this filter.
+ * policy, etc.) are not yet supplied to the primary request-filter path.
  *
  * <p>Reads the signing credential from either the {@code Authorization} header or, for a
  * presigned URL, the {@code X-Amz-Credential} query parameter - both request shapes get the
@@ -252,6 +253,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * ambient account, resolve the credential's actual owner instead of the default account.
      */
     public void authorizeAdditionalResource(String authorizationHeader, String action, String resource) {
+        authorizeAdditionalResource(
+                authorizationHeader, action, resource, ResourcePolicyDecision.NEUTRAL);
+    }
+
+    /**
+     * Authorizes a secondary resource using an already principal-filtered resource-policy
+     * decision. This preserves explicit-deny precedence while allowing either the identity or
+     * resource policy to provide the base grant.
+     */
+    public void authorizeAdditionalResource(
+            String authorizationHeader,
+            String action,
+            String resource,
+            ResourcePolicyDecision resourcePolicyDecision) {
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
@@ -295,7 +310,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
             }
 
-            Decision decision = evaluator.evaluate(caller, null, action, resource, conditionContext);
+            Decision decision = evaluator.evaluateResolvedResourcePolicy(
+                    caller, resourcePolicyDecision, action, resource, conditionContext);
             if (decision != Decision.DENY) {
                 return;
             }

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -913,13 +914,26 @@ public class S3Service implements Resettable, ResourceProvider {
             String action,
             String resourceArn,
             RequestAuthorization authorization) {
-        if (LEGACY_ACCESS_KEY_ID.equals(authorization.accessKeyId()) || iamService == null) {
-            return;
+        if (signedPrincipalResourcePolicyDecision(
+                bucketName, action, resourceArn, authorization)
+                == ResourcePolicyDecision.EXPLICIT_DENY) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+    }
+
+    ResourcePolicyDecision signedPrincipalResourcePolicyDecision(
+            String bucketName,
+            String action,
+            String resourceArn,
+            RequestAuthorization authorization) {
+        if (authorization == null || !authorization.signed()
+                || LEGACY_ACCESS_KEY_ID.equals(authorization.accessKeyId()) || iamService == null) {
+            return ResourcePolicyDecision.NEUTRAL;
         }
 
         Optional<String> principalArn = iamService.resolveCallerArn(authorization.accessKeyId());
         if (principalArn.isEmpty()) {
-            return;
+            return ResourcePolicyDecision.NEUTRAL;
         }
 
         Bucket bucket = bucketStore.get(bucketName)
@@ -934,9 +948,11 @@ public class S3Service implements Resettable, ResourceProvider {
                         action,
                         resourceArn,
                         Map.of("aws:PrincipalArn", principalArn.get()));
-        if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
-            throw new AwsException("AccessDenied", "Access Denied", 403);
-        }
+        return switch (policyDecision) {
+            case ALLOW -> ResourcePolicyDecision.ALLOW;
+            case DENY -> ResourcePolicyDecision.EXPLICIT_DENY;
+            case NEUTRAL -> ResourcePolicyDecision.NEUTRAL;
+        };
     }
 
     private boolean readableObjectExists(String bucketName, String key) {

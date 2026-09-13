@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
@@ -3754,8 +3755,12 @@ public class S3Controller {
                                          S3Service.RequestAuthorization authorization) {
         String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
         String resource = S3PublicAccessEvaluator.objectArn(source.bucket(), source.objectKey());
+        ResourcePolicyDecision resourcePolicyDecision =
+                s3Service.signedPrincipalResourcePolicyDecision(
+                        source.bucket(), action, resource, authorization);
         iamEnforcementFilter.authorizeAdditionalResource(
-                httpHeaders.getHeaderString("Authorization"), action, resource);
+                httpHeaders.getHeaderString("Authorization"), action, resource,
+                resourcePolicyDecision);
         s3Service.authorizeGetObject(
                 source.bucket(), source.objectKey(), source.versionId(), authorization);
     }
