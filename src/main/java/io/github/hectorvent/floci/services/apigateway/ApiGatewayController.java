@@ -846,6 +846,44 @@ public class ApiGatewayController {
         }
     }
 
+    /**
+     * {@code GetUsage}. Returns the real response envelope with an entry per attached key and one
+     * pair per day of the requested range.
+     *
+     * <p>Each pair is {@code [used, remaining]}, not {@code [used, quota]}: measured against real
+     * API Gateway, the second element is the quota limit minus the cumulative use so far in the
+     * period. Both elements are {@code 0} here because the emulator neither meters requests per API
+     * key nor stores a quota on a usage plan. Once a quota lives on {@code UsagePlan} and the
+     * execute path counts per key, this method is where both feed in; until then a caller that sums
+     * the used counts gets the same zero it already gets from an unsupported action, without having
+     * to special-case a missing endpoint.
+     */
+    @GET
+    @Path("/usageplans/{usagePlanId}/usage")
+    public Response getUsage(@Context HttpHeaders headers,
+                             @PathParam("usagePlanId") String usagePlanId,
+                             @QueryParam("startDate") String startDate,
+                             @QueryParam("endDate") String endDate,
+                             @QueryParam("keyId") String keyId) {
+        String region = regionResolver.resolveRegion(headers);
+        ApiGatewayService.UsageReport report = service.getUsage(region, usagePlanId, startDate, endDate, keyId);
+
+        ObjectNode root = objectMapper.createObjectNode();
+        ObjectNode items = root.putObject("items");
+        report.items().forEach((apiKeyId, perDay) -> {
+            ArrayNode days = items.putArray(apiKeyId);
+            for (long[] pair : perDay) {
+                ArrayNode entry = days.addArray();
+                entry.add(pair[0]);
+                entry.add(pair[1]);
+            }
+        });
+        root.put("usagePlanId", report.usagePlanId());
+        root.put("startDate", report.startDate());
+        root.put("endDate", report.endDate());
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
     @GET
     @Path("/usageplans/{usagePlanId}/keys")
     public Response getUsagePlanKeys(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId) {

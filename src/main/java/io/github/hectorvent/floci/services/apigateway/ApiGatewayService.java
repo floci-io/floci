@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -1199,6 +1202,60 @@ public class ApiGatewayService {
     public UsagePlanKey getUsagePlanKey(String region, String usagePlanId, String keyId) {
         return usagePlanKeyStore.get(usagePlanKeyPathKey(region, usagePlanId, keyId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Usage Plan Key not found", 404));
+    }
+
+    /**
+     * Builds a {@code GetUsage} report for a usage plan.
+     *
+     * <p>Shape measured against real API Gateway: the envelope carries {@code usagePlanId},
+     * {@code startDate}, {@code endDate} and an {@code items} map of API key id to one
+     * {@code [used, remaining]} pair per day of the inclusive range. {@code position} is absent
+     * when there is no further page, which is what stops a caller's pagination loop.
+     *
+     * <p><strong>Both numbers are zero.</strong> Nothing counts requests per API key, and a
+     * {@link UsagePlan} carries no quota, so there is no limit to subtract from. Storing a quota on
+     * the usage plan and counting on the execute path are the two pieces still missing; this method
+     * is where they would surface.
+     */
+    public UsageReport getUsage(String region, String usagePlanId, String startDate, String endDate, String keyId) {
+        // Resolving the plan first gives the same NotFoundException an unknown id gets on AWS.
+        getUsagePlan(region, usagePlanId);
+
+        LocalDate start = parseUsageDate(startDate, "startDate");
+        LocalDate end = parseUsageDate(endDate, "endDate");
+        if (end.isBefore(start)) {
+            throw new AwsException("BadRequestException", "Usage end date must be after start date", 400);
+        }
+        int days = (int) ChronoUnit.DAYS.between(start, end) + 1;
+
+        Map<String, List<long[]>> items = new LinkedHashMap<>();
+        for (UsagePlanKey key : getUsagePlanKeys(region, usagePlanId)) {
+            if (keyId != null && !keyId.isBlank() && !keyId.equals(key.getId())) {
+                continue;
+            }
+            List<long[]> perDay = new ArrayList<>();
+            for (int day = 0; day < days; day++) {
+                // [used, remaining]: nothing is metered, and no quota is stored to subtract from.
+                perDay.add(new long[] {0L, 0L});
+            }
+            items.put(key.getId(), perDay);
+        }
+        return new UsageReport(usagePlanId, start.toString(), end.toString(), items);
+    }
+
+    /** One {@code GetUsage} report: {@code items} maps an API key id to its per-day pairs. */
+    public record UsageReport(String usagePlanId, String startDate, String endDate,
+                              Map<String, List<long[]>> items) {}
+
+    private static LocalDate parseUsageDate(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new AwsException("BadRequestException", field + " is required", 400);
+        }
+        try {
+            return LocalDate.parse(value);
+        } catch (DateTimeParseException e) {
+            throw new AwsException("BadRequestException", field + " must be a date of the form YYYY-MM-DD", 400);
+        }
     }
 
     public List<UsagePlanKey> getUsagePlanKeys(String region, String usagePlanId) {
