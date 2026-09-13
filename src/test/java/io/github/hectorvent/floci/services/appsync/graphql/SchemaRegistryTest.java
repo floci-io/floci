@@ -1,17 +1,15 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
-import graphql.GraphQL;
-import graphql.schema.GraphQLAppliedDirective;
-import graphql.schema.GraphQLFieldDefinition;
-import io.github.hectorvent.floci.services.appsync.graphql.scalars.AppSyncScalarRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
-import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * {@link SchemaRegistry} is now just an {@code apiId -> raw SDL} cache: schema compilation
+ * happens in the GraphQL sidecar, not here (issue #2917).
+ */
 class SchemaRegistryTest {
 
     private static final String SDL = "type Query { hello: String }";
@@ -20,48 +18,34 @@ class SchemaRegistryTest {
 
     @BeforeEach
     void setUp() {
-        registry = new SchemaRegistry(new AppSyncSchemaParser(new AppSyncScalarRegistry()));
+        registry = new SchemaRegistry();
     }
 
     @Test
-    void getGraphQLReturnsSameInstanceAcrossCalls() {
+    void getSdlReturnsWhatWasRegistered() {
         registry.register("api-1", SDL);
 
-        GraphQL first = registry.getGraphQL("api-1").orElseThrow();
-        GraphQL second = registry.getGraphQL("api-1").orElseThrow();
-
-        assertSame(first, second);
+        assertEquals(SDL, registry.getSdl("api-1").orElseThrow());
     }
 
     @Test
-    void removeClearsCachedGraphQL() {
-        registry.register("api-1", SDL);
-        assertTrue(registry.getGraphQL("api-1").isPresent());
+    void unknownApiIdIsAbsent() {
+        assertTrue(registry.getSdl("nope").isEmpty());
+    }
 
+    @Test
+    void removeClearsTheEntry() {
+        registry.register("api-1", SDL);
         registry.remove("api-1");
 
-        assertTrue(registry.getGraphQL("api-1").isEmpty());
-        assertTrue(registry.getSchema("api-1").isEmpty());
+        assertTrue(registry.getSdl("api-1").isEmpty());
     }
 
     @Test
-    void reregisterReplacesCachedGraphQL() {
+    void reregisterReplacesTheStoredSdl() {
         registry.register("api-1", SDL);
-        GraphQL original = registry.getGraphQL("api-1").orElseThrow();
-
         registry.register("api-1", "type Query { bye: String }");
-        GraphQL replaced = registry.getGraphQL("api-1").orElseThrow();
 
-        assertNotSame(original, replaced);
-        assertSame(replaced, registry.getGraphQL("api-1").orElseThrow());
-    }
-
-    @Test
-    void awsAuthOnFieldDefinitionParses() {
-        var schema = new AppSyncSchemaParser(new AppSyncScalarRegistry())
-                .parse("type Query { secret: String @aws_auth(cognito_groups: [\"Admins\"]) }");
-        GraphQLFieldDefinition field = schema.getQueryType().getFieldDefinition("secret");
-        GraphQLAppliedDirective directive = field.getAppliedDirective("aws_auth");
-        assertNotNull(directive);
+        assertEquals("type Query { bye: String }", registry.getSdl("api-1").orElseThrow());
     }
 }

@@ -2057,6 +2057,12 @@ public interface EmulatorConfig {
          *  Env: FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS */
         @WithDefault("5000")
         long vtlTimeoutMillis();
+
+        /** When set, Floci uses this URL and skips GraphQL sidecar container management. */
+        Optional<String> graphqlUrl();
+
+        @WithDefault("floci/floci-sidecar-graphql:0.2.0")
+        String graphqlImage();
     }
 
     interface OamServiceConfig {

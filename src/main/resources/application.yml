@@ -101,7 +101,6 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
-      - --initialize-at-run-time=graphql.util.IdGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
@@ -688,6 +687,9 @@ floci:
       vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL resolver template may execute (truncates the loop, does not fail the template)
       vtl-max-output-chars: 1048576        # Maximum characters a VTL resolver template may render before it fails
       vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL resolver template may spend evaluating before it fails
+      # graphql-url: http://floci-graphql:8181  # set to skip sidecar container management
+      # Exact version on purpose: a cached :latest is never re-pulled. Published from floci-io/floci-sidecars.
+      graphql-image: "floci/floci-sidecar-graphql:0.2.0"
     s3vectors:
       enabled: true
     s3tables:
