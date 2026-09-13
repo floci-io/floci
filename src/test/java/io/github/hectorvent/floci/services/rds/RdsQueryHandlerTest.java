@@ -56,6 +56,39 @@ class RdsQueryHandlerTest {
         handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
     }
 
+    @Test
+    void describeEvents_reconcilesOnlyTheRequestedDbInstance() {
+        DbInstance requested = makeInstance("requested");
+        when(service.listDbInstances("requested", null)).thenReturn(List.of(requested));
+        when(service.describeEvents("requested", "db-instance", null, null, null))
+                .thenReturn(List.of());
+        MultivaluedMap<String, String> p = params();
+        p.add("SourceIdentifier", "requested");
+        p.add("SourceType", "db-instance");
+
+        Response response = handler.handle("DescribeEvents", p);
+
+        assertEquals(200, response.getStatus());
+        verify(service).listDbInstances("requested", null);
+        verify(service).refreshDbInstanceRuntimeHealth(requested);
+        verify(service, never()).listDbInstances(null, null);
+    }
+
+    @Test
+    void describeEvents_doesNotReconcileInstancesForAnotherSourceType() {
+        when(service.describeEvents("cluster", "db-cluster", null, null, null))
+                .thenReturn(List.of());
+        MultivaluedMap<String, String> p = params();
+        p.add("SourceIdentifier", "cluster");
+        p.add("SourceType", "db-cluster");
+
+        Response response = handler.handle("DescribeEvents", p);
+
+        assertEquals(200, response.getStatus());
+        verify(service, never()).listDbInstances(any(), any());
+        verify(service, never()).refreshDbInstanceRuntimeHealth(any());
+    }
+
     // ──────────────────────────── DBInstances XML tag ────────────────────────────
 
     @Test

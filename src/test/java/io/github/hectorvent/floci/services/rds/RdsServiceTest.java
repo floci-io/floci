@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
+import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -39,6 +40,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.lang.reflect.Field;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
@@ -5505,6 +5508,28 @@ class RdsServiceTest {
         // Repeated health reads do not duplicate the transition event.
         rdsService.refreshDbInstanceRuntimeHealth(refreshed);
         assertEquals(1, rdsService.describeEvents("dead-db", "db-instance", null, null, 60).size());
+    }
+
+    @Test
+    void describeEventsPrunesEventsOlderThanFourteenDays() throws Exception {
+        InMemoryStorage<String, RdsEvent> eventStore = new InMemoryStorage<>();
+        Field eventsField = RdsService.class.getDeclaredField("events");
+        eventsField.setAccessible(true);
+        eventsField.set(rdsService, eventStore);
+        Instant now = Instant.now();
+        RdsEvent expired = new RdsEvent("expired", "old-db", "db-instance", "old",
+                List.of("availability"), now.minus(Duration.ofDays(15)), "old-arn");
+        RdsEvent retained = new RdsEvent("retained", "recent-db", "db-instance", "recent",
+                List.of("availability"), now.minus(Duration.ofDays(13)), "recent-arn");
+        eventStore.put(expired.id(), expired);
+        eventStore.put(retained.id(), retained);
+
+        List<RdsEvent> result = rdsService.describeEvents(
+                null, null, now.minus(Duration.ofDays(20)), now.plusSeconds(1), null);
+
+        assertEquals(List.of(retained), result);
+        assertTrue(eventStore.get("retained").isPresent());
+        assertTrue(eventStore.get("expired").isEmpty());
     }
 
     @Test

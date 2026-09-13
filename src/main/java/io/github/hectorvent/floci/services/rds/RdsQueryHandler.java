@@ -256,10 +256,12 @@ public class RdsQueryHandler {
             throw new AwsException("InvalidParameterCombination", "StartTime must be before EndTime.", 400);
         }
 
-        // Reconcile current instance health before returning the event history. This mirrors the
-        // same control-plane observation used by DescribeDBInstances and records the transition once.
-        for (DbInstance instance : service.listDbInstances(null, region)) {
-            service.refreshDbInstanceRuntimeHealth(instance);
+        // Only instance events depend on container health. Preserve the unfiltered reconciliation,
+        // but do not inspect unrelated instances for a source-scoped or non-instance query.
+        if (sourceType == null || "db-instance".equals(sourceType)) {
+            for (DbInstance instance : service.listDbInstances(sourceIdentifier, region)) {
+                service.refreshDbInstanceRuntimeHealth(instance);
+            }
         }
         List<RdsEvent> all = service.describeEvents(sourceIdentifier, sourceType, start, end, duration);
         int offset = parseMarker(params.getFirst("Marker"));

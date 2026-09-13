@@ -50,6 +50,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -74,6 +75,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Duration EVENT_RETENTION = Duration.ofDays(14);
     /** Value AWS reports as the OwningService of a secret RDS manages. */
     private static final String MANAGED_SECRET_OWNING_SERVICE = "rds";
     private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
@@ -1284,7 +1286,9 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public List<RdsEvent> describeEvents(String sourceIdentifier, String sourceType,
                                          Instant startTime, Instant endTime, Integer durationMinutes) {
-        Instant effectiveEnd = endTime != null ? endTime : Instant.now();
+        Instant now = Instant.now();
+        pruneExpiredEvents(now);
+        Instant effectiveEnd = endTime != null ? endTime : now;
         Instant effectiveStart = startTime != null ? startTime
                 : effectiveEnd.minusSeconds((durationMinutes != null ? durationMinutes : 60) * 60L);
         return events.scan(_ -> true).stream()
@@ -1293,6 +1297,16 @@ public class RdsService implements Resettable, ResourceProvider {
                 .filter(event -> !event.date().isBefore(effectiveStart) && !event.date().isAfter(effectiveEnd))
                 .sorted(java.util.Comparator.comparing(RdsEvent::date))
                 .toList();
+    }
+
+    private void pruneExpiredEvents(Instant now) {
+        Instant cutoff = now.minus(EVENT_RETENTION);
+        for (String eventId : new ArrayList<>(events.keys())) {
+            RdsEvent event = events.get(eventId).orElse(null);
+            if (event != null && event.date() != null && event.date().isBefore(cutoff)) {
+                events.delete(eventId);
+            }
+        }
     }
 
     public Collection<DbInstance> listDbInstancesByDbiResourceIds(Collection<String> resourceIds) {
