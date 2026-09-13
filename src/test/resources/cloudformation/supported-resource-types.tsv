@@ -127,8 +127,8 @@ AWS::SQS::Queue	SqsCfnProvisioner
 AWS::SQS::QueuePolicy	SqsCfnProvisioner
 AWS::SSM::Parameter	SsmCfnProvisioner
 AWS::Scheduler::ScheduleGroup	SchedulerScheduleGroupCfnProvisioner
-AWS::SecretsManager::Secret	LEGACY_SWITCH
-AWS::SecretsManager::SecretTargetAttachment	LEGACY_SWITCH
+AWS::SecretsManager::Secret	SecretsManagerCfnProvisioner
+AWS::SecretsManager::SecretTargetAttachment	SecretTargetAttachmentCfnProvisioner
 AWS::StepFunctions::StateMachine	LEGACY_SWITCH
 AWS::WAFv2::WebACL	WafV2CfnProvisioner
 Custom::DynamoDBReplica	LEGACY_SWITCH

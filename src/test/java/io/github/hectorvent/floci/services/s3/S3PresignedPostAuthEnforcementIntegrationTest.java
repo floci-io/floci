@@ -49,6 +49,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     @Order(1)
     void createBucket() {
         given()
+        .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID))
         .when()
             .put("/" + BUCKET)
         .then()

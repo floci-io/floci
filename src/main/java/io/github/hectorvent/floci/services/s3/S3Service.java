@@ -764,6 +764,20 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
     }
 
+    /**
+     * CreateBucket is never anonymous on AWS: there is no bucket policy to consult yet, so an
+     * unsigned request is denied outright and a signed one only needs a known access key.
+     */
+    void authorizeCreateBucket(RequestAuthorization authorization) {
+        if (!enforceAuth) {
+            return;
+        }
+        authorizeSignedRequest(authorization);
+        if (isUnsignedRequest(authorization)) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+    }
+
     void authorizeBucketWrite(String bucketName, String action, RequestAuthorization authorization) {
         if (!enforceAuth) {
             return;
@@ -779,6 +793,12 @@ public class S3Service implements Resettable, ResourceProvider {
 
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        // AWS lets only an identity in the bucket owner's account manage the bucket policy; the
+        // policy itself can never grant PutBucketPolicy or DeleteBucketPolicy to an anonymous caller.
+        if (isBucketPolicyAction(action)) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
 
         String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
@@ -929,6 +949,10 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     private static boolean isObjectCreationAction(String action) {
         return "s3:PutObject".equals(action);
+    }
+
+    private static boolean isBucketPolicyAction(String action) {
+        return "s3:PutBucketPolicy".equals(action) || "s3:DeleteBucketPolicy".equals(action);
     }
 
     private static boolean isUnsignedRequest(RequestAuthorization authorization) {
@@ -1311,6 +1335,25 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Returns whether the requested object version is currently protected by an active
+     * GOVERNANCE retention period. The bypass permission is only relevant for those versions;
+     * an {@code x-amz-bypass-governance-retention} header on an otherwise unprotected batch
+     * entry must not make that entry require {@code s3:BypassGovernanceRetention}.
+     */
+    public boolean isGovernanceRetentionActive(String bucketName, String key, String versionId) {
+        ensureBucketExists(bucketName);
+        S3Object object = (versionId != null
+                ? objectStore.get(versionedKey(bucketName, key, versionId))
+                : objectStore.get(objectKey(bucketName, key)))
+                .orElse(null);
+        return object != null
+                && !object.isDeleteMarker()
+                && "GOVERNANCE".equals(object.getObjectLockMode())
+                && object.getRetainUntilDate() != null
+                && Instant.now().isBefore(object.getRetainUntilDate());
+    }
+
     public record ListObjectsResult(List<S3Object> objects, List<String> commonPrefixes, boolean isTruncated, String nextContinuationToken) {}
 
     public List<S3Object> listObjects(String bucketName, String prefix, String delimiter, int maxKeys) {
@@ -1687,17 +1730,24 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public DeleteObjectsResult deleteObjects(String bucketName, List<XmlParser.KeyVersion> entries) {
+        return deleteObjects(bucketName, entries, false);
+    }
+
+    public DeleteObjectsResult deleteObjects(String bucketName, List<XmlParser.KeyVersion> entries,
+                                             boolean bypassGovernance) {
         ensureBucketExists(bucketName);
         List<DeleteResult> deleted = new ArrayList<>();
         List<DeleteError> errors = new ArrayList<>();
         for (XmlParser.KeyVersion entry : entries) {
             try {
-                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId());
+                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId(), bypassGovernance);
                 if (result != null && result.isDeleteMarker()) {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), true, result.getVersionId()));
                 } else {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), false, null));
                 }
+            } catch (AwsException e) {
+                errors.add(new DeleteError(entry.key(), e.getErrorCode(), e.getMessage()));
             } catch (Exception e) {
                 errors.add(new DeleteError(entry.key(), "InternalError", e.getMessage()));
             }

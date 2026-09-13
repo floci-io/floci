@@ -31,9 +31,11 @@ import java.io.StringWriter;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.AbstractMap;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Evaluates AWS API Gateway VTL (Velocity Template Language) mapping templates.
@@ -44,6 +46,7 @@ import java.util.Map;
 @ApplicationScoped
 @RegisterForReflection(targets = {
         VtlTemplateEngine.InputVariable.class,
+        VtlTemplateEngine.ParameterMap.class,
         VtlTemplateEngine.UtilVariable.class,
         VtlTemplateEngine.ResponseOverride.class,
         UberspectImpl.class,
@@ -131,6 +134,10 @@ public class VtlTemplateEngine {
         identity.put("sourceIp", "127.0.0.1");
         map.put("identity", identity);
 
+        if (ctx.authorizer() != null) {
+            map.put("authorizer", ctx.authorizer());
+        }
+
         map.put("responseOverride", responseOverride);
 
         return map;
@@ -181,7 +188,8 @@ public class VtlTemplateEngine {
             String resourcePath,
             String requestId,
             String accountId,
-            Map<String, String> stageVariables
+            Map<String, String> stageVariables,
+            Map<String, Object> authorizer
     ) {}
 
     /**
@@ -252,9 +260,9 @@ public class VtlTemplateEngine {
         /** Returns request parameters organized by type. */
         public Map<String, Map<String, String>> params() {
             Map<String, Map<String, String>> params = new HashMap<>();
-            params.put("querystring", ctx.queryParams() != null ? ctx.queryParams() : Map.of());
-            params.put("path", ctx.pathParams() != null ? ctx.pathParams() : Map.of());
-            params.put("header", ctx.headers() != null ? ctx.headers() : Map.of());
+            params.put("querystring", new ParameterMap(ctx.queryParams()));
+            params.put("path", new ParameterMap(ctx.pathParams()));
+            params.put("header", new ParameterMap(ctx.headers()));
             return params;
         }
 
@@ -286,6 +294,31 @@ public class VtlTemplateEngine {
                 }
             }
             return current;
+        }
+    }
+
+    /** Reflection-safe map exposed to Velocity templates in native images. */
+    public static class ParameterMap extends AbstractMap<String, String> {
+
+        private final Map<String, String> values;
+
+        public ParameterMap(Map<String, String> values) {
+            this.values = values != null ? values : Map.of();
+        }
+
+        @Override
+        public String get(Object key) {
+            return values.get(key);
+        }
+
+        @Override
+        public Set<String> keySet() {
+            return values.keySet();
+        }
+
+        @Override
+        public Set<Entry<String, String>> entrySet() {
+            return values.entrySet();
         }
     }
 

@@ -410,7 +410,7 @@ public class WebSocketIntegrationInvoker {
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 eventJson, Map.of(), Map.of(), Map.of(), "", "", "", "", "000000000000",
-                stageVariables != null ? stageVariables : Map.of());
+                stageVariables != null ? stageVariables : Map.of(), null);
 
         VtlTemplateEngine.EvaluateResult result = vtlEngine.evaluate(template, vtlCtx);
         return result.body();
@@ -450,7 +450,7 @@ public class WebSocketIntegrationInvoker {
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 responseBody, Map.of(), Map.of(), Map.of(), "", "", "", "", "000000000000",
-                stageVariables != null ? stageVariables : Map.of());
+                stageVariables != null ? stageVariables : Map.of(), null);
 
         VtlTemplateEngine.EvaluateResult result = vtlEngine.evaluate(template, vtlCtx);
         return result.body();

@@ -42,7 +42,7 @@ class AuthMiddlewareTest {
                 apiKeyAuthValidator, iamAuthValidator, cognitoAuthValidator, oidcAuthValidator,
                 lambdaAuthorizerValidator, new JwtClaimsDecoder(new ObjectMapper()));
         info = new AuthRequestInfo("{ hello }", null, Map.of(), List.of("127.0.0.1"),
-                "req", "000000000000", "us-east-1", Map.of());
+                "req", "000000000000", "us-east-1", Map.of(), "{ hello }");
     }
 
     @Test

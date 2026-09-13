@@ -3,12 +3,16 @@ package io.github.hectorvent.floci.services.appsync;
 import io.github.hectorvent.floci.core.common.ResolvedServiceCatalog;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncExecutionController;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.AppSyncRequestSigner;
+import io.restassured.RestAssured;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -163,7 +167,7 @@ class AppSyncAuthIntegrationTest {
     }
 
     @Test
-    void iamCallerOnApiKeyFieldReturns200WithUnauthorizedError() {
+    void iamCallerOnApiKeyFieldReturns200WithUnauthorizedError() throws Exception {
         String apiId = given()
             .header("Authorization", MGMT_AUTH)
             .contentType("application/json")
@@ -185,10 +189,11 @@ class AppSyncAuthIntegrationTest {
         startSchema(apiId, "type Query { hello: String @aws_api_key }");
         awaitSchemaSuccess(apiId);
 
+        String body = "{\"query\":\"{ hello }\"}";
         given()
             .contentType("application/json")
-            .header("Authorization", MGMT_AUTH)
-            .body("{\"query\":\"{ hello }\"}")
+            .headers(iamSignedHeaders(apiId, body))
+            .body(body)
         .when()
             .post("/v1/apis/" + apiId + "/graphql")
         .then()
@@ -201,7 +206,7 @@ class AppSyncAuthIntegrationTest {
     }
 
     @Test
-    void additionalModeIamCanIntrospect() {
+    void additionalModeIamCanIntrospect() throws Exception {
         String apiId = given()
             .header("Authorization", MGMT_AUTH)
             .contentType("application/json")
@@ -223,10 +228,11 @@ class AppSyncAuthIntegrationTest {
         startSchema(apiId, "type Query { hello: String }");
         awaitSchemaSuccess(apiId);
 
+        String body = "{\"query\":\"{ __schema { types { name } } }\"}";
         given()
             .contentType("application/json")
-            .header("Authorization", MGMT_AUTH)
-            .body("{\"query\":\"{ __schema { types { name } } }\"}")
+            .headers(iamSignedHeaders(apiId, body))
+            .body(body)
         .when()
             .post("/v1/apis/" + apiId + "/graphql")
         .then()
@@ -240,6 +246,15 @@ class AppSyncAuthIntegrationTest {
         String apiId = createApi("aws-auth-" + UUID.randomUUID().toString().substring(0, 8));
         startSchema(apiId, "type Query { secret: String @aws_auth(cognito_groups: [\"Admins\"]) }");
         awaitSchemaSuccess(apiId);
+    }
+
+    /**
+     * Data-plane requests in {@code AWS_IAM} mode must carry a real SigV4 signature; the bare
+     * {@code Credential=} header that is enough for the management plane is rejected there.
+     */
+    private static Map<String, String> iamSignedHeaders(String apiId, String body) throws Exception {
+        return AppSyncRequestSigner.signedHeaders(apiId, "localhost:" + RestAssured.port, body,
+                "test", "test", "us-east-1", Instant.now());
     }
 
     private static String createApi(String name) {
