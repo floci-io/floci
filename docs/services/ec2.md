@@ -569,6 +569,21 @@ with its `Min`, which the service model declares required; a request missing eit
 with `InvalidParameterValue`: `TcpEstablishedTimeout` runs from 60 to 432000 seconds,
 `UdpTimeout` from 30 to 60, and `UdpStreamTimeout` from 60 to 180.
 
+Three combinations the service model documents in prose rather than in its constraints are
+rejected with `InvalidParameterCombination`:
+
+- `InstanceRequirements` and `InstanceType` together. A launch template selects instance types by
+  attribute or by name, not by both.
+- `AllowedInstanceTypes` and `ExcludedInstanceTypes` together inside `InstanceRequirements`.
+- `SpotMaxPricePercentageOverLowestPrice` and `MaxSpotPriceAsPercentageOfOptimalOnDemandPrice`
+  together inside `InstanceRequirements`.
+
+`CreateLaunchTemplateVersion` applies these three to the merged version as well as to the request
+it received, because the merged data is what the version stores. A version that names only
+`InstanceType` against a source version carrying `InstanceRequirements` is therefore rejected: the
+merge inherits the requirements block and cannot express its removal. Omitting `SourceVersion`
+starts from empty data and is how a template moves between the two selection modes.
+
 Two behaviours worth calling out, because they are what Terraform reads back:
 
 - **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as

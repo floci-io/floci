@@ -4919,16 +4919,30 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * or a version is stored. {@code InstanceRequirementsRequest} declares {@code VCpuCount} and
      * {@code MemoryMiB} as required members, each of which in turn requires its {@code Min}, and
      * the connection tracking timeouts carry the ranges documented on
-     * {@code ConnectionTrackingSpecificationRequest}.
+     * {@code ConnectionTrackingSpecificationRequest}. The remaining rules live only in the member
+     * documentation rather than in the model constraints: "If you specify InstanceRequirements,
+     * you can't specify InstanceType", "If you specify AllowedInstanceTypes, you can't specify
+     * ExcludedInstanceTypes", and "Only one of SpotMaxPricePercentageOverLowestPrice or
+     * MaxSpotPriceAsPercentageOfOptimalOnDemandPrice can be specified".
      */
     private static void validateLaunchTemplateData(LaunchTemplateData data) {
         if (data == null) {
             return;
         }
+        requireInstanceTypeOrInstanceRequirements(data);
         validateInstanceRequirements(data.getInstanceRequirements());
         for (LaunchTemplateData.NetworkInterface networkInterface : data.getNetworkInterfaces()) {
             validateConnectionTracking(networkInterface.getConnectionTrackingSpecification());
         }
+    }
+
+    private static void requireInstanceTypeOrInstanceRequirements(LaunchTemplateData data) {
+        if (data.getInstanceRequirements() == null || !isSet(data.getInstanceType())) {
+            return;
+        }
+        throw new AwsException("InvalidParameterCombination",
+                "InstanceRequirements cannot be combined with InstanceType. A launch template "
+                        + "selects instance types by attribute or by name, not by both.", 400);
     }
 
     private static void validateInstanceRequirements(LaunchTemplateData.InstanceRequirements requirements) {
@@ -4937,6 +4951,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         requireInstanceRequirementsRange("VCpuCount", requirements.getVCpuCount());
         requireInstanceRequirementsRange("MemoryMiB", requirements.getMemoryMiB());
+        requireOnlyOneOf("AllowedInstanceTypes", !requirements.getAllowedInstanceTypes().isEmpty(),
+                "ExcludedInstanceTypes", !requirements.getExcludedInstanceTypes().isEmpty());
+        requireOnlyOneOf("SpotMaxPricePercentageOverLowestPrice",
+                requirements.getSpotMaxPricePercentageOverLowestPrice() != null,
+                "MaxSpotPriceAsPercentageOfOptimalOnDemandPrice",
+                requirements.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice() != null);
+    }
+
+    private static void requireOnlyOneOf(String parameter, boolean present, String other, boolean otherPresent) {
+        if (!present || !otherPresent) {
+            return;
+        }
+        throw new AwsException("InvalidParameterCombination",
+                "Only one of InstanceRequirements." + parameter + " or InstanceRequirements." + other
+                        + " can be specified.", 400);
     }
 
     private static void requireInstanceRequirementsRange(String parameter, LaunchTemplateData.IntRange range) {
@@ -4979,6 +5008,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * {@link LaunchTemplateData}, populated only by whatever fields this request itself supplies.
      * Only an explicit {@code SourceVersion} (including {@code $Latest} / {@code $Default}) causes
      * inheritance.
+     *
+     * <p>The request is validated twice, and both passes matter. The first pass covers what the
+     * caller actually sent. The second covers the merged result, because that is the data the
+     * version stores and the data AutoScaling and the fleet APIs later read. {@link
+     * LaunchTemplateData#mergedWith} has no way to express removal, so a version that names only
+     * {@code InstanceType} against a source carrying {@code InstanceRequirements} merges into a
+     * version holding both, which EC2 does not allow. That merged version is rejected rather than
+     * stored. A caller moving a template between attribute-based and named instance type selection
+     * omits {@code SourceVersion}, which starts the new version from empty data.</p>
      */
     public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
                                                       String sourceVersion, LaunchTemplateData data,
@@ -4996,6 +5034,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber()));
         }
         LaunchTemplateData merged = source.mergedWith(data != null ? data : new LaunchTemplateData());
+        validateLaunchTemplateData(merged);
         launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
         launchTemplate.getVersions().put(String.valueOf(latestVersion), merged);
         launchTemplate.setData(new LaunchTemplateData(merged));

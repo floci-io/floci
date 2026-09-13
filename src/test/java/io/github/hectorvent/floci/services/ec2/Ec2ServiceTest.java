@@ -512,7 +512,6 @@ class Ec2ServiceTest {
                 new InMemoryStorageFactory());
         LaunchTemplateData source = new LaunchTemplateData();
         source.setImageId("ami-source");
-        source.setInstanceType("t3.micro");
 
         LaunchTemplateData.SpotOptions spotOptions = new LaunchTemplateData.SpotOptions();
         spotOptions.setMaxPrice("0.05");
@@ -540,13 +539,15 @@ class Ec2ServiceTest {
 
         LaunchTemplate template = service.createLaunchTemplate("us-east-1", "spot-template", source, List.of());
 
+        // The source selects instance types by attribute, so the new version restates a member
+        // that does not collide with InstanceRequirements.
         LaunchTemplateData override = new LaunchTemplateData();
-        override.setInstanceType("t3.small");
+        override.setImageId("ami-override");
         service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null, "1", override);
 
         LaunchTemplateData data = service.describeLaunchTemplateVersions(
                 "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst().getData();
-        assertEquals("t3.small", data.getInstanceType());
+        assertEquals("ami-override", data.getImageId());
         assertEquals("spot", data.getInstanceMarketOptions().getMarketType());
         assertEquals("0.05", data.getInstanceMarketOptions().getSpotOptions().getMaxPrice());
         assertEquals("one-time", data.getInstanceMarketOptions().getSpotOptions().getSpotInstanceType());

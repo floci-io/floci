@@ -437,10 +437,8 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
             .formParam(req + "AcceleratorName.1", "t4")
             .formParam(req + "AcceleratorTotalMemoryMiB.Min", "16")
             .formParam(req + "NetworkBandwidthGbps.Min", "1.5")
-            .formParam(req + "AllowedInstanceType.1", "m5.*")
             .formParam(req + "SpotMaxPricePercentageOverLowestPrice", "20")
             .formParam(req + "OnDemandMaxPricePercentageOverLowestPrice", "30")
-            .formParam(req + "MaxSpotPriceAsPercentageOfOptimalOnDemandPrice", "40")
             .formParam(req + "RequireEncryptionInTransit", "true")
             .formParam(req + "BaselinePerformanceFactors.Cpu.Reference.1.InstanceFamily", "m6i")
             .formParam(req + "BaselinePerformanceFactors.Cpu.Reference.2.InstanceFamily", "c6i")
@@ -474,16 +472,42 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
             .body(set + "acceleratorNameSet.item", equalTo("t4"))
             .body(set + "acceleratorTotalMemoryMiB.min", equalTo("16"))
             .body(set + "networkBandwidthGbps.min", equalTo("1.5"))
-            .body(set + "allowedInstanceTypeSet.item", equalTo("m5.*"))
             .body(set + "spotMaxPricePercentageOverLowestPrice", equalTo("20"))
             .body(set + "onDemandMaxPricePercentageOverLowestPrice", equalTo("30"))
-            .body(set + "maxSpotPriceAsPercentageOfOptimalOnDemandPrice", equalTo("40"))
             .body(set + "requireEncryptionInTransit", equalTo("true"))
             .body(set + "baselinePerformanceFactors.cpu.referenceSet.item.instanceFamily",
                     contains("m6i", "c6i"));
         // A range the request never set must not read back as an empty element.
         assertFalse(describeBody(name).contains("<totalLocalStorageGB><min>"),
                 "an unset range bound must stay absent");
+    }
+
+    @Test
+    void theOtherHalfOfEachExclusiveRequirementsPairRoundTripsOnItsOwn() {
+        // AllowedInstanceTypes excludes ExcludedInstanceTypes, and
+        // MaxSpotPriceAsPercentageOfOptimalOnDemandPrice excludes
+        // SpotMaxPricePercentageOverLowestPrice, so the members the round trip above cannot carry
+        // are read back from a template of their own.
+        String name = uniqueName("allowed-requirements-lt");
+        String req = "LaunchTemplateData.InstanceRequirements.";
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam(req + "VCpuCount.Min", "2")
+            .formParam(req + "MemoryMiB.Min", "1024")
+            .formParam(req + "AllowedInstanceType.1", "m5.*")
+            .formParam(req + "MaxSpotPriceAsPercentageOfOptimalOnDemandPrice", "40")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String set = DATA + "instanceRequirements.";
+        describeLatest(name)
+            .body(set + "allowedInstanceTypeSet.item", equalTo("m5.*"))
+            .body(set + "maxSpotPriceAsPercentageOfOptimalOnDemandPrice", equalTo("40"));
     }
 
     @Test
@@ -545,7 +569,6 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
             .formParam("Action", "CreateLaunchTemplate")
             .formParam("LaunchTemplateName", name)
             .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
-            .formParam("LaunchTemplateData.InstanceType", "t3.micro")
             .formParam("LaunchTemplateData.InstanceMarketOptions.MarketType", "spot")
             .formParam("LaunchTemplateData.InstanceMarketOptions.SpotOptions.MaxPrice", "0.05")
             .formParam("LaunchTemplateData.InstanceRequirements.VCpuCount.Min", "2")
@@ -558,11 +581,13 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
         .then()
             .statusCode(200);
 
+        // The source selects instance types by attribute, so the new version restates a member
+        // that does not collide with InstanceRequirements.
         given()
             .formParam("Action", "CreateLaunchTemplateVersion")
             .formParam("LaunchTemplateName", name)
             .formParam("SourceVersion", "1")
-            .formParam("LaunchTemplateData.InstanceType", "t3.small")
+            .formParam("LaunchTemplateData.KeyName", "app-key")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -570,7 +595,7 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
             .statusCode(200);
 
         describeLatest(name)
-            .body(DATA + "instanceType", equalTo("t3.small"))
+            .body(DATA + "keyName", equalTo("app-key"))
             .body(DATA + "instanceMarketOptions.marketType", equalTo("spot"))
             .body(DATA + "instanceMarketOptions.spotOptions.maxPrice", equalTo("0.05"))
             .body(DATA + "instanceRequirements.vCpuCount.min", equalTo("2"))
@@ -733,5 +758,149 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeLaunchTemplatesResponse.launchTemplates.item.latestVersionNumber", equalTo("1"));
+    }
+
+    private ValidatableResponse createTemplate(String name, String... dataParams) {
+        RequestSpecification request = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", name)
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .header("Authorization", AUTH_HEADER);
+        for (int i = 0; i < dataParams.length; i += 2) {
+            request = request.formParam("LaunchTemplateData." + dataParams[i], dataParams[i + 1]);
+        }
+        return request.when().post("/").then();
+    }
+
+    private ValidatableResponse createVersion(String name, String sourceVersion, String... dataParams) {
+        RequestSpecification request = given()
+            .formParam("Action", "CreateLaunchTemplateVersion")
+            .formParam("LaunchTemplateName", name)
+            .header("Authorization", AUTH_HEADER);
+        if (sourceVersion != null) {
+            request = request.formParam("SourceVersion", sourceVersion);
+        }
+        for (int i = 0; i < dataParams.length; i += 2) {
+            request = request.formParam("LaunchTemplateData." + dataParams[i], dataParams[i + 1]);
+        }
+        return request.when().post("/").then();
+    }
+
+    private void assertInvalidParameterCombination(ValidatableResponse response) {
+        response.statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+    }
+
+    private void assertLatestVersionIs(String name, String expected) {
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateName.1", name)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.latestVersionNumber", equalTo(expected));
+    }
+
+    @Test
+    void instanceRequirementsAlongsideInstanceTypeIsRejected() {
+        // "If you specify InstanceRequirements, you can't specify InstanceType."
+        String name = uniqueName("type-and-requirements-lt");
+        assertInvalidParameterCombination(createTemplate(name,
+                "InstanceType", "t3.micro",
+                "InstanceRequirements.VCpuCount.Min", "2",
+                "InstanceRequirements.MemoryMiB.Min", "1024"));
+
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateName.1", name)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidLaunchTemplateName.NotFoundException"));
+    }
+
+    @Test
+    void eitherOfInstanceTypeAndInstanceRequirementsOnItsOwnIsAccepted() {
+        createTemplate(uniqueName("type-only-lt"), "InstanceType", "t3.micro").statusCode(200);
+        createTemplate(uniqueName("requirements-only-lt"),
+                "InstanceRequirements.VCpuCount.Min", "2",
+                "InstanceRequirements.MemoryMiB.Min", "1024").statusCode(200);
+    }
+
+    @Test
+    void allowedAndExcludedInstanceTypesTogetherAreRejected() {
+        // "If you specify AllowedInstanceTypes, you can't specify ExcludedInstanceTypes."
+        assertInvalidParameterCombination(createWithRequirements(uniqueName("both-lists-lt"),
+                "VCpuCount.Min", "2", "MemoryMiB.Min", "1024",
+                "AllowedInstanceType.1", "m5.*", "ExcludedInstanceType.1", "t2.*"));
+        createWithRequirements(uniqueName("allowed-only-lt"),
+                "VCpuCount.Min", "2", "MemoryMiB.Min", "1024", "AllowedInstanceType.1", "m5.*")
+            .statusCode(200);
+        createWithRequirements(uniqueName("excluded-only-lt"),
+                "VCpuCount.Min", "2", "MemoryMiB.Min", "1024", "ExcludedInstanceType.1", "t2.*")
+            .statusCode(200);
+    }
+
+    @Test
+    void bothSpotPriceCeilingsTogetherAreRejected() {
+        // "Only one of SpotMaxPricePercentageOverLowestPrice or
+        // MaxSpotPriceAsPercentageOfOptimalOnDemandPrice can be specified."
+        assertInvalidParameterCombination(createWithRequirements(uniqueName("both-spot-lt"),
+                "VCpuCount.Min", "2", "MemoryMiB.Min", "1024",
+                "SpotMaxPricePercentageOverLowestPrice", "20",
+                "MaxSpotPriceAsPercentageOfOptimalOnDemandPrice", "40"));
+        createWithRequirements(uniqueName("spot-over-lowest-lt"),
+                "VCpuCount.Min", "2", "MemoryMiB.Min", "1024",
+                "SpotMaxPricePercentageOverLowestPrice", "20")
+            .statusCode(200);
+        createWithRequirements(uniqueName("spot-over-on-demand-lt"),
+                "VCpuCount.Min", "2", "MemoryMiB.Min", "1024",
+                "MaxSpotPriceAsPercentageOfOptimalOnDemandPrice", "40")
+            .statusCode(200);
+    }
+
+    @Test
+    void createLaunchTemplateVersionRejectsTheSameExclusiveCombinations() {
+        String name = uniqueName("version-exclusive-lt");
+        createTemplate(name, "InstanceType", "t3.micro").statusCode(200);
+
+        assertInvalidParameterCombination(createVersion(name, null,
+                "InstanceType", "t3.small",
+                "InstanceRequirements.VCpuCount.Min", "2",
+                "InstanceRequirements.MemoryMiB.Min", "1024"));
+        assertInvalidParameterCombination(createVersion(name, null,
+                "InstanceRequirements.VCpuCount.Min", "2",
+                "InstanceRequirements.MemoryMiB.Min", "1024",
+                "InstanceRequirements.AllowedInstanceType.1", "m5.*",
+                "InstanceRequirements.ExcludedInstanceType.1", "t2.*"));
+        assertInvalidParameterCombination(createVersion(name, null,
+                "InstanceRequirements.VCpuCount.Min", "2",
+                "InstanceRequirements.MemoryMiB.Min", "1024",
+                "InstanceRequirements.SpotMaxPricePercentageOverLowestPrice", "20",
+                "InstanceRequirements.MaxSpotPriceAsPercentageOfOptimalOnDemandPrice", "40"));
+
+        assertLatestVersionIs(name, "1");
+    }
+
+    @Test
+    void aVersionNamingAnInstanceTypeOverAnAttributeBasedSourceIsRejected() {
+        // The merge carries InstanceRequirements forward and has no way to express removal, so
+        // this version would store both. The stored version is what AutoScaling and the fleet
+        // APIs read, so it is validated after the merge rather than only as it arrived.
+        String name = uniqueName("merge-conflict-lt");
+        createTemplate(name,
+                "InstanceRequirements.VCpuCount.Min", "2",
+                "InstanceRequirements.MemoryMiB.Min", "1024").statusCode(200);
+
+        assertInvalidParameterCombination(createVersion(name, "1", "InstanceType", "t3.micro"));
+        assertLatestVersionIs(name, "1");
+
+        // Starting from empty data instead of the source is how a caller switches selection mode.
+        createVersion(name, null, "InstanceType", "t3.micro").statusCode(200);
+        describeLatest(name).body(DATA + "instanceType", equalTo("t3.micro"));
     }
 }
