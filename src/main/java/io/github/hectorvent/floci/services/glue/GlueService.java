@@ -12,7 +12,10 @@ import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Job;
 import io.github.hectorvent.floci.services.glue.model.JobUpdate;
+import io.github.hectorvent.floci.services.glue.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.glue.model.Partition;
+import io.github.hectorvent.floci.services.glue.model.PartitionIndex;
+import io.github.hectorvent.floci.services.glue.model.PartitionIndexDescriptor;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
@@ -59,11 +62,15 @@ public class GlueService {
             "\\s*([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s*\\((.*)\\)\\s*",
             Pattern.CASE_INSENSITIVE);
 
+    /** Measured against real Glue (us-west-2): a fourth index reports the limit. */
+    private static final int MAX_PARTITION_INDEXES_PER_TABLE = 3;
+
     private final StorageBackend<String, Database> databaseStore;
     private final StorageBackend<String, Table> tableStore;
     private final StorageBackend<String, Table> tableVersionStore;
     private final StorageBackend<String, Map<String, Object>> columnStatisticsStore;
     private final StorageBackend<String, Partition> partitionStore;
+    private final StorageBackend<String, PartitionIndexDescriptor> partitionIndexStore;
     private final StorageBackend<String, Map<String, Object>> partitionColumnStatisticsStore;
     private final StorageBackend<String, UserDefinedFunction> functionStore;
     private final StorageBackend<String, Job> jobStore;
@@ -82,6 +89,8 @@ public class GlueService {
         this.tableVersionStore = storageFactory.create("glue", "table_versions.json", new TypeReference<>() {});
         this.columnStatisticsStore = storageFactory.create("glue", "column_statistics.json", new TypeReference<>() {});
         this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<>() {});
+        this.partitionIndexStore = storageFactory.create(
+                "glue", "partition_indexes.json", new TypeReference<>() {});
         this.partitionColumnStatisticsStore = storageFactory.create(
                 "glue", "partition_column_statistics.json", new TypeReference<>() {});
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
@@ -97,6 +106,7 @@ public class GlueService {
                 StorageBackend<String, Table> tableVersionStore,
                 StorageBackend<String, Map<String, Object>> columnStatisticsStore,
                 StorageBackend<String, Partition> partitionStore,
+                StorageBackend<String, PartitionIndexDescriptor> partitionIndexStore,
                 StorageBackend<String, Map<String, Object>> partitionColumnStatisticsStore,
                 StorageBackend<String, UserDefinedFunction> functionStore,
                 StorageBackend<String, Job> jobStore,
@@ -109,6 +119,7 @@ public class GlueService {
         this.tableVersionStore = tableVersionStore;
         this.columnStatisticsStore = columnStatisticsStore;
         this.partitionStore = partitionStore;
+        this.partitionIndexStore = partitionIndexStore;
         this.partitionColumnStatisticsStore = partitionColumnStatisticsStore;
         this.functionStore = functionStore;
         this.jobStore = jobStore;
@@ -281,6 +292,9 @@ public class GlueService {
         partitionColumnStatisticsStore.keys().stream()
                 .filter(statisticsKey -> statisticsKey.startsWith(key + ":"))
                 .forEach(partitionColumnStatisticsStore::delete);
+        partitionIndexStore.keys().stream()
+                .filter(indexKey -> indexKey.startsWith(key + ":"))
+                .forEach(partitionIndexStore::delete);
         LOG.infov("Deleted Glue Table: {0}.{1}", databaseName, tableName);
     }
 
@@ -422,6 +436,94 @@ public class GlueService {
         return partitionStore.scan(k -> k.startsWith(prefix)).stream()
                 .filter(partition -> matchesPartitionExpression(table, partition, expression))
                 .sorted(GlueService::comparePartitionValues)
+                .toList();
+    }
+
+    /**
+     * Registers a partition index on a table.
+     *
+     * <p>The index is stored {@code ACTIVE} straight away. Real Glue creates one asynchronously and
+     * reports {@code CREATING} while it backfills, but settling immediately keeps the emulator
+     * deterministic and lets a client that polls for {@code ACTIVE} finish on its first read.
+     */
+    public void createPartitionIndex(String databaseName, String tableName, PartitionIndex index) {
+        Table table = getTable(databaseName, tableName);
+
+        if (index == null || index.getIndexName() == null || index.getIndexName().isBlank()) {
+            throw new AwsException("InvalidInputException", "IndexName is required", 400);
+        }
+        List<String> keyNames = index.getKeys();
+        if (keyNames == null || keyNames.isEmpty()) {
+            throw new AwsException("InvalidInputException", "Keys is required", 400);
+        }
+
+        // Every key must name one of the table's partition keys: an index exists to narrow a
+        // partition scan, so a key outside that set could never be used.
+        List<KeySchemaElement> resolvedKeys = new ArrayList<>();
+        for (String keyName : keyNames) {
+            int position = partitionKeyIndex(table, keyName);
+            if (position < 0) {
+                throw new AwsException("InvalidInputException",
+                        "IndexKeys not a part of PartitionColumns. Verify the indexKeys : [" + keyName + "]", 400);
+            }
+            Column partitionKey = table.getPartitionKeys().get(position);
+            resolvedKeys.add(new KeySchemaElement(partitionKey.getName(), partitionKey.getType()));
+        }
+
+        // Measured against real Glue (us-west-2): the cap is evaluated before the duplicate
+        // checks, so a create that is both over the limit and a duplicate reports the limit.
+        List<PartitionIndexDescriptor> existing = getPartitionIndexes(databaseName, tableName);
+        if (existing.size() >= MAX_PARTITION_INDEXES_PER_TABLE) {
+            throw new AwsException("ResourceNumberLimitExceededException",
+                    "Partition index limit exceeded. Maximum: " + MAX_PARTITION_INDEXES_PER_TABLE, 400);
+        }
+
+        String key = partitionIndexKey(databaseName, tableName, index.getIndexName());
+        if (partitionIndexStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "Partition Index " + index.getIndexName() + " already exists with the same name.", 400);
+        }
+
+        // Glue also refuses a second index over the same keys under a different name. The
+        // comparison is order sensitive: [year, month] and [month, year] are distinct indexes.
+        List<String> resolvedKeyNames = resolvedKeys.stream().map(KeySchemaElement::getName).toList();
+        for (PartitionIndexDescriptor other : existing) {
+            List<String> otherKeyNames = other.getKeys() == null
+                    ? List.of()
+                    : other.getKeys().stream().map(KeySchemaElement::getName).toList();
+            if (otherKeyNames.equals(resolvedKeyNames)) {
+                throw new AwsException("AlreadyExistsException",
+                        "Partition Index " + other.getIndexName() + " already exists with the same keys.", 400);
+            }
+        }
+
+        PartitionIndexDescriptor descriptor = new PartitionIndexDescriptor();
+        descriptor.setIndexName(index.getIndexName());
+        descriptor.setIndexStatus("ACTIVE");
+        descriptor.setKeys(resolvedKeys);
+        partitionIndexStore.put(key, descriptor);
+        LOG.infov("Created Glue partition index: {0}.{1} {2}", databaseName, tableName, index.getIndexName());
+    }
+
+    public void deletePartitionIndex(String databaseName, String tableName, String indexName) {
+        getTable(databaseName, tableName);
+        if (indexName == null || indexName.isBlank()) {
+            throw new AwsException("InvalidInputException", "IndexName is required", 400);
+        }
+        String key = partitionIndexKey(databaseName, tableName, indexName);
+        if (partitionIndexStore.get(key).isEmpty()) {
+            throw new AwsException("EntityNotFoundException",
+                    "Index with the given indexName : " + indexName + " does not exist.", 400);
+        }
+        partitionIndexStore.delete(key);
+        LOG.infov("Deleted Glue partition index: {0}.{1} {2}", databaseName, tableName, indexName);
+    }
+
+    public List<PartitionIndexDescriptor> getPartitionIndexes(String databaseName, String tableName) {
+        getTable(databaseName, tableName);
+        String prefix = tableKey(databaseName, tableName) + ":";
+        return partitionIndexStore.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(PartitionIndexDescriptor::getIndexName))
                 .toList();
     }
 
@@ -622,6 +724,10 @@ public class GlueService {
 
     private static String columnStatisticsKey(String databaseName, String tableName, String columnName) {
         return tableKey(databaseName, tableName) + ":" + normalizeName(columnName);
+    }
+
+    private static String partitionIndexKey(String databaseName, String tableName, String indexName) {
+        return tableKey(databaseName, tableName) + ":" + normalizeName(indexName);
     }
 
     private static String partitionKey(String databaseName, String tableName, List<String> partitionValues) {

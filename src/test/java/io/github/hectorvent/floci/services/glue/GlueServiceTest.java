@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.glue.model.Job;
 import io.github.hectorvent.floci.services.glue.model.JobCommand;
 import io.github.hectorvent.floci.services.glue.model.JobUpdate;
 import io.github.hectorvent.floci.services.glue.model.Partition;
+import io.github.hectorvent.floci.services.glue.model.PartitionIndexDescriptor;
 import io.github.hectorvent.floci.services.glue.model.S3Target;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
@@ -76,6 +77,7 @@ class GlueServiceTest {
                 tableVersionStore,
                 columnStatisticsStore,
                 partitionStore,
+                new InMemoryStorage<String, PartitionIndexDescriptor>(),
                 new InMemoryStorage<String, Map<String, Object>>(),
                 new InMemoryStorage<String, UserDefinedFunction>(),
                 new InMemoryStorage<String, Job>(),

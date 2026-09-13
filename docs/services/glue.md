@@ -33,6 +33,13 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 |--------|-------------|
 | CreatePartition | Creates a partition for a Data Catalog table. |
 | GetPartitions | Lists partitions stored for a Data Catalog table. |
+| CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. |
+| GetPartitionIndexes | Lists a table's partition indexes, each with its keys resolved to name and type. |
+| DeletePartitionIndex | Removes a partition index from a table. |
+
+A created partition index is immediately `ACTIVE`. Real Glue creates one asynchronously and
+reports `CREATING` while it backfills, so a client that polls for `ACTIVE` completes on its first
+read here rather than after a wait.
 
 #### User-defined Functions
 
