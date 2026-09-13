@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEven
 import io.github.hectorvent.floci.services.bedrockagentcore.model.Branch;
 import io.github.hectorvent.floci.services.bedrockagentcore.model.MemoryEvent;
 import io.github.hectorvent.floci.services.bedrockagentcore.model.PayloadType;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import jakarta.ws.rs.PathParam;
@@ -225,9 +226,12 @@ public class BedrockAgentCoreMemoryController {
         String region = regionResolver.resolveRegion(headers);
         try {
             CreateEventRequest body = request == null ? new CreateEventRequest() : request;
+            // payload is required but may legitimately be empty, so presence is passed separately
+            // from the value: null means the member was omitted, not that it was an empty list.
             MemoryEvent event = eventService.createEvent(memoryId, body.actorId(), body.sessionId(),
-                    body.eventTimestamp(), body.payload(), body.branch(), region);
-            return Response.ok(Map.of("event", event)).build();
+                    body.eventTimestamp(), body.payload(), body.payload() != null, body.branch(), region);
+            // AWS answers CreateEvent with 201, not 200.
+            return Response.status(201).entity(Map.of("event", event)).build();
         } catch (AwsException e) {
             return awsError(e);
         }
@@ -246,9 +250,15 @@ public class BedrockAgentCoreMemoryController {
         String region = regionResolver.resolveRegion(headers);
         try {
             ListEventsRequest body = request == null ? new ListEventsRequest() : request;
-            List<MemoryEvent> events = eventService.listEvents(memoryId, actorId, sessionId,
-                    body.includePayloads(), body.maxResults(), region);
-            return Response.ok(Map.of("events", events)).build();
+            BedrockAgentCoreEventService.EventPage page = eventService.listEvents(memoryId, actorId, sessionId,
+                    body.includePayloads(), body.maxResults(), body.nextToken(), region);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("events", page.events());
+            // Only present when another page exists: an absent token ends a caller's loop.
+            if (page.nextToken() != null) {
+                response.put("nextToken", page.nextToken());
+            }
+            return Response.ok(response).build();
         } catch (AwsException e) {
             return awsError(e);
         }
@@ -308,8 +318,8 @@ public class BedrockAgentCoreMemoryController {
     }
 
     /** Request body of {@code ListEvents}. */
-    public record ListEventsRequest(Boolean includePayloads, Integer maxResults) {
-        public ListEventsRequest() { this(null, null); }
+    public record ListEventsRequest(Boolean includePayloads, Integer maxResults, String nextToken) {
+        public ListEventsRequest() { this(null, null, null); }
     }
 
 }

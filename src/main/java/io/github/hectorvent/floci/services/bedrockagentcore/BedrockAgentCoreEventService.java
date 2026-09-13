@@ -41,6 +41,9 @@ public class BedrockAgentCoreEventService {
     private static final Pattern MEMORY_ID = Pattern.compile("^.+-[A-Za-z0-9]{10}$");
 
     private static final int MAX_RESULTS_LIMIT = 100;
+    /** Documented default when a caller names no page size. */
+    private static final int DEFAULT_MAX_RESULTS = 20;
+    private static final int MAX_PAYLOAD_ITEMS = 100;
     private static final String DEFAULT_BRANCH = "main";
     private static final SecureRandom RANDOM = new SecureRandom();
 
@@ -61,12 +64,22 @@ public class BedrockAgentCoreEventService {
     }
 
     public MemoryEvent createEvent(String memoryId, String actorId, String sessionId,
-                                   Double eventTimestamp, List<PayloadType> payload,
+                                   Double eventTimestamp, List<PayloadType> payload, boolean payloadPresent,
                                    Branch branch, String region) {
         requireMemory(memoryId, region);
         requireField(actorId, "actorId");
         if (eventTimestamp == null) {
             throw new AwsException("ValidationException", "eventTimestamp is required", 400);
+        }
+        // payload is a required member whose valid values include the empty list, so an omitted
+        // member and an empty array are different requests and only the first is an error.
+        if (!payloadPresent) {
+            throw new AwsException("ValidationException", "payload is required", 400);
+        }
+        List<PayloadType> resolvedPayload = payload == null ? List.of() : payload;
+        if (resolvedPayload.size() > MAX_PAYLOAD_ITEMS) {
+            throw new AwsException("ValidationException",
+                    "payload must have at most " + MAX_PAYLOAD_ITEMS + " items", 400);
         }
 
         // sessionId is optional: AgentCore assigns a UUID when the caller omits it.
@@ -80,8 +93,7 @@ public class BedrockAgentCoreEventService {
         event.setSessionId(resolvedSession);
         event.setEventId(nextEventId(eventTimestamp));
         event.setEventTimestamp(eventTimestamp);
-        // An empty payload is accepted, so the list is stored as given rather than rejected.
-        event.setPayload(payload == null ? List.of() : payload);
+        event.setPayload(resolvedPayload);
         event.setBranch(branch != null ? branch : new Branch(DEFAULT_BRANCH));
 
         eventStore.put(eventKey(memoryId, actorId, resolvedSession, event.getEventId()), event);
@@ -96,8 +108,8 @@ public class BedrockAgentCoreEventService {
      * <p>The id embeds a zero-padded timestamp, so ordering by id descending is the same as
      * ordering by time descending, which is what AgentCore returns.
      */
-    public List<MemoryEvent> listEvents(String memoryId, String actorId, String sessionId,
-                                        Boolean includePayloads, Integer maxResults, String region) {
+    public EventPage listEvents(String memoryId, String actorId, String sessionId,
+                                Boolean includePayloads, Integer maxResults, String nextToken, String region) {
         requireMemory(memoryId, region);
         int limit = resolveMaxResults(maxResults);
 
@@ -105,13 +117,36 @@ public class BedrockAgentCoreEventService {
         List<MemoryEvent> events = new ArrayList<>(eventStore.scan(k -> k.startsWith(prefix)));
         events.sort(Comparator.comparing(MemoryEvent::getEventId).reversed());
 
-        List<MemoryEvent> page = events.size() > limit ? events.subList(0, limit) : events;
+        // The token is the last event id of the previous page. Ids sort with time, and the order
+        // is stable, so resuming is "everything after that id" rather than a positional offset
+        // that a concurrent write could shift.
+        if (nextToken != null && !nextToken.isBlank()) {
+            int resumeAt = -1;
+            for (int i = 0; i < events.size(); i++) {
+                if (nextToken.equals(events.get(i).getEventId())) {
+                    resumeAt = i;
+                    break;
+                }
+            }
+            if (resumeAt < 0) {
+                throw new AwsException("ValidationException", "nextToken is not valid", 400);
+            }
+            events = events.subList(resumeAt + 1, events.size());
+        }
+
+        boolean more = events.size() > limit;
+        List<MemoryEvent> page = more ? new ArrayList<>(events.subList(0, limit)) : events;
         if (Boolean.FALSE.equals(includePayloads)) {
             // Measured: the payload key is absent entirely, not an empty list.
-            return page.stream().map(BedrockAgentCoreEventService::withoutPayload).toList();
+            page = page.stream().map(BedrockAgentCoreEventService::withoutPayload).toList();
         }
-        return List.copyOf(page);
+        // A token only when another page exists; an absent token is what stops a caller's loop.
+        String token = more && !page.isEmpty() ? page.get(page.size() - 1).getEventId() : null;
+        return new EventPage(List.copyOf(page), token);
     }
+
+    /** One page of events plus the token to continue with, or {@code null} at the end. */
+    public record EventPage(List<MemoryEvent> events, String nextToken) {}
 
     public MemoryEvent getEvent(String memoryId, String actorId, String sessionId,
                                 String eventId, String region) {
@@ -161,7 +196,7 @@ public class BedrockAgentCoreEventService {
 
     private static int resolveMaxResults(Integer maxResults) {
         if (maxResults == null) {
-            return MAX_RESULTS_LIMIT;
+            return DEFAULT_MAX_RESULTS;
         }
         if (maxResults < 1 || maxResults > MAX_RESULTS_LIMIT) {
             throw new AwsException("ValidationException",

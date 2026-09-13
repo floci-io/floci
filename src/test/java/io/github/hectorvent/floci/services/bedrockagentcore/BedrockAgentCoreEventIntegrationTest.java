@@ -5,6 +5,7 @@ import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
@@ -41,7 +42,7 @@ class BedrockAgentCoreEventIntegrationTest {
                         + "\"payload\":[{\"conversational\":{\"role\":\"USER\","
                         + "\"content\":{\"text\":\"" + text + "\"}}}]}")
                 .when().post("/memories/" + memoryId + "/events")
-                .then().statusCode(200)
+                .then().statusCode(201)
                 .extract().path("event.eventId");
     }
 
@@ -94,7 +95,7 @@ class BedrockAgentCoreEventIntegrationTest {
         given().contentType(ContentType.JSON)
                 .body("{\"actorId\":\"actor1\",\"eventTimestamp\":1789300800,\"payload\":[]}")
                 .when().post("/memories/" + memoryId + "/events")
-                .then().statusCode(200)
+                .then().statusCode(201)
                 // Measured: AgentCore assigns a UUID rather than rejecting the request.
                 .body("event.sessionId", notNullValue())
                 .body("event.eventId", notNullValue());
@@ -107,7 +108,7 @@ class BedrockAgentCoreEventIntegrationTest {
         given().contentType(ContentType.JSON)
                 .body("{\"actorId\":\"a\",\"sessionId\":\"s\",\"eventTimestamp\":1789300800,\"payload\":[]}")
                 .when().post("/memories/" + memoryId + "/events")
-                .then().statusCode(200);
+                .then().statusCode(201);
     }
 
     @Test
@@ -174,5 +175,61 @@ class BedrockAgentCoreEventIntegrationTest {
                 .when().post("/memories/" + memoryId + "/actor/actor1/sessions/sess1")
                 .then().statusCode(200)
                 .body("events", hasSize(0));
+    }
+
+    @Test
+    void createEventAnswersWith201() {
+        String memoryId = createMemory("evtCreated");
+
+        given().contentType(ContentType.JSON)
+                .body("{\"actorId\":\"a\",\"sessionId\":\"s\",\"eventTimestamp\":1789300800,\"payload\":[]}")
+                .when().post("/memories/" + memoryId + "/events")
+                .then().statusCode(201)
+                .body("event.eventId", notNullValue());
+    }
+
+    @Test
+    void anOmittedPayloadIsRejectedEvenThoughAnEmptyOneIsValid() {
+        String memoryId = createMemory("evtNoPayload2");
+
+        // payload is a required member, so its absence is an error while [] is accepted.
+        given().contentType(ContentType.JSON)
+                .body("{\"actorId\":\"a\",\"sessionId\":\"s\",\"eventTimestamp\":1789300800}")
+                .when().post("/memories/" + memoryId + "/events")
+                .then().statusCode(400)
+                .body("message", containsString("payload"));
+    }
+
+    @Test
+    void listingPagesThroughWithANextToken() {
+        String memoryId = createMemory("evtPaged");
+        for (int i = 0; i < 3; i++) {
+            createEvent(memoryId, "actor1", "sess1", 1789300800d + (i * 60), "m" + i);
+        }
+
+        String firstPage = given().contentType(ContentType.JSON).body("{\"maxResults\":2}")
+                .when().post("/memories/" + memoryId + "/actor/actor1/sessions/sess1")
+                .then().statusCode(200)
+                .body("events", hasSize(2))
+                .body("nextToken", notNullValue())
+                .extract().path("nextToken");
+
+        given().contentType(ContentType.JSON)
+                .body("{\"maxResults\":2,\"nextToken\":\"" + firstPage + "\"}")
+                .when().post("/memories/" + memoryId + "/actor/actor1/sessions/sess1")
+                .then().statusCode(200)
+                .body("events", hasSize(1))
+                // No token on the last page: that is what ends a caller's loop.
+                .body("nextToken", nullValue());
+    }
+
+    @Test
+    void anInvalidNextTokenIsRejected() {
+        String memoryId = createMemory("evtBadToken");
+        createEvent(memoryId, "actor1", "sess1", 1789300800d, "hello");
+
+        given().contentType(ContentType.JSON).body("{\"nextToken\":\"not-a-real-token\"}")
+                .when().post("/memories/" + memoryId + "/actor/actor1/sessions/sess1")
+                .then().statusCode(400);
     }
 }

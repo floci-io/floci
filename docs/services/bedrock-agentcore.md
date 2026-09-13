@@ -96,7 +96,10 @@ than a fixed answer. Behaviour measured against real AgentCore:
 - a **malformed** memory id is a `ValidationException`, while a **well-formed but unknown** one is a
   `ResourceNotFoundException`. A memory id is a name followed by exactly ten alphanumerics
 - an unknown actor or session is an empty list, not an error
-- a new event lands on the `main` branch, and an empty payload is accepted
+- a new event lands on the `main` branch, and an empty payload is accepted, though `payload` is a
+  required member: omitting it is a `ValidationException` while `[]` is valid
+- `CreateEvent` answers `201`, not `200`
+- `ListEvents` pages with `nextToken` and defaults to 20 events when a caller names no `maxResults`
 
 Memory *records* (extraction and retrieval) are not emulated: they depend on an extraction engine
 rather than on stored events.
