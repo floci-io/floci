@@ -36,6 +36,7 @@ import software.amazon.awssdk.services.iam.model.GetInstanceProfileResponse;
 import software.amazon.awssdk.services.iam.model.GetPolicyRequest;
 import software.amazon.awssdk.services.iam.model.GetPolicyResponse;
 import software.amazon.awssdk.services.iam.model.GetPolicyVersionRequest;
+import software.amazon.awssdk.services.iam.model.GetPolicyVersionResponse;
 import software.amazon.awssdk.services.iam.model.GetRoleRequest;
 import software.amazon.awssdk.services.iam.model.GetRoleResponse;
 import software.amazon.awssdk.services.iam.model.GetRolePolicyRequest;
@@ -71,6 +72,7 @@ import software.amazon.awssdk.services.iam.model.UpdateAccessKeyRequest;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -548,7 +550,7 @@ class IamTest {
     @Test
     @Order(33)
     void getAwsManagedPolicy() {
-        var response = iam.getPolicy(GetPolicyRequest.builder().policyArn(ADMIN_POLICY_ARN).build());
+        GetPolicyResponse response = iam.getPolicy(GetPolicyRequest.builder().policyArn(ADMIN_POLICY_ARN).build());
 
         assertThat(response.policy().policyName()).isEqualTo("AdministratorAccess");
         assertThat(response.policy().arn()).isEqualTo(ADMIN_POLICY_ARN);
@@ -560,7 +562,8 @@ class IamTest {
     @Test
     @Order(34)
     void getAwsManagedPolicyWithServiceRolePath() {
-        var response = iam.getPolicy(GetPolicyRequest.builder().policyArn(LAMBDA_BASIC_POLICY_ARN).build());
+        GetPolicyResponse response =
+                iam.getPolicy(GetPolicyRequest.builder().policyArn(LAMBDA_BASIC_POLICY_ARN).build());
 
         assertThat(response.policy().policyName()).isEqualTo("AWSLambdaBasicExecutionRole");
         assertThat(response.policy().path()).isEqualTo("/service-role/");
@@ -569,21 +572,21 @@ class IamTest {
     @Test
     @Order(35)
     void getAwsManagedPolicyVersionDocument() {
-        var versionId = iam.getPolicy(GetPolicyRequest.builder().policyArn(ADMIN_POLICY_ARN).build())
+        String versionId = iam.getPolicy(GetPolicyRequest.builder().policyArn(ADMIN_POLICY_ARN).build())
                 .policy().defaultVersionId();
-        var response = iam.getPolicyVersion(GetPolicyVersionRequest.builder()
+        GetPolicyVersionResponse response = iam.getPolicyVersion(GetPolicyVersionRequest.builder()
                 .policyArn(ADMIN_POLICY_ARN).versionId(versionId).build());
 
         assertThat(response.policyVersion().versionId()).isEqualTo(versionId);
         assertThat(response.policyVersion().isDefaultVersion()).isTrue();
-        var document = URLDecoder.decode(response.policyVersion().document(), StandardCharsets.UTF_8);
+        String document = URLDecoder.decode(response.policyVersion().document(), StandardCharsets.UTF_8);
         assertThat(document).startsWith("{").contains("\"Statement\"").contains("\"Effect\"");
     }
 
     @Test
     @Order(36)
     void listAwsManagedPolicies() {
-        var names = iam.listPoliciesPaginator(request -> request.scope(PolicyScopeType.AWS))
+        List<String> names = iam.listPoliciesPaginator(request -> request.scope(PolicyScopeType.AWS))
                 .policies().stream().map(policy -> policy.policyName()).toList();
 
         assertThat(names).hasSizeGreaterThan(1000)
@@ -596,7 +599,7 @@ class IamTest {
         iam.attachUserPolicy(AttachUserPolicyRequest.builder()
                 .userName(USER_NAME).policyArn(READ_ONLY_POLICY_ARN).build());
 
-        var response = iam.listAttachedUserPolicies(ListAttachedUserPoliciesRequest.builder()
+        ListAttachedUserPoliciesResponse response = iam.listAttachedUserPolicies(ListAttachedUserPoliciesRequest.builder()
                 .userName(USER_NAME).build());
 
         assertThat(response.attachedPolicies())
