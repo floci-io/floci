@@ -1303,11 +1303,18 @@ public class Ec2QueryHandler {
      */
     private Response handleDescribeInstanceCreditSpecifications(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
+        Map<String, List<String>> filters = getFilters(p);
         int maxResults = parseIntParam(p, "MaxResults", 0);
         String nextToken = p.getFirst("NextToken");
 
+        // Validate the pagination parameters before honoring DryRun. AWS returns DryRunOperation
+        // only once the request would otherwise have succeeded, so a MaxResults outside its
+        // modeled range still fails on its own error.
+        service.validateInstanceCreditSpecificationsPagination(ids, maxResults);
+        checkDryRun(p);
+
         InstanceCreditSpecificationListResult result =
-                service.describeInstanceCreditSpecifications(region, ids, maxResults, nextToken);
+                service.describeInstanceCreditSpecifications(region, ids, filters, maxResults, nextToken);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceCreditSpecificationsResponse", AwsNamespaces.EC2)

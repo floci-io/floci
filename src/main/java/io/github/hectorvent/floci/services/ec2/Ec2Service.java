@@ -3121,22 +3121,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * instance type, because recomputing would drop the unlimited option the moment a resize took
      * the instance out of the T family.
      *
+     * <p>Filters narrow whichever of the two sets the request selected. The EC2 model declares
+     * one filter name here, {@code instance-id}, and documents that "if you specify multiple
+     * filters, the filters are joined with an AND, and the request returns only results that
+     * match all of the specified filters". Named ids still decide the base set and are still
+     * validated for existence, so an id that names no instance fails even when a filter would
+     * have excluded it. An unrecognised filter name matches everything, which is what every
+     * other filtered EC2 Describe action in this service already does.
+     *
      * @param instanceIds the ids to report on, or empty for the unfiltered form
+     * @param filters     the Filter.N entries, joined with an AND
      * @param maxResults  page size, or 0 for no pagination. AWS rejects it together with ids
      * @param nextToken   the cursor from a previous page, or null
      */
     public InstanceCreditSpecificationListResult describeInstanceCreditSpecifications(
-            String region, List<String> instanceIds, int maxResults, String nextToken) {
+            String region, List<String> instanceIds, Map<String, List<String>> filters,
+            int maxResults, String nextToken) {
+        validateInstanceCreditSpecificationsPagination(instanceIds, maxResults);
         ensureDefaultResources(region);
-        if (maxResults > 0 && !instanceIds.isEmpty()) {
-            throw new AwsException("InvalidParameterCombination",
-                    "The parameter instanceIdsSet cannot be used with the parameter maxResults", 400);
-        }
 
         if (!instanceIds.isEmpty()) {
             List<InstanceCreditSpecification> named = new ArrayList<>();
             for (String instanceId : instanceIds) {
                 Instance inst = getRequiredInstance(region, instanceId);
+                if (!matchesFilters(inst, filters, region)) {
+                    continue;
+                }
                 named.add(new InstanceCreditSpecification(instanceId, effectiveCpuCredits(inst)));
             }
             return new InstanceCreditSpecificationListResult(named, null);
@@ -3145,6 +3155,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<InstanceCreditSpecification> unlimited = instances.scan(k -> true).stream()
                 .filter(i -> i.getRegion().equals(region))
                 .filter(i -> "unlimited".equals(effectiveCpuCredits(i)))
+                .filter(i -> matchesFilters(i, filters, region))
                 .map(i -> new InstanceCreditSpecification(i.getInstanceId(), "unlimited"))
                 .collect(Collectors.toList());
 
@@ -3159,6 +3170,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return new InstanceCreditSpecificationListResult(new ArrayList<>(page), newNextToken);
         }
         return new InstanceCreditSpecificationListResult(unlimited, null);
+    }
+
+    /**
+     * Validate the pagination parameters of DescribeInstanceCreditSpecifications without touching
+     * stored state, so a caller can reject a bad request before it honors DryRun. AWS reports an
+     * invalid parameter ahead of DryRunOperation, which it only returns once the request could
+     * otherwise succeed.
+     *
+     * <p>DescribeInstanceCreditSpecificationsMaxResults carries a min of 5 and a max of 1000 in
+     * the EC2 model, and InvalidMaxResults is the code this service already raises for a
+     * MaxResults outside its modeled range.
+     */
+    public void validateInstanceCreditSpecificationsPagination(List<String> instanceIds, int maxResults) {
+        if (maxResults > 0 && !instanceIds.isEmpty()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The parameter instanceIdsSet cannot be used with the parameter maxResults", 400);
+        }
+        if (maxResults > 0 && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 1000.", 400);
+        }
     }
 
     /**

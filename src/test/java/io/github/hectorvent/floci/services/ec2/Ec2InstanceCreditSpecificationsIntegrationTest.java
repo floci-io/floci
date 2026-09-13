@@ -163,6 +163,155 @@ class Ec2InstanceCreditSpecificationsIntegrationTest {
     }
 
     /**
+     * DescribeInstanceCreditSpecificationsMaxResults carries a min of 5 and a max of 1000 in the
+     * EC2 model, so both ends are valid and one step outside either end is InvalidMaxResults.
+     */
+    @Test
+    void maxResultsHonorsItsModeledRange() {
+        launch("t3.micro", null);
+
+        assertMaxResultsAccepted("5");
+        assertMaxResultsAccepted("1000");
+        assertMaxResultsRejected("4");
+        assertMaxResultsRejected("1001");
+    }
+
+    @Test
+    void dryRunReturnsDryRunOperation() {
+        given()
+                .formParam("Action", "DescribeInstanceCreditSpecifications")
+                .formParam("DryRun", "true")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(412)
+                .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+    }
+
+    /**
+     * An invalid MaxResults is reported ahead of DryRunOperation, which AWS returns only once the
+     * request could otherwise have succeeded. Sibling EC2 actions order the two probes the same
+     * way.
+     */
+    @Test
+    void anInvalidMaxResultsIsReportedAheadOfDryRun() {
+        given()
+                .formParam("Action", "DescribeInstanceCreditSpecifications")
+                .formParam("MaxResults", "1001")
+                .formParam("DryRun", "true")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidMaxResults"));
+    }
+
+    /**
+     * The EC2 model declares one filter name for this operation, instance-id. On the unfiltered
+     * form it narrows the set of instances on the unlimited option.
+     */
+    @Test
+    void anInstanceIdFilterNarrowsTheUnfilteredForm() {
+        String wanted = launch("t3.micro", null);
+        String other = launch("t3.small", null);
+
+        List<String> reported = filteredInstanceIds("instance-id", wanted);
+
+        assertTrue(reported.contains(wanted));
+        assertFalse(reported.contains(other));
+    }
+
+    /**
+     * Named ids decide the base set and are still validated for existence, and the filters narrow
+     * that set with an AND. A named id the filter excludes drops out of the response.
+     */
+    @Test
+    void anInstanceIdFilterAlsoNarrowsNamedIds() {
+        String wanted = launch("t3.micro", null);
+        String excluded = launch("t3.small", null);
+
+        List<String> reported = given()
+                .formParam("Action", "DescribeInstanceCreditSpecifications")
+                .formParam("InstanceId.1", wanted)
+                .formParam("InstanceId.2", excluded)
+                .formParam("Filter.1.Name", "instance-id")
+                .formParam("Filter.1.Value.1", wanted)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getList(ITEM + "instanceId", String.class);
+
+        assertTrue(reported.contains(wanted));
+        assertFalse(reported.contains(excluded));
+    }
+
+    @Test
+    void anUnknownNamedIdStillFailsWhenAFilterIsPresent() {
+        given()
+                .formParam("Action", "DescribeInstanceCreditSpecifications")
+                .formParam("InstanceId.1", "i-00000000000000000")
+                .formParam("Filter.1.Name", "instance-id")
+                .formParam("Filter.1.Value.1", "i-00000000000000000")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidInstanceID.NotFound"));
+    }
+
+    /**
+     * An unrecognised filter name matches everything, which is what every other filtered EC2
+     * Describe action in this handler already does.
+     */
+    @Test
+    void anUnrecognisedFilterNameMatchesEverything() {
+        String instanceId = launch("t3.micro", null);
+
+        assertTrue(filteredInstanceIds("no-such-filter", "anything").contains(instanceId));
+    }
+
+    private List<String> filteredInstanceIds(String name, String value) {
+        return given()
+                .formParam("Action", "DescribeInstanceCreditSpecifications")
+                .formParam("Filter.1.Name", name)
+                .formParam("Filter.1.Value.1", value)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getList(ITEM + "instanceId", String.class);
+    }
+
+    private void assertMaxResultsAccepted(String maxResults) {
+        given()
+                .formParam("Action", "DescribeInstanceCreditSpecifications")
+                .formParam("MaxResults", maxResults)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+    }
+
+    private void assertMaxResultsRejected(String maxResults) {
+        given()
+                .formParam("Action", "DescribeInstanceCreditSpecifications")
+                .formParam("MaxResults", maxResults)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidMaxResults"));
+    }
+
+    /**
      * Terraform checks BurstablePerformanceSupported on DescribeInstanceTypes before it reads a
      * credit specification at all, so the flag has to be right or the action is never called.
      */
