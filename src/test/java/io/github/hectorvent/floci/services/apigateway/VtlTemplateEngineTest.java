@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -26,6 +27,7 @@ class VtlTemplateEngineTest {
                 "/users",
                 "req-123",
                 "000000000000",
+                Map.of(),
                 Map.of()
         );
     }
@@ -155,10 +157,22 @@ class VtlTemplateEngineTest {
     }
 
     @Test
+    void contextAuthorizer() {
+        VtlTemplateEngine.VtlContext authorizerCtx = new VtlTemplateEngine.VtlContext(
+                "{}", Map.of(), Map.of(), Map.of(), "prod", "POST", "/users",
+                "req-123", "000000000000", Map.of(),
+                Map.of("key_id", "KEY-123", "identity", "{\"tenant\":\"t-9\"}"));
+        String template = "#set($identity = $util.parseJson($context.authorizer.identity))"
+                + "$context.authorizer.key_id|$identity.tenant";
+
+        assertEquals("KEY-123|t-9", engine.evaluate(template, authorizerCtx).body());
+    }
+
+    @Test
     void stageVariables() {
         VtlTemplateEngine.VtlContext svCtx = new VtlTemplateEngine.VtlContext(
                 "{}", Map.of(), Map.of(), Map.of(), "prod", "GET", "/",
-                "req-1", "000000000000", Map.of("tableName", "my-table"));
+                "req-1", "000000000000", Map.of("tableName", "my-table"), Map.of());
         String result = engine.evaluate("$stageVariables.tableName", svCtx).body();
         assertEquals("my-table", result);
     }
@@ -292,7 +306,7 @@ class VtlTemplateEngineTest {
         var queryCtx = new VtlTemplateEngine.VtlContext(
                 "{}", Map.of(), Map.of("userId", "user-42", "status", "active"),
                 Map.of(), "prod", "GET", "/items",
-                "req-456", "000000000000", Map.of("tableName", "orders"));
+                "req-456", "000000000000", Map.of("tableName", "orders"), Map.of());
         String template = """
                 {"TableName": "$stageVariables.tableName", "KeyConditionExpression": "pk = :pk", "ExpressionAttributeValues": {":pk": {"S": "$input.params().querystring.userId"}}}""";
         String result = engine.evaluate(template, queryCtx).body();
@@ -320,7 +334,17 @@ class VtlTemplateEngineTest {
         // Access all three param types in one template
         String template = "$input.params().querystring.limit|$input.params().path.proxy|$input.params().header.get('Content-Type')";
         String result = engine.evaluate(template, ctx("{}")).body();
-        assertTrue(result.startsWith("10|users/123|"), "Should contain all param types: " + result);
+        assertEquals("10|users/123|application/json", result);
+    }
+
+    @Test
+    void inputParams_headerKeySet() {
+        String template = "#foreach($header in $input.params().header.keySet())"
+                + "$header=$input.params().header.get($header)#if($foreach.hasNext),#end#end";
+        String result = engine.evaluate(template, ctx("{}")).body();
+
+        assertEquals(Set.of("Content-Type=application/json", "Authorization=Bearer xyz"),
+                Set.of(result.split(",")));
     }
 
     // ──────────── $util.parseJson in templates ────────────
@@ -358,7 +382,7 @@ class VtlTemplateEngineTest {
                 "{}", Map.of("shared", "header-val"),
                 Map.of("shared", "query-val"),
                 Map.of("shared", "path-val"),
-                "prod", "GET", "/", "req-1", "000000000000", Map.of());
+                "prod", "GET", "/", "req-1", "000000000000", Map.of(), Map.of());
         String result = engine.evaluate("$input.params('shared')", overlapCtx).body();
         assertEquals("query-val", result);
     }

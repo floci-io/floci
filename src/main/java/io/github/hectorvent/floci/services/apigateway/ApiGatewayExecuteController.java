@@ -407,7 +407,7 @@ public class ApiGatewayExecuteController {
                     matched, stage, integration, headers, uriInfo, body, authorizerResult, resolvedApiKey,
                     iamIdentity);
             case "AWS" -> invokeAwsIntegration(region, httpMethod, path, stageName,
-                    matched, integration, headers, uriInfo, body);
+                    matched, integration, headers, uriInfo, body, authorizerResult);
             case "MOCK" -> invokeMock(region, httpMethod, path, stageName, matched, integration, headers, uriInfo, body);
             default -> Response.status(500)
                     .entity(jsonMessage("Unsupported integration type: " + integration.getType()))
@@ -990,7 +990,8 @@ public class ApiGatewayExecuteController {
     private Response invokeAwsIntegration(String region, String httpMethod, String path,
                                           String stageName, ApiGatewayResource resource,
                                           Integration integration, HttpHeaders headers,
-                                          UriInfo uriInfo, byte[] body) {
+                                          UriInfo uriInfo, byte[] body,
+                                          AuthorizerResult authorizerResult) {
         AwsServiceRouter.IntegrationTarget target = serviceRouter.parseIntegrationUri(integration.getUri());
         if (target == null) {
             return Response.status(500)
@@ -1019,7 +1020,8 @@ public class ApiGatewayExecuteController {
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                resource.getPath(), requestId, regionResolver.getAccountId(), null);
+                resource.getPath(), requestId, regionResolver.getAccountId(), null,
+                authorizerResult.context());
 
         // AWS selects the request template by the *incoming* request Content-Type. Capture it
         // before parameter mapping runs, since an integration.request.header.Content-Type
@@ -1238,7 +1240,8 @@ public class ApiGatewayExecuteController {
                 if (responseTemplate != null && !responseTemplate.isEmpty()) {
                     VtlTemplateEngine.VtlContext responseMappingCtx = new VtlTemplateEngine.VtlContext(
                             responseBodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                            resource.getPath(), requestId, regionResolver.getAccountId(), null);
+                            resource.getPath(), requestId, regionResolver.getAccountId(), null,
+                            authorizerResult.context());
                     templateResult = vtlEngine.evaluate(responseTemplate, responseMappingCtx);
                     finalBody = templateResult.body();
                 } else {
@@ -1374,7 +1377,7 @@ public class ApiGatewayExecuteController {
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                resource.getPath(), requestId, regionResolver.getAccountId(), null);
+                resource.getPath(), requestId, regionResolver.getAccountId(), null, null);
 
         // A MOCK has no backend: the request template *is* the integration response, and the
         // "statusCode" it renders is what the integration responses' selectionPatterns are
