@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -169,6 +170,7 @@ public class Ec2ContainerManager {
     private final RegionResolver regionResolver;
     private final ContainerNetworkReachability containerNetworkReachability;
     private final VpcNetworkManager vpcNetworkManager;
+    private final ContainerReachableEndpoint reachableEndpoint;
     private final ExecutorService executor;
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
@@ -188,10 +190,11 @@ public class Ec2ContainerManager {
                                Ec2PortForwardManager portForwardManager,
                                RegionResolver regionResolver,
                                ContainerNetworkReachability containerNetworkReachability,
-                               VpcNetworkManager vpcNetworkManager) {
+                               VpcNetworkManager vpcNetworkManager,
+                               ContainerReachableEndpoint reachableEndpoint) {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
                 portAllocator, config, metadataServer, portForwardManager, regionResolver,
-                containerNetworkReachability, vpcNetworkManager, createLaunchExecutor(),
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, createLaunchExecutor(),
                 Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
     }
 
@@ -208,6 +211,7 @@ public class Ec2ContainerManager {
                         RegionResolver regionResolver,
                         ContainerNetworkReachability containerNetworkReachability,
                         VpcNetworkManager vpcNetworkManager,
+                        ContainerReachableEndpoint reachableEndpoint,
                         ExecutorService executor,
                         Duration userDataExecutionTimeout) {
         this.containerBuilder = containerBuilder;
@@ -223,6 +227,7 @@ public class Ec2ContainerManager {
         this.portForwardManager = portForwardManager;
         this.containerNetworkReachability = containerNetworkReachability;
         this.vpcNetworkManager = vpcNetworkManager;
+        this.reachableEndpoint = reachableEndpoint;
         this.executor = executor;
         this.userDataExecutionTimeout = userDataExecutionTimeout;
     }
@@ -439,7 +444,7 @@ public class Ec2ContainerManager {
         String instanceId = instance.getInstanceId();
         String containerName = ContainerStorageHelper.resourceName(config, "ec2", null, instanceId);
         String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
-        String serviceEndpoint = "http://" + flociHost + ":4566";
+        String serviceEndpoint = reachableEndpoint.baseUrl();
 
         while (true) {
             if (isLaunchCancelled(instance)) {
