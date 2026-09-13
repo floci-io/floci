@@ -408,7 +408,8 @@ public class ApiGatewayExecuteController {
                     iamIdentity);
             case "AWS" -> invokeAwsIntegration(region, httpMethod, path, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
-            case "MOCK" -> invokeMock(region, httpMethod, path, stageName, matched, integration, headers, uriInfo, body);
+            case "MOCK" -> invokeMock(region, httpMethod, path, stageName,
+                    matched, integration, headers, uriInfo, body, authorizerResult);
             default -> Response.status(500)
                     .entity(jsonMessage("Unsupported integration type: " + integration.getType()))
                     .type(MediaType.APPLICATION_JSON).build();
@@ -1374,7 +1375,8 @@ public class ApiGatewayExecuteController {
 
     private Response invokeMock(String region, String httpMethod, String path, String stageName,
                                 ApiGatewayResource resource, Integration integration,
-                                HttpHeaders headers, UriInfo uriInfo, byte[] body) {
+                                HttpHeaders headers, UriInfo uriInfo, byte[] body,
+                                AuthorizerResult authorizerResult) {
         String requestId = UUID.randomUUID().toString();
         String bodyStr = body != null && body.length > 0 ? new String(body) : null;
 
@@ -1395,7 +1397,8 @@ public class ApiGatewayExecuteController {
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                resource.getPath(), requestId, regionResolver.getAccountId(), null, null);
+                resource.getPath(), requestId, regionResolver.getAccountId(), null,
+                vtlAuthorizerContext(authorizerResult.principalId(), authorizerResult.context()));
 
         // A MOCK has no backend: the request template *is* the integration response, and the
         // "statusCode" it renders is what the integration responses' selectionPatterns are
