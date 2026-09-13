@@ -55,6 +55,9 @@ class EventBridgeInvokerTest {
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         when(eventBridgeService.putEvents(anyList(), anyString(), any()))
                 .thenReturn(new EventBridgeService.PutEventsResult(0, List.of()));
+        io.github.hectorvent.floci.config.EmulatorConfig emulatorConfig =
+                mock(io.github.hectorvent.floci.config.EmulatorConfig.class,
+                        org.mockito.Mockito.RETURNS_DEEP_STUBS);
         invoker = new EventBridgeInvoker(
                 lambdaService,
                 sqsService,
@@ -63,10 +66,11 @@ class EventBridgeInvokerTest {
                 firehoseService,
                 eventBridgeService,
                 ecsService,
-                new io.github.hectorvent.floci.services.ecs.EcsJsonHandler(ecsService, new ObjectMapper()),
+                new io.github.hectorvent.floci.services.ecs.EcsJsonHandler(ecsService, new ObjectMapper(),
+                        new io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy(emulatorConfig)),
                 regionResolver,
                 new ObjectMapper(),
-                mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
+                emulatorConfig
         );
     }
 

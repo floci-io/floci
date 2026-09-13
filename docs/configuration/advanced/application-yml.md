@@ -307,6 +307,8 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK`                | *(unset)*        | Docker network for ECS task containers                        |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB`             | `512`            | Default memory (MB) when task definition omits it             |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS`             | `256`            | Default CPU units when task definition omits it               |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
+| `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES`     | `false`          | Allow any host path, bypassing the host-volume-roots allowlist (traversal, bare root, and the Docker socket or an ancestor directory of it are still always rejected) |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK`                   | `false`          | Skip Docker; domains appear active immediately (useful for CI)   |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false`        | Leave OpenSearch containers running after Floci stops            |

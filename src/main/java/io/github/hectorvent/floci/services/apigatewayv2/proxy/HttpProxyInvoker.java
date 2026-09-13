@@ -69,17 +69,19 @@ public class HttpProxyInvoker {
             method = ctx.httpMethod();
         }
 
-        // 3. Build mutable request, seed with inbound headers/query (excluding hop-by-hop)
+        // 3. Build mutable request, seed with inbound headers/query (excluding hop-by-hop).
+        // Seeded from the multi-valued view so repeated inbound headers and query parameters
+        // reach the backend repeated rather than comma-joined.
         ProxyRequestBuilder builder = new ProxyRequestBuilder(resolvedUrl, method);
-        if (ctx.requestHeaders() != null) {
-            for (Map.Entry<String, String> e : ctx.requestHeaders().entrySet()) {
+        if (ctx.multiValueHeaders() != null) {
+            for (Map.Entry<String, List<String>> e : ctx.multiValueHeaders().entrySet()) {
                 if (!HOP_BY_HOP.contains(e.getKey().toLowerCase())) {
                     builder.overwriteHeader(e.getKey(), e.getValue());
                 }
             }
         }
-        if (ctx.queryParams() != null) {
-            for (Map.Entry<String, String> e : ctx.queryParams().entrySet()) {
+        if (ctx.multiValueQueryParams() != null) {
+            for (Map.Entry<String, List<String>> e : ctx.multiValueQueryParams().entrySet()) {
                 builder.overwriteQuery(e.getKey(), e.getValue());
             }
         }
@@ -129,10 +131,10 @@ public class HttpProxyInvoker {
 
         try {
             HttpResponse<byte[]> resp = client.send(hrb.build(), HttpResponse.BodyHandlers.ofByteArray());
-            Map<String, String> respHeaders = new LinkedHashMap<>();
+            Map<String, List<String>> respHeaders = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> e : resp.headers().map().entrySet()) {
                 if (HOP_BY_HOP.contains(e.getKey().toLowerCase())) continue;
-                respHeaders.put(e.getKey(), String.join(",", e.getValue()));
+                respHeaders.put(e.getKey(), List.copyOf(e.getValue()));
             }
             return new ProxyResult(resp.statusCode(), respHeaders, resp.body());
         } catch (Exception e) {
@@ -221,7 +223,7 @@ public class HttpProxyInvoker {
         }
         String[] status = lines[0].split(" ", 3);
         int statusCode = Integer.parseInt(status[1]);
-        Map<String, String> headers = new LinkedHashMap<>();
+        Map<String, List<String>> headers = new LinkedHashMap<>();
         String transferEncoding = null;
         int contentLength = -1;
         for (int i = 1; i < lines.length; i++) {
@@ -238,7 +240,8 @@ public class HttpProxyInvoker {
                 contentLength = Integer.parseInt(value);
             }
             if (!HOP_BY_HOP.contains(name.toLowerCase(Locale.ROOT))) {
-                headers.put(name, value);
+                // Repeated header lines (Set-Cookie) accumulate rather than overwrite.
+                headers.computeIfAbsent(name, k -> new java.util.ArrayList<>()).add(value);
             }
         }
         byte[] body = transferEncoding != null && transferEncoding.toLowerCase(Locale.ROOT).contains("chunked")
@@ -319,7 +322,7 @@ public class HttpProxyInvoker {
 
     private static ProxyResult errorResult(String message) {
         String body = "{\"message\":\"" + message.replace("\"", "\\\"") + "\"}";
-        return new ProxyResult(502,
+        return ProxyResult.withSingleValueHeaders(502,
                 Map.of("Content-Type", "application/json"),
                 body.getBytes(StandardCharsets.UTF_8));
     }

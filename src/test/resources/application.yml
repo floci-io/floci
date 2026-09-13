@@ -272,6 +272,8 @@ floci:
     ecs:
       enabled: true
       mock: true
+      host-volume-roots: []
+      allow-unsafe-host-volumes: false
     appconfig:
       enabled: true
     appconfigdata:

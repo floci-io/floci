@@ -41,7 +41,7 @@ class LambdaAuthorizerValidatorTest {
     void setUp() {
         validator = new LambdaAuthorizerValidator(lambdaService, new LambdaAuthorizerCache(), mapper);
         info = new AuthRequestInfo("{ hello }", "GetHello", Map.of("id", "1"),
-                List.of(), "req-1", "000000000000", "us-east-1", Map.of("authorization", "tok"));
+                List.of(), "req-1", "000000000000", "us-east-1", Map.of("authorization", "tok"), "{ hello }");
         config = Map.of(
                 "authorizerUri", "arn:aws:lambda:us-east-1:000000000000:function:authz",
                 "authorizerResultTtlInSeconds", 30);

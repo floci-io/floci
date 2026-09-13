@@ -66,6 +66,8 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SnsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
@@ -320,6 +322,11 @@ final class CfnProvisionerFixture {
             }
             if (rdsService != null) {
                 discovered.add(new RdsCfnProvisioner(rdsService, dynamicReferences));
+            }
+            if (secretsManagerService != null) {
+                discovered.add(new SecretsManagerCfnProvisioner(secretsManagerService));
+                discovered.add(new SecretTargetAttachmentCfnProvisioner(
+                        secretsManagerService, rdsService, docDbService, objectMapper));
             }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));
@@ -626,7 +633,6 @@ final class CfnProvisionerFixture {
                     iamService,
                     ssmService,
                     kmsService,
-                    secretsManagerService,
                     apiGatewayService,
                     apiGatewayV2Service,
                     ecrService,
@@ -637,14 +643,12 @@ final class CfnProvisionerFixture {
                     reachableEndpoint,
                     stepFunctionsService,
                     ec2Service,
-                    rdsService,
                     eksService,
                     logsService,
                     kinesisService,
                     cloudWatchMetricsService,
                     autoScalingService,
                     firehoseService,
-                    docDbService,
                     cloudFrontService,
                     resourceRegistry,
                     dynamicReferences,

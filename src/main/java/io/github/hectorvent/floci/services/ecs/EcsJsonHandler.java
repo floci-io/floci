@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
@@ -52,11 +53,13 @@ public class EcsJsonHandler {
 
     private final EcsService service;
     private final ObjectMapper objectMapper;
+    private final HostVolumePolicy hostVolumePolicy;
 
     @Inject
-    public EcsJsonHandler(EcsService service, ObjectMapper objectMapper) {
+    public EcsJsonHandler(EcsService service, ObjectMapper objectMapper, HostVolumePolicy hostVolumePolicy) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.hostVolumePolicy = hostVolumePolicy;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -1507,6 +1510,9 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             String hostSourcePath = item.path("host").path("sourcePath").asText(null);
+            if (hostSourcePath != null && !hostSourcePath.isBlank()) {
+                hostVolumePolicy.validate(hostSourcePath);
+            }
             EfsVolumeConfiguration efs = parseEfsVolumeConfiguration(item.path("efsVolumeConfiguration"));
             result.add(new Volume(item.path("name").asText(), hostSourcePath, efs));
         }

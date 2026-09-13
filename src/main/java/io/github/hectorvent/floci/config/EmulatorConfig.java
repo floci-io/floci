@@ -1753,6 +1753,23 @@ public interface EmulatorConfig {
 
         @WithDefault("256")
         int defaultCpuUnits();
+
+        /**
+         * Approved parent directories for task definition host volume bind mounts
+         * (volumes[].host.sourcePath). A sourcePath must resolve under one of these roots.
+         * Empty (the default) rejects every host volume sourcePath unless
+         * {@link #allowUnsafeHostVolumes()} is set, subject to the always-on traversal,
+         * bare-root, and Docker socket blocks below.
+         */
+        Optional<List<String>> hostVolumeRoots();
+
+        /**
+         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes,
+         * allowing any absolute path. Traversal segments, the bare root "/", and the Docker
+         * socket (or any ancestor directory that contains it) are still always rejected.
+         */
+        @WithDefault("false")
+        boolean allowUnsafeHostVolumes();
     }
 
     interface ResourceGroupsTaggingServiceConfig {

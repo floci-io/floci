@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Container;
@@ -38,6 +39,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -367,6 +369,8 @@ public class Ec2ContainerManager {
                     return;
                 }
 
+                refreshMetadataAddresses(instance, containerId);
+
                 if (!markRunning(instance)) {
                     failLaunch(instance, leasedPrivateIp);
                     return;
@@ -579,6 +583,7 @@ public class Ec2ContainerManager {
         if (sshHostPort > 0) {
             portAllocator.release(sshHostPort);
         }
+        metadataServer.unregisterInstance(instance);
         if (containerIp != null && !containerIp.isBlank()) {
             try {
                 metadataServer.unregisterContainer(containerIp, instance);
@@ -782,6 +787,7 @@ public class Ec2ContainerManager {
                     }
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                     refreshImdsSourceRegistration(instance, containerId, containerIp);
+                    refreshMetadataAddresses(instance, containerId);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -852,6 +858,28 @@ public class Ec2ContainerManager {
         return removed;
     }
 
+    private void refreshMetadataAddresses(Instance instance, String containerId) {
+        try {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
+                return;
+            }
+            Set<String> addresses = new HashSet<>();
+            for (ContainerNetwork network : inspect.getNetworkSettings().getNetworks().values()) {
+                if (network != null && network.getIpAddress() != null && !network.getIpAddress().isBlank()) {
+                    addresses.add(network.getIpAddress());
+                }
+            }
+            // An incomplete Docker response must not discard the last known registrations.
+            if (!addresses.isEmpty()) {
+                metadataServer.reconcileContainerAddresses(addresses, instance);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not refresh IMDS addresses for EC2 instance {0}, keeping existing registrations: {1}",
+                    instance.getInstanceId(), e.getMessage());
+        }
+    }
+
     boolean restoreMetadataRegistration(Instance instance) {
         if (instance == null || instance.getDockerContainerId() == null) {
             return false;
@@ -882,6 +910,7 @@ public class Ec2ContainerManager {
         }
         metadataServer.registerContainer(containerIp, instance.getInstanceId(), instance);
         refreshImdsSourceRegistration(instance, containerId, containerIp);
+        refreshMetadataAddresses(instance, containerId);
         return true;
     }
 
@@ -1066,6 +1095,7 @@ public class Ec2ContainerManager {
             }
             metadataServer.unregisterContainer(containerIp, instance);
             metadataServer.unregisterContainer(imdsSourceIp, instance);
+            metadataServer.unregisterInstance(instance);
             // Give the address back only now that the container is gone: releasing it while
             // Docker still holds the endpoint would hand the same IP to the next launch and
             // have Docker refuse it.

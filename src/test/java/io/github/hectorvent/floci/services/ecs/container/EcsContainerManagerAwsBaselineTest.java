@@ -79,7 +79,7 @@ class EcsContainerManagerAwsBaselineTest {
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, config, regionResolver, awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class), ecrRegistryManager);
+                mock(SecretsManagerService.class), ecrRegistryManager, mock(HostVolumePolicy.class));
     }
 
     @Test
