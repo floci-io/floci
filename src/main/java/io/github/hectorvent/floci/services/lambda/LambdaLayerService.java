@@ -124,6 +124,10 @@ public class LambdaLayerService {
         String description = (String) request.get("Description");
         String licenseInfo = (String) request.get("LicenseInfo");
 
+        LambdaService.validateEnumList(request.get("CompatibleRuntimes"), "compatibleRuntimes",
+                LambdaService.RUNTIME_VALUES, 15);
+        LambdaService.validateEnumList(request.get("CompatibleArchitectures"), "compatibleArchitectures",
+                LambdaService.ARCHITECTURE_VALUES, 2);
         List<String> compatibleRuntimes = request.get("CompatibleRuntimes") instanceof List
                 ? (List<String>) request.get("CompatibleRuntimes") : null;
         List<String> compatibleArchitectures = request.get("CompatibleArchitectures") instanceof List

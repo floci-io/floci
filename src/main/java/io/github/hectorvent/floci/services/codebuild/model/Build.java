@@ -22,6 +22,7 @@ public class Build {
     private Double startTime;
     private Double endTime;
     private ProjectSource source;
+    private List<ProjectSource> secondarySources;
     private ProjectArtifacts artifacts;
     private ProjectEnvironment environment;
     private Map<String, Object> logs;
@@ -62,6 +63,9 @@ public class Build {
 
     public ProjectSource getSource() { return source; }
     public void setSource(ProjectSource source) { this.source = source; }
+
+    public List<ProjectSource> getSecondarySources() { return secondarySources; }
+    public void setSecondarySources(List<ProjectSource> secondarySources) { this.secondarySources = secondarySources; }
 
     public ProjectArtifacts getArtifacts() { return artifacts; }
     public void setArtifacts(ProjectArtifacts artifacts) { this.artifacts = artifacts; }
