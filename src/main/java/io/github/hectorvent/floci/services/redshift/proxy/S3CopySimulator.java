@@ -169,17 +169,29 @@ public final class S3CopySimulator {
     public static boolean runCopyFrom(Socket client, Socket backend,
                                       CopyStatementParser.S3CopyFrom spec, S3Service s3,
                                       char txStatus) throws IOException {
-        return runCopyFrom(client, backend, spec, s3, txStatus, null);
+        return runCopyFrom(client, backend, spec, s3, txStatus, null, LoadErrorRecorder.NOOP);
     }
 
     public static boolean runCopyFrom(Socket client, Socket backend,
                                       CopyStatementParser.S3CopyFrom spec, S3Service s3,
                                       char txStatus, IntConsumer onStatusChange) throws IOException {
+        return runCopyFrom(client, backend, spec, s3, txStatus, onStatusChange, LoadErrorRecorder.NOOP);
+    }
+
+    public static boolean runCopyFrom(Socket client, Socket backend,
+                                      CopyStatementParser.S3CopyFrom spec, S3Service s3,
+                                      char txStatus, IntConsumer onStatusChange,
+                                      LoadErrorRecorder loadErrorRecorder) throws IOException {
         CopyInput input;
         try {
             input = prepareCopy(spec, s3);
         } catch (S3TransferException e) {
             LOG.debugv(e, "COPY preparation failed for s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
+            if (loadErrorRecorder != null) {
+                loadErrorRecorder.record(
+                        "s3://" + spec.bucket() + "/" + spec.keyOrPrefix(),
+                        0, "", 1204, e.getMessage());
+            }
             sendError(client, backend, e.sqlState(), e.getMessage(), txStatus, onStatusChange);
             return true;
         }
@@ -209,6 +221,11 @@ public final class S3CopySimulator {
         if (first.type() != 'G') {
             // Backend rejected the COPY itself (e.g. no such table). Its ErrorResponse and the
             // ReadyForQuery that follows are the client's one response.
+            if (loadErrorRecorder != null) {
+                loadErrorRecorder.record(
+                        "s3://" + spec.bucket() + "/" + spec.keyOrPrefix(),
+                        0, "", 1204, "Backend rejected COPY statement");
+            }
             forward(client, first);
             drainToReadyForQuery(backendDecoder, client, onStatusChange);
             return true;
@@ -223,6 +240,11 @@ public final class S3CopySimulator {
             drainToReadyForQuery(backendDecoder, client, onStatusChange);
         } catch (RuntimeException | IOException e) {
             LOG.warnv(e, "S3 COPY streaming failed; aborting the open CopyIn");
+            if (loadErrorRecorder != null) {
+                loadErrorRecorder.record(
+                        "s3://" + spec.bucket() + "/" + spec.keyOrPrefix(),
+                        1, "", 1204, e.getMessage());
+            }
             abortOpenCopyIn(client, backend, backendOut, backendDecoder, e, txStatus, onStatusChange);
         }
         return true;

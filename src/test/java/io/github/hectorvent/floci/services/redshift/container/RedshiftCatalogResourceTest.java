@@ -30,6 +30,8 @@ class RedshiftCatalogResourceTest {
             assertTrue(sql.contains("svv_transactions"), "Missing DDL for svv_transactions");
             assertTrue(sql.contains("stv_slices"), "Missing DDL for stv_slices");
             assertTrue(sql.contains("stl_query"), "Missing DDL for stl_query");
+            assertTrue(sql.contains("stv_wlm_query_state"), "Missing DDL for stv_wlm_query_state");
+            assertTrue(sql.contains("svv_diskusage"), "Missing DDL for svv_diskusage");
         }
     }
 }

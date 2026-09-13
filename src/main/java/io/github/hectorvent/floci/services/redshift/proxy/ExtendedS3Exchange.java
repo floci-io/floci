@@ -17,6 +17,14 @@ final class ExtendedS3Exchange {
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3Statement statement, S3Service s3Service,
             BackendResponseCoordinator coordinator, BackendResponseCoordinator.Ticket ticket) throws IOException {
+        execute(client, backend, executeFrame, statement, s3Service, coordinator, ticket, LoadErrorRecorder.NOOP);
+    }
+
+    static void execute(Socket client, Socket backend,
+            PostgresWireDecoder.FrontendMessage executeFrame,
+            CopyStatementParser.S3Statement statement, S3Service s3Service,
+            BackendResponseCoordinator coordinator, BackendResponseCoordinator.Ticket ticket,
+            LoadErrorRecorder loadErrorRecorder) throws IOException {
         BackendResponseCoordinator.GateResult gate;
         try {
             gate = coordinator.awaitExtendedExecuteTurn(ticket);
@@ -33,7 +41,7 @@ final class ExtendedS3Exchange {
         try {
             switch (statement) {
                 case CopyStatementParser.S3CopyFrom copy -> {
-                    CopyResult result = runCopy(client, backend, executeFrame, copy, s3Service, coordinator);
+                    CopyResult result = runCopy(client, backend, executeFrame, copy, s3Service, coordinator, loadErrorRecorder);
                     failed = !result.succeeded();
                     deferredReadyForQuery = result.deferredReadyForQuery();
                 }
@@ -58,7 +66,8 @@ final class ExtendedS3Exchange {
     private static CopyResult runCopy(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3CopyFrom spec, S3Service s3Service,
-            BackendResponseCoordinator coordinator) throws IOException {
+            BackendResponseCoordinator coordinator,
+            LoadErrorRecorder loadErrorRecorder) throws IOException {
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(executeFrame.toPacketBytes());
         backendOut.flush();
@@ -67,6 +76,11 @@ final class ExtendedS3Exchange {
         PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
         PostgresWireDecoder.FrontendMessage first = nextOwnedFrame(client, decoder, coordinator);
         if (first.type() == 'E') {
+            if (loadErrorRecorder != null) {
+                loadErrorRecorder.record(
+                        "s3://" + spec.bucket() + "/" + spec.keyOrPrefix(),
+                        0, "", 1204, "Backend rejected COPY statement");
+            }
             forward(client, first);
             forwardClientSyncToBackend(sync, backendOut, coordinator);
             return new CopyResult(false, null);
@@ -79,6 +93,11 @@ final class ExtendedS3Exchange {
         try {
             input = S3CopySimulator.prepareCopy(spec, s3Service);
         } catch (S3CopySimulator.S3TransferException e) {
+            if (loadErrorRecorder != null) {
+                loadErrorRecorder.record(
+                        "s3://" + spec.bucket() + "/" + spec.keyOrPrefix(),
+                        0, "", 1204, e.getMessage());
+            }
             S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
             forwardClientSyncToBackend(sync, backendOut, coordinator);
             drainExecute(client, decoder, coordinator, false);
@@ -91,6 +110,11 @@ final class ExtendedS3Exchange {
             backendOut.write(new byte[]{'c', 0, 0, 0, 4});
             backendOut.flush();
         } catch (RuntimeException | IOException e) {
+            if (loadErrorRecorder != null) {
+                loadErrorRecorder.record(
+                        "s3://" + spec.bucket() + "/" + spec.keyOrPrefix(),
+                        1, "", 1204, e.getMessage());
+            }
             S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
             forwardClientSyncToBackend(sync, backendOut, coordinator);
             drainExecute(client, decoder, coordinator, false);

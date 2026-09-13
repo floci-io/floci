@@ -48,10 +48,18 @@ public class RedshiftInterceptingBridge {
     private volatile boolean pumpBetweenMessages = true;
     private volatile boolean pumpFinished = false;
 
+    private final LoadErrorRecorder loadErrorRecorder;
+
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service) {
+        this(client, backend, s3Service, LoadErrorRecorder.NOOP);
+    }
+
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service,
+                                     LoadErrorRecorder loadErrorRecorder) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
+        this.loadErrorRecorder = (loadErrorRecorder != null) ? loadErrorRecorder : LoadErrorRecorder.NOOP;
     }
 
     @FunctionalInterface
@@ -139,7 +147,8 @@ public class RedshiftInterceptingBridge {
             boolean intercepted = runWithBackendOwned(() -> switch (statement) {
                 case CopyStatementParser.S3CopyFrom copy -> S3CopySimulator.runCopyFrom(
                         client, backend, copy, s3Service, coordinator.lastReadyStatus(),
-                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
+                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}),
+                        loadErrorRecorder);
                 case CopyStatementParser.S3Unload unload -> S3CopySimulator.runUnload(
                         client, backend, unload, s3Service, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
@@ -276,7 +285,7 @@ public class RedshiftInterceptingBridge {
         }
         try {
             backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
-            ExtendedS3Exchange.execute(client, backend, executeFrame, statement, s3Service, coordinator, ticket);
+            ExtendedS3Exchange.execute(client, backend, executeFrame, statement, s3Service, coordinator, ticket, loadErrorRecorder);
         } finally {
             try {
                 backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
