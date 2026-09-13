@@ -23,6 +23,7 @@ class RedshiftCatalogResourceTest {
             assertTrue(sql.contains("stl_load_errors"), "Missing DDL for stl_load_errors");
             assertTrue(sql.contains("svl_qlog"), "Missing DDL for svl_qlog");
             assertTrue(sql.contains("pg_user_info"), "Missing DDL for pg_user_info");
+            assertTrue(sql.contains("svl_user_info"), "Missing DDL for svl_user_info");
             assertTrue(sql.contains("stv_sessions"), "Missing DDL for stv_sessions");
             assertTrue(sql.contains("stv_recents"), "Missing DDL for stv_recents");
             assertTrue(sql.contains("pg_database_info"), "Missing DDL for pg_database_info");

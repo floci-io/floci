@@ -267,18 +267,19 @@ When a Redshift cluster container starts, Floci bootstraps common Redshift syste
 - `stv_tbl_perm`: Table persistence metadata (`id`, `name`, `db_id`, `temp`, `backup`).
 - `stl_load_errors`: Table storing load errors for COPY statements.
 - `svl_qlog`: Query execution log view (`userid`, `query`, `xid`, `pid`, `starttime`, `endtime`, `elapsed`, `aborted`, `label`).
-- `pg_user_info`: User catalog information (`usesysid`, `usename`, `usecreatedb`, `usesuper`).
-- `pg_database_info`: Database catalog information (`datid`, `datname`, `datdba`, `encoding`).
-- `stv_sessions`: Active database sessions (`process`, `user_name`, `db_name`, `starttime`).
-- `stv_recents`: Recently executed queries (`user_id`, `pid`, `query`, `starttime`, `endtime`, `status`).
-- `svv_transactions`: Current transaction status (`txn_owner`, `txn_db`, `xid`, `pid`, `txn_start`).
-- `stv_slices`: Cluster slice metadata (`slice`, `node`).
-- `stl_query`: Dynamic query execution log view mapped from `pg_stat_activity` (`query`, `xid`, `pid`, `userid`, `starttime`, `endtime`, `elapsed`, `querytxt`, `database`, `aborted`).
-- `stv_wlm_query_state`: Dynamic WLM query state view (`query`, `service_class`, `slot_count`, `service_class_start_time`, `queue_time`, `exec_time`, `state`).
-- `svv_diskusage`: Disk space usage summary per relation (`database`, `schema`, `table_id`, `name`, `size`, `used`).
-- `stl_load_errors`: Table storing load errors for COPY statements. When an S3 COPY fails (due to missing buckets, access errors, or rejected rows), Floci records the error details (`filename`, `line_number`, `colname`, `err_code`, `err_reason`, `starttime`) directly into `stl_load_errors` so diagnostic queries like `SELECT * FROM stl_load_errors ORDER BY starttime DESC LIMIT 1` return actionable error details.
+- `pg_user_info`: User catalog information (`usesysid`, `usename`, `usecreatedb`, `usesuper`, `useconnlimit`, `syslogaccess`).
+- `svl_user_info`: Standard Redshift user information view matching AWS documented columns.
+- `pg_database_info`: Database catalog information (`datid`, `datname`, `datdba`, `encoding`, `datconnlimit`).
+- `stv_sessions`: Active database sessions (`process`, `user_name`, `db_name`, `starttime`, `timeout_sec`).
+- `stv_recents`: Recently executed queries (`userid`, `pid`, `process`, `query`, `starttime`, `duration`, `status`).
+- `svv_transactions`: Current transaction status (`txn_owner`, `txn_db`, `xid`, `pid`, `txn_start`, `lock_mode`, `relation`, `granted`).
+- `stv_slices`: Cluster slice metadata (`node`, `slice`, `localslice`, `type`).
+- `stl_query`: Dynamic query execution log view mapped from `pg_stat_activity` (`query`, `xid`, `pid`, `userid`, `starttime`, `endtime`, `elapsed`, `querytxt`, `database`, `aborted`, `insert_pristine`, `concurrency_scaling_status`).
+- `stv_wlm_query_state`: Dynamic WLM query state view (`xid`, `task`, `query`, `service_class`, `slot_count`, `wlm_start_time`, `queue_time`, `exec_time`, `state`, `query_priority`).
+- `svv_diskusage`: Disk space usage summary per relation exposing full documented Redshift block layout columns (`db_id`, `name`, `slice`, `col`, `tbl`, `blocknum`, `num_values`, `minvalue`, `maxvalue`, `sb_pos`, `pinned`, `on_disk`, `modified`, `hdr_modified`, `unsorted`, `tombstone`, `preferred_diskno`, `temporary`, `newblock`) as well as compatibility aliases (`database`, `schema`, `table_id`, `size`, `used`).
+- `stl_load_errors`: Table storing load errors for COPY statements. When an S3 COPY fails (due to missing buckets, access errors, or rejected rows), Floci records the error details (`filename`, `line_number`, `colname`, `err_code`, `err_reason`, `starttime`, `is_partial`, `start_offset`, `copy_job_id`) directly into `stl_load_errors` so diagnostic queries like `SELECT * FROM stl_load_errors ORDER BY starttime DESC LIMIT 1` return actionable error details.
 
-These views return structural metadata mapped from PostgreSQL internal catalogs (`pg_catalog`, `information_schema`, `pg_stat_activity`). They provide structural compatibility for client tooling rather than multi-node cluster runtime metrics.
+These views expose the documented Redshift column names, types, and ordering mapped from PostgreSQL internal catalogs (`pg_catalog`, `information_schema`, `pg_stat_activity`), with deterministic placeholders where PostgreSQL cannot provide multi-node metrics.
 
 ## Out of Scope
 
