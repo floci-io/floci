@@ -620,19 +620,7 @@ public class CloudFormationService implements ResourceProvider {
      * that failure surfaces on those paths, and floci must still expose it there.
      */
     public Future<?> executeChangeSetForRequest(String stackName, String changeSetName, String region) {
-        Stack stack = getStackOrThrow(stackName, region, regionResolver.getAccountId());
-        ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(
-                changeSetName, region, regionResolver.getAccountId()));
-        if (cs == null) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetName + "] does not exist", 400);
-        }
-        if (!"AVAILABLE".equals(cs.getExecutionStatus())) {
-            throw new AwsException("InvalidChangeSetStatus",
-                    "ChangeSet [" + cs.getChangeSetId() + "] cannot be executed in its current "
-                            + "status of [" + cs.getStatus() + "]", 400);
-        }
-        return executeChangeSet(stackName, changeSetName, region, regionResolver.getAccountId());
+        return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), true);
     }
 
     /**
@@ -643,33 +631,78 @@ public class CloudFormationService implements ResourceProvider {
      * are materialized under a synthetic request scope bound to {@code accountId} so a single-stack
      * deployment lands in the caller's account, and a StackSet instance lands in its target account.
      *
-     * <p>Unlike {@link #executeChangeSetForRequest}, this does not refuse a non-{@code AVAILABLE}
-     * change set: {@code CreateStack}/{@code UpdateStack} call this directly right after creating
-     * their own change set, and must still reach {@code CREATE_FAILED} (or its update equivalent)
-     * when that change set failed, for example from a failed SAM transform.
+     * <p>Unlike {@link #executeChangeSetForRequest}, this does not require the change set to be
+     * {@code AVAILABLE}: {@code CreateStack}/{@code UpdateStack} call this directly right after
+     * creating their own change set, and must still reach {@code CREATE_FAILED} (or its update
+     * equivalent) when that change set failed, for example from a failed SAM transform. It still
+     * refuses one that is already executing or has already executed.
      */
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region, String accountId) {
-        Stack stack = getStackOrThrow(stackName, region, accountId);
-        ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(changeSetName, region, accountId));
-        if (cs == null) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetName + "] does not exist", 400);
-        }
+        return claimAndSubmitExecution(stackName, changeSetName, region, accountId, false);
+    }
 
-        boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
-                "CREATE_IN_PROGRESS".equals(stack.getStatus());
+    private record ClaimedExecution(ChangeSet changeSet, boolean isCreate) {}
 
-        stack.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
-        stack.setLastUpdatedTime(now());
-        addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
+    // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
+    private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
+                                              String accountId, boolean requireAvailable) {
+        String canonicalStackName = getStackOrThrow(stackNameOrArn, region, accountId).getStackName();
+        String resolvedChangeSetName = resolveChangeSetName(changeSetName, region, accountId);
+
+        ClaimedExecution[] claimed = new ClaimedExecution[1];
+        Stack stack = stacks.compute(stackKey(accountId, canonicalStackName, region), (k, existing) -> {
+            if (existing == null) {
+                throw new AwsException("ValidationError",
+                        "Stack with id " + stackNameOrArn + " does not exist", 400);
+            }
+            ChangeSet cs = existing.getChangeSets().get(resolvedChangeSetName);
+            if (cs == null) {
+                throw new AwsException("ChangeSetNotFoundException",
+                        "ChangeSet [" + changeSetName + "] does not exist", 400);
+            }
+            String executionStatus = cs.getExecutionStatus();
+            boolean eligible = requireAvailable
+                    ? "AVAILABLE".equals(executionStatus)
+                    : executionStatus == null || !executionStatus.startsWith("EXECUTE_");
+            if (!eligible) {
+                throw invalidChangeSetStatus(cs);
+            }
+            boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
+                    "CREATE_IN_PROGRESS".equals(existing.getStatus());
+            cs.setExecutionStatus("EXECUTE_IN_PROGRESS");
+            // CloudFormation deletes every other change set on the stack once one of them executes.
+            existing.getChangeSets().values().removeIf(other -> other != cs);
+            existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
+            existing.setLastUpdatedTime(now());
+            addEvent(existing, existing.getStackName(), existing.getStackId(),
+                    "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
+            claimed[0] = new ClaimedExecution(cs, isCreate);
+            return existing;
+        });
         persistStack(stack);
 
+        return submitExecution(stack, claimed[0].changeSet(), claimed[0].isCreate(), region, accountId);
+    }
+
+    private AwsException invalidChangeSetStatus(ChangeSet cs) {
+        String detail = "FAILED".equals(cs.getStatus())
+                ? "status of [" + cs.getStatus() + "]"
+                : "execution status of [" + cs.getExecutionStatus() + "]";
+        return new AwsException("InvalidChangeSetStatus",
+                "ChangeSet [" + cs.getChangeSetId() + "] cannot be executed in its current " + detail, 400);
+    }
+
+    private Future<?> submitExecution(Stack stack, ChangeSet cs, boolean isCreate, String region, String accountId) {
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
-        return executor.submit(() -> runUnderAccount(accountId,
-                () -> executeTemplate(stack, templateBody, params, isCreate, region, accountId)));
+        return executor.submit(() -> runUnderAccount(accountId, () -> {
+            executeTemplate(stack, templateBody, params, isCreate, region, accountId);
+            String status = stack.getStatus();
+            cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
+                    ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
+            persistStack(stack);
+        }));
     }
 
     /**
