@@ -65,6 +65,12 @@ public class GlueService {
     /** Measured against real Glue (us-west-2): a fourth index reports the limit. */
     private static final int MAX_PARTITION_INDEXES_PER_TABLE = 3;
 
+    // Glue's partition index states. FAILED also exists but is only reachable through a backfill
+    // failure, which is not emulated.
+    private static final String INDEX_STATUS_CREATING = "CREATING";
+    private static final String INDEX_STATUS_ACTIVE = "ACTIVE";
+    private static final String INDEX_STATUS_DELETING = "DELETING";
+
     private final StorageBackend<String, Database> databaseStore;
     private final StorageBackend<String, Table> tableStore;
     private final StorageBackend<String, Table> tableVersionStore;
@@ -472,7 +478,8 @@ public class GlueService {
 
         // Measured against real Glue (us-west-2): the cap is evaluated before the duplicate
         // checks, so a create that is both over the limit and a duplicate reports the limit.
-        List<PartitionIndexDescriptor> existing = getPartitionIndexes(databaseName, tableName);
+        List<PartitionIndexDescriptor> existing = readPartitionIndexes(databaseName, tableName);
+        requireNoIndexInProgress(existing);
         if (existing.size() >= MAX_PARTITION_INDEXES_PER_TABLE) {
             throw new AwsException("ResourceNumberLimitExceededException",
                     "Partition index limit exceeded. Maximum: " + MAX_PARTITION_INDEXES_PER_TABLE, 400);
@@ -499,7 +506,7 @@ public class GlueService {
 
         PartitionIndexDescriptor descriptor = new PartitionIndexDescriptor();
         descriptor.setIndexName(index.getIndexName());
-        descriptor.setIndexStatus("ACTIVE");
+        descriptor.setIndexStatus(INDEX_STATUS_CREATING);
         descriptor.setKeys(resolvedKeys);
         partitionIndexStore.put(key, descriptor);
         LOG.infov("Created Glue partition index: {0}.{1} {2}", databaseName, tableName, index.getIndexName());
@@ -511,20 +518,79 @@ public class GlueService {
             throw new AwsException("InvalidInputException", "IndexName is required", 400);
         }
         String key = partitionIndexKey(databaseName, tableName, indexName);
-        if (partitionIndexStore.get(key).isEmpty()) {
+        PartitionIndexDescriptor target = partitionIndexStore.get(key).orElse(null);
+        // An index still being created is not addressable by name yet: real Glue reports it as
+        // absent even while GetPartitionIndexes lists it as CREATING (measured in isolation).
+        if (target == null || INDEX_STATUS_CREATING.equals(target.getIndexStatus())) {
             throw new AwsException("EntityNotFoundException",
                     "Index with the given indexName : " + indexName + " does not exist.", 400);
         }
-        partitionIndexStore.delete(key);
-        LOG.infov("Deleted Glue partition index: {0}.{1} {2}", databaseName, tableName, indexName);
+        if (INDEX_STATUS_DELETING.equals(target.getIndexStatus())) {
+            throw new AwsException("EntityNotFoundException",
+                    "Index with the given indexName : " + indexName + " does not exist.", 400);
+        }
+        requireNoIndexInProgress(readPartitionIndexes(databaseName, tableName));
+
+        // Deletion is observable: the index reports DELETING before it disappears.
+        target.setIndexStatus(INDEX_STATUS_DELETING);
+        partitionIndexStore.put(key, target);
+        LOG.infov("Deleting Glue partition index: {0}.{1} {2}", databaseName, tableName, indexName);
     }
 
+    /**
+     * Returns a table's partition indexes and then advances any that are mid-lifecycle.
+     *
+     * <p>Real Glue creates and deletes an index asynchronously, so a caller sees {@code CREATING}
+     * before {@code ACTIVE} and {@code DELETING} before the index disappears. Rather than tie those
+     * transitions to wall-clock time, which would make tests racy, each read reports the current
+     * state and settles it: the next read sees the outcome. A client that polls for {@code ACTIVE}
+     * or for the index to vanish, as the Terraform provider does, converges on its second read.
+     */
     public List<PartitionIndexDescriptor> getPartitionIndexes(String databaseName, String tableName) {
+        List<PartitionIndexDescriptor> current = readPartitionIndexes(databaseName, tableName);
+        for (PartitionIndexDescriptor descriptor : current) {
+            String key = partitionIndexKey(databaseName, tableName, descriptor.getIndexName());
+            if (INDEX_STATUS_CREATING.equals(descriptor.getIndexStatus())) {
+                PartitionIndexDescriptor settled = copyWithStatus(descriptor, INDEX_STATUS_ACTIVE);
+                partitionIndexStore.put(key, settled);
+            } else if (INDEX_STATUS_DELETING.equals(descriptor.getIndexStatus())) {
+                partitionIndexStore.delete(key);
+            }
+        }
+        return current;
+    }
+
+    /** Reads the stored indexes without advancing the lifecycle. */
+    private List<PartitionIndexDescriptor> readPartitionIndexes(String databaseName, String tableName) {
         getTable(databaseName, tableName);
         String prefix = tableKey(databaseName, tableName) + ":";
         return partitionIndexStore.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(PartitionIndexDescriptor::getIndexName))
                 .toList();
+    }
+
+    private static PartitionIndexDescriptor copyWithStatus(PartitionIndexDescriptor source, String status) {
+        PartitionIndexDescriptor copy = new PartitionIndexDescriptor();
+        copy.setIndexName(source.getIndexName());
+        copy.setIndexStatus(status);
+        copy.setKeys(source.getKeys());
+        copy.setBackfillErrors(source.getBackfillErrors());
+        return copy;
+    }
+
+    /**
+     * Glue allows one index per table to be created or deleted at a time. Measured message, with
+     * the offending index and its state named.
+     */
+    private static void requireNoIndexInProgress(List<PartitionIndexDescriptor> existing) {
+        for (PartitionIndexDescriptor descriptor : existing) {
+            String status = descriptor.getIndexStatus();
+            if (INDEX_STATUS_CREATING.equals(status) || INDEX_STATUS_DELETING.equals(status)) {
+                throw new AwsException("ResourceNumberLimitExceededException",
+                        "Index " + descriptor.getIndexName() + " is in " + status
+                                + " state. Only 1 index can be created or deleted simultaneously per table.", 400);
+            }
+        }
     }
 
     // The partition store scan returns values in storage iteration order, which is not stable.

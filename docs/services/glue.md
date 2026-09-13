@@ -33,13 +33,18 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 |--------|-------------|
 | CreatePartition | Creates a partition for a Data Catalog table. |
 | GetPartitions | Lists partitions stored for a Data Catalog table. |
-| CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. |
+| CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. The index reports `CREATING` before `ACTIVE`. |
 | GetPartitionIndexes | Lists a table's partition indexes, each with its keys resolved to name and type. |
-| DeletePartitionIndex | Removes a partition index from a table. |
+| DeletePartitionIndex | Removes a partition index from a table. The index reports `DELETING` before it disappears. |
 
-A created partition index is immediately `ACTIVE`. Real Glue creates one asynchronously and
-reports `CREATING` while it backfills, so a client that polls for `ACTIVE` completes on its first
-read here rather than after a wait.
+Partition indexes carry the AWS lifecycle. A new index reports `CREATING` and then `ACTIVE`; a
+deleted one reports `DELETING` and then disappears. As on AWS, only one index per table may be
+created or deleted at a time, and an index that is still `CREATING` cannot be deleted yet.
+
+The transitions are driven by reads rather than by a timer, so they are deterministic: each
+`GetPartitionIndexes` reports the current state and settles it, and a client that polls (as the
+Terraform provider does) converges on its next call. The `FAILED` state is not emulated, since it
+only arises from a backfill failure.
 
 #### User-defined Functions
 
