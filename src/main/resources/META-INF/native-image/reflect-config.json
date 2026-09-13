@@ -24,6 +24,18 @@
     "allDeclaredFields": true
   },
   {
+    "name": "org.apache.velocity.util.introspection.SecureUberspector",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "io.github.hectorvent.floci.services.apigateway.SandboxedForeach",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
     "name": "org.apache.velocity.util.introspection.TypeConversionHandlerImpl",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,

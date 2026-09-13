@@ -286,6 +286,18 @@ These AWS AppSync capabilities are not yet implemented and are tracked in future
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_APPSYNC_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_APPSYNC_VTL_MAX_LOOPS` | `10000` | Maximum `#foreach` iterations a VTL resolver template may execute |
+| `FLOCI_SERVICES_APPSYNC_VTL_MAX_OUTPUT_CHARS` | `1048576` | Maximum characters a VTL resolver template may render |
+| `FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS` | `5000` | Maximum wall-clock time a VTL resolver template may spend evaluating |
+
+Request/response mapping templates render inside the same VTL reflection sandbox described for
+API Gateway in [api-gateway.md](api-gateway.md#configuration) (`SecureUberspector`, with `Class`,
+`ClassLoader`, `Runtime`, `ProcessBuilder`, `System`, `Thread`, `java.io.File` and related
+classes/packages blocked), and are subject to the same three limits above. The loop cap truncates
+a `#foreach` at the configured iteration count and lets the template finish rendering with
+whatever output it produced up to that point; it does not fail the resolver. Exceeding the
+output-size or execution-time limit does fail the resolver, the same way any other VTL evaluation
+error does.
 
 ## Examples
 

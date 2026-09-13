@@ -289,6 +289,19 @@ setups, and `floci:override-id` wins when both are present. Every other tag is p
 |---|---|---|
 | `FLOCI_SERVICES_APIGATEWAY_ENABLED` | `true` | Enable or disable API Gateway v1 (REST APIs) |
 | `FLOCI_SERVICES_APIGATEWAYV2_ENABLED` | `true` | Enable or disable API Gateway v2 (HTTP and WebSocket APIs) |
+| `FLOCI_SERVICES_APIGATEWAY_VTL_MAX_LOOPS` | `10000` | Maximum `#foreach` iterations a VTL mapping template may execute |
+| `FLOCI_SERVICES_APIGATEWAY_VTL_MAX_OUTPUT_CHARS` | `1048576` | Maximum characters a VTL mapping template may render |
+| `FLOCI_SERVICES_APIGATEWAY_VTL_TIMEOUT_MILLIS` | `5000` | Maximum wall-clock time a VTL mapping template may spend evaluating |
+
+VTL (Velocity Template Language) mapping templates render inside a reflection-restricted sandbox
+(`SecureUberspector`, with `Class`, `ClassLoader`, `Runtime`, `ProcessBuilder`, `System`, `Thread`,
+`java.io.File` and related classes/packages blocked) and are subject to the three limits above.
+The loop cap truncates a `#foreach` at the configured iteration count and lets the template finish
+rendering with whatever output it produced up to that point; it does not fail the template.
+Exceeding the output-size or execution-time limit does fail the template, the same way any other
+Velocity evaluation error does; neither introduces a new error shape. This applies to both API
+Gateway v1 (`AWS`/Lambda mapping templates) and the AppSync resolver templates described in
+[appsync.md](appsync.md).
 
 ## API Gateway v2 (HTTP and WebSocket APIs) {#v2}
 

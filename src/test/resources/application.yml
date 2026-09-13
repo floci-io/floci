@@ -135,6 +135,9 @@ floci:
         enabled: true
     apigateway:
       enabled: true
+      vtl-max-loops: 10000
+      vtl-max-output-chars: 1048576
+      vtl-timeout-millis: 5000
     apigatewayv2:
       enabled: true
     iam:
@@ -368,6 +371,9 @@ floci:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
+      vtl-max-loops: 10000
+      vtl-max-output-chars: 1048576
+      vtl-timeout-millis: 5000
     s3vectors:
       enabled: true
     s3tables:
