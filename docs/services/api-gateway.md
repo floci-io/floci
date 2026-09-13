@@ -249,11 +249,16 @@ element of each pair is the quota limit minus cumulative use on real API Gateway
 itself.
 
 The operation pages over the API key entries with `limit` and `position`, defaulting to 25 keys a
-page and emitting `position` only when another page exists. Real API Gateway is an unreliable guide
-at the edges here, so two choices differ deliberately: it answers `limit=0` with an
-`InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected as
-a `BadRequestException`; and it accepts a `limit` past the documented maximum of 500, so anything
-larger is clamped rather than refused.
+page and emitting `position` only when another page exists.
+
+The documented maximum `limit` of 500 is **not** enforced by the service: probed against real API
+Gateway, every value from 500 up to `Integer.MAX_VALUE` was accepted without error, so no ceiling is
+imposed here either. Whether the service caps the page it actually returns above 500 cannot be
+observed without a plan holding more than 500 keys, so nothing is assumed about it.
+
+The lower bound is a deliberate divergence: real API Gateway answers `limit=0` and `limit=-1` with
+an `InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected
+as a `BadRequestException` instead of reproducing a 500.
 
 **Both numbers are always zero.** Nothing meters requests per API key, and a usage plan stores no
 quota to subtract from, so there is no limit to report against. Throttle settings are likewise

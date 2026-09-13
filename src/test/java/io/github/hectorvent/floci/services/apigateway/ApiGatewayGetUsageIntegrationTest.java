@@ -193,16 +193,31 @@ class ApiGatewayGetUsageIntegrationTest {
     }
 
     @Test
-    void aLimitAboveTheMaximumIsClamped() {
+    void aLimitAboveTheDocumentedMaximumIsAccepted() {
         String planId = createUsagePlan("usage-biglimit");
         createApiKeyOnPlan(planId, "usage-biglimit-key");
 
-        // Real API Gateway accepts a limit past the documented maximum rather than rejecting it,
-        // so this clamps rather than erroring.
+        // Probed against real API Gateway: every value from 500 up to Integer.MAX_VALUE is accepted
+        // without error, so the documented maximum of 500 is not a rejection boundary.
+        for (String limit : new String[] {"500", "501", "100000", "2147483647"}) {
+            given()
+                    .when().get("/usageplans/" + planId + "/usage"
+                            + "?startDate=2026-09-01&endDate=2026-09-02&limit=" + limit)
+                    .then().statusCode(200)
+                    .body("items", aMapWithSize(1));
+        }
+    }
+
+    @Test
+    void aNegativeLimitIsRejected() {
+        String planId = createUsagePlan("usage-neglimit");
+
+        // Real API Gateway answers a negative limit with an InternalFailure. That is a fault, not a
+        // contract, so this rejects rather than reproducing a 500.
         given()
                 .when().get("/usageplans/" + planId + "/usage"
-                        + "?startDate=2026-09-01&endDate=2026-09-02&limit=501")
-                .then().statusCode(200)
-                .body("items", aMapWithSize(1));
+                        + "?startDate=2026-09-01&endDate=2026-09-02&limit=-1")
+                .then().statusCode(400)
+                .body(containsString("Invalid limit parameter"));
     }
 }

@@ -57,9 +57,8 @@ import jakarta.inject.Inject;
 @ApplicationScoped
 public class ApiGatewayService {
 
-    /** Documented default and maximum page size for GetUsage. */
+    /** Documented default page size for GetUsage. The documented maximum is not enforced by AWS. */
     private static final int DEFAULT_USAGE_LIMIT = 25;
-    private static final int MAX_USAGE_LIMIT = 500;
 
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayService.class);
@@ -1280,10 +1279,15 @@ public class ApiGatewayService {
     /**
      * Resolves the page size.
      *
-     * <p>Real API Gateway is not a good guide at the edges here: it answers {@code limit=0} with an
-     * {@code InternalFailure} and accepts {@code limit=501} despite a documented maximum of 500. A
-     * zero or negative page size is rejected rather than reproducing that fault, and anything above
-     * the documented maximum is clamped to it.
+     * <p>The documented maximum of 500 is <em>not</em> enforced by the service. Probed against real
+     * API Gateway, every value from 500 up to {@link Integer#MAX_VALUE} was accepted without error,
+     * so no ceiling is imposed here either. Whether the service caps the page it actually returns
+     * above 500 is not observable without a plan holding more than 500 keys, so nothing is assumed
+     * about it.
+     *
+     * <p>The lower bound is a deliberate divergence: real API Gateway answers {@code limit=0} and
+     * {@code limit=-1} with an {@code InternalFailure}, which is a fault rather than a contract, so
+     * a page size below one is rejected as a bad request instead of reproducing a 500.
      */
     private static int resolveUsageLimit(Integer limit) {
         if (limit == null) {
@@ -1292,7 +1296,7 @@ public class ApiGatewayService {
         if (limit < 1) {
             throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
         }
-        return Math.min(limit, MAX_USAGE_LIMIT);
+        return limit;
     }
 
     /** One {@code GetUsage} report: {@code items} maps an API key id to its per-day pairs. */
