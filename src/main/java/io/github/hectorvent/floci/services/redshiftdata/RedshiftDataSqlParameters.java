@@ -2,11 +2,12 @@ package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SqlParameterParser;
+import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,9 +27,6 @@ final class RedshiftDataSqlParameters {
     private RedshiftDataSqlParameters() {
     }
 
-    record ParsedSql(String sql, List<String> parameterOrder) {
-    }
-
     /**
      * Rewrites {@code :name} placeholders to positional {@code ?}, skipping over
      * string literals, quoted identifiers, line and block comments, PostgreSQL
@@ -37,61 +35,7 @@ final class RedshiftDataSqlParameters {
      * (the PostgreSQL default with {@code standard_conforming_strings} on).
      */
     static ParsedSql parse(String sql) {
-        StringBuilder out = new StringBuilder(sql.length());
-        List<String> order = new ArrayList<>();
-        int len = sql.length();
-        int i = 0;
-        while (i < len) {
-            char c = sql.charAt(i);
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
-                int end = sql.indexOf('\n', i);
-                end = end < 0 ? len : end;
-                out.append(sql, i, end);
-                i = end;
-                continue;
-            }
-            if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = sql.indexOf("*/", i + 2);
-                end = end < 0 ? len : end + 2;
-                out.append(sql, i, end);
-                i = end;
-                continue;
-            }
-            if (c == '\'' || c == '"') {
-                i = copyQuoted(sql, i, c, out);
-                continue;
-            }
-            if (c == '$') {
-                int consumed = copyDollarQuoted(sql, i, out);
-                if (consumed > i) {
-                    i = consumed;
-                    continue;
-                }
-                out.append(c);
-                i++;
-                continue;
-            }
-            if (c == ':') {
-                if (i + 1 < len && sql.charAt(i + 1) == ':') {
-                    out.append("::");
-                    i += 2;
-                    continue;
-                }
-                if (i + 1 < len && isNameStart(sql.charAt(i + 1))) {
-                    int j = i + 1;
-                    while (j < len && isNamePart(sql.charAt(j))) {
-                        j++;
-                    }
-                    order.add(sql.substring(i + 1, j));
-                    out.append('?');
-                    i = j;
-                    continue;
-                }
-            }
-            out.append(c);
-            i++;
-        }
-        return new ParsedSql(out.toString(), order);
+        return SqlParameterParser.parse(sql);
     }
 
     /**
@@ -150,113 +94,6 @@ final class RedshiftDataSqlParameters {
      * characters (with only whitespace after) are permitted.
      */
     static boolean isMultiStatement(String sql) {
-        int len = sql.length();
-        int i = 0;
-        boolean sawSemicolon = false;
-        while (i < len) {
-            char c = sql.charAt(i);
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
-                int end = sql.indexOf('\n', i);
-                i = end < 0 ? len : end;
-                continue;
-            }
-            if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = sql.indexOf("*/", i + 2);
-                i = end < 0 ? len : end + 2;
-                continue;
-            }
-            if (c == '\'' || c == '"') {
-                i = skipQuoted(sql, i, c, isEscapeStringStart(sql, i, c));
-                continue;
-            }
-            if (c == '$') {
-                int consumed = skipDollarQuoted(sql, i);
-                if (consumed > i) {
-                    i = consumed;
-                    continue;
-                }
-            }
-            if (c == ';') {
-                sawSemicolon = true;
-            } else if (sawSemicolon && !Character.isWhitespace(c)) {
-                return true;
-            }
-            i++;
-        }
-        return false;
-    }
-
-    /**
-     * Whether the quote at {@code quotePos} opens a PostgreSQL escape string
-     * ({@code E'...'} / {@code e'...'}), inside which a backslash escapes the
-     * next character. Plain {@code '...'} literals do not process backslashes
-     * under {@code standard_conforming_strings}.
-     */
-    private static boolean isEscapeStringStart(String sql, int quotePos, char quote) {
-        if (quote != '\'' || quotePos == 0) {
-            return false;
-        }
-        char prefix = sql.charAt(quotePos - 1);
-        if (prefix != 'e' && prefix != 'E') {
-            return false;
-        }
-        return quotePos - 1 == 0 || !isNamePart(sql.charAt(quotePos - 2));
-    }
-
-    private static int skipQuoted(String sql, int start, char quote, boolean backslashEscapes) {
-        int len = sql.length();
-        int i = start + 1;
-        while (i < len) {
-            char c = sql.charAt(i);
-            if (backslashEscapes && c == '\\' && i + 1 < len) {
-                i += 2;
-                continue;
-            }
-            if (c == quote) {
-                if (i + 1 < len && sql.charAt(i + 1) == quote) {
-                    i += 2;
-                    continue;
-                }
-                return i + 1;
-            }
-            i++;
-        }
-        return i;
-    }
-
-    private static int skipDollarQuoted(String sql, int start) {
-        int len = sql.length();
-        int tagEnd = start + 1;
-        while (tagEnd < len && isNamePart(sql.charAt(tagEnd))) {
-            tagEnd++;
-        }
-        if (tagEnd >= len || sql.charAt(tagEnd) != '$') {
-            return start;
-        }
-        String tag = sql.substring(start, tagEnd + 1);
-        int close = sql.indexOf(tag, tagEnd + 1);
-        return close < 0 ? len : close + tag.length();
-    }
-
-    private static int copyQuoted(String sql, int start, char quote, StringBuilder out) {
-        int end = skipQuoted(sql, start, quote, isEscapeStringStart(sql, start, quote));
-        out.append(sql, start, end);
-        return end;
-    }
-
-    private static int copyDollarQuoted(String sql, int start, StringBuilder out) {
-        int end = skipDollarQuoted(sql, start);
-        if (end > start) {
-            out.append(sql, start, end);
-        }
-        return end;
-    }
-
-    private static boolean isNameStart(char c) {
-        return Character.isLetter(c) || c == '_';
-    }
-
-    private static boolean isNamePart(char c) {
-        return Character.isLetterOrDigit(c) || c == '_';
+        return SqlParameterParser.isMultiStatement(sql);
     }
 }

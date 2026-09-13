@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.rdsdata;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SqlParameterParser;
+import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -11,7 +13,6 @@ import java.sql.SQLException;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -34,20 +35,12 @@ final class RdsDataSqlParameters {
     }
 
     /**
-     * SQL rewritten with positional {@code ?} placeholders, plus the ordered
-     * list of the Data API parameter names each placeholder was derived from.
-     * A name repeats once per occurrence in the original SQL.
-     */
-    record ParsedSql(String sql, List<String> parameterOrder) {
-    }
-
-    /**
      * Rewrites {@code :name} placeholders to positional {@code ?} without
      * treating backslash as a string-literal escape (the PostgreSQL default
      * with {@code standard_conforming_strings} on).
      */
     static ParsedSql parse(String sql) {
-        return parse(sql, false);
+        return SqlParameterParser.parse(sql);
     }
 
     /**
@@ -55,76 +48,9 @@ final class RdsDataSqlParameters {
      * string literals, quoted/backtick identifiers, line and block comments,
      * PostgreSQL {@code ::} casts, and PostgreSQL dollar-quoted strings so a
      * colon inside any of those is left untouched.
-     *
-     * @param backslashEscapes when {@code true}, a backslash inside a single- or
-     *        double-quoted string escapes the next character (MySQL/MariaDB
-     *        default, i.e. {@code NO_BACKSLASH_ESCAPES} disabled). Backtick
-     *        identifiers never honor backslash escaping.
      */
     static ParsedSql parse(String sql, boolean backslashEscapes) {
-        StringBuilder out = new StringBuilder(sql.length());
-        List<String> order = new ArrayList<>();
-        int len = sql.length();
-        int i = 0;
-        while (i < len) {
-            char c = sql.charAt(i);
-
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
-                int end = sql.indexOf('\n', i);
-                if (end < 0) {
-                    end = len;
-                }
-                out.append(sql, i, end);
-                i = end;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = sql.indexOf("*/", i + 2);
-                end = end < 0 ? len : end + 2;
-                out.append(sql, i, end);
-                i = end;
-                continue;
-            }
-
-            if (c == '\'' || c == '"' || c == '`') {
-                i = copyQuoted(sql, i, c, out, backslashEscapes);
-                continue;
-            }
-
-            if (c == '$') {
-                int consumed = copyDollarQuoted(sql, i, out);
-                if (consumed > i) {
-                    i = consumed;
-                    continue;
-                }
-                out.append(c);
-                i++;
-                continue;
-            }
-
-            if (c == ':') {
-                if (i + 1 < len && sql.charAt(i + 1) == ':') {
-                    out.append("::");
-                    i += 2;
-                    continue;
-                }
-                if (i + 1 < len && isNameStart(sql.charAt(i + 1))) {
-                    int j = i + 1;
-                    while (j < len && isNamePart(sql.charAt(j))) {
-                        j++;
-                    }
-                    order.add(sql.substring(i + 1, j));
-                    out.append('?');
-                    i = j;
-                    continue;
-                }
-            }
-
-            out.append(c);
-            i++;
-        }
-        return new ParsedSql(out.toString(), order);
+        return SqlParameterParser.parse(sql, backslashEscapes);
     }
 
     /**
@@ -214,56 +140,6 @@ final class RdsDataSqlParameters {
             throw new AwsException("BadRequestException",
                     "Parameter :" + name + " blobValue is not valid base64: " + e.getMessage(), 400);
         }
-    }
-
-    private static int copyQuoted(String sql, int start, char quote, StringBuilder out, boolean backslashEscapes) {
-        int len = sql.length();
-        boolean escapable = backslashEscapes && quote != '`';
-        out.append(quote);
-        int i = start + 1;
-        while (i < len) {
-            char c = sql.charAt(i);
-            out.append(c);
-            if (escapable && c == '\\' && i + 1 < len) {
-                out.append(sql.charAt(i + 1));
-                i += 2;
-                continue;
-            }
-            if (c == quote) {
-                if (i + 1 < len && sql.charAt(i + 1) == quote) {
-                    out.append(quote);
-                    i += 2;
-                    continue;
-                }
-                return i + 1;
-            }
-            i++;
-        }
-        return i;
-    }
-
-    private static int copyDollarQuoted(String sql, int start, StringBuilder out) {
-        int len = sql.length();
-        int tagEnd = start + 1;
-        while (tagEnd < len && isNamePart(sql.charAt(tagEnd))) {
-            tagEnd++;
-        }
-        if (tagEnd >= len || sql.charAt(tagEnd) != '$') {
-            return start;
-        }
-        String tag = sql.substring(start, tagEnd + 1);
-        int close = sql.indexOf(tag, tagEnd + 1);
-        int end = close < 0 ? len : close + tag.length();
-        out.append(sql, start, end);
-        return end;
-    }
-
-    private static boolean isNameStart(char c) {
-        return Character.isLetter(c) || c == '_';
-    }
-
-    private static boolean isNamePart(char c) {
-        return Character.isLetterOrDigit(c) || c == '_';
     }
 
     private static String text(JsonNode node, String field) {

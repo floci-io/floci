@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -85,7 +86,7 @@ public class RedshiftDataService implements Resettable {
     private void runOnConnection(RedshiftDataStatementStore.StoredStatement stored,
                                  Connection connection, String sql, Map<String, String> parameters)
             throws SQLException {
-        RedshiftDataSqlParameters.ParsedSql parsed = RedshiftDataSqlParameters.parse(sql);
+        ParsedSql parsed = RedshiftDataSqlParameters.parse(sql);
         long t0 = System.nanoTime();
         try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
             RedshiftDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
