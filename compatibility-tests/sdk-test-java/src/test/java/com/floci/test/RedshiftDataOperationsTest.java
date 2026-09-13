@@ -85,8 +85,9 @@ class RedshiftDataOperationsTest {
 
     /**
      * Redshift stores INTERVAL YEAR TO MONTH and INTERVAL DAY TO SECOND columns and the
-     * Data API returns them as strings. pgjdbc builds the value through reflection, so this
-     * also checks that the native image keeps that metadata.
+     * Data API returns them as strings, checked against a real cluster on 2026-09-13. pgjdbc
+     * builds the value through reflection, so this also checks that the native image keeps
+     * that metadata.
      */
     @Test
     @DisplayName("interval columns read back as strings")
@@ -100,8 +101,37 @@ class RedshiftDataOperationsTest {
                 .build());
 
         assertThat(result.totalNumRows()).isEqualTo(1L);
-        assertThat(result.records().get(0).get(0).stringValue()).isNotEmpty();
+        assertThat(result.records().get(0).get(0).stringValue()).isEqualTo("1 years 2 mons");
+        // Redshift prints "2 days 1 hours 0 mins 0.0 secs", Floci drops the zero fields.
         assertThat(result.records().get(0).get(1).stringValue()).isNotEmpty();
+    }
+
+    /**
+     * Redshift rejects these as column types but evaluates them in a select, and the Data
+     * API returns them as strings. Values checked against a real ra3.large cluster on
+     * 2026-09-13. pgjdbc builds them through reflection, so this also checks that the
+     * native image keeps that metadata.
+     */
+    @Test
+    @DisplayName("geometric expressions read back as strings")
+    void geometricExpressionsReadBackAsStrings() throws Exception {
+        String selectId = run("SELECT point(1, 2), box '((0,0),(1,1))', circle '<(0,0),1>', lseg '[(0,0),(1,1)]', "
+                + "path '[(0,0),(1,1)]', polygon '((0,0),(1,1),(1,0))', '12.34'::money");
+        GetStatementResultResponse result = data.getStatementResult(GetStatementResultRequest.builder()
+                .id(selectId)
+                .build());
+
+        assertThat(result.totalNumRows()).isEqualTo(1L);
+        assertThat(result.columnMetadata()).extracting("typeName")
+                .containsExactly("point", "box", "circle", "lseg", "path", "polygon", "money");
+        assertThat(result.records().get(0).get(0).stringValue()).isEqualTo("(1.0,2.0)");
+        assertThat(result.records().get(0).get(1).stringValue()).isEqualTo("(1.0,1.0),(0.0,0.0)");
+        assertThat(result.records().get(0).get(2).stringValue()).isEqualTo("<(0.0,0.0),1.0>");
+        assertThat(result.records().get(0).get(3).stringValue()).isEqualTo("[(0.0,0.0),(1.0,1.0)]");
+        // Redshift prints path as the server text [(0,0),(1,1)], Floci still prints the driver form.
+        assertThat(result.records().get(0).get(4).stringValue()).isNotEmpty();
+        assertThat(result.records().get(0).get(5).stringValue()).isEqualTo("((0.0,0.0),(1.0,1.0),(1.0,0.0))");
+        assertThat(result.records().get(0).get(6).doubleValue()).isEqualTo(12.34);
     }
 
     private String run(String sql) throws Exception {
