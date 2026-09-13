@@ -479,6 +479,8 @@ public class SesController {
             List<String> ccAddresses = jsonArrayToList(destination.path("CcAddresses"));
             List<String> bccAddresses = jsonArrayToList(destination.path("BccAddresses"));
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
+            String feedbackForwardingAddress =
+                    request.path("FeedbackForwardingEmailAddress").asText(null);
             List<String> allDestinations = mergeLists(toAddresses, ccAddresses, bccAddresses);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
@@ -502,7 +504,8 @@ public class SesController {
                 sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
                         configurationSetName, regionResolver.getAccountId(), region);
                 messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
-                        configurationSetName, emailTags, listManagement, region);
+                        feedbackForwardingAddress, configurationSetName, emailTags, listManagement,
+                        region);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.
@@ -517,7 +520,8 @@ public class SesController {
                 sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
                         null, regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
-                        bccAddresses, replyToAddresses, subject, bodyText, bodyHtml,
+                        bccAddresses, replyToAddresses, feedbackForwardingAddress,
+                        subject, bodyText, bodyHtml,
                         configurationSetName, emailTags, additionalHeaders, listManagement, region);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
@@ -549,7 +553,8 @@ public class SesController {
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, resolvedName, regionResolver.getAccountId(), region);
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
-                            bccAddresses, replyToAddresses, resolvedName, templateData,
+                            bccAddresses, replyToAddresses, feedbackForwardingAddress,
+                            resolvedName, templateData,
                             configurationSetName, emailTags, additionalHeaders, listManagement, region);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
@@ -563,7 +568,7 @@ public class SesController {
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, null, regionResolver.getAccountId(), region);
                     messageId = sesService.sendInlineTemplatedEmail(fromEmailAddress, toAddresses,
-                            ccAddresses, bccAddresses, replyToAddresses,
+                            ccAddresses, bccAddresses, replyToAddresses, feedbackForwardingAddress,
                             subject, text, html, templateData,
                             configurationSetName, emailTags, additionalHeaders, listManagement, region);
                 }
@@ -603,6 +608,8 @@ public class SesController {
                         "FromEmailAddress is required.", 400);
             }
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
+            String feedbackForwardingAddress =
+                    request.path("FeedbackForwardingEmailAddress").asText(null);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
 
@@ -689,7 +696,7 @@ public class SesController {
                     gateTemplateName, regionResolver.getAccountId(), region);
 
             List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(fromEmailAddress,
-                    replyToAddresses, subject, text, html,
+                    replyToAddresses, feedbackForwardingAddress, subject, text, html,
                     defaultTemplateData, entries, configurationSetName,
                     defaultEmailTags, defaultHeaders, region);
 

@@ -39,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -941,7 +942,7 @@ class CognitoLambdaTriggersTest {
 
         verify(ses).sendEmail(
                 anyString(), eq(List.of("spike@example.com")),
-                eq(List.of()), eq(List.of()), eq(List.of()),
+                eq(List.of()), eq(List.of()), eq(List.of()), isNull(),
                 eq("TRIGGER-FIRED"),
                 eq("TRIGGER-FIRED code=246962"),
                 any(), any(), eq(List.of()), eq(List.of()), any(), anyString());
@@ -998,7 +999,7 @@ class CognitoLambdaTriggersTest {
 
         verify(ses).sendEmail(
                 anyString(), eq(List.of("spike@example.com")),
-                any(), any(), any(),
+                any(), any(), any(), isNull(),
                 eq("Your verification code"),
                 eq("Your verification code is 246962."),
                 any(), any(), any(), any(), any(), anyString());
@@ -1022,7 +1023,7 @@ class CognitoLambdaTriggersTest {
         verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
         verify(ses).sendEmail(
                 anyString(), eq(List.of("spike@example.com")),
-                any(), any(), any(),
+                any(), any(), any(), isNull(),
                 eq("Your verification code"),
                 eq("Your verification code is 246962."),
                 any(), any(), any(), any(), any(), anyString());

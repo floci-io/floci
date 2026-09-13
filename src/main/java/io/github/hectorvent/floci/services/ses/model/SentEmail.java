@@ -21,6 +21,9 @@ public class SentEmail {
     @JsonProperty("Source")
     private String source;
 
+    @JsonProperty("ReturnPath")
+    private String returnPath;
+
     @JsonProperty("Destination")
     private List<String> toAddresses;
 
@@ -91,6 +94,9 @@ public class SentEmail {
 
     public String getSource() { return source; }
     public void setSource(String source) { this.source = source; }
+
+    public String getReturnPath() { return returnPath; }
+    public void setReturnPath(String returnPath) { this.returnPath = returnPath; }
 
     public List<String> getToAddresses() { return toAddresses; }
     public void setToAddresses(List<String> toAddresses) { this.toAddresses = toAddresses; }
