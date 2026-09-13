@@ -1314,6 +1314,80 @@ public class ApiGatewayController {
         }
     }
 
+    // ──────────────────────────── VPC Links (v1) ────────────────────────────
+
+    @POST
+    @Path("/vpclinks")
+    public Response createV1VpcLink(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            io.github.hectorvent.floci.services.apigateway.model.VpcLink link =
+                    service.createVpcLink(region, request);
+            // AWS provisions asynchronously and answers 202 Accepted.
+            return Response.status(202).entity(toV1VpcLinkNode(link).toString())
+                    .type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/vpclinks")
+    public Response getV1VpcLinks(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode items = result.putArray("item");
+        service.getVpcLinks(region).forEach(l -> items.add(toV1VpcLinkNode(l)));
+        return Response.ok(result.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/vpclinks/{vpcLinkId}")
+    public Response getV1VpcLink(@Context HttpHeaders headers,
+                                 @PathParam("vpcLinkId") String vpcLinkId) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(toV1VpcLinkNode(service.getVpcLink(region, vpcLinkId)).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @PATCH
+    @Path("/vpclinks/{vpcLinkId}")
+    public Response updateV1VpcLink(@Context HttpHeaders headers,
+                                    @PathParam("vpcLinkId") String vpcLinkId,
+                                    String body) {
+        String region = regionResolver.resolveRegion(headers);
+        io.github.hectorvent.floci.services.apigateway.model.VpcLink link =
+                service.updateVpcLink(region, vpcLinkId, parsePatchOperations(body));
+        return Response.ok(toV1VpcLinkNode(link).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/vpclinks/{vpcLinkId}")
+    public Response deleteV1VpcLink(@Context HttpHeaders headers,
+                                    @PathParam("vpcLinkId") String vpcLinkId) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteVpcLink(region, vpcLinkId);
+        return Response.accepted().build();
+    }
+
+    private ObjectNode toV1VpcLinkNode(io.github.hectorvent.floci.services.apigateway.model.VpcLink link) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("id", link.getId());
+        node.put("name", link.getName());
+        if (link.getDescription() != null) node.put("description", link.getDescription());
+        ArrayNode arns = node.putArray("targetArns");
+        link.getTargetArns().forEach(arns::add);
+        node.put("status", link.getStatus());
+        if (link.getStatusMessage() != null) node.put("statusMessage", link.getStatusMessage());
+        if (!link.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("tags");
+            link.getTags().forEach(tags::put);
+        }
+        return node;
+    }
+
     // ──────────────────────────── VPC Links (v2) ────────────────────────────
 
     @POST
@@ -1915,6 +1989,11 @@ public class ApiGatewayController {
             node.set("tags", tagsNode);
         }
 
+        if (api.getBinaryMediaTypes() != null && !api.getBinaryMediaTypes().isEmpty()) {
+            ArrayNode binaryTypes = node.putArray("binaryMediaTypes");
+            api.getBinaryMediaTypes().forEach(binaryTypes::add);
+        }
+
         EndpointConfiguration epConfig = api.getEndpointConfiguration();
         if (epConfig == null) {
             epConfig = new EndpointConfiguration();
@@ -1988,6 +2067,21 @@ public class ApiGatewayController {
         node.put("httpMethod", i.getHttpMethod());
         node.put("uri", i.getUri());
         node.put("passthroughBehavior", i.getPassthroughBehavior());
+        if (i.getContentHandling() != null) node.put("contentHandling", i.getContentHandling());
+        if (i.getTimeoutInMillis() != null) node.put("timeoutInMillis", i.getTimeoutInMillis());
+        if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
+        if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
+        if (i.getCredentials() != null) node.put("credentials", i.getCredentials());
+        if (i.getCacheNamespace() != null) node.put("cacheNamespace", i.getCacheNamespace());
+        if (!i.getCacheKeyParameters().isEmpty()) {
+            ArrayNode keys = node.putArray("cacheKeyParameters");
+            i.getCacheKeyParameters().forEach(keys::add);
+        }
+        if (i.getTlsConfig() != null) {
+            node.putObject("tlsConfig")
+                    .put("insecureSkipVerification", i.getTlsConfig().isInsecureSkipVerification());
+        }
+        // Mapping configuration is what IaC tools diff against — omitting it read as drift.
         if (!i.getRequestParameters().isEmpty()) {
             ObjectNode params = node.putObject("requestParameters");
             i.getRequestParameters().forEach(params::put);
@@ -2008,6 +2102,7 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("statusCode", r.statusCode());
         node.put("selectionPattern", r.selectionPattern());
+        if (r.contentHandling() != null) node.put("contentHandling", r.contentHandling());
         if (r.responseParameters() != null && !r.responseParameters().isEmpty()) {
             ObjectNode params = node.putObject("responseParameters");
             r.responseParameters().forEach(params::put);
@@ -2034,6 +2129,9 @@ public class ApiGatewayController {
         if (s.getDescription() != null) node.put("description", s.getDescription());
         node.put("createdDate", s.getCreatedDate());
         node.put("lastUpdatedDate", s.getLastUpdatedDate());
+        node.put("cacheClusterEnabled", s.isCacheClusterEnabled());
+        node.put("cacheClusterStatus", s.getCacheClusterStatus());
+        if (s.getCacheClusterSize() != null) node.put("cacheClusterSize", s.getCacheClusterSize());
         if (!s.getVariables().isEmpty()) {
             ObjectNode vars = node.putObject("variables");
             s.getVariables().forEach(vars::put);

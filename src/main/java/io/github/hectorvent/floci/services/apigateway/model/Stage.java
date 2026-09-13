@@ -16,6 +16,35 @@ public class Stage {
     private String description;
     private Map<String, String> variables = new HashMap<>();
     private Map<String, MethodSetting> methodSettings = new HashMap<>();
+    /** Stage-level cache switch; a method's own cachingEnabled only applies when this is on. */
+    private boolean cacheClusterEnabled;
+    private String cacheClusterSize;
+    private String cacheClusterStatus = "NOT_AVAILABLE";
+
+    public boolean isCacheClusterEnabled() {
+        return cacheClusterEnabled;
+    }
+
+    public void setCacheClusterEnabled(boolean cacheClusterEnabled) {
+        this.cacheClusterEnabled = cacheClusterEnabled;
+        this.cacheClusterStatus = cacheClusterEnabled ? "AVAILABLE" : "NOT_AVAILABLE";
+    }
+
+    public String getCacheClusterSize() {
+        return cacheClusterSize;
+    }
+
+    public void setCacheClusterSize(String cacheClusterSize) {
+        this.cacheClusterSize = cacheClusterSize;
+    }
+
+    public String getCacheClusterStatus() {
+        return cacheClusterStatus;
+    }
+
+    public void setCacheClusterStatus(String cacheClusterStatus) {
+        this.cacheClusterStatus = cacheClusterStatus;
+    }
     private long createdDate;
     private long lastUpdatedDate;
 
