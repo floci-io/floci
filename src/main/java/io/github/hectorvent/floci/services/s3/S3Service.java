@@ -878,11 +878,13 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
 
         if (requestAuthorization.signed()) {
-            if (isKnownAccessKey(requestAuthorization)) {
-                return;
+            if (!isKnownAccessKey(requestAuthorization)) {
+                throw new AwsException("InvalidAccessKeyId",
+                        "The AWS Access Key Id you provided does not exist in our records.", 403);
             }
-            throw new AwsException("InvalidAccessKeyId",
-                    "The AWS Access Key Id you provided does not exist in our records.", 403);
+            authorizeSignedPrincipalPolicyDeny(
+                    bucketName, action, resourceArn, requestAuthorization);
+            return;
         }
 
         Bucket bucket = bucketStore.get(bucketName)
@@ -904,6 +906,37 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         throw new AwsException("AccessDenied", "Access Denied", 403);
+    }
+
+    private void authorizeSignedPrincipalPolicyDeny(
+            String bucketName,
+            String action,
+            String resourceArn,
+            RequestAuthorization authorization) {
+        if (LEGACY_ACCESS_KEY_ID.equals(authorization.accessKeyId()) || iamService == null) {
+            return;
+        }
+
+        Optional<String> principalArn = iamService.resolveCallerArn(authorization.accessKeyId());
+        if (principalArn.isEmpty()) {
+            return;
+        }
+
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException(
+                        "NoSuchBucket", "The specified bucket does not exist.", 404));
+        S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
+                S3PublicAccessEvaluator.principalPolicyDecision(
+                        objectMapper,
+                        bucket.getPolicy(),
+                        "AWS",
+                        principalArn.get(),
+                        action,
+                        resourceArn,
+                        Map.of("aws:PrincipalArn", principalArn.get()));
+        if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
     }
 
     private boolean readableObjectExists(String bucketName, String key) {
