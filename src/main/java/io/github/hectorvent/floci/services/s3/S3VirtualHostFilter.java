@@ -107,11 +107,15 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
         // Do not hijack requests meant for other AWS services
         String auth = requestContext.getHeaderString("Authorization");
-        boolean signedForS3 = auth != null && auth.contains("Credential=")
-                && auth.contains("/s3/aws4_request");
-        if (auth != null && auth.contains("Credential=") && !signedForS3) {
+        boolean hasAuthorizationCredential = auth != null && auth.contains("Credential=");
+        boolean headerSignedForS3 = hasAuthorizationCredential && auth.contains("/s3/aws4_request");
+        if (hasAuthorizationCredential && !headerSignedForS3) {
             return;
         }
+        String queryCredential = requestContext.getUriInfo().getQueryParameters()
+                .getFirst("X-Amz-Credential");
+        boolean signedForS3 = headerSignedForS3
+                || queryCredential != null && queryCredential.contains("/s3/aws4_request");
 
         // Other AWS services use these content types on the shared edge endpoint. An explicit
         // S3 SigV4 scope is authoritative, including empty-body multipart initiation requests.
