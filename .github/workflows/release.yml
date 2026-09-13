@@ -223,6 +223,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Ordering matters: this step wipes native/ and replaces it with the arm64-only
+      # baseline binary. It is safe only because it runs AFTER the multi-arch image
+      # above has been pushed, and nothing that follows reads native/ from the build
+      # context: the Cedar sidecar builds from sidecars/cedar/ only, and the compat
+      # image pulls its base (BASE_IMAGE) from the registry. Moving this step above
+      # the multi-arch push would silently publish `latest` from the baseline binary.
       - name: Stage ARMv8.0 baseline artifact under the native package path
         run: |
           rm -rf native/amd64 native/arm64
