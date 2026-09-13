@@ -247,13 +247,46 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
 
                 String checkpointSeq = (lastSeq == null || checkpointTrimmed) ? "TRIM_HORIZON" : lastSeq;
                 String batchKey = esm.getUuid() + ":" + shardId + ":" + checkpointSeq;
-                String checkpoint = invokeResult.getFunctionError() == null
+                CheckpointOutcome outcome = invokeResult.getFunctionError() == null
                         ? successfulInvocationCheckpoint(esm, invokeResult, lastSeq, records, matched)
-                        : null;
+                        : new CheckpointOutcome(null, 0);
 
-                if (checkpoint != null && !checkpoint.equals(lastSeq)) {
+                if (outcome.lowestFailedIndex() == records.size()) {
                     retryCounts.remove(batchKey);
-                    advanceCheckpoint(esm, shardId, checkpoint);
+                    advanceCheckpoint(esm, shardId, outcome.checkpoint());
+                } else if (outcome.lowestFailedIndex() > 0) {
+                    retryCounts.remove(batchKey);
+
+                    String nextCheckpoint = outcome.checkpoint();
+                    String nextBatchKey = esm.getUuid() + ":" + shardId + ":" + nextCheckpoint;
+                    Integer maxRetries = esm.getMaximumRetryAttempts();
+                    int currentRetries = retryCounts.merge(nextBatchKey, 1, Integer::sum);
+
+                    if (maxRetries != null && maxRetries >= 0 && currentRetries > maxRetries) {
+                        LOG.warnv("DynamoDB Streams ESM {0}: maximum retry attempts ({1}) exhausted for batch ending at {2}",
+                                esm.getUuid(), maxRetries, newestFetchedSeq);
+                        Set<String> deliveredSeqs = new HashSet<>();
+                        for (DynamoDbStreamRecord rec : matched) {
+                            deliveredSeqs.add(rec.getSequenceNumber());
+                        }
+                        List<DynamoDbStreamRecord> failedRecords = new ArrayList<>();
+                        for (int i = outcome.lowestFailedIndex(); i < records.size(); i++) {
+                            DynamoDbStreamRecord rec = records.get(i);
+                            if (deliveredSeqs.contains(rec.getSequenceNumber())) {
+                                failedRecords.add(rec);
+                            }
+                        }
+                        if (failedRecords.isEmpty()) {
+                            failedRecords = records.subList(outcome.lowestFailedIndex(), records.size());
+                        }
+                        sendToOnFailureDestination(esm, shardId, failedRecords, invokeResult, currentRetries);
+                        retryCounts.remove(nextBatchKey);
+                        advanceCheckpoint(esm, shardId, newestFetchedSeq);
+                    } else {
+                        LOG.warnv("DynamoDB Streams ESM {0}: Lambda returned error [batchItemFailures], retry {1}, records will be retried",
+                                esm.getUuid(), currentRetries);
+                        advanceCheckpoint(esm, shardId, nextCheckpoint);
+                    }
                 } else {
                     Integer maxRetries = esm.getMaximumRetryAttempts();
                     int currentRetries = retryCounts.merge(batchKey, 1, Integer::sum);
@@ -279,29 +312,32 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         });
     }
 
+    private record CheckpointOutcome(String checkpoint, int lowestFailedIndex) {}
+
     /**
      * Returns the last record that can be consumed after a successful invocation. Floci stores the
      * last consumed sequence and resumes with {@code AFTER_SEQUENCE_NUMBER}, so a partial failure
      * checkpoints the record immediately before AWS's lowest reported failed sequence.
      */
-    private String successfulInvocationCheckpoint(EventSourceMapping esm, InvokeResult invokeResult,
-                                                  String previousCheckpoint,
-                                                  List<DynamoDbStreamRecord> fetched,
-                                                  List<DynamoDbStreamRecord> delivered) {
+    private CheckpointOutcome successfulInvocationCheckpoint(EventSourceMapping esm, InvokeResult invokeResult,
+                                                              String previousCheckpoint,
+                                                              List<DynamoDbStreamRecord> fetched,
+                                                              List<DynamoDbStreamRecord> delivered) {
         String newestFetchedSeq = fetched.get(fetched.size() - 1).getSequenceNumber();
         byte[] payload = invokeResult.getPayload();
         if (!esm.isReportBatchItemFailures() || payload == null || payload.length == 0) {
-            return newestFetchedSeq;
+            return new CheckpointOutcome(newestFetchedSeq, fetched.size());
         }
 
         try {
             JsonNode response = objectMapper.readTree(payload);
             JsonNode failures = response.get("batchItemFailures");
             if (failures == null || failures.isNull()) {
-                return newestFetchedSeq;
+                return new CheckpointOutcome(newestFetchedSeq, fetched.size());
             }
             if (!failures.isArray()) {
-                return retryWholeBatch(esm, previousCheckpoint, "batchItemFailures is not an array");
+                return new CheckpointOutcome(
+                        retryWholeBatch(esm, previousCheckpoint, "batchItemFailures is not an array"), 0);
             }
 
             Map<String, Integer> fetchedIndexes = new HashMap<>();
@@ -317,27 +353,30 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
             for (JsonNode item : failures) {
                 JsonNode identifier = item.get("itemIdentifier");
                 if (identifier == null || identifier.isNull() || identifier.asText().isEmpty()) {
-                    return retryWholeBatch(esm, previousCheckpoint,
-                            "entry has a missing, null or empty itemIdentifier");
+                    return new CheckpointOutcome(
+                            retryWholeBatch(esm, previousCheckpoint,
+                                    "entry has a missing, null or empty itemIdentifier"), 0);
                 }
                 String sequenceNumber = identifier.asText();
                 Integer index = fetchedIndexes.get(sequenceNumber);
                 if (index == null || !deliveredSequences.contains(sequenceNumber)) {
-                    return retryWholeBatch(esm, previousCheckpoint,
-                            "itemIdentifier " + sequenceNumber + " is not in the delivered batch");
+                    return new CheckpointOutcome(
+                            retryWholeBatch(esm, previousCheckpoint,
+                                    "itemIdentifier " + sequenceNumber + " is not in the delivered batch"), 0);
                 }
                 lowestFailedIndex = Math.min(lowestFailedIndex, index);
             }
 
             if (lowestFailedIndex == fetched.size()) {
-                return newestFetchedSeq;
+                return new CheckpointOutcome(newestFetchedSeq, fetched.size());
             }
-            return lowestFailedIndex == 0
+            String checkpoint = lowestFailedIndex == 0
                     ? previousCheckpoint
                     : fetched.get(lowestFailedIndex - 1).getSequenceNumber();
+            return new CheckpointOutcome(checkpoint, lowestFailedIndex);
         } catch (Exception e) {
-            return retryWholeBatch(esm, previousCheckpoint,
-                    "response is not valid JSON: " + e.getMessage());
+            return new CheckpointOutcome(
+                    retryWholeBatch(esm, previousCheckpoint, "response is not valid JSON: " + e.getMessage()), 0);
         }
     }
 
