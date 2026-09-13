@@ -1,20 +1,17 @@
-package io.github.hectorvent.floci.services.appsync.graphql.scalars;
+package io.github.hectorvent.floci.graphql.scalars;
 
 import graphql.schema.GraphQLScalarType;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
-@ApplicationScoped
+/** No CDI here: this sidecar has no DI container, the server just calls {@code new}. */
 public class AppSyncScalarRegistry {
     private final List<GraphQLScalarType> scalars;
     private final Map<String, GraphQLScalarType> scalarMap;
 
-    @Inject
     public AppSyncScalarRegistry() {
         this.scalars = List.of(
             AppSyncScalars.AWSJSON,

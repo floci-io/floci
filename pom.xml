@@ -253,11 +253,14 @@
             <version>2.4.1</version>
         </dependency>
 
-        <!-- GraphQL schema parsing and type system (AppSync execution engine) -->
+        <!-- GraphQL is test-only in the Floci process (issue #2917). Production execution runs
+             in the sidecar; this is here so tests can boot GraphqlSidecarServer in-process and
+             build schemas the same way it does, against the real graphql-java version it uses. -->
         <dependency>
             <groupId>com.graphql-java</groupId>
             <artifactId>graphql-java</artifactId>
             <version>26.1</version>
+            <scope>test</scope>
         </dependency>
 
         <!-- JSON Schema validation (API Gateway request validation) -->
@@ -476,6 +479,16 @@
                         <configuration>
                             <sources>
                                 <source>sidecars/cedar/src/main/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>add-graphql-sidecar-test-source</id>
+                        <phase>generate-test-sources</phase>
+                        <goals><goal>add-test-source</goal></goals>
+                        <configuration>
+                            <sources>
+                                <source>sidecars/graphql/src/main/java</source>
                             </sources>
                         </configuration>
                     </execution>
