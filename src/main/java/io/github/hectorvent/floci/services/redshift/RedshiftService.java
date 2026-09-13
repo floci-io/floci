@@ -11,6 +11,10 @@ import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.UUID;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
@@ -46,6 +50,7 @@ public class RedshiftService {
     private final AccountAwareStorageBackend<Snapshot> snapshots;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroups;
+    private final AccountAwareStorageBackend<Integration> integrations;
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -64,6 +69,7 @@ public class RedshiftService {
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
         this.subnetGroups = storageFactory.create("redshift", "redshift-subnet-groups.json", new TypeReference<Map<String, ClusterSubnetGroup>>() {});
+        this.integrations = storageFactory.create("redshift", "redshift-integrations.json", new TypeReference<Map<String, Integration>>() {});
         this.containerManager = containerManager;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -198,6 +204,80 @@ public class RedshiftService {
         clusters.put(identifier, cluster);
         clusters.flush();
         return cluster;
+    }
+
+    // ── Zero-ETL integrations ────────────────────────────────────
+    //
+    // Metadata only: no data is replicated from the source. The shape and the lower case status
+    // were captured from a live integration in us-west-2.
+
+    public synchronized Integration createIntegration(String integrationName, String sourceArn, String targetArn,
+                                                      String kmsKeyId, Map<String, String> tags, String region) {
+        if (integrationName == null || integrationName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "IntegrationName is required.", 400);
+        }
+        if (sourceArn == null || sourceArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SourceArn is required.", 400);
+        }
+        if (targetArn == null || targetArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetArn is required.", 400);
+        }
+        boolean nameTaken = integrations.scan(k -> true).stream()
+                .anyMatch(existing -> integrationName.equals(existing.getIntegrationName()));
+        if (nameTaken) {
+            throw new AwsException("IntegrationAlreadyExistsFault",
+                    "The integration " + integrationName + " already exists.", 400);
+        }
+
+        String integrationId = UUID.randomUUID().toString();
+        Integration integration = new Integration();
+        integration.setIntegrationArn("arn:aws:redshift:" + region + ":" + regionResolver.getAccountId()
+                + ":integration:" + integrationId);
+        integration.setIntegrationName(integrationName);
+        integration.setSourceArn(sourceArn);
+        integration.setTargetArn(targetArn);
+        // Real integrations pass through creating before settling; nothing here has work to do.
+        integration.setStatus("active");
+        integration.setKmsKeyId(kmsKeyId);
+        integration.setCreateTime(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        integration.setTags(tags);
+        integrations.put(integrationId, integration);
+        LOG.infov("Created Redshift zero-ETL integration: {0}", integration.getIntegrationArn());
+        return integration;
+    }
+
+    /**
+     * Lists integrations, or the single one an ARN names.
+     *
+     * <p>An unknown ARN is {@code IntegrationNotFoundFault}, measured against real Redshift. An
+     * account with no integrations at all is an empty list rather than an error.
+     */
+    public List<Integration> describeIntegrations(String integrationArn) {
+        List<Integration> all = integrations.scan(k -> true);
+        if (integrationArn == null || integrationArn.isBlank()) {
+            return all;
+        }
+        return all.stream()
+                .filter(integration -> integrationArn.equals(integration.getIntegrationArn()))
+                .findFirst()
+                .map(List::of)
+                .orElseThrow(() -> new AwsException("IntegrationNotFoundFault",
+                        "The requested integration doesn't exist.", 404));
+    }
+
+    public synchronized Integration deleteIntegration(String integrationArn) {
+        if (integrationArn == null || integrationArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "IntegrationArn is required.", 400);
+        }
+        for (String key : integrations.keys()) {
+            Optional<Integration> stored = integrations.get(key);
+            if (stored.isPresent() && integrationArn.equals(stored.get().getIntegrationArn())) {
+                integrations.delete(key);
+                LOG.infov("Deleted Redshift zero-ETL integration: {0}", integrationArn);
+                return stored.get();
+            }
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
     }
 
     public List<Cluster> describeClusters(String identifier) {

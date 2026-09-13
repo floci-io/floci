@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -348,6 +349,61 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "CreateIntegration" -> {
+            Integration integration = service.createIntegration(
+                    params.getFirst("IntegrationName"),
+                    params.getFirst("SourceArn"),
+                    params.getFirst("TargetArn"),
+                    params.getFirst("KMSKeyId"),
+                    tagMap(params),
+                    regionResolver.resolveRegionFromAuth(authorizationHeader));
+            String xml = new XmlBuilder()
+                    .start("CreateIntegrationResponse")
+                      .start("CreateIntegrationResult")
+                        .raw(buildIntegrationXml(integration, false))
+                      .end("CreateIntegrationResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CreateIntegrationResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DescribeIntegrations" -> {
+            List<Integration> found = service.describeIntegrations(params.getFirst("IntegrationArn"));
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeIntegrationsResponse")
+                      .start("DescribeIntegrationsResult")
+                        .start("Integrations");
+            for (Integration integration : found) {
+                xmlBuilder.raw(buildIntegrationXml(integration, true));
+            }
+            // No Marker element: real Redshift omits it when there is no further page, and the
+            // caller's pagination loop stops on an absent marker.
+            String xml = xmlBuilder
+                        .end("Integrations")
+                      .end("DescribeIntegrationsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeIntegrationsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DeleteIntegration" -> {
+            Integration integration = service.deleteIntegration(params.getFirst("IntegrationArn"));
+            String xml = new XmlBuilder()
+                    .start("DeleteIntegrationResponse")
+                      .start("DeleteIntegrationResult")
+                        .raw(buildIntegrationXml(integration, false))
+                      .end("DeleteIntegrationResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteIntegrationResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "DescribeClusterSubnetGroups" -> {
             String name = params.getFirst("ClusterSubnetGroupName");
             List<ClusterSubnetGroup> groups = service.describeClusterSubnetGroups(name);
@@ -647,6 +703,54 @@ public class RedshiftQueryHandler {
             builder.elem("DataType", param.getDataType());
         }
         return builder.end("Parameter").build();
+    }
+
+
+    /**
+     * Renders one integration. {@code Errors} is emitted even when empty, which is what a live
+     * integration returns, and {@code Status} stays lower case for the same reason.
+     */
+    private String buildIntegrationXml(Integration integration, boolean includeErrors) {
+        XmlBuilder builder = new XmlBuilder()
+                .start("Integration")
+                  .elem("IntegrationArn", integration.getIntegrationArn())
+                  .elem("IntegrationName", integration.getIntegrationName())
+                  .elem("SourceArn", integration.getSourceArn())
+                  .elem("TargetArn", integration.getTargetArn())
+                  .elem("Status", integration.getStatus())
+                  .elem("CreateTime", integration.getCreateTime());
+        if (integration.getKmsKeyId() != null) {
+            builder.elem("KMSKeyId", integration.getKmsKeyId());
+        }
+        if (includeErrors) {
+            builder.start("Errors").end("Errors");
+        }
+        if (integration.getTags() != null && !integration.getTags().isEmpty()) {
+            builder.start("Tags");
+            for (Map.Entry<String, String> tag : integration.getTags().entrySet()) {
+                builder.start("Tag")
+                    .elem("Key", tag.getKey())
+                    .elem("Value", tag.getValue())
+                  .end("Tag");
+            }
+            builder.end("Tags");
+        }
+        return builder.end("Integration").build();
+    }
+
+    /** Reads the {@code Tags.Tag.N.Key} / {@code .Value} pairs of a Query request. */
+    private static Map<String, String> tagMap(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (String key : params.keySet()) {
+            if (key.matches("Tags\\.Tag\\.\\d+\\.Key")) {
+                String value = params.getFirst(key.replaceAll("\\.Key$", ".Value"));
+                String name = params.getFirst(key);
+                if (name != null && !name.isBlank()) {
+                    tags.put(name, value == null ? "" : value);
+                }
+            }
+        }
+        return tags;
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
