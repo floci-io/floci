@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
@@ -134,6 +135,29 @@ class ApiGatewayExecuteControllerTest {
         assertEquals(
                 objectMapper.valueToTree(List.of("first", "second", "third")),
                 event.path("multiValueHeaders").path("X-Dup"));
+    }
+
+    @Test
+    void convertsAuthorizerValuesToAwsVtlStringShape() {
+        Map<String, Object> result = ApiGatewayExecuteController.vtlAuthorizerContext(
+                "real-principal",
+                Map.of(
+                        "principalId", "context-principal",
+                        "stringKey", "value",
+                        "numberKey", 1,
+                        "booleanKey", true));
+
+        assertEquals(Map.of(
+                "principalId", "real-principal",
+                "stringKey", "value",
+                "numberKey", "1",
+                "booleanKey", "true"), result);
+    }
+
+    @Test
+    void omitsEmptyAuthorizerVtlContext() {
+        assertNull(ApiGatewayExecuteController.vtlAuthorizerContext(null, null));
+        assertNull(ApiGatewayExecuteController.vtlAuthorizerContext(null, Map.of()));
     }
 
     // ── Lambda proxy response Content-Type header matching ──────

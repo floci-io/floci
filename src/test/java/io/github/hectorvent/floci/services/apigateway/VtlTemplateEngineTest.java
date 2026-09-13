@@ -161,11 +161,19 @@ class VtlTemplateEngineTest {
         VtlTemplateEngine.VtlContext authorizerCtx = new VtlTemplateEngine.VtlContext(
                 "{}", Map.of(), Map.of(), Map.of(), "prod", "POST", "/users",
                 "req-123", "000000000000", Map.of(),
-                Map.of("key_id", "KEY-123", "identity", "{\"tenant\":\"t-9\"}"));
+                Map.of(
+                        "principalId", "test-user",
+                        "key_id", "KEY-123",
+                        "numberKey", "1",
+                        "booleanKey", "true",
+                        "identity", "{\"tenant\":\"t-9\"}"));
         String template = "#set($identity = $util.parseJson($context.authorizer.identity))"
-                + "$context.authorizer.key_id|$identity.tenant";
+                + "#set($numberIsString = $context.authorizer.numberKey == \"1\")"
+                + "#set($booleanIsString = $context.authorizer.booleanKey == \"true\")"
+                + "$context.authorizer.principalId|$context.authorizer.key_id|$identity.tenant"
+                + "|$numberIsString|$booleanIsString";
 
-        assertEquals("KEY-123|t-9", engine.evaluate(template, authorizerCtx).body());
+        assertEquals("test-user|KEY-123|t-9|true|true", engine.evaluate(template, authorizerCtx).body());
     }
 
     @Test

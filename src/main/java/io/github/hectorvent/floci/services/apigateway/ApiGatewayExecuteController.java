@@ -987,6 +987,22 @@ public class ApiGatewayExecuteController {
         return params;
     }
 
+    static Map<String, Object> vtlAuthorizerContext(
+            String principalId, Map<String, Object> authorizerContext) {
+        Map<String, Object> result = new HashMap<>();
+        if (authorizerContext != null) {
+            authorizerContext.forEach((key, value) -> {
+                if (value != null) {
+                    result.put(key, value.toString());
+                }
+            });
+        }
+        if (principalId != null) {
+            result.put("principalId", principalId);
+        }
+        return result.isEmpty() ? null : result;
+    }
+
     private Response invokeAwsIntegration(String region, String httpMethod, String path,
                                           String stageName, ApiGatewayResource resource,
                                           Integration integration, HttpHeaders headers,
@@ -1017,11 +1033,13 @@ public class ApiGatewayExecuteController {
 
         String incomingContentType = headerMap.getOrDefault("Content-Type",
                 headerMap.getOrDefault("content-type", "application/json"));
+        Map<String, Object> vtlAuthorizerContext = vtlAuthorizerContext(
+                authorizerResult.principalId(), authorizerResult.context());
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
                 resource.getPath(), requestId, regionResolver.getAccountId(), null,
-                authorizerResult.context());
+                vtlAuthorizerContext);
 
         // AWS selects the request template by the *incoming* request Content-Type. Capture it
         // before parameter mapping runs, since an integration.request.header.Content-Type
@@ -1241,7 +1259,7 @@ public class ApiGatewayExecuteController {
                     VtlTemplateEngine.VtlContext responseMappingCtx = new VtlTemplateEngine.VtlContext(
                             responseBodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
                             resource.getPath(), requestId, regionResolver.getAccountId(), null,
-                            authorizerResult.context());
+                            vtlAuthorizerContext);
                     templateResult = vtlEngine.evaluate(responseTemplate, responseMappingCtx);
                     finalBody = templateResult.body();
                 } else {

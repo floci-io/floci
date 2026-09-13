@@ -58,6 +58,8 @@ class ApiGatewayAuthorizerContextIntegrationTest {
                     sub: "test-user",
                     client_id: "my-client",
                     key_id: "KEY-123",
+                    numKey: 1,
+                    boolKey: true,
                     identity: JSON.stringify({key_id: "KEY-123", tenant: "t-9"}),
                     methodArn: event.methodArn
                   }
@@ -228,7 +230,7 @@ class ApiGatewayAuthorizerContextIntegrationTest {
                           "httpMethod":"POST",
                           "uri":"%s",
                           "requestTemplates":{
-                            "application/json":"#set($identity = $util.parseJson($context.authorizer.identity)){\\\"keyId\\\":\\\"$context.authorizer.key_id\\\",\\\"tenant\\\":\\\"$identity.tenant\\\"}"
+                            "application/json":"#set($identity = $util.parseJson($context.authorizer.identity))#set($numberIsString = $context.authorizer.numKey == \\\"1\\\")#set($booleanIsString = $context.authorizer.boolKey == \\\"true\\\"){\\\"principalId\\\":\\\"$context.authorizer.principalId\\\",\\\"numberIsString\\\":$numberIsString,\\\"booleanIsString\\\":$booleanIsString,\\\"keyId\\\":\\\"$context.authorizer.key_id\\\",\\\"tenant\\\":\\\"$identity.tenant\\\"}"
                           }
                         }
                         """.formatted(proxyUri))
@@ -238,7 +240,14 @@ class ApiGatewayAuthorizerContextIntegrationTest {
 
         given()
                 .contentType(ContentType.JSON)
-                .body("{\"selectionPattern\":\"\",\"responseTemplates\":{\"application/json\":\"\"}}")
+                .body("""
+                        {
+                          "selectionPattern":"",
+                          "responseTemplates":{
+                            "application/json":"#set($numberIsString = $context.authorizer.numKey == \\\"1\\\")#set($booleanIsString = $context.authorizer.boolKey == \\\"true\\\"){\\\"request\\\":$input.json('$'),\\\"principalId\\\":\\\"$context.authorizer.principalId\\\",\\\"numberIsString\\\":$numberIsString,\\\"booleanIsString\\\":$booleanIsString}"
+                          }
+                        }
+                        """)
                 .when().put("/restapis/" + apiId + "/resources/" + mappedResourceId
                         + "/methods/PUT/integration/responses/200")
                 .then()
@@ -304,8 +313,14 @@ class ApiGatewayAuthorizerContextIntegrationTest {
                 .extract().asString();
 
         JsonNode payload = OBJECT_MAPPER.readTree(response);
-        assertEquals("KEY-123", payload.path("keyId").asText());
-        assertEquals("t-9", payload.path("tenant").asText());
+        assertEquals("test-user", payload.path("principalId").asText());
+        assertTrue(payload.path("numberIsString").asBoolean());
+        assertTrue(payload.path("booleanIsString").asBoolean());
+        assertEquals("test-user", payload.path("request").path("principalId").asText());
+        assertTrue(payload.path("request").path("numberIsString").asBoolean());
+        assertTrue(payload.path("request").path("booleanIsString").asBoolean());
+        assertEquals("KEY-123", payload.path("request").path("keyId").asText());
+        assertEquals("t-9", payload.path("request").path("tenant").asText());
     }
 
     @Test
