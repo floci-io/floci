@@ -66,6 +66,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * convert land under the evaluated ErrorOutputPrefix as AWS-shaped NDJSON
  * error lines. Against Floci this exercises the floci-duck sidecar for real,
  * which the emulator's unit tests mock.
+ *
+ * The table carries the complex Hive types beside the primitive ones, the shape
+ * a real Firehose-to-Athena pipeline uses, so one stream covers both. The
+ * coercions the nested records rely on were probed against real AWS: a value
+ * that is not an array is wrapped into one, an array fills a struct by
+ * position, member names match case-insensitively at every depth, and a
+ * mismatch inside a nested value fails that record alone.
  */
 @DisplayName("Firehose data format conversion delivery (JSON to Parquet)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -80,6 +87,13 @@ class FirehoseParquetDeliveryTest {
     private static final String VALID_RECORD_2 = "{\"ticker\": \"MISSING_FIELDS\"}\n";
     private static final String MISMATCH_RECORD = "{\"ticker\": \"BAD\", \"price\": \"oops\"}\n";
     private static final String UNPARSEABLE_RECORD = "this is not json at all\n";
+    private static final String NESTED_RECORD =
+            "{\"ticker\": \"NESTED\", \"tags\": [\"a\", \"b\"], \"person\": {\"name\": \"Alice\", \"age\": 30},"
+                    + " \"items\": [{\"sku\": \"s1\", \"qty\": 2}], \"attrs\": {\"k1\": [\"v1\", \"v2\"]}}\n";
+    private static final String COERCED_NESTED_RECORD =
+            "{\"ticker\": \"COERCED\", \"TAGS\": \"solo\", \"PERSON\": [\"Bob\", 41]}\n";
+    private static final String NESTED_MISMATCH_RECORD =
+            "{\"ticker\": \"BAD_NESTED\", \"items\": [{\"sku\": \"s5\", \"qty\": \"oops\"}]}\n";
 
     private static FirehoseClient firehose;
     private static GlueClient glue;
@@ -119,7 +133,14 @@ class FirehoseParquetDeliveryTest {
                                         Column.builder().name("price").type("double").build(),
                                         Column.builder().name("qty").type("int").build(),
                                         Column.builder().name("active").type("boolean").build(),
-                                        Column.builder().name("ts").type("timestamp").build())
+                                        Column.builder().name("ts").type("timestamp").build(),
+                                        Column.builder().name("tags").type("array<string>").build(),
+                                        Column.builder().name("person")
+                                                .type("struct<name:string,age:int>").build(),
+                                        Column.builder().name("items")
+                                                .type("array<struct<sku:string,qty:int>>").build(),
+                                        Column.builder().name("attrs")
+                                                .type("map<string,array<string>>").build())
                                 // The destination prefix with a Parquet SerDe, as a real
                                 // Firehose-to-Parquet setup defines it, so the delivered
                                 // objects can be read back through Athena.
@@ -176,7 +197,10 @@ class FirehoseParquetDeliveryTest {
                         record(VALID_RECORD_1),
                         record(VALID_RECORD_2),
                         record(MISMATCH_RECORD),
-                        record(UNPARSEABLE_RECORD))
+                        record(UNPARSEABLE_RECORD),
+                        record(NESTED_RECORD),
+                        record(COERCED_NESTED_RECORD),
+                        record(NESTED_MISMATCH_RECORD))
                 .build()).failedPutCount()).isZero();
     }
 
@@ -271,9 +295,12 @@ class FirehoseParquetDeliveryTest {
         byte[] body = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(key).build())
                 .readAllBytes();
         List<String> lines = new String(body, StandardCharsets.UTF_8).strip().lines().toList();
-        assertThat(lines).hasSize(2);
+        assertThat(lines).hasSize(3);
 
-        String mismatch = lines.stream().filter(l -> l.contains("MalformedData")).findFirst().orElseThrow();
+        String mismatch = lines.stream()
+                .filter(l -> l.contains(Base64.getEncoder()
+                        .encodeToString(MISMATCH_RECORD.getBytes(StandardCharsets.UTF_8))))
+                .findFirst().orElseThrow();
         assertThat(mismatch).contains("\"lastErrorCode\":\"DataFormatConversion.MalformedData\"");
         assertThat(mismatch).contains(
                 Base64.getEncoder().encodeToString(MISMATCH_RECORD.getBytes(StandardCharsets.UTF_8)));
@@ -283,14 +310,21 @@ class FirehoseParquetDeliveryTest {
         assertThat(unparseable).contains("\"lastErrorCode\":\"DataFormatConversion.ParseError\"");
         assertThat(unparseable).contains(
                 Base64.getEncoder().encodeToString(UNPARSEABLE_RECORD.getBytes(StandardCharsets.UTF_8)));
+
+        // A mismatch inside an array of structs is per-record too, not a batch failure.
+        String nested = lines.stream()
+                .filter(l -> l.contains(Base64.getEncoder()
+                        .encodeToString(NESTED_MISMATCH_RECORD.getBytes(StandardCharsets.UTF_8))))
+                .findFirst().orElseThrow();
+        assertThat(nested).contains("\"lastErrorCode\":\"DataFormatConversion.MalformedData\"");
     }
 
     /**
      * The PAR1 framing only proves the object is a Parquet file. Reading it back
      * through Athena, which resolves the Glue table to the delivery prefix, is what
-     * shows the projection itself is right: both valid records are present, the
-     * absent members became null rather than being dropped, and the values kept
-     * their column types instead of arriving as strings.
+     * shows the projection itself is right: every convertible record is present,
+     * the absent members became null rather than being dropped, and the values
+     * kept their column types instead of arriving as strings.
      */
     @Test
     @Order(3)
@@ -322,7 +356,7 @@ class FirehoseParquetDeliveryTest {
                     .filter(row -> !"ticker".equals(row.get(0)))
                     .toList();
 
-            assertThat(rows).as("both valid records must be in the Parquet object").hasSize(2);
+            assertThat(rows).as("every convertible record must be in the Parquet object").hasSize(4);
 
             List<String> typed = rows.stream().filter(row -> "AAA".equals(row.get(0))).findFirst()
                     .orElseThrow();
@@ -339,6 +373,92 @@ class FirehoseParquetDeliveryTest {
             assertThat(sparse.subList(1, sparse.size()))
                     .as("members absent from the record must be null, not dropped")
                     .allSatisfy(value -> assertThat(value).isNullOrEmpty());
+        }
+    }
+
+    /**
+     * The nested columns read back the same way, through a list element, a struct
+     * member, a struct member inside a list, and a map entry. The two records are
+     * selected by name because a subscript of a null container is the one thing
+     * this query cannot ask of the primitive-only records.
+     */
+    @Test
+    @Order(4)
+    @DisplayName("Nested array, struct and map values read back through Athena")
+    void nestedValuesReadBackThroughAthena() throws Exception {
+        waitForDeliveredKey("data/");
+
+        try (AthenaClient athena = TestFixtures.athenaClient()) {
+            StartQueryExecutionResponse started = athena.startQueryExecution(
+                    StartQueryExecutionRequest.builder()
+                            .queryString("SELECT ticker, tags[1], person.name, person.age,"
+                                    + " items[1].sku, attrs['k1'][2] FROM \"" + database + "\".\""
+                                    + TABLE + "\" WHERE ticker = 'NESTED' ORDER BY ticker")
+                            .workGroup("primary")
+                            .resultConfiguration(ResultConfiguration.builder()
+                                    .outputLocation("s3://" + bucket + "/athena-results/")
+                                    .build())
+                            .build());
+
+            QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
+                    athena, started.queryExecutionId(), Duration.ofSeconds(120));
+            assertThat(status.state())
+                    .as("Athena read-back did not succeed: %s", status.stateChangeReason())
+                    .isEqualTo(QueryExecutionState.SUCCEEDED);
+
+            List<String> nested = athena.getQueryResults(r -> r
+                            .queryExecutionId(started.queryExecutionId()))
+                    .resultSet().rows().stream()
+                    .map(row -> row.data().stream().map(Datum::varCharValue).toList())
+                    .filter(row -> "NESTED".equals(row.get(0)))
+                    .findFirst().orElseThrow();
+
+            assertThat(nested.get(1)).isEqualTo("a");
+            assertThat(nested.get(2)).isEqualTo("Alice");
+            assertThat(nested.get(3)).isEqualTo("30");
+            assertThat(nested.get(4)).isEqualTo("s1");
+            assertThat(nested.get(5)).isEqualTo("v2");
+        }
+    }
+
+    /**
+     * The coerced record proves the probed leniency end to end: a scalar wrapped
+     * into a one-element array, a struct filled from an array by position, and
+     * both found under uppercase keys.
+     */
+    @Test
+    @Order(5)
+    @DisplayName("A scalar for an array and an array for a struct convert as AWS coerces them")
+    void coercedNestedValuesReadBackThroughAthena() throws Exception {
+        waitForDeliveredKey("data/");
+
+        try (AthenaClient athena = TestFixtures.athenaClient()) {
+            StartQueryExecutionResponse started = athena.startQueryExecution(
+                    StartQueryExecutionRequest.builder()
+                            .queryString("SELECT ticker, tags[1], person.name, person.age FROM \""
+                                    + database + "\".\"" + TABLE + "\" WHERE ticker = 'COERCED'")
+                            .workGroup("primary")
+                            .resultConfiguration(ResultConfiguration.builder()
+                                    .outputLocation("s3://" + bucket + "/athena-results/")
+                                    .build())
+                            .build());
+
+            QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
+                    athena, started.queryExecutionId(), Duration.ofSeconds(120));
+            assertThat(status.state())
+                    .as("Athena read-back did not succeed: %s", status.stateChangeReason())
+                    .isEqualTo(QueryExecutionState.SUCCEEDED);
+
+            List<String> coerced = athena.getQueryResults(r -> r
+                            .queryExecutionId(started.queryExecutionId()))
+                    .resultSet().rows().stream()
+                    .map(row -> row.data().stream().map(Datum::varCharValue).toList())
+                    .filter(row -> "COERCED".equals(row.get(0)))
+                    .findFirst().orElseThrow();
+
+            assertThat(coerced.get(1)).isEqualTo("solo");
+            assertThat(coerced.get(2)).isEqualTo("Bob");
+            assertThat(coerced.get(3)).isEqualTo("41");
         }
     }
 
