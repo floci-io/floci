@@ -661,7 +661,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
         DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
-                dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
+                dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.CREATING,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
         instance.setOptionGroupName(optionGroupName);
         instance.setDbSubnetGroupName(dbSubnetGroupName);
@@ -720,6 +720,8 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         }
 
+        instance.setStatus(DbInstanceStatus.AVAILABLE);
+        putInstanceForScope(accountId, effectiveRegion, id, instance);
         LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
                 id, engine, endpoint.address(), String.valueOf(endpoint.port()));
         return instance;
