@@ -259,34 +259,45 @@ public class S3Controller {
                                   byte[] body) {
         try {
             validateRawUri();
+            S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                    s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (hasQueryParam(uriInfo, "notification")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketNotification", authorization);
                 return handlePutBucketNotification(bucket, body);
             }
             if (hasQueryParam(uriInfo, "versioning")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketVersioning", authorization);
                 return handlePutBucketVersioning(bucket, body);
             }
             if (hasQueryParam(uriInfo, "tagging")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketTagging", authorization);
                 return handlePutBucketTagging(bucket, body);
             }
             if (hasQueryParam(uriInfo, "object-lock")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketObjectLockConfiguration", authorization);
                 return handlePutObjectLockConfiguration(bucket, body);
             }
             if (hasQueryParam(uriInfo, "website")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketWebsite", authorization);
                 return handlePutBucketWebsite(bucket, body);
             }
             if (hasQueryParam(uriInfo, "logging")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketLogging", authorization);
                 s3Service.putBucketLogging(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "policy")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketPolicy", authorization);
                 s3Service.putBucketPolicy(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "cors")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketCORS", authorization);
                 s3Service.putBucketCors(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "lifecycle")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutLifecycleConfiguration", authorization);
                 String requestedSize = httpHeaders.getHeaderString("x-amz-transition-default-minimum-object-size");
                 String storedSize = s3Service.putBucketLifecycle(bucket,
                         new String(body, StandardCharsets.UTF_8), requestedSize);
@@ -295,6 +306,7 @@ public class S3Controller {
                         .build();
             }
             if (hasQueryParam(uriInfo, "acl")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketAcl", authorization);
                 s3Service.putBucketAcl(bucket, new String(body, StandardCharsets.UTF_8),
                         httpHeaders.getHeaderString("x-amz-acl"),
                         httpHeaders.getHeaderString("x-amz-grant-read"),
@@ -305,57 +317,59 @@ public class S3Controller {
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "encryption")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutEncryptionConfiguration", authorization);
                 s3Service.putBucketEncryption(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "publicAccessBlock")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketPublicAccessBlock", authorization);
                 s3Service.putPublicAccessBlock(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "ownershipControls")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketOwnershipControls", authorization);
                 s3Service.putBucketOwnershipControls(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "requestPayment")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketRequestPayment", authorization);
                 s3Service.putBucketRequestPayment(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "accelerate")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutAccelerateConfiguration", authorization);
                 s3Service.putBucketAccelerateConfiguration(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "replication")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutReplicationConfiguration", authorization);
                 s3Service.putBucketReplication(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             // Must be handled here: an unmatched subresource falls through to CreateBucket below,
             // which answers a metrics call with BucketAlreadyOwnedByYou.
             if (hasQueryParam(uriInfo, "metrics")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutMetricsConfiguration", authorization);
                 return handlePutBucketMetricsConfiguration(bucket, uriInfo, body);
             }
             // Same fall-through hazard as metrics: an intelligent-tiering PUT must not become a
             // CreateBucket.
             if (hasQueryParam(uriInfo, "intelligent-tiering")) {
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
                 return handlePutBucketIntelligentTieringConfiguration(bucket, uriInfo, body);
             }
             // Same fall-through hazard as metrics: an analytics or inventory PUT must not become
             // a CreateBucket.
             if (hasQueryParam(uriInfo, "analytics")) {
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutAnalyticsConfiguration", authorization);
                 return handlePutBucketAnalyticsConfiguration(bucket, uriInfo, body);
             }
             if (hasQueryParam(uriInfo, "inventory")) {
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutInventoryConfiguration", authorization);
                 return handlePutBucketInventoryConfiguration(bucket, uriInfo, body);
             }
 
+            s3Service.authorizeCreateBucket(authorization);
             String locationConstraint = null;
             if (body != null && body.length > 0) {
                 locationConstraint = XmlParser.extractFirst(new String(body, StandardCharsets.UTF_8),
@@ -401,51 +415,61 @@ public class S3Controller {
                                   @Context HttpHeaders httpHeaders) {
         try {
             validateRawUri();
+            S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                    s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (hasQueryParam(uriInfo, "tagging")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketTagging", authorization);
                 s3Service.deleteBucketTagging(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "website")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:DeleteBucketWebsite", authorization);
                 s3Service.deleteBucketWebsite(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "policy")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:DeleteBucketPolicy", authorization);
                 s3Service.deleteBucketPolicy(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "cors")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketCORS", authorization);
                 s3Service.deleteBucketCors(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "lifecycle")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutLifecycleConfiguration", authorization);
                 s3Service.deleteBucketLifecycle(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "encryption")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutEncryptionConfiguration", authorization);
                 s3Service.deleteBucketEncryption(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "publicAccessBlock")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketPublicAccessBlock", authorization);
                 s3Service.deletePublicAccessBlock(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "ownershipControls")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketOwnershipControls", authorization);
                 s3Service.deleteBucketOwnershipControls(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "replication")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutReplicationConfiguration", authorization);
                 s3Service.deleteBucketReplication(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "metrics")) {
                 // Likewise this must not fall through to deleting the bucket.
+                s3Service.authorizeBucketWrite(bucket, "s3:PutMetricsConfiguration", authorization);
                 s3Service.deleteBucketMetricsConfiguration(bucket, requireMetricsId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "intelligent-tiering")) {
                 // Likewise this must not fall through to deleting the bucket.
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
                 s3Service.deleteBucketIntelligentTieringConfiguration(bucket,
                         requireIntelligentTieringId(uriInfo));
@@ -453,16 +477,12 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "analytics")) {
                 // Likewise this must not fall through to deleting the bucket.
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutAnalyticsConfiguration", authorization);
                 s3Service.deleteBucketAnalyticsConfiguration(bucket, requireAnalyticsId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "inventory")) {
                 // Likewise this must not fall through to deleting the bucket.
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutInventoryConfiguration", authorization);
                 s3Service.deleteBucketInventoryConfiguration(bucket, requireInventoryId(uriInfo));
                 return Response.noContent().build();
@@ -473,6 +493,7 @@ public class S3Controller {
                 throw new AwsException("MethodNotAllowed",
                         "The specified method is not allowed against this resource.", 405);
             }
+            s3Service.authorizeBucketWrite(bucket, "s3:DeleteBucket", authorization);
             s3Service.deleteBucket(bucket);
             return Response.noContent().build();
         } catch (AwsException e) {
