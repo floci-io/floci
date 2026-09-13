@@ -251,10 +251,11 @@ itself.
 The operation pages over the API key entries with `limit` and `position`, defaulting to 25 keys a
 page and emitting `position` only when another page exists.
 
-The documented maximum `limit` of 500 is **not** enforced by the service: probed against real API
-Gateway, every value from 500 up to `Integer.MAX_VALUE` was accepted without error, so no ceiling is
-imposed here either. Whether the service caps the page it actually returns above 500 cannot be
-observed without a plan holding more than 500 keys, so nothing is assumed about it.
+Request acceptance and response page size are separate things here. Probed against real API
+Gateway, every `limit` from 500 up to `Integer.MAX_VALUE` is accepted without error, so none is
+rejected. That does not show the service ever returning more than 500 entries in one page, and the
+documented contract caps a page at 500, so a larger `limit` is honoured as a request while the page
+returned stays capped at 500.
 
 The lower bound is a deliberate divergence: real API Gateway answers `limit=0` and `limit=-1` with
 an `InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected

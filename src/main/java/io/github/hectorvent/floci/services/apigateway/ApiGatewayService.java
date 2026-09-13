@@ -57,8 +57,13 @@ import jakarta.inject.Inject;
 @ApplicationScoped
 public class ApiGatewayService {
 
-    /** Documented default page size for GetUsage. The documented maximum is not enforced by AWS. */
+    /** Documented default page size for GetUsage. */
     private static final int DEFAULT_USAGE_LIMIT = 25;
+    /**
+     * Documented maximum results per page. A larger {@code limit} is accepted, as real API Gateway
+     * accepts one, but the page returned is still capped here.
+     */
+    private static final int MAX_USAGE_PAGE_SIZE = 500;
 
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayService.class);
@@ -1277,29 +1282,33 @@ public class ApiGatewayService {
     }
 
     /**
-     * Resolves the page size.
+     * Resolves the effective page size, which is not the same thing as accepting the request.
      *
-     * <p>The documented maximum of 500 is <em>not</em> enforced by the service. Probed against real
-     * API Gateway, every value from 500 up to {@link Integer#MAX_VALUE} was accepted without error,
-     * so no ceiling is imposed here either. Whether the service caps the page it actually returns
-     * above 500 is not observable without a plan holding more than 500 keys, so nothing is assumed
-     * about it.
+     * <p>Request acceptance and response page size are separate. Probed against real API Gateway,
+     * every {@code limit} from 500 up to {@link Integer#MAX_VALUE} is accepted without error, so
+     * none is rejected here either. What that probe does <em>not</em> establish is that the service
+     * ever returns more than 500 entries in one page, and the documented contract says 500 is the
+     * maximum number of results per page. The effective page is therefore capped at 500 until a
+     * real result with more than 500 keys shows otherwise.
      *
      * <p>The lower bound is a deliberate divergence: real API Gateway answers {@code limit=0} and
      * {@code limit=-1} with an {@code InternalFailure}, which is a fault rather than a contract, so
      * a page size below one is rejected as a bad request instead of reproducing a 500.
      */
-    private static int resolveUsageLimit(Integer limit) {
+    static int resolveUsageLimit(Integer limit) {
         if (limit == null) {
             return DEFAULT_USAGE_LIMIT;
         }
         if (limit < 1) {
             throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
         }
-        return limit;
+        return Math.min(limit, MAX_USAGE_PAGE_SIZE);
     }
 
-    /** One {@code GetUsage} report: {@code items} maps an API key id to its per-day pairs. */
+    /**
+     * One {@code GetUsage} report: {@code items} maps an API key id to its per-day pairs, and
+     * {@code position} is the continuation token, absent on the terminal page.
+     */
     public record UsageReport(String usagePlanId, String startDate, String endDate,
                               Map<String, List<long[]>> items, String position) {}
 
