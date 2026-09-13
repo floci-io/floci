@@ -10,6 +10,7 @@ RUN curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.12/binaries/apa
 COPY pom.xml .
 RUN mvn dependency:go-offline -B
 COPY src ./src
+COPY sidecars ./sidecars
 
 # Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
 # REST invokers for AwsQueryController.dispatch and AwsJson11Controller.handle are each the
