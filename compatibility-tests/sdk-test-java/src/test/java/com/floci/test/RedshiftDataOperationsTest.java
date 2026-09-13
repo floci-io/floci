@@ -134,6 +134,43 @@ class RedshiftDataOperationsTest {
         assertThat(result.records().get(0).get(6).doubleValue()).isEqualTo(12.34);
     }
 
+    /**
+     * Error text checked against a real cluster on 2026-09-13.
+     */
+    @Test
+    @DisplayName("PostgreSQL types Redshift lacks fail the statement with the Redshift error")
+    void typesRedshiftLacksFailTheStatement() throws Exception {
+        assertThat(failure("SELECT line '{1,2,3}'")).isEqualTo("ERROR: type \"line\" not yet implemented");
+        assertThat(failure("SELECT '{\"a\":1}'::json")).isEqualTo("ERROR: type \"json\" does not exist");
+        assertThat(failure("SELECT '{\"a\":1}'::jsonb")).isEqualTo("ERROR: type \"jsonb\" does not exist");
+    }
+
+    private String failure(String sql) throws Exception {
+        String id = submit(sql);
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(30));
+        while (Instant.now().isBefore(deadline)) {
+            DescribeStatementResponse describe = describe(id);
+            if (describe.status() == StatusString.FAILED) {
+                return describe.error();
+            }
+            if (describe.status() == StatusString.FINISHED) {
+                throw new IllegalStateException("Statement " + id + " finished but was expected to fail");
+            }
+            Thread.sleep(250);
+        }
+        throw new IllegalStateException("Statement " + id + " did not finish in time");
+    }
+
+    private String submit(String sql) {
+        return data.executeStatement(ExecuteStatementRequest.builder()
+                .clusterIdentifier(clusterId)
+                .dbUser(USERNAME)
+                .database(DATABASE)
+                .sql(sql)
+                .build())
+                .id();
+    }
+
     private String run(String sql) throws Exception {
         String id = data.executeStatement(ExecuteStatementRequest.builder()
                 .clusterIdentifier(clusterId)
