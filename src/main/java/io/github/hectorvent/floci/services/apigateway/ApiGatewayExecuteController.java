@@ -872,19 +872,23 @@ public class ApiGatewayExecuteController {
         });
     }
 
-    private void putQueryStringParameters(ObjectNode event, UriInfo uriInfo) {
+    void putQueryStringParameters(ObjectNode event, UriInfo uriInfo) {
         MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
         if (!queryParams.isEmpty()) {
             ObjectNode qsp = event.putObject("queryStringParameters");
             queryParams.forEach((name, values) -> {
-                if (!values.isEmpty()) qsp.put(name, values.get(0));
+                // AWS collapses a repeated query string parameter to the LAST value in the
+                // single-value `queryStringParameters` map, exactly as it does for duplicate
+                // headers above; multiValueQueryStringParameters keeps every value in order.
+                // Taking the first value diverged from AWS: ?x=1&x=2&x=3 yields "3", not "1".
+                if (!values.isEmpty()) qsp.put(name, values.get(values.size() - 1));
             });
         } else {
             event.putNull("queryStringParameters");
         }
     }
 
-    private void putMultiValueQueryStringParameters(ObjectNode event, UriInfo uriInfo) {
+    void putMultiValueQueryStringParameters(ObjectNode event, UriInfo uriInfo) {
         MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
         if (!queryParams.isEmpty()) {
             ObjectNode mqsp = event.putObject("multiValueQueryStringParameters");
