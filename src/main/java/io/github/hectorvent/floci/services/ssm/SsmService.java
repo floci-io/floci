@@ -155,6 +155,11 @@ public class SsmService implements ResourceProvider {
      * Returns the version number.
      */
     public long putParameter(String name, String value, String type, String description, boolean overwrite, String region) {
+        return putParameter(name, value, type, description, overwrite, null, region);
+    }
+
+    public long putParameter(String name, String value, String type, String description, boolean overwrite,
+                             Map<String, String> tags, String region) {
         rejectReservedName(name);
         String storageKey = regionKey(region, name);
         Parameter existing = parameterStore.get(storageKey).orElse(null);
@@ -165,13 +170,27 @@ public class SsmService implements ResourceProvider {
                     400);
         }
 
+        if (overwrite && tags != null && !tags.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Invalid request: tags and overwrite can't be used together. To create a "
+                            + "parameter with tags, please remove overwrite flag. To update tags for an "
+                            + "existing parameter, please use AddTagsToResource or RemoveTagsFromResource.",
+                    400);
+        }
+
         long version = (existing != null) ? existing.getVersion() + 1 : 1;
 
         Parameter parameter = new Parameter(name, value, type != null ? type : "String");
         parameter.setVersion(version);
-        parameter.setDescription(description);
+        parameter.setDescription(description != null ? description : (existing != null ? existing.getDescription() : null));
         parameter.setArn(regionResolver.buildArn("ssm", region, "parameter" + name));
         parameter.setLastModifiedDate(Instant.now());
+
+        if (existing != null && existing.getTags() != null) {
+            parameter.setTags(new HashMap<>(existing.getTags()));
+        } else if (tags != null && !tags.isEmpty()) {
+            parameter.setTags(new HashMap<>(tags));
+        }
 
         parameterStore.put(storageKey, parameter);
         addHistory(storageKey, parameter);
@@ -356,7 +375,8 @@ public class SsmService implements ResourceProvider {
     }
 
     public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
-        String storageKey = regionKey(region, resourceId);
+        String normalizedId = normalizeResourceId(resourceId);
+        String storageKey = regionKey(region, normalizedId);
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -370,7 +390,8 @@ public class SsmService implements ResourceProvider {
     }
 
     public Map<String, String> listTagsForResource(String resourceId, String region) {
-        String storageKey = regionKey(region, resourceId);
+        String normalizedId = normalizeResourceId(resourceId);
+        String storageKey = regionKey(region, normalizedId);
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -378,7 +399,8 @@ public class SsmService implements ResourceProvider {
     }
 
     public void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
-        String storageKey = regionKey(region, resourceId);
+        String normalizedId = normalizeResourceId(resourceId);
+        String storageKey = regionKey(region, normalizedId);
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -390,6 +412,16 @@ public class SsmService implements ResourceProvider {
             parameterStore.put(storageKey, param);
         }
         LOG.debugv("Removed tags from parameter: {0}", resourceId);
+    }
+
+    private static String normalizeResourceId(String resourceId) {
+        if (resourceId != null && resourceId.startsWith("arn:aws:ssm:")) {
+            int idx = resourceId.indexOf(":parameter");
+            if (idx != -1) {
+                return resourceId.substring(idx + ":parameter".length());
+            }
+        }
+        return resourceId;
     }
 
     // ──────────────────────── Documents and Share Permissions ────────────────

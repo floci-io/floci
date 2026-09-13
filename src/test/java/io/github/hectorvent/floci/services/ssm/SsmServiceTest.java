@@ -843,4 +843,51 @@ class SsmServiceTest {
         assertEquals("AssociationDoesNotExist", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
+
+    @Test
+    void putParameterWithTags() {
+        String region = "eu-west-1";
+        Map<String, String> tags = Map.of("Environment", "Production", "Project", "Floci");
+        ssmService.putParameter("/app/tagged", "value", "String", null, false, tags, region);
+
+        Map<String, String> retrievedTags = ssmService.listTagsForResource("/app/tagged", region);
+        assertEquals(2, retrievedTags.size());
+        assertEquals("Production", retrievedTags.get("Environment"));
+        assertEquals("Floci", retrievedTags.get("Project"));
+    }
+
+    @Test
+    void putParameterOverwritePreservesTags() {
+        String region = "eu-west-1";
+        Map<String, String> tags = Map.of("Project", "demo");
+        ssmService.putParameter("/app/param", "hello", "String", null, false, tags, region);
+
+        ssmService.putParameter("/app/param", "world", "String", null, true, null, region);
+
+        Map<String, String> retrievedTags = ssmService.listTagsForResource("/app/param", region);
+        assertEquals(1, retrievedTags.size());
+        assertEquals("demo", retrievedTags.get("Project"));
+    }
+
+    @Test
+    void putParameterOverwriteWithTagsThrowsValidationException() {
+        String region = "eu-west-1";
+        Map<String, String> tags = Map.of("Project", "demo");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.putParameter("/app/conflict", "val", "String", null, true, tags, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void listTagsForResourceWithArnNormalized() {
+        String region = "eu-west-1";
+        Map<String, String> tags = Map.of("Project", "demo");
+        ssmService.putParameter("/app/arn-test", "val", "String", null, false, tags, region);
+
+        String arn = "arn:aws:ssm:" + region + ":000000000000:parameter/app/arn-test";
+        Map<String, String> retrievedTags = ssmService.listTagsForResource(arn, region);
+        assertEquals(1, retrievedTags.size());
+        assertEquals("demo", retrievedTags.get("Project"));
+    }
 }
