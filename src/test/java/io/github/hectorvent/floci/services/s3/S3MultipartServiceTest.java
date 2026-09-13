@@ -250,6 +250,34 @@ class S3MultipartServiceTest {
     }
 
     @Test
+    void completeMultipartUploadStoresTheCompositeETagOnTheFirstWrite() {
+        // WAL storage logs a record when it is put, so an ETag changed after the put never reaches the log.
+        Map<String, String> firstStoredETags = new HashMap<>();
+        InMemoryStorage<String, S3Object> objectStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, S3Object value) {
+                firstStoredETags.putIfAbsent(key, value.getETag());
+                super.put(key, value);
+            }
+        };
+        S3Service service = new S3Service(new InMemoryStorage<>(), objectStore, tempDir, true);
+        service.createBucket("versioned-bucket", "us-east-1");
+        service.putBucketVersioning("versioned-bucket", "Enabled");
+        MultipartUpload upload = service.initiateMultipartUpload("versioned-bucket", "file.bin", null);
+        service.uploadPart("versioned-bucket", "file.bin", upload.getUploadId(), 1,
+                "part1".getBytes(StandardCharsets.UTF_8));
+        service.uploadPart("versioned-bucket", "file.bin", upload.getUploadId(), 2,
+                "part2".getBytes(StandardCharsets.UTF_8));
+
+        S3Object result = service.completeMultipartUpload("versioned-bucket", "file.bin",
+                upload.getUploadId(), List.of(1, 2), null, null);
+
+        assertTrue(result.getETag().endsWith("-2\""), result.getETag());
+        assertEquals(2, firstStoredETags.size(), firstStoredETags.toString());
+        firstStoredETags.values().forEach(stored -> assertEquals(result.getETag(), stored));
+    }
+
+    @Test
     void completeMultipartUploadCleansUp() {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "file.bin", null);
         s3Service.uploadPart("test-bucket", "file.bin", upload.getUploadId(), 1, "data".getBytes());

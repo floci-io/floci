@@ -483,24 +483,33 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object storeObject(String bucketName, String key, byte[] data,
                                  String contentType, Map<String, String> metadata,
                                  S3Checksum checksum, List<Part> parts, PutObjectOptions options) {
+        return storeObject(bucketName, key, data, contentType, metadata, checksum, parts, options, null);
+    }
+
+    private S3Object storeObject(String bucketName, String key, byte[] data,
+                                 String contentType, Map<String, String> metadata,
+                                 S3Checksum checksum, List<Part> parts, PutObjectOptions options, String eTag) {
         Bucket bucket = resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
         synchronized (bucket) {
-            return storeObjectInternal(bucket, bucketName, key, data, contentType, metadata, checksum, parts, options);
+            return storeObjectInternal(bucket, bucketName, key, data, contentType, metadata, checksum, parts, options,
+                    eTag);
         }
     }
 
     private S3Object storeObjectInternal(Bucket bucket, String bucketName, String key, byte[] data,
                                          String contentType, Map<String, String> metadata,
-                                         S3Checksum checksum, List<Part> parts, PutObjectOptions options) {
+                                         S3Checksum checksum, List<Part> parts, PutObjectOptions options,
+                                         String eTag) {
         PutObjectOptions effectiveOptions = options != null ? options : new PutObjectOptions();
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
         SseCustomerKey sseCustomerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(), effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
-        S3Object object = new S3Object(bucketName, key, data, contentType);
+        S3Object object = new S3Object(bucketName, key, data, contentType,
+                eTag != null ? eTag : computeETag(data));
         if (metadata != null) {
             object.getMetadata().putAll(metadata);
         }
@@ -3117,13 +3126,12 @@ public class S3Service implements Resettable, ResourceProvider {
                             .withServerSideEncryption(upload.getServerSideEncryption())
                             .withSseKmsKeyId(upload.getSseKmsKeyId())
                             .withAcl(upload.getAcl())
-                            .withTagging(upload.getTagging()));
+                            .withTagging(upload.getTagging()),
+                    compositeETag);
             if (upload.getSseCustomerAlgorithm() != null) {
                 object.setSseCustomerAlgorithm(upload.getSseCustomerAlgorithm());
                 object.setSseCustomerKeyMd5(upload.getSseCustomerKeyMd5());
             }
-            // Override the ETag with the composite multipart ETag
-            object.setETag(compositeETag);
             objectStore.put(objectKey(bucket, key), object);
 
             // Cleanup
