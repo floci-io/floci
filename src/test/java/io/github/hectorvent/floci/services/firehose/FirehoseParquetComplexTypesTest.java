@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
@@ -370,6 +371,73 @@ class FirehoseParquetComplexTypesTest {
         String ndjson = stagedNdjson();
         assertTrue(ndjson.contains("\"attrs\":{\"MixedKey\":[\"v\"]}"), "staged rows were: " + ndjson);
         assertTrue(ndjson.contains("\"person\":{\"name\":\"Bob\",\"age\":2}"), "staged rows were: " + ndjson);
+    }
+
+    /**
+     * The HiveJsonSerDe coercion matrix, probed 2026-09-13 on a rig with exactly
+     * these columns: what it still coerces, and the four things it refuses that OpenX
+     * accepts, each with the message AWS wrote to the error output.
+     */
+    @Test
+    void hiveJsonSerDeStillCoercesWhatAwsDocumentsAsAllowed() {
+        converter.deliver(hiveStream(), BUCKET, List.of(
+                record("{\"id\": \"h\", \"tags\": [1, 2, 3], \"person\": {\"name\": \"Dan\", \"extra\": 1},"
+                        + " \"items\": [{\"sku\": \"s\", \"qty\": 2, \"extra\": 1}]}"),
+                record("{\"id\": \"empty\", \"person\": {}, \"tags\": [\"a\", null]}")), DELIVERY_TIME);
+
+        String ndjson = stagedNdjson();
+        assertTrue(ndjson.contains("\"tags\":[\"1\",\"2\",\"3\"]"), "staged rows were: " + ndjson);
+        assertTrue(ndjson.contains("\"person\":{\"name\":\"Dan\",\"age\":null}"), "staged rows were: " + ndjson);
+        assertTrue(ndjson.contains("\"items\":[{\"sku\":\"s\",\"qty\":2}]"), "staged rows were: " + ndjson);
+        assertTrue(ndjson.contains("\"person\":{\"name\":null,\"age\":null}"), "staged rows were: " + ndjson);
+        assertTrue(ndjson.contains("\"tags\":[\"a\",null]"), "staged rows were: " + ndjson);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "{\"id\": \"a\", \"tags\": \"solo\"}"
+                + "|Data does not match the schema. java.io.IOException: Start of Array expected",
+        "{\"id\": \"b\", \"items\": {\"sku\": \"x\", \"qty\": 1}}"
+                + "|Data does not match the schema. java.io.IOException: Start of Array expected",
+        "{\"id\": \"c\", \"attrs\": {\"k\": \"notanarray\"}}"
+                + "|Data does not match the schema. java.io.IOException: Start of Array expected",
+        "{\"id\": \"d\", \"person\": [\"Bob\", 41]}"
+                + "|Data does not match the schema. java.io.IOException: Start of Object expected",
+        "{\"id\": \"e\", \"person\": 42}"
+                + "|Data does not match the schema. java.io.IOException: Start of Object expected",
+        "{\"id\": \"f\", \"person\": {\"name\": \"Eve\", \"age\": \"7\"}}"
+                + "|Data does not match the schema. Current token (VALUE_STRING) not numeric,"
+                + " can not use numeric value accessors",
+        "{\"id\": {\"nested\": 1}}"
+                + "|One or more fields have incorrect format. Exception when validating field (root)",
+        "{\"id\": \"g\", \"tags\": [{\"MixedKey\": 1}]}"
+                + "|One or more fields have incorrect format. Exception when validating field (root)",
+    })
+    void hiveJsonSerDeFailsTheRecordWhereOpenXWouldCoerce(String json, String message) throws Exception {
+        FirehoseParquetConverter.Outcome outcome = converter.deliver(hiveStream(), BUCKET,
+                List.of(record(json)), DELIVERY_TIME);
+
+        assertEquals(0, outcome.convertedRecords());
+        assertEquals(1, outcome.failedRecords());
+        JsonNode line = singleErrorLine();
+        assertEquals("DataFormatConversion.MalformedData", line.get("lastErrorCode").asText());
+        assertEquals(message, line.get("lastErrorMessage").asText());
+    }
+
+    /** The same rule reaches a top-level scalar column, where Floci used to coerce under Hive too. */
+    @Test
+    void hiveJsonSerDeRefusesAStringInATopLevelNumericColumn() throws Exception {
+        when(glueService.getTable("db", "events")).thenReturn(table(
+                new Column("ticker", "string"), new Column("qty", "int")));
+
+        FirehoseParquetConverter.Outcome outcome = converter.deliver(hiveStream(), BUCKET, List.of(
+                record("{\"ticker\": \"AAA\", \"qty\": \"10\"}"),
+                record("{\"ticker\": \"BBB\", \"qty\": 10}")), DELIVERY_TIME);
+
+        assertEquals(1, outcome.convertedRecords());
+        assertEquals(1, outcome.failedRecords());
+        assertTrue(stagedNdjson().contains("{\"ticker\":\"BBB\",\"qty\":10}"),
+                "staged rows were: " + stagedNdjson());
     }
 
     /**

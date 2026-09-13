@@ -154,7 +154,7 @@ public class FirehoseParquetConverter {
 
         List<SchemaColumn> schema;
         try {
-            schema = resolveSchema(schemaConfig, caseInsensitive(conversion), lowercasesMapKeys(conversion));
+            schema = resolveSchema(schemaConfig, SerDeRules.of(conversion));
         } catch (AwsException e) {
             return failWholeBatch(stream, s3, bucket, records, deliveryTime, schemaConfig,
                     "DataFormatConversion." + e.getErrorCode(), e.getMessage());
@@ -240,8 +240,7 @@ public class FirehoseParquetConverter {
      * SchemaConfiguration.Region and CatalogId only flow into the error-output
      * metadata; VersionId is not resolved (the live table is always used).
      */
-    private List<SchemaColumn> resolveSchema(SchemaConfiguration schemaConfig, boolean caseInsensitive,
-                                             boolean lowercaseMapKeys) {
+    private List<SchemaColumn> resolveSchema(SchemaConfiguration schemaConfig, SerDeRules rules) {
         Table table = glueService.getTable(schemaConfig.getDatabaseName(), schemaConfig.getTableName());
         List<Column> columns = table.getStorageDescriptor() == null
                 ? null : table.getStorageDescriptor().getColumns();
@@ -260,7 +259,7 @@ public class FirehoseParquetConverter {
                 throw new UnsupportedSchemaException("Column name " + name
                         + " is not supported for Parquet conversion.");
             }
-            ValueType type = HiveTypeParser.parse(name, column.getType(), caseInsensitive, lowercaseMapKeys);
+            ValueType type = HiveTypeParser.parse(name, column.getType(), rules);
             if (type == null) {
                 throw new UnsupportedSchemaException("Column " + name + " has Hive type " + column.getType()
                         + ", which Floci cannot convert to Parquet.");
@@ -306,16 +305,31 @@ public class FirehoseParquetConverter {
     }
 
     /**
-     * Whether a map column's keys, which are data rather than schema, are stored
-     * lowercased. Probed: OpenX lowercases every JSON key before deserializing and
-     * a map entry key goes down with them, while HiveJsonSerDe keeps the key as it
-     * was written even though it still resolves column and member names
-     * case-insensitively. So this follows the SerDe in use, not {@link
-     * #caseInsensitive(DataFormatConversionConfiguration)}.
+     * What the configured deserializer does with a value, all of it probed against
+     * real AWS.
+     *
+     * <p>{@code caseInsensitive}: column and struct member names match regardless of
+     * case. Both SerDes do this unless OpenX is told not to.
+     *
+     * <p>{@code lowercaseKeys}: keys that are data rather than schema, a map's entry
+     * keys and the JSON text a non-scalar leaves in a text column, are stored
+     * lowercased. Only a case-insensitive OpenX does this, since it lowercases every
+     * JSON key before deserializing; HiveJsonSerDe keeps them as written.
+     *
+     * <p>{@code lenient}: a value of the wrong shape is coerced rather than refused.
+     * OpenX wraps a non-array into a one-element array, fills a struct from an array
+     * by position, and serializes a non-scalar into a text column; it also parses a
+     * string into a numeric column. HiveJsonSerDe refuses all four and fails the
+     * record, while still coercing a number into a text column, taking a missing
+     * member as null and dropping an undeclared one.
      */
-    private static boolean lowercasesMapKeys(DataFormatConversionConfiguration conversion) {
-        OpenXJsonSerDe openX = conversion.getInputFormatConfiguration().getDeserializer().getOpenXJsonSerDe();
-        return openX != null && !Boolean.FALSE.equals(openX.getCaseInsensitive());
+    private record SerDeRules(boolean caseInsensitive, boolean lowercaseKeys, boolean lenient) {
+
+        static SerDeRules of(DataFormatConversionConfiguration conversion) {
+            boolean openX = conversion.getInputFormatConfiguration().getDeserializer().getOpenXJsonSerDe() != null;
+            boolean caseInsensitive = FirehoseParquetConverter.caseInsensitive(conversion);
+            return new SerDeRules(caseInsensitive, openX && caseInsensitive, openX);
+        }
     }
 
     /**
@@ -584,12 +598,13 @@ public class FirehoseParquetConverter {
     private record StructField(String name, ValueType type) {}
 
     /**
-     * Hive {@code array<T>}. A value that is not an array is wrapped into a
-     * one-element array rather than failing the record: probed, a string in an
-     * {@code array<string>} column arrives as a single-element array, and so does
-     * an object in an {@code array<struct<..>>} one.
+     * Hive {@code array<T>}. Under OpenX a value that is not an array is wrapped into
+     * a one-element array rather than failing the record: probed, a string in an
+     * {@code array<string>} column arrives as a single-element array, and so does an
+     * object in an {@code array<struct<..>>} one. HiveJsonSerDe fails the record
+     * instead (probed), with the message reproduced here.
      */
-    private record ListType(ValueType element) implements ValueType {
+    private record ListType(ValueType element, SerDeRules rules) implements ValueType {
 
         @Override
         public String duckType() {
@@ -599,6 +614,9 @@ public class FirehoseParquetConverter {
         @Override
         public Object coerce(JsonNode value) {
             if (!value.isArray()) {
+                if (!rules.lenient()) {
+                    throw shapeMismatch("java.io.IOException: Start of Array expected");
+                }
                 List<Object> wrapped = new ArrayList<>(1);
                 wrapped.add(element.coerce(value));
                 return wrapped;
@@ -614,10 +632,12 @@ public class FirehoseParquetConverter {
     /**
      * Hive {@code struct<a:T,..>}. An object matches members by name, a missing one
      * being null and an undeclared one dropped, so an empty object is a struct of
-     * null members rather than a null struct. An array fills the members by
-     * position instead, extras ignored, and a scalar fails the record: all probed.
+     * null members rather than a null struct; both SerDes agree on that (probed).
+     * Under OpenX an array fills the members by position instead, extras ignored,
+     * and only a scalar fails the record. HiveJsonSerDe fails the record for anything
+     * but an object (probed).
      */
-    private record StructType(List<StructField> fields, boolean caseInsensitive) implements ValueType {
+    private record StructType(List<StructField> fields, SerDeRules rules) implements ValueType {
 
         @Override
         public String duckType() {
@@ -634,6 +654,9 @@ public class FirehoseParquetConverter {
 
         @Override
         public Object coerce(JsonNode value) {
+            if (!value.isObject() && !rules.lenient()) {
+                throw shapeMismatch("java.io.IOException: Start of Object expected");
+            }
             if (value.isArray()) {
                 return positional(value);
             }
@@ -644,11 +667,11 @@ public class FirehoseParquetConverter {
                         "Data does not match the schema. Data is not JSONObject  but "
                                 + javaTypeName(value) + " with value " + value.asText());
             }
-            Map<String, JsonNode> byLowerKey = caseInsensitive ? lowerKeyIndex(value) : Map.of();
+            Map<String, JsonNode> byLowerKey = rules.caseInsensitive() ? lowerKeyIndex(value) : Map.of();
             Map<String, Object> members = new LinkedHashMap<>();
             for (StructField field : fields) {
                 JsonNode member = value.get(field.name());
-                if (member == null && caseInsensitive) {
+                if (member == null && rules.caseInsensitive()) {
                     member = byLowerKey.get(field.name().toLowerCase(Locale.ROOT));
                 }
                 members.put(field.name(),
@@ -673,10 +696,9 @@ public class FirehoseParquetConverter {
      * only under a case-insensitive OpenX, which lowercases every JSON key before
      * deserializing: probed, {@code {"MixedKey": ..}} is stored under
      * {@code mixedkey} there and kept as written under HiveJsonSerDe, which resolves
-     * column and member names case-insensitively all the same. See {@link
-     * FirehoseParquetConverter#lowercasesMapKeys(DataFormatConversionConfiguration)}.
+     * column and member names case-insensitively all the same. See {@link SerDeRules}.
      */
-    private record MapType(ValueType key, ValueType value, boolean lowercaseKeys) implements ValueType {
+    private record MapType(ValueType key, ValueType value, SerDeRules rules) implements ValueType {
 
         @Override
         public String duckType() {
@@ -686,6 +708,11 @@ public class FirehoseParquetConverter {
         @Override
         public Object coerce(JsonNode node) {
             if (!node.isObject()) {
+                if (!rules.lenient()) {
+                    // By analogy with a struct; a map column itself given a non-object
+                    // was not probed under HiveJsonSerDe (documented).
+                    throw shapeMismatch("java.io.IOException: Start of Object expected");
+                }
                 // Real AWS fails this record too, but with an OpenX cast error naming
                 // classes Floci does not use, so the wording here is its own
                 // (documented deviation).
@@ -697,7 +724,7 @@ public class FirehoseParquetConverter {
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> field = fields.next();
-                String name = lowercaseKeys ? field.getKey().toLowerCase(Locale.ROOT) : field.getKey();
+                String name = rules.lowercaseKeys() ? field.getKey().toLowerCase(Locale.ROOT) : field.getKey();
                 JsonNode member = field.getValue();
                 entries.put(key.coerce(TextNode.valueOf(name)),
                         member == null || member.isNull() ? null : value.coerce(member));
@@ -714,6 +741,12 @@ public class FirehoseParquetConverter {
             byLowerKey.putIfAbsent(field.getKey().toLowerCase(Locale.ROOT), field.getValue());
         }
         return byLowerKey;
+    }
+
+    /** The record failure HiveJsonSerDe reports for a value of the wrong shape (probed). */
+    private static RecordConversionException shapeMismatch(String cause) {
+        return new RecordConversionException("DataFormatConversion.MalformedData",
+                "Data does not match the schema. " + cause);
     }
 
     private static String javaTypeName(JsonNode value) {
@@ -743,22 +776,19 @@ public class FirehoseParquetConverter {
         private static final int MAX_DEPTH = 32;
 
         private final String type;
-        private final boolean caseInsensitive;
-        private final boolean lowercaseMapKeys;
+        private final SerDeRules rules;
         private int pos;
 
-        private HiveTypeParser(String type, boolean caseInsensitive, boolean lowercaseMapKeys) {
+        private HiveTypeParser(String type, SerDeRules rules) {
             this.type = type;
-            this.caseInsensitive = caseInsensitive;
-            this.lowercaseMapKeys = lowercaseMapKeys;
+            this.rules = rules;
         }
 
-        static ValueType parse(String name, String hiveType, boolean caseInsensitive,
-                               boolean lowercaseMapKeys) {
+        static ValueType parse(String name, String hiveType, SerDeRules rules) {
             if (hiveType == null || hiveType.isBlank()) {
                 return null;
             }
-            HiveTypeParser parser = new HiveTypeParser(hiveType, caseInsensitive, lowercaseMapKeys);
+            HiveTypeParser parser = new HiveTypeParser(hiveType, rules);
             ValueType parsed = parser.parseType(name, 0);
             parser.skipSpaces();
             // Trailing content means the type was never understood, as "char(10)garbage"
@@ -791,7 +821,7 @@ public class FirehoseParquetConverter {
             if (element == null || !expect('>')) {
                 return null;
             }
-            return new ListType(element);
+            return new ListType(element, rules);
         }
 
         private ValueType parseMap(String name, int depth) {
@@ -809,7 +839,7 @@ public class FirehoseParquetConverter {
             if (value == null || !expect('>')) {
                 return null;
             }
-            return new MapType(key, value, lowercaseMapKeys);
+            return new MapType(key, value, rules);
         }
 
         private ValueType parseStruct(String name, int depth) {
@@ -836,7 +866,7 @@ public class FirehoseParquetConverter {
                 }
                 fields.add(new StructField(field, fieldType));
             } while (expect(','));
-            return expect('>') ? new StructType(List.copyOf(fields), caseInsensitive) : null;
+            return expect('>') ? new StructType(List.copyOf(fields), rules) : null;
         }
 
         /** A primitive, with the {@code (n)} or {@code (p,s)} width some of them carry. */
@@ -865,7 +895,7 @@ public class FirehoseParquetConverter {
                     pos = mark;
                 }
             }
-            return ScalarType.fromPrimitive(name, text.toLowerCase(Locale.ROOT), lowercaseMapKeys);
+            return ScalarType.fromPrimitive(name, text.toLowerCase(Locale.ROOT), rules);
         }
 
         private String readWord() {
@@ -925,27 +955,27 @@ public class FirehoseParquetConverter {
     }
 
     private record ScalarType(String name, String duckType, ColumnKind kind,
-                              boolean lowercaseKeys) implements ValueType {
+                              SerDeRules rules) implements ValueType {
 
         /** Primitive Hive types only; anything else, {@code binary} included, returns null. */
-        static ScalarType fromPrimitive(String name, String type, boolean lowercaseKeys) {
+        static ScalarType fromPrimitive(String name, String type, SerDeRules rules) {
             Matcher decimal = DECIMAL_TYPE.matcher(type);
             if (decimal.matches()) {
-                return decimalSpec(name, decimal.group(1), decimal.group(2), lowercaseKeys);
+                return decimalSpec(name, decimal.group(1), decimal.group(2), rules);
             }
             return switch (type) {
-                case "boolean" -> new ScalarType(name, "BOOLEAN", ColumnKind.BOOLEAN, lowercaseKeys);
-                case "tinyint" -> new ScalarType(name, "TINYINT", ColumnKind.INTEGRAL, lowercaseKeys);
-                case "smallint" -> new ScalarType(name, "SMALLINT", ColumnKind.INTEGRAL, lowercaseKeys);
-                case "int", "integer" -> new ScalarType(name, "INTEGER", ColumnKind.INTEGRAL, lowercaseKeys);
-                case "bigint" -> new ScalarType(name, "BIGINT", ColumnKind.INTEGRAL, lowercaseKeys);
-                case "float", "real" -> new ScalarType(name, "FLOAT", ColumnKind.FLOATING, lowercaseKeys);
-                case "double", "double precision" -> new ScalarType(name, "DOUBLE", ColumnKind.FLOATING, lowercaseKeys);
-                case "decimal" -> new ScalarType(name, "DECIMAL(10,0)", ColumnKind.DECIMAL, lowercaseKeys);
-                case "string" -> new ScalarType(name, "VARCHAR", ColumnKind.TEXT, lowercaseKeys);
-                case "date" -> new ScalarType(name, "DATE", ColumnKind.DATE, lowercaseKeys);
-                case "timestamp" -> new ScalarType(name, "TIMESTAMP", ColumnKind.TIMESTAMP, lowercaseKeys);
-                default -> sizedTextSpec(name, type, lowercaseKeys);
+                case "boolean" -> new ScalarType(name, "BOOLEAN", ColumnKind.BOOLEAN, rules);
+                case "tinyint" -> new ScalarType(name, "TINYINT", ColumnKind.INTEGRAL, rules);
+                case "smallint" -> new ScalarType(name, "SMALLINT", ColumnKind.INTEGRAL, rules);
+                case "int", "integer" -> new ScalarType(name, "INTEGER", ColumnKind.INTEGRAL, rules);
+                case "bigint" -> new ScalarType(name, "BIGINT", ColumnKind.INTEGRAL, rules);
+                case "float", "real" -> new ScalarType(name, "FLOAT", ColumnKind.FLOATING, rules);
+                case "double", "double precision" -> new ScalarType(name, "DOUBLE", ColumnKind.FLOATING, rules);
+                case "decimal" -> new ScalarType(name, "DECIMAL(10,0)", ColumnKind.DECIMAL, rules);
+                case "string" -> new ScalarType(name, "VARCHAR", ColumnKind.TEXT, rules);
+                case "date" -> new ScalarType(name, "DATE", ColumnKind.DATE, rules);
+                case "timestamp" -> new ScalarType(name, "TIMESTAMP", ColumnKind.TIMESTAMP, rules);
+                default -> sizedTextSpec(name, type, rules);
             };
         }
 
@@ -955,7 +985,7 @@ public class FirehoseParquetConverter {
          * the type string, so a prefix match would let {@code varchar(foo)} or
          * {@code char(10)garbage} through as text instead of reporting the schema.
          */
-        private static ScalarType sizedTextSpec(String name, String type, boolean lowercaseKeys) {
+        private static ScalarType sizedTextSpec(String name, String type, SerDeRules rules) {
             Matcher sized = SIZED_TEXT_TYPE.matcher(type);
             if (!sized.matches() || sized.group(2).length() > 5) {
                 return null;
@@ -965,7 +995,7 @@ public class FirehoseParquetConverter {
             if (length < 1 || length > max) {
                 return null;
             }
-            return new ScalarType(name, "VARCHAR", ColumnKind.TEXT, lowercaseKeys);
+            return new ScalarType(name, "VARCHAR", ColumnKind.TEXT, rules);
         }
 
         /**
@@ -974,7 +1004,7 @@ public class FirehoseParquetConverter {
          * rather than left for the COPY to reject as a batch-level failure.
          */
         private static ScalarType decimalSpec(String name, String precisionText, String scaleText,
-                                              boolean lowercaseKeys) {
+                                              SerDeRules rules) {
             if (precisionText.length() > 2 || scaleText.length() > 2) {
                 return null;
             }
@@ -984,7 +1014,7 @@ public class FirehoseParquetConverter {
                 return null;
             }
             return new ScalarType(name, "DECIMAL(" + precision + "," + scale + ")", ColumnKind.DECIMAL,
-                    lowercaseKeys);
+                    rules);
         }
 
         /**
@@ -997,6 +1027,9 @@ public class FirehoseParquetConverter {
         @Override
         public Object coerce(JsonNode value) {
             try {
+                if (!rules.lenient()) {
+                    refuseWhatHiveRefuses(value);
+                }
                 return switch (kind) {
                     case BOOLEAN -> coerceBoolean(value);
                     case INTEGRAL -> coerceIntegral(value);
@@ -1021,7 +1054,28 @@ public class FirehoseParquetConverter {
          * HiveJsonSerDe leaves them as written. The same rule the map keys follow.
          */
         private String jsonText(JsonNode value) {
-            return lowercaseKeys ? lowercaseKeys(value).toString() : value.toString();
+            return rules.lowercaseKeys() ? lowercaseKeys(value).toString() : value.toString();
+        }
+
+        /**
+         * The two things HiveJsonSerDe will not do that OpenX does, both documented
+         * by AWS and probed: read a JSON string into a numeric column, and turn a
+         * nested value into text. The numeric message is Jackson's; AWS appends a
+         * source location whose object hash changes per run, which is not
+         * reproduced. The text one comes from the SerDe's field validator and
+         * carries no schema prefix.
+         */
+        private void refuseWhatHiveRefuses(JsonNode value) {
+            boolean numeric = kind == ColumnKind.INTEGRAL || kind == ColumnKind.FLOATING
+                    || kind == ColumnKind.DECIMAL;
+            if (numeric && value.isTextual()) {
+                throw shapeMismatch("Current token (VALUE_STRING) not numeric,"
+                        + " can not use numeric value accessors");
+            }
+            if (kind == ColumnKind.TEXT && !value.isValueNode()) {
+                throw new RecordConversionException("DataFormatConversion.MalformedData",
+                        "One or more fields have incorrect format. Exception when validating field (root)");
+            }
         }
 
         private static JsonNode lowercaseKeys(JsonNode node) {
