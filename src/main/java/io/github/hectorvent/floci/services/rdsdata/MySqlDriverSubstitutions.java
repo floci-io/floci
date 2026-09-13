@@ -139,7 +139,8 @@ final class OpenTelemetryUnavailable implements BooleanSupplier {
         try {
             Class.forName("io.opentelemetry.api.GlobalOpenTelemetry");
             return false;
-        } catch (ClassNotFoundException e) {
+        } catch (ClassNotFoundException expected) {
+            // The OpenTelemetry API is not on the classpath, which is what this check detects.
             return true;
         }
     }
