@@ -217,7 +217,7 @@ Always rejected, regardless of configuration:
 
 - Relative paths, and any path containing a `..` segment.
 - The bare filesystem root (`/`).
-- The Docker socket (`/var/run/docker.sock`, `/run/docker.sock`) and any directory that contains it (e.g. `/var/run`, `/run`, `/var`), including via a symlink that resolves onto one of these paths.
+- The Docker daemon socket and any directory that contains it (e.g. `/var/run`, `/run`, `/var`), including via a symlink that resolves onto one of these paths. The protected socket is the one Floci's own Docker client connects to, resolved the same way the client resolves it: `floci.docker.docker-host`, then `DOCKER_HOST`, then the active Docker context (Colima, OrbStack, Rancher Desktop, Podman), then `/var/run/docker.sock`. The conventional locations `/var/run/docker.sock` and `/run/docker.sock` are always protected as well.
 
 **By default, with no configuration, every host `sourcePath` is rejected.** You must explicitly opt in with one of:
 

@@ -13,10 +13,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -405,6 +410,61 @@ class EcsJsonHandlerVolumesTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("RegisterTaskDefinition", socket, "us-east-1"));
         assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void registerTaskDefinitionRejectsTheSocketNamedByDockerHostEnv(@TempDir Path tempDir) throws Exception {
+        // With floci.docker.docker-host at its default, Floci's own Docker client connects to
+        // whatever DOCKER_HOST names, so that socket is the live daemon socket and must be
+        // protected exactly like /var/run/docker.sock, even with allow-unsafe-host-volumes.
+        Path daemonSocket = tempDir.resolve("floci-docker.sock");
+        when(config.docker().dockerHost()).thenReturn("unix:///var/run/docker.sock");
+        when(config.docker().dockerConfigPath())
+                .thenReturn(Optional.of(tempDir.resolve("no-docker-config").toString()));
+        when(config.services().ecs().allowUnsafeHostVolumes()).thenReturn(true);
+        handler = new EcsJsonHandler(service, objectMapper, new HostVolumePolicy(config,
+                environment(Map.of("DOCKER_HOST", "unix://" + daemonSocket))));
+
+        JsonNode request = objectMapper.readTree(registerRequestWithHostVolume(daemonSocket.toString()));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void registerTaskDefinitionRejectsTheDirectoryHoldingTheActiveContextSocket(@TempDir Path tempDir)
+            throws Exception {
+        // Colima, OrbStack and Rancher Desktop publish their daemon socket through a Docker
+        // context rather than DOCKER_HOST. Floci's client follows the active context, so the
+        // directory holding that socket exposes the daemon just like /var/run does.
+        Path dockerConfigDir = tempDir.resolve("docker-config");
+        Path socketDir = tempDir.resolve("colima");
+        writeContextFixture(dockerConfigDir, "colima", "unix://" + socketDir.resolve("docker.sock"));
+        when(config.docker().dockerHost()).thenReturn("unix:///var/run/docker.sock");
+        when(config.docker().dockerConfigPath()).thenReturn(Optional.of(dockerConfigDir.toString()));
+        when(config.services().ecs().allowUnsafeHostVolumes()).thenReturn(true);
+        handler = new EcsJsonHandler(service, objectMapper, new HostVolumePolicy(config, environment(Map.of())));
+
+        JsonNode request = objectMapper.readTree(registerRequestWithHostVolume(socketDir.toString()));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    private static Function<String, String> environment(Map<String, String> variables) {
+        return variables::get;
+    }
+
+    /** Lays out {@code config.json} and a context's {@code meta.json} the way the Docker CLI does. */
+    private static void writeContextFixture(Path dockerConfigDir, String contextName, String host) throws Exception {
+        Files.createDirectories(dockerConfigDir);
+        Files.writeString(dockerConfigDir.resolve("config.json"), "{\"currentContext\":\"" + contextName + "\"}");
+        byte[] nameHash = MessageDigest.getInstance("SHA-256").digest(contextName.getBytes(StandardCharsets.UTF_8));
+        Path metaDir = dockerConfigDir.resolve("contexts").resolve("meta").resolve(HexFormat.of().formatHex(nameHash));
+        Files.createDirectories(metaDir);
+        Files.writeString(metaDir.resolve("meta.json"),
+                "{\"Name\":\"" + contextName + "\",\"Metadata\":{},"
+                        + "\"Endpoints\":{\"docker\":{\"Host\":\"" + host + "\",\"SkipTLSVerify\":false}}}");
     }
 
     @Test

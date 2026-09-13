@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs.container;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.docker.DockerClientProducer;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -12,11 +13,12 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * Guards task-definition {@code volumes[].host.sourcePath} against the unsafe bind mounts a
  * caller-controlled task definition could otherwise request: relative/traversal paths, the bare
- * filesystem root, anything that reaches the Docker socket, and (unless
+ * filesystem root, anything that reaches the Docker daemon socket, and (unless
  * {@code floci.services.ecs.allow-unsafe-host-volumes} is set) paths outside the configured
  * {@code floci.services.ecs.host-volume-roots} allowlist.
  *
@@ -38,10 +40,23 @@ public class HostVolumePolicy {
             "/run/docker.sock");
 
     private final EmulatorConfig config;
+    private final Function<String, String> environment;
+    // Resolved once on first use: the environment and Docker context files do not change for
+    // the life of the process, and the resolver logs when it picks a context endpoint.
+    private volatile String effectiveDockerHost;
 
     @Inject
     public HostVolumePolicy(EmulatorConfig config) {
+        this(config, System::getenv);
+    }
+
+    /**
+     * @param environment lookup for the {@code DOCKER_HOST}, {@code DOCKER_CONFIG} and
+     *     {@code DOCKER_CONTEXT} variables; {@code System::getenv} in production
+     */
+    public HostVolumePolicy(EmulatorConfig config, Function<String, String> environment) {
         this.config = config;
+        this.environment = environment;
     }
 
     public void validate(String sourcePath) {
@@ -124,12 +139,13 @@ public class HostVolumePolicy {
     }
 
     /**
-     * Candidate Docker socket paths: the two conventional Linux/macOS locations, Docker
-     * Desktop's per-user rootless socket, and the raw filesystem path of the configured
-     * {@code floci.docker.docker-host} when it is a {@code unix://} URL. This intentionally does
-     * not replicate {@code DockerClientProducer}'s full effective-host resolution (DOCKER_HOST
-     * env var, Docker CLI context files, Windows named pipes): that pipeline has no filesystem
-     * containment meaning and reusing it here would be a much larger, unrelated change.
+     * Candidate Docker socket paths: the socket Floci's own Docker client connects to, plus the
+     * two conventional Linux/macOS locations and Docker Desktop's per-user rootless socket as
+     * defence in depth. The first comes from the same resolution {@link DockerClientProducer}
+     * uses to build the client ({@code floci.docker.docker-host}, then {@code DOCKER_HOST}, then
+     * the active Docker context), so a daemon reached through, say, {@code DOCKER_HOST=unix:///tmp/x.sock}
+     * or a Colima context is protected too. Only a {@code unix://} endpoint names a filesystem
+     * path; {@code tcp://} and Windows named pipes have nothing a bind mount could expose.
      */
     private List<String> dockerSocketCandidates() {
         List<String> candidates = new ArrayList<>(LITERAL_DOCKER_SOCKET_PATHS);
@@ -137,14 +153,24 @@ public class HostVolumePolicy {
         if (userHome != null && !userHome.isBlank()) {
             candidates.add(userHome + "/.docker/run/docker.sock");
         }
-        String configuredHost = config.docker().dockerHost();
-        if (configuredHost != null && configuredHost.startsWith("unix://")) {
-            String path = configuredHost.substring("unix://".length());
+        String daemonHost = effectiveDockerHost();
+        if (daemonHost.startsWith("unix://")) {
+            String path = daemonHost.substring("unix://".length());
             if (!path.isBlank()) {
                 candidates.add(path);
             }
         }
         return candidates;
+    }
+
+    private String effectiveDockerHost() {
+        String host = effectiveDockerHost;
+        if (host == null) {
+            String resolved = DockerClientProducer.resolveDockerConnection(config.docker(), environment).host();
+            host = resolved == null ? "" : resolved;
+            effectiveDockerHost = host;
+        }
+        return host;
     }
 
     /**
