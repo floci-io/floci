@@ -175,6 +175,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | StopInstances | Stops running instances and updates their stored lifecycle state. |
 | RebootInstances | Reboots instances through the local EC2 service model. |
 | DescribeInstanceStatus | Returns status records for stored instances. |
+| DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. `Filter.N` supports the modeled `instance-id` and narrows whichever set the request selected. `MaxResults` accepts 5 through 1000 and cannot be combined with instance ids. `DryRun=true` returns `DryRunOperation`. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. |
 | ModifyInstanceAttribute | Updates supported mutable attributes for an instance. |
 | ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. |
@@ -528,7 +529,7 @@ allocated address.
 
 | Action | Description |
 |--------|-------------|
-| DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service. |
+| DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service, including `burstablePerformanceSupported` for the T families. |
 | DescribeInstanceTypeOfferings | Returns instance type offerings for the requested location filters. |
 
 ### Launch Templates

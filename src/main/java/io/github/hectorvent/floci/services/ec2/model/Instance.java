@@ -61,6 +61,15 @@ public class Instance {
     // AWS's launch defaults through effectiveMetadataOptions().
     private LaunchTemplateData.MetadataOptions metadataOptions;
 
+    // The credit option this instance acquired, at launch from the request or from its burstable
+    // family's default, or at a resize onto a burstable type. Stored rather than derived from the
+    // current instance type on read, because AWS keeps reporting the unlimited option of an
+    // instance that was configured as a T2, T3 or T3a and then resized onto another family. Null
+    // for an instance that never acquired one. CreditSpecification is not a member of the Instance
+    // shape DescribeInstances returns, so this reaches the wire only through
+    // DescribeInstanceCreditSpecifications.
+    private String creditSpecificationCpuCredits;
+
     // Docker backing fields (not serialised to AWS wire format)
     private String dockerContainerId;
     private String containerBridgeIp;
@@ -217,6 +226,9 @@ public class Instance {
 
     public LaunchTemplateData.MetadataOptions getMetadataOptions() { return metadataOptions; }
     public void setMetadataOptions(LaunchTemplateData.MetadataOptions metadataOptions) { this.metadataOptions = metadataOptions; }
+
+    public String getCreditSpecificationCpuCredits() { return creditSpecificationCpuCredits; }
+    public void setCreditSpecificationCpuCredits(String creditSpecificationCpuCredits) { this.creditSpecificationCpuCredits = creditSpecificationCpuCredits; }
 
     /** The stored metadata options, or AWS's launch defaults for a record that has none. */
     public LaunchTemplateData.MetadataOptions effectiveMetadataOptions() {
