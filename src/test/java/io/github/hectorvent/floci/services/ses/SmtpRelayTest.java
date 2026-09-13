@@ -651,6 +651,49 @@ class SmtpRelayTest {
     }
 
     @Test
+    void relayRaw_embeddedRfc822Part_isReserializedWhole() {
+        SmtpRelay relay = enabledRelay();
+
+        String rawMime = "From: s@example.com\r\n"
+                + "To: t@example.com\r\n"
+                + "Subject: Fwd: original\r\n"
+                + "Content-Type: multipart/mixed; boundary=\"fwd\"\r\n"
+                + "\r\n"
+                + "--fwd\r\n"
+                + "Content-Type: text/plain; charset=UTF-8\r\n"
+                + "\r\n"
+                + "see the forwarded note\r\n"
+                + "--fwd\r\n"
+                + "Content-Type: message/rfc822\r\n"
+                + "Content-Disposition: attachment; filename=\"original.eml\"\r\n"
+                + "\r\n"
+                + "From: inner@example.com\r\n"
+                + "To: t@example.com\r\n"
+                + "Subject: original\r\n"
+                + "\r\n"
+                + "inner body\r\n"
+                + "--fwd--";
+        relay.relayRaw(raw("from@example.com", List.of("to@example.com"), rawMime));
+
+        MailMessage sent = captureSent();
+        assertEquals("see the forwarded note", sent.getText().trim());
+        assertNotNull(sent.getAttachment());
+        assertEquals(1, sent.getAttachment().size());
+        MailAttachment forwarded = sent.getAttachment().get(0);
+        assertEquals("original.eml", forwarded.getName());
+        assertEquals("message/rfc822", forwarded.getContentType());
+        // The embedded message is written back out as a complete RFC 822 stream, headers and all,
+        // which is the DefaultMessageWriter path that needs mime4j -core and -dom to agree.
+        String reserialized = forwarded.getData().toString();
+        assertTrue(reserialized.contains("From: inner@example.com"),
+                "forwarded headers should survive, got: " + reserialized);
+        assertTrue(reserialized.contains("Subject: original"),
+                "forwarded headers should survive, got: " + reserialized);
+        assertTrue(reserialized.contains("inner body"),
+                "forwarded body should survive, got: " + reserialized);
+    }
+
+    @Test
     void relayRaw_contentIdPart_becomesAnInlineAttachment() {
         SmtpRelay relay = enabledRelay();
 

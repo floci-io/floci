@@ -131,7 +131,6 @@
         <dependency>
             <groupId>org.apache.james</groupId>
             <artifactId>apache-mime4j-dom</artifactId>
-            <version>0.8.14</version>
         </dependency>
 
         <!-- Jackson for JSON storage serialization -->
