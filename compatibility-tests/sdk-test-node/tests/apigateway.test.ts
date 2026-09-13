@@ -838,4 +838,19 @@ describe('API Gateway v1 — resource/method resolution precedence', () => {
   it('should serve POST /things/real from the greedy proxy', async () => {
     expect(await servedBy('/things/real', 'POST')).toBe('things-proxy');
   });
+
+  // AWS resolves path and method together, so "no such path" and "a path whose resources
+  // declare no usable method" are one failure: 403 Missing Authentication Token, not 404/405.
+  it('should answer 403 when no candidate resource declares the method', async () => {
+    const res = await executeApi(apiId, 'prod', '/users/me', { method: 'POST' });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-amzn-errortype')).toBe('MissingAuthenticationTokenException');
+    expect(await res.json()).toEqual({ message: 'Missing Authentication Token' });
+  });
+
+  it('should answer 403 for a path that matches no resource', async () => {
+    const res = await executeApi(apiId, 'prod', '/zzz', { method: 'GET' });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ message: 'Missing Authentication Token' });
+  });
 });

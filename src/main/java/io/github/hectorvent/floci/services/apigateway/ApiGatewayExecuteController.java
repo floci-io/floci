@@ -328,9 +328,7 @@ public class ApiGatewayExecuteController {
         List<ApiGatewayResource> resources = apiGatewayService.getResources(region, apiId);
         List<ApiGatewayResource> matchedResources = matchResources(resources, path);
         if (matchedResources.isEmpty()) {
-            return Response.status(404)
-                    .entity(jsonMessage("Not Found"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return restNoMatch();
         }
 
         ApiGatewayResource matched = null;
@@ -358,9 +356,7 @@ public class ApiGatewayExecuteController {
         }
 
         if (matched == null) {
-            return Response.status(405)
-                    .entity(jsonMessage("Method Not Allowed"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return restNoMatch();
         }
 
         // 1. Authorizer
@@ -1889,6 +1885,26 @@ public class ApiGatewayExecuteController {
         return Response.status(403)
                 .header("x-amzn-ErrorType", error.errorType())
                 .entity(jsonMessage(error.message()))
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    /**
+     * Renders an execute-api request that reached no method the way a REST API does.
+     *
+     * <p>AWS resolves the path and the method as one step, so "no such path" and "a path whose
+     * resources declare no usable method" are the same failure and share one response: {@code 403}
+     * with {@code MissingAuthenticationTokenException}, never {@code 404} or {@code 405}. This is
+     * the well-known "Missing Authentication Token" result of calling a REST API with the wrong
+     * verb. Captured against a real REST API in us-west-2; the cases are pinned in
+     * {@code ApiGatewayNoMatchIntegrationTest}.
+     *
+     * <p>HTTP APIs are unaffected: they answer an unmatched route with {@code 404}
+     * {@code {"message":"Not Found"}}, which the v2 dispatch path continues to do.
+     */
+    private Response restNoMatch() {
+        return Response.status(403)
+                .header("x-amzn-ErrorType", "MissingAuthenticationTokenException")
+                .entity(jsonMessage("Missing Authentication Token"))
                 .type(MediaType.APPLICATION_JSON).build();
     }
 
