@@ -83,6 +83,27 @@ class RedshiftDataOperationsTest {
         assertThat(result.records().get(0).get(1).stringValue()).isEqualTo("a");
     }
 
+    /**
+     * Redshift stores INTERVAL YEAR TO MONTH and INTERVAL DAY TO SECOND columns and the
+     * Data API returns them as strings. pgjdbc builds the value through reflection, so this
+     * also checks that the native image keeps that metadata.
+     */
+    @Test
+    @DisplayName("interval columns read back as strings")
+    void intervalColumnsReadBackAsStrings() throws Exception {
+        run("CREATE TABLE compat_intervals (y2m interval year to month, d2s interval day to second)");
+        run("INSERT INTO compat_intervals VALUES (interval '1-2' year to month, interval '2 1:0:0' day to second)");
+
+        String selectId = run("SELECT y2m, d2s FROM compat_intervals");
+        GetStatementResultResponse result = data.getStatementResult(GetStatementResultRequest.builder()
+                .id(selectId)
+                .build());
+
+        assertThat(result.totalNumRows()).isEqualTo(1L);
+        assertThat(result.records().get(0).get(0).stringValue()).isNotEmpty();
+        assertThat(result.records().get(0).get(1).stringValue()).isNotEmpty();
+    }
+
     private String run(String sql) throws Exception {
         String id = data.executeStatement(ExecuteStatementRequest.builder()
                 .clusterIdentifier(clusterId)

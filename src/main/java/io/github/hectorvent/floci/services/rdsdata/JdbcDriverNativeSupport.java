@@ -5,7 +5,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 /**
  * Registers the JDBC driver classes that are instantiated by name in a native image.
  * DriverManager loads the drivers through ServiceLoader, MySQL Connector/J creates its
- * connection URL, socket factory, logger and exceptions through Class.forName.
+ * connection URL, socket factory, logger and exceptions through Class.forName, and the
+ * PostgreSQL driver builds interval values, which Redshift tables can hold, through
+ * reflection.
  */
 @RegisterForReflection(classNames = {
     "com.mysql.cj.jdbc.Driver",
@@ -36,6 +38,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
     "com.mysql.cj.exceptions.UnableToConnectException",
     "com.mysql.cj.exceptions.UnsupportedConnectionStringException",
     "com.mysql.cj.exceptions.WrongArgumentException",
-    "org.postgresql.Driver"
+    "org.postgresql.Driver",
+    "org.postgresql.util.PGInterval"
 }, methods = false, fields = false, ignoreNested = true)
 public class JdbcDriverNativeSupport {}
