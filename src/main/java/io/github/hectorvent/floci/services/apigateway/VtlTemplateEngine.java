@@ -235,13 +235,13 @@ public class VtlTemplateEngine {
             }
         }
 
-        /** Searches all parameter types for the given name (querystring, path, header). */
+        /** Searches all parameter types for the given name (path, querystring, header). */
         public String params(String paramName) {
-            if (ctx.queryParams() != null && ctx.queryParams().containsKey(paramName)) {
-                return ctx.queryParams().get(paramName);
-            }
             if (ctx.pathParams() != null && ctx.pathParams().containsKey(paramName)) {
                 return ctx.pathParams().get(paramName);
+            }
+            if (ctx.queryParams() != null && ctx.queryParams().containsKey(paramName)) {
+                return ctx.queryParams().get(paramName);
             }
             if (ctx.headers() != null && ctx.headers().containsKey(paramName)) {
                 return ctx.headers().get(paramName);
