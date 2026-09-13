@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.bedrockruntime.backend;
 
+import io.github.hectorvent.floci.core.common.AwsEventStreamWriter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -280,7 +281,7 @@ final class BedrockOpenAiTranslator {
      * contentBlockIndex before parsing it as JSON.
      */
     static void streamBedrockEvents(ObjectMapper mapper, Stream<String> sseLines, OutputStream out, long startNanos) {
-        BedrockStreamEncoder.writeEvent(mapper, out, "messageStart", mapper.createObjectNode().put("role", "assistant"));
+        AwsEventStreamWriter.writeEvent(mapper, out, "messageStart", mapper.createObjectNode().put("role", "assistant"));
 
         boolean anyContentDeltaWritten = false;
         Map<Integer, ToolCallAccumulator> toolCalls = new LinkedHashMap<>();
@@ -344,7 +345,7 @@ final class BedrockOpenAiTranslator {
         }
 
         if (anyContentDeltaWritten) {
-            BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockStop",
+            AwsEventStreamWriter.writeEvent(mapper, out, "contentBlockStop",
                     mapper.createObjectNode().put("contentBlockIndex", 0));
         }
 
@@ -356,7 +357,7 @@ final class BedrockOpenAiTranslator {
         }
 
         boolean hasToolCalls = !validToolCalls.isEmpty();
-        BedrockStreamEncoder.writeEvent(mapper, out, "messageStop",
+        AwsEventStreamWriter.writeEvent(mapper, out, "messageStop",
                 mapper.createObjectNode().put("stopReason", hasToolCalls ? "tool_use" : mapFinishReason(finishReason)));
 
         writeMetadata(mapper, out, startNanos, promptTokens, completionTokens, totalTokens);
@@ -386,7 +387,7 @@ final class BedrockOpenAiTranslator {
                 .put("outputTokens", completionTokens)
                 .put("totalTokens", totalTokens);
         metadata.putObject("metrics").put("latencyMs", latencyMs);
-        BedrockStreamEncoder.writeEvent(mapper, out, "metadata", metadata);
+        AwsEventStreamWriter.writeEvent(mapper, out, "metadata", metadata);
     }
 
     private static void writeToolCalls(ObjectMapper mapper, OutputStream out, ToolCallAccumulator acc, int blockIndex) {
@@ -395,14 +396,14 @@ final class BedrockOpenAiTranslator {
         ObjectNode toolUseStart = startEvent.putObject("start").putObject("toolUse");
         toolUseStart.put("toolUseId", acc.id);
         toolUseStart.put("name", acc.name);
-        BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockStart", startEvent);
+        AwsEventStreamWriter.writeEvent(mapper, out, "contentBlockStart", startEvent);
 
         ObjectNode deltaEvent = mapper.createObjectNode();
         deltaEvent.put("contentBlockIndex", blockIndex);
         deltaEvent.putObject("delta").putObject("toolUse").put("input", acc.arguments.toString());
-        BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockDelta", deltaEvent);
+        AwsEventStreamWriter.writeEvent(mapper, out, "contentBlockDelta", deltaEvent);
 
-        BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockStop",
+        AwsEventStreamWriter.writeEvent(mapper, out, "contentBlockStop",
                 mapper.createObjectNode().put("contentBlockIndex", blockIndex));
     }
 
@@ -430,7 +431,7 @@ final class BedrockOpenAiTranslator {
         ObjectNode errorPayload = mapper.createObjectNode();
         errorPayload.put("message", "Proxy backend's ConverseStream response ended without a finish_reason "
                 + "or \"[DONE]\" terminator - the stream may have been truncated.");
-        BedrockStreamEncoder.writeException(mapper, out, "modelStreamErrorException", errorPayload);
+        AwsEventStreamWriter.writeException(mapper, out, "modelStreamErrorException", errorPayload);
     }
 
     private static void writeToolCalls(JsonNode delta, Map<Integer, ToolCallAccumulator> toolCalls) {
@@ -466,7 +467,7 @@ final class BedrockOpenAiTranslator {
         ObjectNode deltaEvent = mapper.createObjectNode();
         deltaEvent.put("contentBlockIndex", 0);
         deltaEvent.putObject("delta").put("text", contentDelta);
-        BedrockStreamEncoder.writeEvent(mapper, out, "contentBlockDelta", deltaEvent);
+        AwsEventStreamWriter.writeEvent(mapper, out, "contentBlockDelta", deltaEvent);
         return true;
     }
 

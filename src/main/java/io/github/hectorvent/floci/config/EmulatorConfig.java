@@ -2450,6 +2450,18 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean validateRuntimeExists();
+
+        /**
+         * Prefix on the assistant reply InvokeHarness streams back. The reply echoes the caller's
+         * last user message: there is no model, and echoing makes a chat UI visibly work while
+         * keeping a request that failed to parse obvious.
+         */
+        @WithDefault("You said: ")
+        String harnessEchoPrefix();
+
+        /** Reply used when a request carries no user message, which is a legitimate call. */
+        @WithDefault("No user message was supplied.")
+        String harnessEmptyReply();
     }
 
     /** Classic (2012-06-01) Elastic Load Balancing — a separate API from {@link ElbV2ServiceConfig}. */

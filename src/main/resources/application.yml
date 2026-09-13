@@ -719,6 +719,8 @@ floci:
       enabled: true
       # invoke-response: '{"output":"yes"}'   # Body returned by InvokeAgentRuntime
       # validate-runtime-exists: false        # true = reject unknown runtime ARNs
+      # harness-echo-prefix: 'You said: '      # Prefix on the reply InvokeHarness streams back
+      # harness-empty-reply: 'No user message was supplied.'
     bedrock-agent-core-control:
       enabled: true
     servicequotas:
