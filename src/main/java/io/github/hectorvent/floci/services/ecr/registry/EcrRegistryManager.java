@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerPresence;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
@@ -200,9 +201,6 @@ public class EcrRegistryManager {
      * @return true when the registry container is running
      */
     public boolean tryEnsureStarted() {
-        if (started) {
-            return true;
-        }
         try {
             ensureStarted();
         } catch (RuntimeException e) {
@@ -226,7 +224,20 @@ public class EcrRegistryManager {
      */
     public synchronized void ensureStarted() {
         if (started) {
-            return;
+            ContainerPresence presence = lifecycleManager.presenceOf(containerId);
+            if (presence == ContainerPresence.RUNNING || presence == ContainerPresence.UNKNOWN) {
+                return;
+            }
+            String previousContainerId = containerId;
+            closeLogStream();
+            containerId = null;
+            started = false;
+            if (presence == ContainerPresence.ABSENT) {
+                portAllocator.release(hostPort);
+                hostPort = config.services().ecr().registryBasePort();
+            }
+            LOG.infov("ECR backing registry container {0} is {1}; recovering it without restarting Floci",
+                    previousContainerId, presence == ContainerPresence.ABSENT ? "gone" : "stopped");
         }
         String name = registryContainerName();
 
@@ -313,6 +324,7 @@ public class EcrRegistryManager {
     }
 
     private void attachLogStream() {
+        closeLogStream();
         String shortId = containerId.length() >= 8 ? containerId.substring(0, 8) : containerId;
         String logGroup = "/aws/ecr/registry";
         String logStreamName = logStreamer.generateLogStreamName(shortId);
@@ -320,6 +332,19 @@ public class EcrRegistryManager {
 
         this.logStream = logStreamer.attach(
                 containerId, logGroup, logStreamName, region, "ecr:registry");
+    }
+
+    private void closeLogStream() {
+        Closeable previous = logStream;
+        logStream = null;
+        if (previous == null) {
+            return;
+        }
+        try {
+            previous.close();
+        } catch (Exception e) {
+            LOG.debugv("Could not close the previous ECR registry log stream: {0}", e.getMessage());
+        }
     }
 
     private java.util.Optional<String> resolveRegistryDockerNetwork() {

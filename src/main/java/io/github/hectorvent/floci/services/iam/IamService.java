@@ -1931,8 +1931,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
-     * Stores an assumed-role session including the temporary secret access key so that
-     * {@link #findSecretKey(String)} can resolve it for RDS/ElastiCache IAM token validation.
+     * Stores an assumed-role session including the temporary secret access key. Token-aware
+     * authentication paths use the overload that also records the session token.
      */
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
                                 java.time.Instant expiration, String sessionPolicyDocument) {

@@ -155,6 +155,67 @@ class AslExecutorMockedResponsesTest {
     }
 
     @Test
+    void mockedResponseIndexContinuesAcrossMapIterations() throws Exception {
+        var mocks = testCase(Map.of("Call API", List.of(
+                returnStep(0, 0, "{\"Payload\": \"first\"}"),
+                returnStep(1, 1, "{\"Payload\": \"second\"}"))));
+
+        var execution = run("""
+                {
+                  "StartAt": "Each",
+                  "States": {
+                    "Each": {
+                      "Type": "Map",
+                      "ItemsPath": "$.ids",
+                      "MaxConcurrency": 1,
+                      "ItemProcessor": {
+                        "StartAt": "Call API",
+                        "States": {
+                          "Call API": {
+                            "Type": "Task",
+                            "Resource": "%s",
+                            "OutputPath": "$.Payload",
+                            "End": true
+                          }
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(UNSUPPORTED_RESOURCE), mocks, "{\"ids\": [1, 2]}");
+
+        assertEquals("SUCCEEDED", execution.getStatus());
+        assertEquals(List.of("first", "second"),
+                objectMapper.readValue(execution.getOutput(), List.class));
+    }
+
+    @Test
+    void mockedResponseIndexRestartsForEachExecution() throws Exception {
+        var mocks = testCase(Map.of("Call API", List.of(
+                returnStep(0, 0, "{\"value\": \"first\"}"),
+                returnStep(1, 1, "{\"value\": \"second\"}"))));
+        var definition = """
+                {
+                  "StartAt": "Call API",
+                  "States": {
+                    "Call API": {
+                      "Type": "Task",
+                      "Resource": "%s",
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(UNSUPPORTED_RESOURCE);
+
+        var firstExecution = run(definition, mocks, "{}", "first-execution");
+        var secondExecution = run(definition, mocks, "{}", "second-execution");
+
+        assertEquals("first", objectMapper.readTree(firstExecution.getOutput()).path("value").asText());
+        assertEquals("first", objectMapper.readTree(secondExecution.getOutput()).path("value").asText());
+    }
+
+    @Test
     void missingAttemptEntryFailsExecution() throws Exception {
         var mocks = testCase(Map.of("Call API", List.of(
                 throwStep(0, 0, "ApiGateway.429", "Too many requests"))));
@@ -236,6 +297,14 @@ class AslExecutorMockedResponsesTest {
     }
 
     private Execution run(String definition, MockedTestCase mocks) {
+        return run(definition, mocks, "{}");
+    }
+
+    private Execution run(String definition, MockedTestCase mocks, String input) {
+        return run(definition, mocks, input, "mock-test-execution");
+    }
+
+    private Execution run(String definition, MockedTestCase mocks, String input, String executionName) {
         var stateMachine = new StateMachine();
         stateMachine.setName("mock-test");
         stateMachine.setStateMachineArn("arn:aws:states:%s:%s:stateMachine:mock-test".formatted(REGION, ACCOUNT));
@@ -243,11 +312,11 @@ class AslExecutorMockedResponsesTest {
         stateMachine.setDefinition(definition);
 
         var execution = new Execution();
-        execution.setName("mock-test-execution");
+        execution.setName(executionName);
         execution.setExecutionArn(
-                "arn:aws:states:%s:%s:execution:mock-test:mock-test-execution".formatted(REGION, ACCOUNT));
+                "arn:aws:states:%s:%s:execution:mock-test:%s".formatted(REGION, ACCOUNT, executionName));
         execution.setStateMachineArn(stateMachine.getStateMachineArn());
-        execution.setInput("{}");
+        execution.setInput(input);
 
         var history = new ArrayList<HistoryEvent>();
         executor.executeSync(stateMachine, execution, history, mocks, (updated, events) -> {

@@ -479,6 +479,8 @@ public class SesController {
             List<String> ccAddresses = jsonArrayToList(destination.path("CcAddresses"));
             List<String> bccAddresses = jsonArrayToList(destination.path("BccAddresses"));
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
+            String feedbackForwardingAddress =
+                    request.path("FeedbackForwardingEmailAddress").asText(null);
             List<String> allDestinations = mergeLists(toAddresses, ccAddresses, bccAddresses);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
@@ -502,7 +504,8 @@ public class SesController {
                 sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
                         configurationSetName, regionResolver.getAccountId(), region);
                 messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
-                        configurationSetName, emailTags, listManagement, region);
+                        feedbackForwardingAddress, configurationSetName, emailTags, listManagement,
+                        region);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.
@@ -517,7 +520,8 @@ public class SesController {
                 sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
                         null, regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
-                        bccAddresses, replyToAddresses, subject, bodyText, bodyHtml,
+                        bccAddresses, replyToAddresses, feedbackForwardingAddress,
+                        subject, bodyText, bodyHtml,
                         configurationSetName, emailTags, additionalHeaders, listManagement, region);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
@@ -549,7 +553,8 @@ public class SesController {
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, resolvedName, regionResolver.getAccountId(), region);
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
-                            bccAddresses, replyToAddresses, resolvedName, templateData,
+                            bccAddresses, replyToAddresses, feedbackForwardingAddress,
+                            resolvedName, templateData,
                             configurationSetName, emailTags, additionalHeaders, listManagement, region);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
@@ -563,7 +568,7 @@ public class SesController {
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, null, regionResolver.getAccountId(), region);
                     messageId = sesService.sendInlineTemplatedEmail(fromEmailAddress, toAddresses,
-                            ccAddresses, bccAddresses, replyToAddresses,
+                            ccAddresses, bccAddresses, replyToAddresses, feedbackForwardingAddress,
                             subject, text, html, templateData,
                             configurationSetName, emailTags, additionalHeaders, listManagement, region);
                 }
@@ -603,6 +608,8 @@ public class SesController {
                         "FromEmailAddress is required.", 400);
             }
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
+            String feedbackForwardingAddress =
+                    request.path("FeedbackForwardingEmailAddress").asText(null);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
 
@@ -689,7 +696,7 @@ public class SesController {
                     gateTemplateName, regionResolver.getAccountId(), region);
 
             List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(fromEmailAddress,
-                    replyToAddresses, subject, text, html,
+                    replyToAddresses, feedbackForwardingAddress, subject, text, html,
                     defaultTemplateData, entries, configurationSetName,
                     defaultEmailTags, defaultHeaders, region);
 
@@ -1881,6 +1888,36 @@ public class SesController {
         return Response.ok(result).build();
     }
 
+    @PUT
+    @Path("/dedicated-ip-pools/{poolName}/scaling")
+    public Response putDedicatedIpPoolScalingAttributes(@Context HttpHeaders headers,
+                                                        @PathParam("poolName") String poolName,
+                                                        String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            String scalingMode = parseOptionString(request.path("ScalingMode"), "ScalingMode");
+            sesService.putDedicatedIpPoolScalingAttributes(poolName, scalingMode, region);
+            LOG.infov("SES V2 PutDedicatedIpPoolScalingAttributes on {0}", poolName);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    // ──────────────────────── Dedicated IPs (IP-level) ────────────────────────
+
+    @GET
+    @Path("/dedicated-ips")
+    public Response getDedicatedIps(@Context HttpHeaders headers) {
+        regionResolver.resolveRegion(headers);
+        // Floci does not model leased dedicated IPs, so the account has none.
+        ObjectNode result = objectMapper.createObjectNode();
+        result.putArray("DedicatedIps");
+        result.putNull("NextToken");
+        return Response.ok(result).build();
+    }
+
     @GET
     @Path("/contact-lists/{contactListName}")
     public Response getContactList(@Context HttpHeaders headers,
@@ -2160,6 +2197,59 @@ public class SesController {
         return result;
     }
 
+    @GET
+    @Path("/dedicated-ips/{ip}")
+    public Response getDedicatedIp(@Context HttpHeaders headers, @PathParam("ip") String ip) {
+        String region = regionResolver.resolveRegion(headers);
+        sesService.getDedicatedIp(ip, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @PUT
+    @Path("/dedicated-ips/{ip}/pool")
+    public Response putDedicatedIpInPool(@Context HttpHeaders headers,
+                                         @PathParam("ip") String ip, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            String destinationPoolName = parseOptionString(
+                    request.path("DestinationPoolName"), "DestinationPoolName");
+            sesService.putDedicatedIpInPool(ip, destinationPoolName, region);
+            LOG.infov("SES V2 PutDedicatedIpInPool: {0}", ip);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/dedicated-ips/{ip}/warmup")
+    public Response putDedicatedIpWarmupAttributes(@Context HttpHeaders headers,
+                                                   @PathParam("ip") String ip, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            sesService.putDedicatedIpWarmupAttributes(ip,
+                    parseWarmupPercentage(request.path("WarmupPercentage")), region);
+            LOG.infov("SES V2 PutDedicatedIpWarmupAttributes: {0}", ip);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    // JSON-layer concern only: a non-integer WarmupPercentage is a SerializationException,
+    // matching AWS. Required/range validation lives in the service.
+    private static Integer parseWarmupPercentage(JsonNode node) {
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isInt()) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        return node.intValue();
+    }
+
     // ──────────────────────────── Account ────────────────────────────
 
     @GET
@@ -2171,7 +2261,7 @@ public class SesController {
         AccountSuppressionAttributes suppression = sesService.getAccountSuppressionAttributes(region);
 
         ObjectNode result = objectMapper.createObjectNode();
-        result.put("DedicatedIpAutoWarmupEnabled", false);
+        result.put("DedicatedIpAutoWarmupEnabled", sesService.isAccountDedicatedIpAutoWarmupEnabled(region));
         result.put("EnforcementStatus", "HEALTHY");
         result.put("ProductionAccessEnabled", true);
         result.put("SendingEnabled", sendingEnabled);
@@ -2371,6 +2461,25 @@ public class SesController {
                 "1 validation error detected: Value at '" + path
                         + "' failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]",
                 400);
+    }
+
+    @PUT
+    @Path("/account/dedicated-ips/warmup")
+    public Response putAccountDedicatedIpWarmupAttributes(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            JsonNode enabledNode = request.path("AutoWarmupEnabled");
+            // AutoWarmupEnabled has a default of false: the SDK omits it when false, so a missing
+            // member is treated as false rather than rejected. A present value goes through the
+            // shared SES v2 boolean coercion (string→true, null/number/container→SerializationException).
+            boolean enabled = enabledNode.isMissingNode() ? false : coerceBoolean(enabledNode);
+            sesService.setAccountDedicatedIpAutoWarmup(region, enabled);
+            LOG.infov("SES V2 PutAccountDedicatedIpWarmupAttributes: {0}", enabled);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
     }
 
     @PUT

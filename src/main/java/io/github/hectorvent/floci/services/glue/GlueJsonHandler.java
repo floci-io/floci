@@ -84,6 +84,16 @@ public class GlueJsonHandler {
                 Table table = glueService.getTable(dbName, tableName);
                 yield Response.ok(Map.of("Table", table)).build();
             }
+            case "GetPartitionIndexes" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                // Resolve the table so a missing one is reported as such rather than as an empty
+                // index list. No index can exist until CreatePartitionIndex is supported, so the
+                // list is empty for every table that does resolve - which is the answer a client
+                // reading a table's indexes needs, rather than an unsupported-action failure.
+                glueService.getTable(dbName, tableName);
+                yield Response.ok(Map.of("PartitionIndexDescriptorList", List.of())).build();
+            }
             case "GetTables" -> {
                 String dbName = request.get("DatabaseName").asText();
                 yield Response.ok(Map.of("TableList", glueService.getTables(dbName))).build();

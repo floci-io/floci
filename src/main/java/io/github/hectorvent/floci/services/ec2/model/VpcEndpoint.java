@@ -23,6 +23,13 @@ public class VpcEndpoint {
     private List<String> securityGroupIds = new ArrayList<>();
     private boolean privateDnsEnabled;
     private String policyDocument;
+    /**
+     * The addresses the caller pinned per subnet through {@code SubnetConfiguration}. AWS assigns
+     * each one to the endpoint's network interface in that subnet, so this is read back from the
+     * interfaces rather than from the endpoint. A subnet with no entry keeps the address floci
+     * synthesizes for it.
+     */
+    private List<VpcEndpointSubnetConfiguration> subnetConfigurations = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
 
     public VpcEndpoint() {}
@@ -62,6 +69,11 @@ public class VpcEndpoint {
 
     public String getPolicyDocument() { return policyDocument; }
     public void setPolicyDocument(String policyDocument) { this.policyDocument = policyDocument; }
+
+    public List<VpcEndpointSubnetConfiguration> getSubnetConfigurations() { return subnetConfigurations; }
+    public void setSubnetConfigurations(List<VpcEndpointSubnetConfiguration> subnetConfigurations) {
+        this.subnetConfigurations = subnetConfigurations;
+    }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }

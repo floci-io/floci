@@ -332,6 +332,229 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
     }
 
+    @Test
+    void partialBatchFailureCheckpointsBeforeLowestFailedRecord() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{}"),
+                ddbRecord("s2", "INSERT", "{}"),
+                ddbRecord("s3", "INSERT", "{}")));
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s3\"},{\"itemIdentifier\":\"s2\"}]}".getBytes());
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+
+        pollerWith(store).pollAndInvoke(esm);
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    @Test
+    void partialBatchFailureAtFirstRecordKeepsPriorCheckpoint() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{}"),
+                ddbRecord("s2", "INSERT", "{}")));
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}".getBytes());
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, "s0");
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.pollAndInvoke(esm);
+        verify(executorService, timeout(2000))
+                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        awaitPollCompletedViaSecondFetch(p, esm);
+
+        verify(store, never()).saveForAccount(anyString(), any());
+        assertEquals("s0", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    @Test
+    void malformedPartialBatchResponseRetriesWholeBatch() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{}"),
+                ddbRecord("s2", "INSERT", "{}")));
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"unknown\"}]}".getBytes());
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.pollAndInvoke(esm);
+        verify(executorService, timeout(2000))
+                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        awaitPollCompletedViaSecondFetch(p, esm);
+
+        verify(store, never()).saveForAccount(anyString(), any());
+        assertNull(esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    @Test
+    void partialBatchResponseIsIgnoredWhenNotConfigured() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{}"),
+                ddbRecord("s2", "INSERT", "{}")));
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}".getBytes());
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+
+        pollerWith(store).pollAndInvoke(esm);
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    // ──────────────────── FilterCriteria + partial batch failure ────────────────────
+
+    /**
+     * The retry boundary is computed against the full FETCHED batch, while the function only ever
+     * sees the post-filter records. A filtered-out record sitting immediately before the lowest
+     * failed record is therefore the checkpoint: it is consumed (never re-read), and the failed
+     * record plus everything after it is retried.
+     */
+    @Test
+    void partialFailureWithFilterCheckpointsAtFilteredOutRecordBeforeLowestFailure() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"inactive\"}}"), // filtered out
+                ddbRecord("s3", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                ddbRecord("s4", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        InvokeResult result = new InvokeResult();
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s4\"},{\"itemIdentifier\":\"s3\"}]}".getBytes());
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm(PATTERN);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+
+        pollerWith(store).pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode records = readRecords(payload.getValue());
+        assertEquals(3, records.size(), "only the post-filter records are delivered");
+        assertEquals("s1", records.get(0).path("dynamodb").path("SequenceNumber").asText());
+        assertEquals("s3", records.get(1).path("dynamodb").path("SequenceNumber").asText());
+        assertEquals("s4", records.get(2).path("dynamodb").path("SequenceNumber").asText());
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        // s2 was never sent to the function, yet it is the record immediately before the lowest
+        // failure (s3) in the fetched batch — so it is the checkpoint: s1 and s2 are consumed and
+        // the next poll resumes AFTER s2, re-delivering s3 and s4.
+        assertEquals("s2", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    /**
+     * A reported identifier that names a record the filter removed is a record the function never
+     * received. It cannot be a legitimate failure, so it is treated as malformed and the whole batch
+     * is retried instead of silently advancing past it.
+     */
+    @Test
+    void partialFailureReportingFilteredOutRecordRetriesWholeBatch() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"inactive\"}}"), // filtered out
+                ddbRecord("s3", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        InvokeResult result = new InvokeResult();
+        // s2 is in the fetched batch but was never delivered to the function.
+        result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s2\"}]}".getBytes());
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(result);
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm(PATTERN);
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, "s0");
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.pollAndInvoke(esm);
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode records = readRecords(payload.getValue());
+        assertEquals(2, records.size());
+        assertEquals("s1", records.get(0).path("dynamodb").path("SequenceNumber").asText());
+        assertEquals("s3", records.get(1).path("dynamodb").path("SequenceNumber").asText());
+        awaitPollCompletedViaSecondFetch(p, esm);
+
+        // Had the identifier been accepted, the checkpoint would have landed on s1 (the record
+        // before s2). Instead the prior checkpoint is kept and the entire window is retried.
+        verify(store, never()).saveForAccount(anyString(), any());
+        assertEquals("s0", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    /**
+     * A checkpoint that has aged out of the retained window names a cursor that can never succeed.
+     * Retrying it wedges the ESM for good: later writes keep reaching the stream and none is ever
+     * delivered. The poller must resume from the trim horizon instead.
+     */
+    @Test
+    void trimmedCheckpointResumesFromTrimHorizonInsteadOfWedging() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+
+        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
+                eq("AFTER_SEQUENCE_NUMBER"), any())).thenReturn("it-trimmed");
+        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
+                eq("TRIM_HORIZON"), any())).thenReturn("it-horizon");
+        when(streamService.getRecords("it-trimmed", 10)).thenThrow(
+                new AwsException("TrimmedDataAccessException",
+                        "The requested sequence number has been trimmed", 400));
+        when(streamService.getRecords("it-horizon", 10)).thenReturn(
+                new DynamoDbStreamService.GetRecordsResult(
+                        List.of(ddbRecord("s9", "INSERT", "{\"status\":{\"S\":\"active\"}}")), "it-horizon"));
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, STALE_CHECKPOINT);
+
+        pollerWith(store).pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(1, readRecords(payload.getValue()).size());
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s9", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
+    /** Only a trimmed checkpoint resets the cursor; any other stream failure retries the same window. */
+    @Test
+    void nonTrimmedStreamErrorLeavesTheCheckpointAlone() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        when(functionStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn")).thenReturn(Optional.of(fn));
+
+        when(streamService.getShardIterator(eq(STREAM_ARN), eq(DynamoDbStreamService.SHARD_ID),
+                anyString(), any())).thenReturn("it");
+        when(streamService.getRecords("it", 10)).thenThrow(
+                new AwsException("InternalServerError", "boom", 500));
+
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.getShardSequenceNumbers().put(DynamoDbStreamService.SHARD_ID, STALE_CHECKPOINT);
+
+        pollerWith(store).pollAndInvoke(esm);
+        awaitPollCompletedViaSecondFetch(pollerWith(store), esm);
+
+        verify(executorService, never()).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(store, never()).saveForAccount(anyString(), any());
+        assertEquals(STALE_CHECKPOINT, esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+    }
+
     private JsonNode readRecords(byte[] payload) {
         try {
             return OBJECT_MAPPER.readTree(payload).path("Records");

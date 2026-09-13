@@ -115,7 +115,9 @@ public class RdsSigV4Validator {
             if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
                 secretKey = LEGACY_SECRET_KEY;
             } else {
-                Optional<String> registeredSecretKey = iamService.findSecretKey(accessKeyId);
+                String sessionToken = findRawParam(rawPairs, "X-Amz-Security-Token");
+                Optional<String> registeredSecretKey = iamService.findSecretKey(
+                        accessKeyId, sessionToken == null ? null : urlDecode(sessionToken));
                 if (registeredSecretKey.isEmpty()) {
                     LOG.debugv("RDS IAM token references unregistered access key={0}", sanitizeForLog(accessKeyId));
                     return false;

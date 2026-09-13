@@ -13,6 +13,7 @@ import java.security.NoSuchAlgorithmException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -2244,6 +2245,51 @@ class S3IntegrationTest {
     }
 
     // --- ListObjectsV2 pagination ---
+
+    @Test
+    @Order(100)
+    void listObjectsValidatesMaxKeys() {
+        String bucket = "max-keys-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("a").when().put("/" + bucket + "/a.txt").then().statusCode(200);
+        try {
+            // max-keys=0 is a valid request for an empty page: no keys, and IsTruncated stays false
+            // even though the bucket has objects.
+            for (String query : List.of("?max-keys=0", "?list-type=2&max-keys=0")) {
+                given()
+                .when()
+                    .get("/" + bucket + query)
+                .then()
+                    .statusCode(200)
+                    .body(containsString("<MaxKeys>0</MaxKeys>"))
+                    .body(containsString("<IsTruncated>false</IsTruncated>"))
+                    .body(not(containsString("<Key>")))
+                    .body(not(containsString("<NextContinuationToken>")));
+            }
+            given()
+            .when()
+                .get("/" + bucket + "?versions&max-keys=0")
+            .then()
+                .statusCode(200)
+                .body(containsString("<MaxKeys>0</MaxKeys>"))
+                .body(containsString("<IsTruncated>false</IsTruncated>"))
+                .body(not(containsString("<Version>")));
+
+            for (String invalid : List.of("-1", "abc", "2147483648")) {
+                given()
+                .when()
+                    .get("/" + bucket + "?list-type=2&max-keys=" + invalid)
+                .then()
+                    .statusCode(400)
+                    .body(containsString("<Code>InvalidArgument</Code>"))
+                    .body(containsString("<ArgumentName>maxKeys</ArgumentName>"))
+                    .body(containsString("<ArgumentValue>" + invalid + "</ArgumentValue>"));
+            }
+        } finally {
+            given().when().delete("/" + bucket + "/a.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
 
     @Test
     @Order(101)

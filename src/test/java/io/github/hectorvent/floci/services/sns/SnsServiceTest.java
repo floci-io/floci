@@ -491,4 +491,34 @@ class SnsServiceTest {
                 "arn:aws:sns:us-east-1:000000000000:ghost-topic", REGION));
     }
 
+
+    /**
+     * A Lambda subscription endpoint may be a qualified ARN. Taking the segment after the last
+     * colon read the alias as the function name, so a subscription to
+     * {@code ...:function:order-processor:PROD} invoked a function called {@code PROD}: the
+     * message was accepted, reported as published, and delivered nowhere.
+     */
+    @Test
+    void extractFunctionNameIgnoresTheQualifier() {
+        String base = "arn:aws:lambda:us-east-1:000000000000:function:order-processor";
+
+        assertEquals("order-processor", SnsService.extractFunctionName(base));
+        assertEquals("order-processor", SnsService.extractFunctionName(base + ":PROD"));
+        assertEquals("order-processor", SnsService.extractFunctionName(base + ":42"));
+        assertEquals("order-processor", SnsService.extractFunctionName(base + ":$LATEST"));
+    }
+
+    /** Other partitions carry the same resource grammar. */
+    @Test
+    void extractFunctionNameWorksInAnyPartition() {
+        assertEquals("order-processor", SnsService.extractFunctionName(
+                "arn:aws-us-gov:lambda:us-gov-west-1:000000000000:function:order-processor:PROD"));
+    }
+
+    /** A bare function name is a legal endpoint too and passes through unchanged. */
+    @Test
+    void extractFunctionNameLeavesABareNameAlone() {
+        assertEquals("order-processor", SnsService.extractFunctionName("order-processor"));
+        assertNull(SnsService.extractFunctionName(null));
+    }
 }

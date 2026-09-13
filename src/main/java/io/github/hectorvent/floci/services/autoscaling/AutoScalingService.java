@@ -30,6 +30,24 @@ public class AutoScalingService {
     static final String INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE =
             "Valid requests must contain either the InstanceID parameter "
                     + "or both the ImageId and InstanceType parameters.";
+    static final Set<String> DESIRED_CAPACITY_TYPES = Set.of("units", "vcpu", "memory-mib");
+    static final int MIN_MAX_INSTANCE_LIFETIME_SECONDS = 86400;
+    static final String INVALID_DESIRED_CAPACITY_TYPE_MESSAGE =
+            "The specified value for DesiredCapacityType is not valid. Valid values are: units, vcpu, memory-mib.";
+    static final String INVALID_MAX_INSTANCE_LIFETIME_MESSAGE =
+            "MaxInstanceLifetime must be equal to 0 or a value greater than or equal to 86400 seconds.";
+    static final String INVALID_DEFAULT_INSTANCE_WARMUP_MESSAGE =
+            "DefaultInstanceWarmup must be greater than or equal to 0, or -1 to remove a previously set value.";
+    static final String INSTANCE_REQUIREMENTS_AND_INSTANCE_TYPE_MESSAGE =
+            "A launch template override must not specify both InstanceType and InstanceRequirements.";
+    static final String DEFAULT_DESIRED_CAPACITY_TYPE = "units";
+    static final String INSTANCE_REQUIREMENTS_MISSING_RANGES_MESSAGE =
+            "You must specify VCpuCount and MemoryMiB when you specify InstanceRequirements "
+                    + "on a launch template override.";
+    static final String DESIRED_CAPACITY_TYPE_NEEDS_INSTANCE_REQUIREMENTS_MESSAGE =
+            "Amazon EC2 Auto Scaling supports DesiredCapacityType for attribute-based instance type "
+                    + "selection only. Specify InstanceRequirements on a MixedInstancesPolicy launch "
+                    + "template override, or use the default DesiredCapacityType of units.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
             "An active instance refresh with a desired configuration exists. All configuration options derived from the desired configuration are not available for update while the instance refresh is active.";
 
@@ -185,7 +203,8 @@ public class AutoScalingService {
                                                     String healthCheckType, int healthCheckGracePeriod,
                                                     List<String> terminationPolicies,
                                                     Map<String, String> tags,
-                                                    Map<String, Boolean> tagPropagateAtLaunch) {
+                                                    Map<String, Boolean> tagPropagateAtLaunch,
+                                                    AsgOptionalFields optionalFields) {
         String key = asgKey(region, name);
         if (groups.containsKey(key)) {
             throw new AwsException("AlreadyExists",
@@ -200,6 +219,10 @@ public class AutoScalingService {
         }
         validateEffectiveLaunchImage(region, launchConfigName, launchTemplateId, launchTemplateName,
                 launchTemplateVersion, mixedInstancesPolicy);
+        validateOptionalFields(optionalFields);
+        validateDesiredCapacityType(
+                optionalFields != null ? optionalFields.desiredCapacityType() : null,
+                mixedInstancesPolicy);
 
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setAutoScalingGroupName(name);
@@ -230,6 +253,9 @@ public class AutoScalingService {
         if (tagPropagateAtLaunch != null) {
             asg.getTagPropagateAtLaunch().putAll(tagPropagateAtLaunch);
         }
+        if (optionalFields != null) {
+            optionalFields.applyToNewGroup(asg);
+        }
         groups.put(key, asg);
         return asg;
     }
@@ -243,13 +269,15 @@ public class AutoScalingService {
                                         Integer defaultCooldown, List<String> availabilityZones,
                                         List<String> subnetIds,
                                         String healthCheckType, Integer healthCheckGracePeriod,
-                                        List<String> terminationPolicies) {
+                                        List<String> terminationPolicies,
+                                        AsgOptionalFields optionalFields) {
         AutoScalingGroup asg = requireGroup(region, name);
         validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
         if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
             throw new AwsException("ValidationError",
                     "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
         }
+        validateOptionalFields(optionalFields);
         rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
                 launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
         LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
@@ -259,6 +287,9 @@ public class AutoScalingService {
                 effectiveIdentity.launchTemplateId(),
                 effectiveIdentity.launchTemplateName(),
                 effectiveIdentity.launchTemplateVersion(),
+                effectiveIdentity.mixedInstancesPolicy());
+        validateDesiredCapacityType(
+                effectiveDesiredCapacityType(asg, optionalFields),
                 effectiveIdentity.mixedInstancesPolicy());
         if (launchConfigName != null) {
             asg.setLaunchConfigurationName(launchConfigName);
@@ -290,6 +321,9 @@ public class AutoScalingService {
         if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
         if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
         if (terminationPolicies != null) { asg.setTerminationPolicies(new ArrayList<>(terminationPolicies)); }
+        if (optionalFields != null) {
+            optionalFields.applyToExistingGroup(asg);
+        }
         groups.put(asgKey(region, name), asg);
     }
 
@@ -1039,6 +1073,97 @@ public class AutoScalingService {
             throw new AwsException("ValidationError",
                     "A MixedInstancesPolicy must specify a LaunchTemplate with a LaunchTemplateId "
                             + "or LaunchTemplateName.", 400);
+        }
+        validateLaunchTemplateOverrides(mixedInstancesPolicy);
+    }
+
+    private static void validateLaunchTemplateOverrides(MixedInstancesPolicy mixedInstancesPolicy) {
+        for (MixedInstancesPolicy.LaunchTemplateOverride override : overridesOf(mixedInstancesPolicy)) {
+            MixedInstancesPolicy.InstanceRequirements requirements = override.getInstanceRequirements();
+            if (requirements == null || requirements.isEmpty()) {
+                continue;
+            }
+            if (override.getInstanceType() != null) {
+                throw new AwsException("ValidationError",
+                        INSTANCE_REQUIREMENTS_AND_INSTANCE_TYPE_MESSAGE, 400);
+            }
+            if (requirements.getVCpuCount() == null || requirements.getMemoryMiB() == null) {
+                throw new AwsException("ValidationError",
+                        INSTANCE_REQUIREMENTS_MISSING_RANGES_MESSAGE, 400);
+            }
+        }
+    }
+
+    /**
+     * Botocore documents {@code DesiredCapacityType} as supported "for attribute-based instance type
+     * selection only", and it types the member as a plain string rather than an enum, so the rule
+     * lives in prose and not in the model constraints.
+     *
+     * <p>Attribute-based selection here means the mixed instances policy that the request leaves in
+     * effect carries at least one launch template override holding a non-empty
+     * {@code InstanceRequirements}. On create that is the policy the request supplies. On update it
+     * is the policy the request supplies, or the stored one when the request names no launch source
+     * at all, or none when the request switches the group to a launch configuration or a plain
+     * launch template.
+     *
+     * <p>{@code units} is the documented default and stays legal for every group.
+     */
+    private static void validateDesiredCapacityType(String desiredCapacityType,
+                                                    MixedInstancesPolicy effectivePolicy) {
+        if (desiredCapacityType == null || DEFAULT_DESIRED_CAPACITY_TYPE.equals(desiredCapacityType)) {
+            return;
+        }
+        if (!usesInstanceRequirements(effectivePolicy)) {
+            throw new AwsException("ValidationError",
+                    DESIRED_CAPACITY_TYPE_NEEDS_INSTANCE_REQUIREMENTS_MESSAGE, 400);
+        }
+    }
+
+    private static String effectiveDesiredCapacityType(AutoScalingGroup asg,
+                                                       AsgOptionalFields optionalFields) {
+        if (optionalFields != null && optionalFields.desiredCapacityType() != null) {
+            return optionalFields.desiredCapacityType();
+        }
+        return asg.getDesiredCapacityType();
+    }
+
+    private static boolean usesInstanceRequirements(MixedInstancesPolicy mixedInstancesPolicy) {
+        for (MixedInstancesPolicy.LaunchTemplateOverride override : overridesOf(mixedInstancesPolicy)) {
+            MixedInstancesPolicy.InstanceRequirements requirements = override.getInstanceRequirements();
+            if (requirements != null && !requirements.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<MixedInstancesPolicy.LaunchTemplateOverride> overridesOf(
+            MixedInstancesPolicy mixedInstancesPolicy) {
+        if (mixedInstancesPolicy == null || mixedInstancesPolicy.getLaunchTemplate() == null) {
+            return List.of();
+        }
+        List<MixedInstancesPolicy.LaunchTemplateOverride> overrides =
+                mixedInstancesPolicy.getLaunchTemplate().getOverrides();
+        return overrides != null ? overrides : List.of();
+    }
+
+    private static void validateOptionalFields(AsgOptionalFields optionalFields) {
+        if (optionalFields == null) {
+            return;
+        }
+        String desiredCapacityType = optionalFields.desiredCapacityType();
+        if (desiredCapacityType != null && !DESIRED_CAPACITY_TYPES.contains(desiredCapacityType)) {
+            throw new AwsException("ValidationError", INVALID_DESIRED_CAPACITY_TYPE_MESSAGE, 400);
+        }
+        Integer maxInstanceLifetime = optionalFields.maxInstanceLifetime();
+        if (maxInstanceLifetime != null && maxInstanceLifetime != 0
+                && maxInstanceLifetime < MIN_MAX_INSTANCE_LIFETIME_SECONDS) {
+            throw new AwsException("ValidationError", INVALID_MAX_INSTANCE_LIFETIME_MESSAGE, 400);
+        }
+        Integer defaultInstanceWarmup = optionalFields.defaultInstanceWarmup();
+        if (defaultInstanceWarmup != null
+                && defaultInstanceWarmup < AsgOptionalFields.DEFAULT_INSTANCE_WARMUP_REMOVAL_SENTINEL) {
+            throw new AwsException("ValidationError", INVALID_DEFAULT_INSTANCE_WARMUP_MESSAGE, 400);
         }
     }
 

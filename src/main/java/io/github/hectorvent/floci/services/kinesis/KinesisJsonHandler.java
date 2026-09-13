@@ -72,6 +72,7 @@ public class KinesisJsonHandler {
             case "DisableEnhancedMonitoring" -> handleDisableEnhancedMonitoring(request, region);
             case "UpdateStreamMode" -> handleUpdateStreamMode(request, region);
             case "UpdateMaxRecordSize" -> handleUpdateMaxRecordSize(request, region);
+            case "UpdateShardCount" -> handleUpdateShardCount(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -180,6 +181,24 @@ public class KinesisJsonHandler {
         }
         service.updateMaxRecordSize(extractStreamNameFromArn(streamArn), size, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUpdateShardCount(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        JsonNode targetNode = request.path("TargetShardCount");
+        if (!targetNode.isIntegralNumber() || !targetNode.canConvertToInt()) {
+            throw new AwsException("InvalidArgumentException", "TargetShardCount must be an integer", 400);
+        }
+        String scalingType = request.path("ScalingType").asText(null);
+        KinesisService.UpdateShardCountResult result =
+                service.updateShardCount(streamName, targetNode.intValue(), scalingType, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("StreamName", result.streamName());
+        response.put("StreamARN", result.streamArn());
+        response.put("CurrentShardCount", result.currentShardCount());
+        response.put("TargetShardCount", result.targetShardCount());
+        return Response.ok(response).build();
     }
 
     private String extractStreamNameFromArn(String streamArn) {

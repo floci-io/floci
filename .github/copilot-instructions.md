@@ -23,6 +23,16 @@ Raise concerns when a PR introduces any of the following without strong justific
 - Broad refactors unrelated to the PR goal
 - New service patterns where an existing Floci pattern should be reused
 - Direct storage implementation usage instead of `StorageFactory`
+- `var` where an explicit type belongs. Floci reproduces AWS wire contracts, so the
+  concrete type at a call site is usually what a reviewer needs to see. The one
+  exception is a record deconstruction pattern.
+- Fully-qualified class names written inline instead of imported. Flag
+  `new java.util.ArrayList<>()`. Do not flag it when the file has a genuine name
+  collision, such as `apigateway` versus `apigatewayv2` model types, CDI `Instance`
+  versus the EC2 model `Instance`, or a service `Record` versus `java.lang.Record`.
+- Wildcard imports in `src/main`. Static wildcards in tests are fine.
+- An empty `catch` block. A tolerated exception is logged, or named `ignored` or
+  `expected` with a comment saying why swallowing is safe.
 
 ## Architecture Expectations
 
@@ -122,6 +132,9 @@ When analyzing a PR, check:
 - Are storage changes wired through `StorageFactory`?
 - Are tests added or updated where compatibility is affected?
 - Are docs updated when user-facing behavior changes?
+- Does new code follow the AGENTS.md Code Style rules: explicit types over `var`,
+  imported classes over inline fully-qualified names, no wildcard imports in
+  `src/main`, braces in conditionals, constructor injection?
 
 ## How to Write Feedback
 

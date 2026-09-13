@@ -115,7 +115,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             }
 
             String accessKeyId = credParts[0];
-            String secretKey = resolveSecretKey(accessKeyId);
+            String secretKey = resolveSecretKey(accessKeyId, queryParams.getFirst("X-Amz-Security-Token"));
             if (secretKey == null) {
                 requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
                         "The AWS Access Key Id you provided does not exist in our records."));
@@ -217,11 +217,15 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     }
 
     private String resolveSecretKey(String accessKeyId) {
+        return resolveSecretKey(accessKeyId, null);
+    }
+
+    private String resolveSecretKey(String accessKeyId, String sessionToken) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return LEGACY_SECRET_KEY;
         }
         if (iamService != null) {
-            Optional<String> registered = iamService.findSecretKey(accessKeyId);
+            Optional<String> registered = iamService.findSecretKey(accessKeyId, sessionToken);
             if (registered.isPresent()) {
                 return registered.get();
             }

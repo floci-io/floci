@@ -855,6 +855,282 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_implicitApiGlobalRequestAuthorizerWiresMethods() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Api": {
+                  "Auth": {
+                    "DefaultAuthorizer": "MyAuth",
+                    "Authorizers": {
+                      "MyAuth": {
+                        "FunctionPayloadType": "REQUEST",
+                        "FunctionArn": {"Fn::GetAtt": ["AuthFn", "Arn"]},
+                        "Identity": {
+                          "Headers": ["Authorization", "X-Tenant"],
+                          "QueryStrings": ["token"],
+                          "ReauthorizeEvery": 60
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "Resources": {
+                "ApiFn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "code",
+                    "Events": {
+                      "Get": {"Type": "Api", "Properties": {"Path": "/secret", "Method": "GET"}}
+                    }
+                  }
+                },
+                "AuthFn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "code"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        JsonNode authorizer = resources.fields().next().getValue();
+        for (Iterator<Map.Entry<String, JsonNode>> it = resources.fields(); it.hasNext();) {
+            JsonNode candidate = it.next().getValue();
+            if ("AWS::ApiGateway::Authorizer".equals(candidate.path("Type").asText())) {
+                authorizer = candidate;
+                break;
+            }
+        }
+        assertEquals("REQUEST", authorizer.path("Properties").path("Type").asText());
+        assertEquals("MyAuth", authorizer.path("Properties").path("Name").asText());
+        assertEquals("method.request.header.Authorization,method.request.header.X-Tenant,"
+                        + "method.request.querystring.token",
+                authorizer.path("Properties").path("IdentitySource").asText());
+        assertEquals(60, authorizer.path("Properties").path("AuthorizerResultTtlInSeconds").asInt());
+
+        boolean customMethod = false;
+        boolean authPermission = false;
+        for (Iterator<Map.Entry<String, JsonNode>> it = resources.fields(); it.hasNext();) {
+            JsonNode candidate = it.next().getValue();
+            if ("AWS::ApiGateway::Method".equals(candidate.path("Type").asText())
+                    && "CUSTOM".equals(candidate.path("Properties").path("AuthorizationType").asText())
+                    && candidate.path("Properties").path("AuthorizerId").path("Ref").isTextual()) {
+                customMethod = true;
+            }
+            if ("AWS::Lambda::Permission".equals(candidate.path("Type").asText())
+                    && "AuthFn".equals(candidate.path("Properties").path("FunctionName")
+                            .path("Fn::GetAtt").path(0).asText())) {
+                authPermission = true;
+            }
+        }
+        assertTrue(customMethod, "expected the implicit method to reference the generated authorizer");
+        assertTrue(authPermission, "expected SAM to grant API Gateway permission to invoke the authorizer");
+    }
+
+    @Test
+    void expandSamTemplate_implicitApiEventCanOptOutOfGlobalAuthorizer() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Api": {"Auth": {
+                "DefaultAuthorizer": "AWS_IAM"
+              }}},
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler", "Runtime": "nodejs20.x", "InlineCode": "code",
+                    "Events": {
+                      "Private": {"Type": "Api", "Properties": {"Path": "/private", "Method": "GET"}},
+                      "Public": {"Type": "Api", "Properties": {"Path": "/public", "Method": "GET",
+                        "Auth": {"Authorizer": "NONE"}}}
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        int iam = 0;
+        int none = 0;
+        for (Iterator<Map.Entry<String, JsonNode>> it = resources.fields(); it.hasNext();) {
+            JsonNode candidate = it.next().getValue();
+            if (!"AWS::ApiGateway::Method".equals(candidate.path("Type").asText())) {
+                continue;
+            }
+            String authorizationType = candidate.path("Properties").path("AuthorizationType").asText();
+            if ("AWS_IAM".equals(authorizationType)) iam++;
+            if ("NONE".equals(authorizationType)) none++;
+        }
+        assertEquals(1, iam);
+        assertEquals(1, none);
+    }
+
+    @Test
+    void expandSamTemplate_implicitApiSupportsAwsIamAuthorizersShorthand() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Api": {"Auth": {"Authorizers": "AWS_IAM"}}},
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler", "Runtime": "nodejs20.x", "InlineCode": "code",
+                    "Events": {"Get": {"Type": "Api", "Properties": {"Path": "/x", "Method": "GET"}}}
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        boolean found = false;
+        for (Iterator<Map.Entry<String, JsonNode>> it = resources.fields(); it.hasNext();) {
+            JsonNode candidate = it.next().getValue();
+            if ("AWS::ApiGateway::Method".equals(candidate.path("Type").asText())) {
+                assertEquals("AWS_IAM", candidate.path("Properties").path("AuthorizationType").asText());
+                found = true;
+            }
+        }
+        assertTrue(found);
+    }
+
+    @Test
+    void expandSamTemplate_requestAuthorizerRequiresIdentity() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Api": {"Auth": {
+                "DefaultAuthorizer": "MyAuth",
+                "Authorizers": {"MyAuth": {
+                  "FunctionPayloadType": "REQUEST",
+                  "FunctionArn": "arn:aws:lambda:us-east-1:000000000000:function:auth"
+                }}
+              }}},
+              "Resources": {
+                "Fn": {"Type": "AWS::Serverless::Function", "Properties": {
+                  "Handler": "index.handler", "Runtime": "nodejs20.x", "InlineCode": "code",
+                  "Events": {"Get": {"Type": "Api", "Properties": {"Path": "/x", "Method": "GET"}}}
+                }}
+              }
+            }
+            """);
+
+        AwsException error = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertTrue(error.getMessage().contains("Identity"));
+    }
+
+    @Test
+    void expandSamTemplate_requestAuthorizerRejectsUnsupportedInvokeRole() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Api": {"Auth": {
+                "DefaultAuthorizer": "MyAuth",
+                "Authorizers": {"MyAuth": {
+                  "FunctionPayloadType": "REQUEST",
+                  "FunctionArn": "arn:aws:lambda:us-east-1:000000000000:function:auth",
+                  "FunctionInvokeRole": "arn:aws:iam::000000000000:role/auth-invoke",
+                  "Identity": {"Headers": ["Authorization"]}
+                }}
+              }}},
+              "Resources": {
+                "Fn": {"Type": "AWS::Serverless::Function", "Properties": {
+                  "Handler": "index.handler", "Runtime": "nodejs20.x", "InlineCode": "code",
+                  "Events": {"Get": {"Type": "Api", "Properties": {"Path": "/x", "Method": "GET"}}}
+                }}
+              }
+            }
+            """);
+
+        AwsException error = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertTrue(error.getMessage().contains("FunctionInvokeRole"));
+    }
+
+    @Test
+    void expandSamTemplate_requestAuthorizerRejectsOutOfRangeTtl() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Api": {"Auth": {
+                "DefaultAuthorizer": "MyAuth",
+                "Authorizers": {"MyAuth": {
+                  "FunctionPayloadType": "REQUEST",
+                  "FunctionArn": "arn:aws:lambda:us-east-1:000000000000:function:auth",
+                  "Identity": {"Headers": ["Authorization"], "ReauthorizeEvery": 3601}
+                }}
+              }}},
+              "Resources": {
+                "Fn": {"Type": "AWS::Serverless::Function", "Properties": {
+                  "Handler": "index.handler", "Runtime": "nodejs20.x", "InlineCode": "code",
+                  "Events": {"Get": {"Type": "Api", "Properties": {"Path": "/x", "Method": "GET"}}}
+                }}
+              }
+            }
+            """);
+
+        AwsException error = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertTrue(error.getMessage().contains("ReauthorizeEvery"));
+    }
+
+    @Test
+    void expandSamTemplate_implicitApiRejectsUnknownDefaultAuthorizer() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Api": {"Auth": {"DefaultAuthorizer": "Missing"}}},
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler", "Runtime": "nodejs20.x", "InlineCode": "code",
+                    "Events": {"Get": {"Type": "Api", "Properties": {"Path": "/x", "Method": "GET"}}}
+                  }
+                }
+              }
+            }
+            """);
+
+        AwsException error = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Missing"));
+    }
+
+    @Test
+    void expandSamTemplate_explicitServerlessApiAuthFailsInsteadOfBeingDropped() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Api": {
+                  "Type": "AWS::Serverless::Api",
+                  "Properties": {
+                    "StageName": "Prod",
+                    "Auth": {"DefaultAuthorizer": "AWS_IAM"}
+                  }
+                }
+              }
+            }
+            """);
+
+        AwsException error = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Auth"));
+    }
+
+    @Test
     void expandSamTemplate_dedupesDuplicateApiRoutes() throws Exception {
         // Two events resolving to the same (path, method) must collapse to a single API Gateway Method.
         JsonNode template = objectMapper.readTree("""

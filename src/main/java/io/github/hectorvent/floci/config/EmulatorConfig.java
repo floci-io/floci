@@ -672,6 +672,7 @@ public interface EmulatorConfig {
         AppConfigDataServiceConfig appconfigdata();
         EcrServiceConfig ecr();
         ResourceGroupsTaggingServiceConfig tagging();
+        BedrockServiceConfig bedrock();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
         MwaaServiceConfig mwaa();
@@ -702,6 +703,8 @@ public interface EmulatorConfig {
         CostExplorerServiceConfig ce();
         CurServiceConfig cur();
         BcmDataExportsServiceConfig bcmDataExports();
+        OamServiceConfig oam();
+        BcmPricingCalculatorServiceConfig bcmPricingCalculator();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
@@ -739,7 +742,10 @@ public interface EmulatorConfig {
         ControlCatalogServiceConfig controlcatalog();
         ControlTowerServiceConfig controltower();
         ConnectServiceConfig connect();
+        AppIntegrationsServiceConfig appintegrations();
         CognitoIdentityServiceConfig cognitoidentity();
+        GlobalAcceleratorServiceConfig globalaccelerator();
+        DataSyncServiceConfig datasync();
 
         ApsServiceConfig aps();
 
@@ -754,7 +760,22 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface AppIntegrationsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface CognitoIdentityServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface GlobalAcceleratorServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface DataSyncServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1739,6 +1760,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface BedrockServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface BedrockRuntimeServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1896,6 +1922,16 @@ public interface EmulatorConfig {
         /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
         @WithDefault("30")
         int schemaWorkerShutdownTimeoutSeconds();
+    }
+
+    interface OamServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BcmPricingCalculatorServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface BcmDataExportsServiceConfig {
@@ -2110,6 +2146,28 @@ public interface EmulatorConfig {
          * Env var: FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS (comma-separated)
          */
         Optional<List<String>> extraHosts();
+
+        /**
+         * Accept a {@code Layers} ARN naming another account, recording it on the function
+         * without mounting its content. Off by default, because it broadens what CreateFunction
+         * and UpdateFunctionConfiguration accept beyond what AWS does.
+         *
+         * <p>On the live service a foreign-account layer resolves through its resource policy:
+         * an AWS-managed public layer succeeds, and everything else is AccessDeniedException.
+         * Floci implements no layer permissions, so it cannot tell those apart. The default
+         * answers both the way AWS answers the second, which is the faithful choice for a
+         * compatibility layer. Turn this on to attach public layers such as Powertools, the
+         * AppConfig extension or a vendor-published layer, at the cost of also accepting an
+         * ARN AWS would refuse. The content is never fetched either way, so a function whose
+         * behaviour depends on the layer will not run correctly here.
+         *
+         * <p>A layer ARN outside the {@code aws} partition is rejected regardless: partitions
+         * are isolated, so no resource policy can make one readable.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS
+         */
+        @WithDefault("false")
+        boolean acceptExternalLayerArns();
 
         /**
          * Concurrent executions ceiling applied per region. AWS Lambda's
@@ -2502,7 +2560,9 @@ public interface EmulatorConfig {
         String defaultPostgresImage();
 
         /** Airflow versions environments may request. Combined with the image tag
-         *  {@code apache/airflow:<version>-python3.12}. */
+         *  {@code apache/airflow:<version>-<pythonTag>}, where the Python tag matches the
+         *  version real Amazon MWAA runs for that Airflow version: see
+         *  {@code MwaaEnvironmentManager.pythonTagFor}. */
         @WithDefault("2.10.5,2.9.3,2.8.4")
         List<String> supportedVersions();
 

@@ -5,6 +5,7 @@ import org.apache.commons.lang3.function.TriFunction;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 @RegisterForReflection
 public final class ReservedTags {
@@ -90,11 +91,27 @@ public final class ReservedTags {
      * error code rather than the {@code ValidationException} the shared guard uses.
      */
     public static void rejectApiGatewayReservedTagsOnUpdate(Map<String, String> tags) {
+        rejectApiGatewayReservedTagsOnUpdate(tags, null);
+    }
+
+    /**
+     * API Gateway resource update guard with an idempotent exception for its two id-override keys.
+     * Infrastructure tools resend the complete tag set, so an override equal to the resource's
+     * existing id is a no-op. A different value would attempt to rename the resource and remains
+     * invalid after creation.
+     */
+    public static void rejectApiGatewayReservedTagsOnUpdate(Map<String, String> tags, String resourceId) {
         if (tags == null) {
             return;
         }
-        for (String key : tags.keySet()) {
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            String key = tag.getKey();
             if (isReserved(key) || DEPRECATED_API_GATEWAY_CUSTOM_ID_KEY.equals(key)) {
+                boolean idOverride = OVERRIDE_ID_KEY.equals(key)
+                        || DEPRECATED_API_GATEWAY_CUSTOM_ID_KEY.equals(key);
+                if (idOverride && resourceId != null && Objects.equals(tag.getValue(), resourceId)) {
+                    continue;
+                }
                 throw new AwsException(
                         BAD_REQUEST_EXCEPTION,
                         "Reserved tag key " + key + " can only be supplied during resource creation.",

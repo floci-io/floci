@@ -234,13 +234,42 @@ public class LambdaService implements ResourceProvider {
     // content mounted, which is correct AWS-parity behavior for a layer deleted *after* being
     // attached (AWS doesn't re-validate on every invoke either), but was previously the only
     // signal at all for a bad ARN, even a typo caught at attach time on real AWS.
+    //
+    // An ARN naming another account or another partition is answered on the live service by the
+    // layer's resource policy: a public layer resolves, and everything else is
+    // AccessDeniedException. Measured on CreateFunction in ap-southeast-1, a foreign-account ARN
+    // and a cross-partition ARN return the same AccessDeniedException, so Floci returns that for
+    // both rather than inventing a distinction the API does not make.
+    //
+    // Floci implements no layer permissions, so it cannot tell a public layer from a private one
+    // and cannot fetch either one's content. Refusing is the faithful default: it is the answer
+    // AWS gives to every foreign ARN except a public layer. floci.services.lambda
+    // .accept-external-layer-arns records a same-partition foreign ARN unresolved instead, which
+    // is what a stack attaching Powertools or the AppConfig extension needs. Cross-partition
+    // stays refused even then, because partitions are isolated and no policy can reach across
+    // one, and because GetLayerVersionByArn already calls such an ARN invalid.
     private void validateLayersResolvable(List<String> layerArns) {
         if (layerArns == null || layerService == null) return;
         for (String arn : layerArns) {
-            if (layerService.resolveLayerByArn(arn) == null) {
-                throw new AwsException("InvalidParameterValueException",
-                        "Layer version " + arn + " does not exist.", 400);
+            if (layerService.resolveLayerByArn(arn) != null) {
+                continue;
             }
+            if (layerService.isForeignLayerArn(arn)) {
+                boolean acceptable = !layerService.isForeignPartitionLayerArn(arn)
+                        && config != null
+                        && config.services().lambda().acceptExternalLayerArns();
+                if (!acceptable) {
+                    throw new AwsException("AccessDeniedException",
+                            "User is not authorized to perform: lambda:GetLayerVersion on resource: "
+                                    + arn + " because no resource-based policy allows the"
+                                    + " lambda:GetLayerVersion action", 403);
+                }
+                LOG.warnv("Layer {0} belongs to another account; recorded on the function but its"
+                        + " content will not be mounted at /opt", arn);
+                continue;
+            }
+            throw new AwsException("InvalidParameterValueException",
+                    "Layer version " + arn + " does not exist.", 400);
         }
     }
 

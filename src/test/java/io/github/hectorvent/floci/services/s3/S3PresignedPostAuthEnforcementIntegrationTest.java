@@ -33,7 +33,9 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     public static final class S3AuthProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.s3.enforce-auth", "true");
+            return Map.of(
+                    "floci.services.s3.enforce-auth", "true",
+                    "floci.services.iam.enforcement-enabled", "true");
         }
     }
 
@@ -322,6 +324,121 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
         .then()
             .statusCode(403)
             .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+    }
+
+    // --- IAM identity-policy enforcement (#3195): a genuinely-signed presigned POST from a
+    // real IAM user must still be evaluated against that user's identity policy, the same way
+    // a header-signed request is. Before the fix, IamEnforcementFilter never saw this credential
+    // at all (it arrives only in the multipart form body), so an explicit Deny had no effect.
+
+    @Test
+    @Order(30)
+    void rejectsGenuineSignatureWhenIdentityPolicyDeniesPutObject() {
+        String key = "uploads/iam-denied.txt";
+        String userName = "presigned-post-denied-user";
+        String[] credentials = createUserAndAccessKey(userName);
+        String accessKeyId = credentials[0];
+        String secretKey = credentials[1];
+        putUserPolicy(userName, "DenyPutObject", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny","Action":"s3:PutObject","Resource":"*"}
+                ]}""");
+
+        String policyBase64 = buildPolicyBase64(BUCKET, key);
+        String credential = accessKeyId + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, secretKey);
+
+        given()
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE)
+            .multiPart("x-amz-signature", signature)
+            .multiPart("file", "iam-denied.txt",
+                    "should not be stored".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(403)
+            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+    }
+
+    @Test
+    @Order(31)
+    void acceptsGenuineSignatureWhenIdentityPolicyAllowsPutObject() {
+        String key = "uploads/iam-allowed.txt";
+        String fileContent = "uploaded by a permitted IAM user";
+        String userName = "presigned-post-allowed-user";
+        String[] credentials = createUserAndAccessKey(userName);
+        String accessKeyId = credentials[0];
+        String secretKey = credentials[1];
+        putUserPolicy(userName, "AllowPutObject", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%1$s/*"}
+                ]}""".formatted(BUCKET));
+
+        String policyBase64 = buildPolicyBase64(BUCKET, key);
+        String credential = accessKeyId + "/20260101/us-east-1/s3/aws4_request";
+        String signature = signPolicy(policyBase64, credential, secretKey);
+
+        given()
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE)
+            .multiPart("x-amz-signature", signature)
+            .multiPart("file", "iam-allowed.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(204)
+            .header("ETag", notNullValue());
+    }
+
+    private static final String IAM_ROOT_AUTH =
+            "AWS4-HMAC-SHA256 Credential=" + LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/iam/aws4_request"
+                    + ", SignedHeaders=host, Signature=abc";
+
+    /** Returns {accessKeyId, secretAccessKey} for a freshly created IAM user. */
+    private static String[] createUserAndAccessKey(String userName) {
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", userName)
+            .header("Authorization", IAM_ROOT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        io.restassured.response.ExtractableResponse<io.restassured.response.Response> response = given()
+            .formParam("Action", "CreateAccessKey")
+            .formParam("UserName", userName)
+            .header("Authorization", IAM_ROOT_AUTH)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract();
+
+        return new String[] {
+                response.path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"),
+                response.path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey")
+        };
+    }
+
+    private static void putUserPolicy(String userName, String policyName, String policyDocument) {
+        given()
+            .formParam("Action", "PutUserPolicy")
+            .formParam("UserName", userName)
+            .formParam("PolicyName", policyName)
+            .formParam("PolicyDocument", policyDocument)
+            .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID).replace("/s3/", "/iam/"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     private static String authorizationHeader(String accessKeyId) {

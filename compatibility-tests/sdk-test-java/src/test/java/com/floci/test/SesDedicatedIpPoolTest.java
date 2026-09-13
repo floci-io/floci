@@ -13,10 +13,17 @@ import software.amazon.awssdk.services.sesv2.model.AlreadyExistsException;
 import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.CreateDedicatedIpPoolRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteDedicatedIpPoolRequest;
+import software.amazon.awssdk.services.sesv2.model.GetAccountRequest;
 import software.amazon.awssdk.services.sesv2.model.GetDedicatedIpPoolRequest;
 import software.amazon.awssdk.services.sesv2.model.GetDedicatedIpPoolResponse;
+import software.amazon.awssdk.services.sesv2.model.GetDedicatedIpRequest;
+import software.amazon.awssdk.services.sesv2.model.GetDedicatedIpsRequest;
 import software.amazon.awssdk.services.sesv2.model.ListDedicatedIpPoolsResponse;
 import software.amazon.awssdk.services.sesv2.model.NotFoundException;
+import software.amazon.awssdk.services.sesv2.model.PutAccountDedicatedIpWarmupAttributesRequest;
+import software.amazon.awssdk.services.sesv2.model.PutDedicatedIpInPoolRequest;
+import software.amazon.awssdk.services.sesv2.model.PutDedicatedIpPoolScalingAttributesRequest;
+import software.amazon.awssdk.services.sesv2.model.PutDedicatedIpWarmupAttributesRequest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -129,5 +136,99 @@ class SesDedicatedIpPoolTest {
         assertThatThrownBy(() -> sesV2.deleteDedicatedIpPool(
                 DeleteDedicatedIpPoolRequest.builder().poolName("compat-pool-ghost").build()))
                 .isInstanceOf(NotFoundException.class);
+    }
+
+    // ─────────────── IP-level / scaling / account warmup ───────────────
+
+    private static final String TEST_IP = "192.0.2.1";
+
+    @Test
+    @Order(9)
+    void getDedicatedIps_empty() {
+        assertThat(sesV2.getDedicatedIps(GetDedicatedIpsRequest.builder().build()).dedicatedIps())
+                .isEmpty();
+    }
+
+    @Test
+    @Order(10)
+    void getDedicatedIp_throwsNotFound() {
+        assertThatThrownBy(() -> sesV2.getDedicatedIp(
+                GetDedicatedIpRequest.builder().ip(TEST_IP).build()))
+                .isInstanceOf(NotFoundException.class);
+    }
+
+    @Test
+    @Order(11)
+    void putDedicatedIpInPool_throwsNotFound() {
+        String pool = "compat-pool-scaling";
+        // Pre-clean like the class-level pools: an interrupted earlier run may have left it behind.
+        deletePoolQuietly(pool);
+        sesV2.createDedicatedIpPool(CreateDedicatedIpPoolRequest.builder().poolName(pool).build());
+        try {
+            assertThatThrownBy(() -> sesV2.putDedicatedIpInPool(PutDedicatedIpInPoolRequest.builder()
+                    .ip(TEST_IP).destinationPoolName(pool).build()))
+                    .isInstanceOf(NotFoundException.class);
+
+            // Switching the pool's scaling mode is the only IP-level operation that
+            // mutates state (no IPs exist to manage).
+            sesV2.putDedicatedIpPoolScalingAttributes(PutDedicatedIpPoolScalingAttributesRequest.builder()
+                    .poolName(pool).scalingMode("MANAGED").build());
+            assertThat(sesV2.getDedicatedIpPool(GetDedicatedIpPoolRequest.builder().poolName(pool).build())
+                    .dedicatedIpPool().scalingModeAsString()).isEqualTo("MANAGED");
+        } finally {
+            sesV2.deleteDedicatedIpPool(DeleteDedicatedIpPoolRequest.builder().poolName(pool).build());
+        }
+    }
+
+    @Test
+    @Order(12)
+    void putDedicatedIpWarmupAttributes_throwsNotFound() {
+        assertThatThrownBy(() -> sesV2.putDedicatedIpWarmupAttributes(
+                PutDedicatedIpWarmupAttributesRequest.builder().ip(TEST_IP).warmupPercentage(50).build()))
+                .isInstanceOf(NotFoundException.class);
+    }
+
+    @Test
+    @Order(13)
+    void putDedicatedIpPoolScalingAttributes_managedToStandard_throwsBadRequest() {
+        String pool = "compat-pool-downgrade";
+        deletePoolQuietly(pool);
+        sesV2.createDedicatedIpPool(CreateDedicatedIpPoolRequest.builder().poolName(pool).build());
+        try {
+            sesV2.putDedicatedIpPoolScalingAttributes(PutDedicatedIpPoolScalingAttributesRequest.builder()
+                    .poolName(pool).scalingMode("MANAGED").build());
+            assertThatThrownBy(() -> sesV2.putDedicatedIpPoolScalingAttributes(
+                    PutDedicatedIpPoolScalingAttributesRequest.builder()
+                            .poolName(pool).scalingMode("STANDARD").build()))
+                    .isInstanceOf(BadRequestException.class);
+        } finally {
+            sesV2.deleteDedicatedIpPool(DeleteDedicatedIpPoolRequest.builder().poolName(pool).build());
+        }
+    }
+
+    @Test
+    @Order(14)
+    void putDedicatedIpWarmupAttributes_outOfRange_throwsBadRequest() {
+        // Range is enforced before the IP lookup, so an out-of-range value is a BadRequestException
+        // rather than the IP NotFoundException.
+        assertThatThrownBy(() -> sesV2.putDedicatedIpWarmupAttributes(
+                PutDedicatedIpWarmupAttributesRequest.builder().ip(TEST_IP).warmupPercentage(150).build()))
+                .isInstanceOf(BadRequestException.class);
+    }
+
+    @Test
+    @Order(15)
+    void accountDedicatedIpAutoWarmup_togglable() {
+        boolean original = sesV2.getAccount(GetAccountRequest.builder().build())
+                .dedicatedIpAutoWarmupEnabled();
+        try {
+            sesV2.putAccountDedicatedIpWarmupAttributes(PutAccountDedicatedIpWarmupAttributesRequest.builder()
+                    .autoWarmupEnabled(false).build());
+            assertThat(sesV2.getAccount(GetAccountRequest.builder().build()).dedicatedIpAutoWarmupEnabled())
+                    .isFalse();
+        } finally {
+            sesV2.putAccountDedicatedIpWarmupAttributes(PutAccountDedicatedIpWarmupAttributesRequest.builder()
+                    .autoWarmupEnabled(original).build());
+        }
     }
 }

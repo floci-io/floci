@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.mwaa;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -31,6 +32,7 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -66,21 +68,18 @@ public class MwaaEnvironmentManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final LaunchedContainerAwsEnv awsEnv;
-    private final RegionResolver regionResolver;
 
     @Inject
     public MwaaEnvironmentManager(ContainerBuilder containerBuilder,
                                   ContainerLifecycleManager lifecycleManager,
                                   ContainerDetector containerDetector,
                                   EmulatorConfig config,
-                                  LaunchedContainerAwsEnv awsEnv,
-                                  RegionResolver regionResolver) {
+                                  LaunchedContainerAwsEnv awsEnv) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.config = config;
         this.awsEnv = awsEnv;
-        this.regionResolver = regionResolver;
     }
 
     /**
@@ -98,7 +97,7 @@ public class MwaaEnvironmentManager {
         String dbPassword = generateSecret(24);
         environment.setDbPassword(dbPassword);
 
-        String dbContainerName = dbContainerName(config, name);
+        String dbContainerName = dbContainerName(config, environment);
         String dbVolume = dbContainerName;
         lifecycleManager.removeIfExists(dbContainerName);
         lifecycleManager.ensureVolume(dbVolume);
@@ -114,7 +113,7 @@ public class MwaaEnvironmentManager {
                 .withExposedPort(POSTGRES_PORT)
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "mwaa", name, regionResolver.getAccountId(), regionResolver.getDefaultRegion()))
+                        "mwaa", name, environmentAccount(environment), environmentRegion(environment)))
                 .build();
 
         String dbContainerId = lifecycleManager.create(dbSpec);
@@ -135,7 +134,7 @@ public class MwaaEnvironmentManager {
     void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
                                byte[] startupScriptContent) {
         String name = environment.getName();
-        String airflowContainerName = airflowContainerName(config, name);
+        String airflowContainerName = airflowContainerName(config, environment);
         String dagsVolume = airflowContainerName + "-dags";
         String logsVolume = airflowContainerName + "-logs";
 
@@ -143,7 +142,7 @@ public class MwaaEnvironmentManager {
         lifecycleManager.ensureVolume(dagsVolume);
         lifecycleManager.ensureVolume(logsVolume);
 
-        String image = "apache/airflow:%s-python3.12".formatted(airflowVersion);
+        String image = "apache/airflow:%s-%s".formatted(airflowVersion, pythonTagFor(airflowVersion));
         String adminUser = "admin";
         String adminPassword = generateSecret(24);
         String sqlAlchemyConn = "postgresql+psycopg2://airflow:" + dbPassword + "@" + dbIp + ":" + POSTGRES_PORT + "/airflow";
@@ -151,7 +150,7 @@ public class MwaaEnvironmentManager {
         // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
         // Lambda/ECS containers already do via LaunchedContainerAwsEnv — otherwise a real DAG's
         // boto3.client("s3") etc. would target real AWS instead of this emulator.
-        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(config.defaultRegion(), Optional.empty()));
+        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(environmentRegion(environment), Optional.empty()));
         env.addAll(List.of(
                 "AIRFLOW__CORE__EXECUTOR=LocalExecutor",
                 "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=" + sqlAlchemyConn,
@@ -161,6 +160,7 @@ public class MwaaEnvironmentManager {
                 "AIRFLOW__CORE__LOAD_EXAMPLES=false",
                 "_AIRFLOW_WWW_USER_USERNAME=" + adminUser,
                 "_AIRFLOW_WWW_USER_PASSWORD=" + adminPassword));
+        env.addAll(airflowConfigurationOptionsEnv(environment.getAirflowConfigurationOptions()));
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(airflowContainerName)
@@ -177,7 +177,7 @@ public class MwaaEnvironmentManager {
                 .withDockerNetwork(config.services().mwaa().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "mwaa", name, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "mwaa", name, environmentAccount(environment), environmentRegion(environment)));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(AIRFLOW_WEBSERVER_PORT);
@@ -265,6 +265,43 @@ public class MwaaEnvironmentManager {
         }
     }
 
+    /**
+     * True when either container backing this environment, Postgres or Airflow, was created but is
+     * no longer running: for example a startup script or {@code airflow db migrate} failing
+     * partway through kills the Airflow container, or the Postgres container itself dies (out of
+     * memory, its volume filling up), which never surfaces as an Airflow-side failure since the
+     * Airflow process itself keeps running, just never reporting {@code metadatabase} healthy.
+     * {@code docker start} only launches a container's entrypoint and returns immediately, so
+     * nothing else observes either of those; {@link MwaaService}'s readiness poller uses this to
+     * stop waiting on containers that will never let the environment answer {@code /health},
+     * instead of leaving the environment at CREATING forever.
+     */
+    public boolean hasAnyContainerExited(Environment environment) {
+        return hasContainerExited(environment.getDbContainerId(), "Postgres", environment)
+                || hasContainerExited(environment.getAirflowContainerId(), "Airflow", environment);
+    }
+
+    private boolean hasContainerExited(String containerId, String label, Environment environment) {
+        if (containerId == null) {
+            return false;
+        }
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec();
+            return !Boolean.TRUE.equals(inspect.getState().getRunning());
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            // Inconclusive (a transient Docker daemon issue, not "the container is gone"): treat as
+            // still running, like isReady()'s own catch-all does for a failed /health call, so one
+            // bad inspect doesn't wrongly fail this environment or, since the readiness poller
+            // shares one loop across every CREATING environment, escape and starve every other
+            // environment's check for this poll tick.
+            LOG.warnv("Could not inspect {0} container {1} for environment {2}: {3}",
+                    label, containerId, environment.getName(), e.getMessage());
+            return false;
+        }
+    }
+
     /** Crude but dependency-free check for {@code "<section>":{"status":"healthy"...}} in the /health JSON. */
     static boolean healthySection(String body, String section) {
         int idx = body.indexOf("\"" + section + "\"");
@@ -293,8 +330,8 @@ public class MwaaEnvironmentManager {
         if (environment.getDbContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getDbContainerId(), null);
         }
-        String airflowContainerName = airflowContainerName(config, name);
-        lifecycleManager.removeVolume(dbContainerName(config, name));
+        String airflowContainerName = airflowContainerName(config, environment);
+        lifecycleManager.removeVolume(dbContainerName(config, environment));
         lifecycleManager.removeVolume(airflowContainerName + "-dags");
         lifecycleManager.removeVolume(airflowContainerName + "-logs");
         LOG.infov("Stopped MWAA containers for environment {0}", name);
@@ -345,12 +382,76 @@ public class MwaaEnvironmentManager {
      *  daemon (via {@code FLOCI_DOCKER_RESOURCE_NAMESPACE}) don't collide, same as every other
      *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
      *  that as "no namespace configured" and returns the base name unchanged. */
-    static String dbContainerName(EmulatorConfig config, String environmentName) {
-        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentName + "-db");
+    static String dbContainerName(EmulatorConfig config, Environment environment) {
+        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentIdentity(environment) + "-db");
     }
 
-    static String airflowContainerName(EmulatorConfig config, String environmentName) {
-        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentName + "-airflow");
+    static String airflowContainerName(EmulatorConfig config, Environment environment) {
+        return ContainerStorageHelper.dockerName(config,
+                "floci-mwaa-" + environmentIdentity(environment) + "-airflow");
+    }
+
+    private static String environmentIdentity(Environment environment) {
+        return environmentAccount(environment) + "." + environmentRegion(environment) + "." + environment.getName();
+    }
+
+    static String environmentAccount(Environment environment) {
+        return environment.getAccountId() != null
+                ? environment.getAccountId()
+                : AwsArnUtils.accountOrDefault(environment.getArn(), "000000000000");
+    }
+
+    static String environmentRegion(Environment environment) {
+        return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1");
+    }
+
+    /**
+     * The Python minor version tag real Amazon MWAA runs for a given {@code AirflowVersion}, so
+     * the emulated image matches the same Airflow/Python pairing a requirements.txt built the way
+     * AWS documents (a constraint file pinned to that pairing) expects. Per AWS's own Airflow
+     * versions table, every version through 2.10.x runs Python 3.11, and 2.11.0 onward (including
+     * every 3.x release) runs Python 3.12.
+     */
+    static String pythonTagFor(String airflowVersion) {
+        String[] parts = airflowVersion.split("\\.", 3);
+        int major = Integer.parseInt(parts[0]);
+        int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+        return (major > 2 || (major == 2 && minor >= 11)) ? "python3.12" : "python3.11";
+    }
+
+    /**
+     * Translates {@code AirflowConfigurationOptions} ({@code "section.key"} to value, e.g.
+     * {@code core.dags_are_paused_at_creation}) into the {@code AIRFLOW__SECTION__KEY} environment
+     * variables real Amazon MWAA sets for the same option, matching Airflow's own {@code conf.get}
+     * section/key model. An entry without a non-empty section and key on both sides of the dot is
+     * malformed per AWS's own format and is skipped rather than guessed at. An entry that would
+     * collide with one of {@link #PROTECTED_ENV_VARS} is skipped too and logged: those are Floci's
+     * own required LocalExecutor/DB/security wiring, not something a configuration option request
+     * gets to override.
+     */
+    static List<String> airflowConfigurationOptionsEnv(Map<String, String> options) {
+        if (options == null || options.isEmpty()) {
+            return List.of();
+        }
+        List<String> env = new ArrayList<>();
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            String dotted = entry.getKey();
+            int dot = dotted.indexOf('.');
+            if (dot <= 0 || dot == dotted.length() - 1) {
+                LOG.warnv("Ignoring malformed AirflowConfigurationOptions key ''{0}'', expected "
+                        + "the AWS \"section.key\" format", dotted);
+                continue;
+            }
+            String key = "AIRFLOW__" + dotted.substring(0, dot).toUpperCase(Locale.ROOT)
+                    + "__" + dotted.substring(dot + 1).toUpperCase(Locale.ROOT);
+            if (PROTECTED_ENV_VARS.contains(key)) {
+                LOG.warnv("Ignoring AirflowConfigurationOptions entry ''{0}'': it maps to {1}, "
+                        + "which Floci itself manages for this environment", dotted, key);
+                continue;
+            }
+            env.add(key + "=" + entry.getValue());
+        }
+        return env;
     }
 
     /**
@@ -425,11 +526,17 @@ public class MwaaEnvironmentManager {
                 + "exec airflow webserver";
     }
 
+    /**
+     * Probes over TCP loopback on purpose. The official image runs first-boot init against a
+     * temporary server that listens only on the Unix socket, so a socket probe can pass before
+     * the final server accepts the Airflow container's TCP connections.
+     */
     private void waitForPostgresReady(String containerId) {
         Exception last = null;
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
-                ExecResult result = execInContainer(containerId, new String[]{"pg_isready", "-U", "airflow"});
+                ExecResult result = execInContainer(containerId,
+                        new String[]{"pg_isready", "-h", "127.0.0.1", "-U", "airflow"});
                 if (result.exitCode() == 0) {
                     return;
                 }

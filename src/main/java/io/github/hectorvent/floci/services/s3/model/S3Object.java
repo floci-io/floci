@@ -158,7 +158,7 @@ public class S3Object {
     public String getDataGeneration() { return dataGeneration; }
     public void setDataGeneration(String dataGeneration) { this.dataGeneration = dataGeneration; }
 
-    private static String computeETag(byte[] data) {
+    public static String computeETag(byte[] data) {
         try {
             var md = java.security.MessageDigest.getInstance("MD5");
             byte[] digest = md.digest(data);

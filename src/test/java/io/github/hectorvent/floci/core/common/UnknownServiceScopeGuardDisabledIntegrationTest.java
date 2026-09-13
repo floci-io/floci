@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -19,6 +21,11 @@ import static org.hamcrest.Matchers.containsString;
 @TestProfile(UnknownServiceScopeGuardDisabledIntegrationTest.GuardDisabledProfile.class)
 class UnknownServiceScopeGuardDisabledIntegrationTest {
 
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
     @Test
     void unsupportedScopeFallsThroughWhenRejectionDisabled() {
         given()
@@ -31,6 +38,20 @@ class UnknownServiceScopeGuardDisabledIntegrationTest {
             // named "accounts", instead of the guard's UnknownOperationException.
             .statusCode(404)
             .body(containsString("<Code>NoSuchBucket</Code>"));
+    }
+
+    @Test
+    void knownRestJsonScopeFallsThroughWhenRejectionDisabled() {
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260707/us-east-1/bedrock"
+                    + "/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"name\":\"probe\"}")
+        .when()
+            .post("/prompts")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"));
     }
 
     public static final class GuardDisabledProfile implements QuarkusTestProfile {

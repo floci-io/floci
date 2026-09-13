@@ -107,7 +107,7 @@ public class AwsProtocolClaimFilter implements ContainerRequestFilter {
         }
     }
 
-    private Response unknownOperationResponse(int status, String message) {
+    static Response unknownOperationResponse(int status, String message) {
         return Response.status(status)
                 .type(MediaType.APPLICATION_JSON)
                 .header("x-amzn-query-error", "UnknownOperationException;Sender")

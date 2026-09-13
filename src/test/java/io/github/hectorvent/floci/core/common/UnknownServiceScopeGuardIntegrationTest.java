@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -16,6 +18,11 @@ import static org.hamcrest.Matchers.not;
  */
 @QuarkusTest
 class UnknownServiceScopeGuardIntegrationTest {
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     private static String authorization(String service) {
         return "AWS4-HMAC-SHA256 Credential=test/20260707/us-east-1/" + service
@@ -36,6 +43,35 @@ class UnknownServiceScopeGuardIntegrationTest {
             .header("X-Amzn-Errortype", "UnknownOperationException")
             .header("x-amzn-query-error", "UnknownOperationException;Sender")
             .body("__type", equalTo("UnknownOperationException"));
+    }
+
+    @Test
+    void knownRestJsonScopeCannotFallThroughToS3Wildcard() {
+        given()
+            .header("Authorization", authorization("bedrock"))
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"name\":\"probe\"}")
+        .when()
+            .post("/prompts")
+        .then()
+            .statusCode(404)
+            .contentType(containsString("application/json"))
+            .header("X-Amzn-Errortype", "UnknownOperationException")
+            .body("__type", equalTo("UnknownOperationException"))
+            .body("message", equalTo("Unknown operation: POST /prompts"));
+    }
+
+    @Test
+    void bedrockScopeStillReachesBedrockRuntimeRoutes() {
+        given()
+            .header("Authorization", authorization("bedrock"))
+            .contentType("application/json")
+            .body("{\"prompt\":\"hello\"}")
+        .when()
+            .post("/model/test-model/invoke")
+        .then()
+            .statusCode(200)
+            .contentType(containsString("application/json"));
     }
 
     @Test

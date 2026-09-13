@@ -40,6 +40,21 @@ public class CloudFrontController {
     private static final String DEFAULT_GEO_RESTRICTION_TYPE = "none";
     private static final int EMPTY_QUANTITY = 0;
 
+    /**
+     * Origin timeout constraints from the CloudFront {@code CustomOriginConfig} and
+     * {@code Origin} API references. {@code OriginReadTimeout} accepts 1-120 seconds, default 30.
+     * {@code OriginKeepaliveTimeout} accepts 1-300 seconds, default 5. {@code ResponseCompletionTimeout}
+     * has no enforced maximum when unset (represented here as 0), but when set must be at least
+     * {@code OriginReadTimeout}.
+     */
+    private static final int DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS = 30;
+    private static final int MIN_ORIGIN_READ_TIMEOUT_SECONDS = 1;
+    private static final int MAX_ORIGIN_READ_TIMEOUT_SECONDS = 120;
+    private static final int DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 5;
+    private static final int MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 1;
+    private static final int MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 300;
+    private static final int DEFAULT_RESPONSE_COMPLETION_TIMEOUT_SECONDS = 0;
+
     private final CloudFrontService service;
 
     @Inject
@@ -1920,7 +1935,11 @@ public class CloudFrontController {
                 .elem("DomainName", o.getDomainName())
                 .elem("OriginPath", o.getOriginPath() != null ? o.getOriginPath() : "")
                 .elem("ConnectionAttempts", o.getConnectionAttempts())
-                .elem("ConnectionTimeout", o.getConnectionTimeout());
+                .elem("ConnectionTimeout", o.getConnectionTimeout())
+                .elem("ResponseCompletionTimeout",
+                        o.getResponseCompletionTimeout() != null
+                                ? o.getResponseCompletionTimeout()
+                                : DEFAULT_RESPONSE_COMPLETION_TIMEOUT_SECONDS);
 
         if (o.getOriginAccessControlId() != null && !o.getOriginAccessControlId().isEmpty()) {
             xml.elem("OriginAccessControlId", o.getOriginAccessControlId());
@@ -1942,6 +1961,11 @@ public class CloudFrontController {
                     .elem("HTTPSPort", coc.getOrDefault("HTTPSPort", "443").toString())
                     .elem("OriginProtocolPolicy",
                             coc.getOrDefault("OriginProtocolPolicy", "https-only").toString())
+                    .elem("OriginReadTimeout",
+                            coc.getOrDefault("OriginReadTimeout", DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS).toString())
+                    .elem("OriginKeepaliveTimeout",
+                            coc.getOrDefault("OriginKeepaliveTimeout", DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS)
+                                    .toString())
                     .raw(xmlOriginSslProtocols(coc.get("OriginSslProtocols")))
                     .end("CustomOriginConfig");
         }
@@ -2673,6 +2697,8 @@ public class CloudFrontController {
             Map<String, String> s3Config = null;
             Map<String, Object> customConfig = null;
             List<String> sslProtocols = null;
+            Integer sslProtocolsQuantity = null;
+            Integer originReadTimeoutSeconds = null;
             boolean inCustomHeaders = false;
             boolean inCustomHeaderItems = false;
             boolean customHeaderItemsSeen = false;
@@ -2773,6 +2799,12 @@ public class CloudFrontController {
                                 }
                             }
                         }
+                        case "ResponseCompletionTimeout" -> {
+                            if (inOrigin && !inS3OriginConfig && !inCustomOriginConfig && current != null) {
+                                current.setResponseCompletionTimeout(
+                                        parseNonNegativeTimeout("ResponseCompletionTimeout", r.getElementText()));
+                            }
+                        }
                         case "OriginAccessIdentity" -> {
                             if (inS3OriginConfig && s3Config != null) {
                                 s3Config.put("OriginAccessIdentity", r.getElementText());
@@ -2793,6 +2825,23 @@ public class CloudFrontController {
                                 customConfig.put("OriginProtocolPolicy", r.getElementText());
                             }
                         }
+                        case "OriginKeepaliveTimeout" -> {
+                            if (inCustomOriginConfig && customConfig != null) {
+                                customConfig.put("OriginKeepaliveTimeout", parseBoundedTimeout(
+                                        "InvalidOriginKeepaliveTimeout", "OriginKeepaliveTimeout",
+                                        r.getElementText(), MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                                        MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS));
+                            }
+                        }
+                        case "OriginReadTimeout" -> {
+                            if (inCustomOriginConfig && customConfig != null) {
+                                originReadTimeoutSeconds = parseBoundedTimeout(
+                                        "InvalidOriginReadTimeout", "OriginReadTimeout",
+                                        r.getElementText(), MIN_ORIGIN_READ_TIMEOUT_SECONDS,
+                                        MAX_ORIGIN_READ_TIMEOUT_SECONDS);
+                                customConfig.put("OriginReadTimeout", originReadTimeoutSeconds);
+                            }
+                        }
                         case "CustomHeaders" -> {
                             if (inOrigin) {
                                 inCustomHeaders = true;
@@ -2806,6 +2855,12 @@ public class CloudFrontController {
                             if (inCustomHeaders && currentHeader == null) {
                                 try {
                                     customHeadersQuantity = Integer.parseInt(r.getElementText());
+                                } catch (NumberFormatException e) {
+                                    throw inconsistentQuantities();
+                                }
+                            } else if (inOriginSslProtocols) {
+                                try {
+                                    sslProtocolsQuantity = Integer.parseInt(r.getElementText());
                                 } catch (NumberFormatException e) {
                                     throw inconsistentQuantities();
                                 }
@@ -2846,10 +2901,14 @@ public class CloudFrontController {
                         }
                         case "OriginSslProtocols" -> {
                             if (inCustomOriginConfig && customConfig != null && sslProtocols != null) {
+                                if (sslProtocolsQuantity == null || sslProtocolsQuantity != sslProtocols.size()) {
+                                    throw inconsistentQuantities();
+                                }
                                 customConfig.put("OriginSslProtocols", sslProtocols);
                             }
                             inOriginSslProtocols = false;
                             sslProtocols = null;
+                            sslProtocolsQuantity = null;
                         }
                         case "CustomOriginConfig" -> {
                             if (inCustomOriginConfig && current != null) {
@@ -2891,10 +2950,23 @@ public class CloudFrontController {
                         }
                         case "Origin" -> {
                             if (inOrigin && current != null) {
+                                Integer completionTimeout = current.getResponseCompletionTimeout();
+                                int effectiveReadTimeout = originReadTimeoutSeconds != null
+                                        ? originReadTimeoutSeconds
+                                        : DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS;
+                                if (completionTimeout != null && completionTimeout > 0
+                                        && completionTimeout < effectiveReadTimeout) {
+                                    throw new AwsException(
+                                            "InvalidArgument",
+                                            "The parameter ResponseCompletionTimeout must be greater than or "
+                                                    + "equal to OriginReadTimeout.",
+                                            400);
+                                }
                                 result.add(current);
                             }
                             inOrigin = false;
                             current = null;
+                            originReadTimeoutSeconds = null;
                         }
                         case "Origins" -> inOrigins = false;
                         default -> {
@@ -2927,6 +2999,36 @@ public class CloudFrontController {
                 "InvalidArgument",
                 "The origin custom headers structure is invalid.",
                 400);
+    }
+
+    private static int parseBoundedTimeout(String errorCode, String field, String rawValue, int min, int max) {
+        int value = parseNonNegativeTimeout(errorCode, field, rawValue);
+        if (value < min || value > max) {
+            throw new AwsException(
+                    errorCode,
+                    "The parameter " + field + " must be between " + min + " and " + max + " seconds.",
+                    400);
+        }
+        return value;
+    }
+
+    private static int parseNonNegativeTimeout(String field, String rawValue) {
+        return parseNonNegativeTimeout("InvalidArgument", field, rawValue);
+    }
+
+    private static int parseNonNegativeTimeout(String errorCode, String field, String rawValue) {
+        try {
+            int value = Integer.parseInt(rawValue);
+            if (value < 0) {
+                throw new NumberFormatException(rawValue);
+            }
+            return value;
+        } catch (NumberFormatException e) {
+            throw new AwsException(
+                    errorCode,
+                    "The parameter " + field + " must be a non-negative integer.",
+                    400);
+        }
     }
 
     // Event types accepted by AWS for each association kind. Lambda@Edge runs at all

@@ -31,9 +31,24 @@ public final class SigV4TokenTestHelper {
             Instant timestamp,
             int expiresSeconds
     ) throws Exception {
+        return createElastiCacheToken(clusterId, user, accessKeyId, secretKey, timestamp, expiresSeconds, null);
+    }
+
+    public static String createElastiCacheToken(
+            String clusterId,
+            String user,
+            String accessKeyId,
+            String secretKey,
+            Instant timestamp,
+            int expiresSeconds,
+            String sessionToken
+    ) throws Exception {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("Action", "connect");
         params.put("User", user);
+        if (sessionToken != null) {
+            params.put("X-Amz-Security-Token", sessionToken);
+        }
         return signToken(clusterId, null, accessKeyId, secretKey, "us-east-1",
                 "elasticache", timestamp, expiresSeconds, params, Map.of("host", clusterId));
     }
@@ -60,9 +75,25 @@ public final class SigV4TokenTestHelper {
             Instant timestamp,
             int expiresSeconds
     ) throws Exception {
+        return createRdsToken(host, port, dbUser, accessKeyId, secretKey, timestamp, expiresSeconds, null);
+    }
+
+    public static String createRdsToken(
+            String host,
+            int port,
+            String dbUser,
+            String accessKeyId,
+            String secretKey,
+            Instant timestamp,
+            int expiresSeconds,
+            String sessionToken
+    ) throws Exception {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("Action", "connect");
         params.put("DBUser", dbUser);
+        if (sessionToken != null) {
+            params.put("X-Amz-Security-Token", sessionToken);
+        }
         return signToken(host, port, accessKeyId, secretKey, "us-east-1",
                 "rds-db", timestamp, expiresSeconds, params, Map.of("host", host + ":" + port));
     }

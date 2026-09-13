@@ -280,6 +280,8 @@ floci:
       enabled: true
     ui:
       enabled: true
+    bedrock:
+      enabled: true
     bedrock-runtime:
       enabled: true
     eks:
@@ -337,9 +339,13 @@ floci:
     cur:
       enabled: true
       emit-mode: off
+    bcm-pricing-calculator:
+      enabled: true
     bcm-data-exports:
       enabled: true
       emit-mode: off
+    oam:
+      enabled: true
     cloudtrail:
       enabled: true
       flush-interval-seconds: 3600
@@ -418,7 +424,13 @@ floci:
       enabled: true
     connect:
       enabled: true
+    appintegrations:
+      enabled: true
     cognitoidentity:
+      enabled: true
+    globalaccelerator:
+      enabled: true
+    datasync:
       enabled: true
     aps:
       enabled: true

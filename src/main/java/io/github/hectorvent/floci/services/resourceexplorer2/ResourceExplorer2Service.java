@@ -999,10 +999,14 @@ public class ResourceExplorer2Service {
             return 0;
         }
         try {
-            return Integer.parseInt(new String(Base64.getDecoder().decode(token)));
+            int offset = Integer.parseInt(new String(Base64.getDecoder().decode(token)));
+            if (offset < 0) {
+                throw new IllegalArgumentException("negative offset");
+            }
+            return offset;
         } catch (Exception e) {
-            LOG.debugf("Invalid NextToken '%s', restarting from offset 0: %s", token, e.getMessage());
-            return 0;
+            throw new AwsException("ValidationException",
+                    "NextToken is invalid or has expired.", 400);
         }
     }
 

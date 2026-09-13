@@ -1486,13 +1486,31 @@ public class SnsService implements Resettable, ResourceProvider {
         }
     }
 
-    private static String extractFunctionName(String functionArn) {
-        int idx = functionArn.lastIndexOf(':');
-        return idx >= 0 ? functionArn.substring(idx + 1) : functionArn;
+    private static final String FUNCTION_MARKER = ":function:";
+
+    /**
+     * Function name out of a Lambda ARN, which may carry a qualifier:
+     * {@code arn:aws:lambda:<region>:<account>:function:<name>[:<alias-or-version>]}.
+     *
+     * <p>Taking the segment after the last colon reads the qualifier as the function name, so a
+     * subscription to {@code ...:function:order-processor:PROD} invoked a function called
+     * {@code PROD} and the message went nowhere. Cut after {@code :function:} instead, matching
+     * what S3 and Step Functions already do for the same ARN.
+     */
+    static String extractFunctionName(String functionArn) {
+        if (functionArn == null) {
+            return null;
+        }
+        int functionMarker = functionArn.indexOf(FUNCTION_MARKER);
+        if (functionMarker < 0) {
+            return functionArn;
+        }
+        String suffix = functionArn.substring(functionMarker + FUNCTION_MARKER.length());
+        int qualifierSeparator = suffix.indexOf(':');
+        return qualifierSeparator >= 0 ? suffix.substring(0, qualifierSeparator) : suffix;
     }
 
     private static String extractRegionFromArn(String arn) {
-        if (arn == null || !arn.startsWith("arn:aws:")) return null;
         return AwsArnUtils.regionOrDefault(arn, null);
     }
 

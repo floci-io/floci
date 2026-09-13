@@ -28,6 +28,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Organizations](organizations.md) | `POST /` + `X-Amz-Target: AWSOrganizationsV20161128.*` | JSON 1.1 | 55 |
 | [Cognito](cognito.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityProviderService.*` | JSON 1.1 | 43 |
 | [Cognito Identity](cognitoidentity.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityService.*` | JSON 1.1 | 13 |
+| [Global Accelerator](globalaccelerator.md) | `POST /` + `X-Amz-Target: GlobalAccelerator_V20180706.*` | JSON 1.1 | 22 |
 | [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 34 |
 | [CloudHSM v2](cloudhsmv2.md) | `POST /` + `X-Amz-Target: BaldrApiService.*` | JSON 1.1 | 18 |
 | [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 24 |
@@ -40,6 +41,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [EventBridge](eventbridge.md) | `POST /` + `X-Amz-Target: AmazonEventBridge.*` | JSON 1.1 | 16 |
 | [EventBridge Scheduler](scheduler.md) | `/schedules/*`, `/schedule-groups/*`, `/tags/*` | REST JSON | 12 |
 | [EventBridge Pipes](pipes.md) | `/v1/pipes/*` | REST JSON | 7 |
+| [CloudWatch OAM](oam.md) | REST paths such as `POST /CreateSink` and `POST /CreateLink` | REST JSON | 15 |
 | [CloudWatch Logs](cloudwatch.md) | `POST /` + `X-Amz-Target: Logs.*` | JSON 1.1 | 17 |
 | [CloudWatch Metrics](cloudwatch.md#metrics) | `POST /` with `Action=` or JSON 1.1 | Query / JSON | 11 |
 | [CloudWatch RUM](rum.md) | `/appmonitor`, `/appmonitor/{name}`, `/appmonitors` | REST JSON | 5 |
@@ -56,6 +58,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Security Hub](securityhub.md) | `/organization/*`, `/accounts`, `/findingAggregator/*`, `/configurationPolicy*`, `/tags/*` | REST JSON | 22 |
 | [Amazon Detective](detective.md) | `/orgs/*`, `/graphs/list`, `/graph/*` | REST JSON | 8 |
 | [Amazon Connect](connect.md) | `/instance`, `/instance/{instanceId}/*`, `/tags/*` | REST JSON | 15 |
+| [Amazon AppIntegrations](appintegrations.md) | `/eventIntegrations/*`, `/dataIntegrations/*`, `/tags/*` | REST JSON | 14 |
 | [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 8 |
 | [MemoryDB](memorydb.md) | `POST /` + `X-Amz-Target: AmazonMemoryDB.*` + TCP proxy | JSON 1.1 + RESP | 7 |
 | [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 14 |
@@ -87,6 +90,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AppConfig](appconfig.md) | `/applications/...`, `/deploymentstrategies/...` | REST JSON | 16 |
 | [AppConfigData](appconfig.md#data-plane) | `/configurationsessions`, `/configuration` | REST JSON | 2 |
 | [AppSync](appsync.md) | `/v1/apis/...` | REST JSON | 33 |
+| [Amazon Bedrock](bedrock.md) | `/guardrails`, `/guardrails/{guardrailIdentifier}`, `/tagResource`, `/untagResource`, `/listTagsForResource` | REST JSON | 9 |
 | [Bedrock Runtime](bedrock-runtime.md) | `/model/{modelId}/converse`, `/model/{modelId}/invoke` | REST JSON | 2 (stub; streaming returns 501) |
 | [Bedrock AgentCore Control](bedrock-agentcore.md) | `/runtimes/*`, `/gateways/*`, `/memories/*`, `/identities/*`, `/browsers*`, `/browser-profiles*`, `/code-interpreters*`, `/resourcepolicy/*`, `/tags/{resourceArn}` | REST JSON | 61 (+ 3 tagging via shared `/tags/{arn}` route) |
 | [Bedrock AgentCore](bedrock-agentcore.md#data-plane-invokeagentruntime) | `/runtimes/{agentRuntimeArn}/invocations` | REST JSON (binary payload) | 1 (canned-response stub) |
@@ -127,8 +131,10 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Pricing](pricing.md) | `POST /` + `X-Amz-Target: AWSPriceListService.*` | JSON 1.1 | 5 |
 | [Cost Explorer](ce.md) | `POST /` + `X-Amz-Target: AWSInsightsIndexService.*` | JSON 1.1 | 9 |
 | [Cost and Usage Reports](cur.md) | `POST /` + `X-Amz-Target: AWSOrigamiServiceGatewayService.*` | JSON 1.1 | 6 |
+| [BCM Pricing Calculator](bcm-pricing-calculator.md) | `POST /` + `X-Amz-Target: AWSBCMPricingCalculator.*` | JSON 1.0 | 4 |
 | [BCM Data Exports](bcm-data-exports.md) | `POST /` + `X-Amz-Target: AWSBillingAndCostManagementDataExports.*` | JSON 1.1 | 7 |
 | [Transfer Family](transfer.md) | `POST /` + `X-Amz-Target: TransferService.*` | JSON 1.1 | 17 |
+| [DataSync](datasync.md) | `POST /` + `X-Amz-Target: FmrsService.*` | JSON 1.1 | 48 |
 | [IoT Core](iot.md) | `/things/...`, `/endpoint`, rules/policies REST paths | REST JSON | 62 |
 | [IoT Data](iot.md) | `/things/{thingName}/shadow`, MQTT topics | REST JSON | 11 |
 

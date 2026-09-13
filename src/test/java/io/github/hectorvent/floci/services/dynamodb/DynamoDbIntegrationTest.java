@@ -804,7 +804,29 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
-            .body("message", equalTo("Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided."));
+            .body("message", equalTo("1 validation error detected: Must specify the AttributesToGet or "
+                    + "ProjectionExpression when choosing to get SPECIFIC_ATTRIBUTES"));
+    }
+
+    @Test
+    @Order(10)
+    void scanWithSelectSpecificAttributesRequiresProjectionParameters() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "Select": "SPECIFIC_ATTRIBUTES"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Must specify the AttributesToGet or "
+                    + "ProjectionExpression when choosing to get SPECIFIC_ATTRIBUTES"));
     }
 
     @Test

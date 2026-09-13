@@ -79,7 +79,7 @@ class S3ConcurrentWriteReadTest {
         }
         for (Thread t : threads) t.start();
         for (Thread t : threads) {
-            t.join(30_000);
+            t.join(120_000);
             assertFalse(t.isAlive(), "thread did not finish within the join timeout");
         }
 

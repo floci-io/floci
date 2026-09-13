@@ -352,4 +352,42 @@ class AthenaTest {
         assertThat(response.tags().get(0).key()).isEqualTo("env");
         assertThat(response.tags().get(0).value()).isEqualTo("prod");
     }
+
+    @Test
+    @Order(11)
+    @DisplayName("updateWorkGroup round-trips changes through the Athena SDK")
+    void updateWorkGroupRoundTripsThroughSdk() {
+        String groupName = "sdk-update-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        athena.createWorkGroup(CreateWorkGroupRequest.builder()
+                .name(groupName)
+                .description("before")
+                .configuration(WorkGroupConfiguration.builder()
+                        .resultConfiguration(ResultConfiguration.builder()
+                                .outputLocation("s3://before/results/")
+                                .build())
+                        .enforceWorkGroupConfiguration(true)
+                        .build())
+                .build());
+
+        athena.updateWorkGroup(UpdateWorkGroupRequest.builder()
+                .workGroup(groupName)
+                .description("after")
+                .state(WorkGroupState.DISABLED)
+                .configurationUpdates(WorkGroupConfigurationUpdates.builder()
+                        .resultConfigurationUpdates(ResultConfigurationUpdates.builder()
+                                .outputLocation("s3://after/results/")
+                                .build())
+                        .enforceWorkGroupConfiguration(false)
+                        .publishCloudWatchMetricsEnabled(true)
+                        .build())
+                .build());
+
+        WorkGroup workGroup = athena.getWorkGroup(r -> r.workGroup(groupName)).workGroup();
+        assertThat(workGroup.description()).isEqualTo("after");
+        assertThat(workGroup.state()).isEqualTo(WorkGroupState.DISABLED);
+        assertThat(workGroup.configuration().resultConfiguration().outputLocation())
+                .isEqualTo("s3://after/results/");
+        assertThat(workGroup.configuration().enforceWorkGroupConfiguration()).isFalse();
+        assertThat(workGroup.configuration().publishCloudWatchMetricsEnabled()).isTrue();
+    }
 }

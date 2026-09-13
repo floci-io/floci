@@ -46,6 +46,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.InvalidPathException;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.PathNotFoundException;
+import com.jayway.jsonpath.spi.json.JacksonJsonNodeJsonProvider;
+import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
 
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.impl.NoStackTraceTimeoutException;
@@ -66,6 +72,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.math.BigInteger;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -112,6 +119,22 @@ public class AslExecutor {
     }
 
     private record ResolvedMapItems(JsonNode items, MapItemsSource source) {
+    }
+
+    private record ActiveMockExecution(
+            MockedTestCase testCase,
+            ConcurrentHashMap<String, AtomicInteger> responseIndexes) {
+
+        private ActiveMockExecution(MockedTestCase testCase) {
+            this(testCase, new ConcurrentHashMap<>());
+        }
+
+        private int nextResponseIndex(String stateName) {
+            return responseIndexes.computeIfAbsent(stateName, ignored -> new AtomicInteger()).getAndIncrement();
+        }
+    }
+
+    private record MockedTaskInvocation(List<MockedResponseStep> steps, int responseIndex) {
     }
 
     private static final Logger LOG = Logger.getLogger(AslExecutor.class);
@@ -213,12 +236,13 @@ public class AslExecutor {
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
     private final ObjectMapper objectMapper;
+    private final Configuration jsonPathConfiguration;
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
     private final WebClient webClient;
     private final EmulatorConfig config;
     private final CustomResourceLiveness customResourceLiveness;
-    private final Map<String, MockedTestCase> activeMocks = new ConcurrentHashMap<>();
+    private final Map<String, ActiveMockExecution> activeMocks = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
         t.setDaemon(true);
@@ -253,6 +277,12 @@ public class AslExecutor {
         this.schedulerService = schedulerService;
         this.schedulerController = schedulerController;
         this.objectMapper = objectMapper;
+        this.jsonPathConfiguration = objectMapper == null
+                ? null
+                : Configuration.builder()
+                        .jsonProvider(new JacksonJsonNodeJsonProvider(objectMapper))
+                        .mappingProvider(new JacksonMappingProvider(objectMapper))
+                        .build();
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
         this.config = config;
@@ -526,7 +556,7 @@ public class AslExecutor {
 
     private void registerMocks(Execution exec, MockedTestCase mockedTestCase) {
         if (mockedTestCase != null) {
-            activeMocks.put(exec.getExecutionArn(), mockedTestCase);
+            activeMocks.put(exec.getExecutionArn(), new ActiveMockExecution(mockedTestCase));
         }
     }
 
@@ -547,7 +577,7 @@ public class AslExecutor {
         while (true) {
             try {
                 return executeState(name, type, stateDef, input, chain, sm, jsonata,
-                        topLevelQueryLanguage, context, variables, attempt, executionDeadlineNanos);
+                        topLevelQueryLanguage, context, variables, executionDeadlineNanos);
             } catch (FailStateException raised) {
                 var e = raised.attributedTo(name, enteredEventId);
                 if (!raised.hasFinalCause()) {
@@ -621,11 +651,11 @@ public class AslExecutor {
     private StateResult executeState(String name, String type, JsonNode stateDef, JsonNode input,
                                      HistoryChain chain, StateMachine sm, boolean jsonata,
                                      String topLevelQueryLanguage, JsonNode context, ObjectNode variables,
-                                     int attempt, long executionDeadlineNanos) throws Exception {
+                                     long executionDeadlineNanos) throws Exception {
         return switch (type) {
             case "Pass" -> executePassState(stateDef, input, jsonata, context, variables);
             case "Task" -> executeTaskState(name, stateDef, input, chain, sm,
-                    jsonata, context, variables, attempt, executionDeadlineNanos);
+                    jsonata, context, variables, executionDeadlineNanos);
             case "Choice" -> executeChoiceState(stateDef, input, jsonata, context, variables);
             case "Wait" -> executeWaitState(stateDef, input, jsonata, context, variables, executionDeadlineNanos);
             case "Succeed" -> executeSucceedState(stateDef, input, jsonata, context, variables);
@@ -665,7 +695,7 @@ public class AslExecutor {
 
     private StateResult executeTaskState(String stateName, JsonNode stateDef, JsonNode input,
                                          HistoryChain chain, StateMachine sm, boolean jsonata,
-                                         JsonNode context, ObjectNode variables, int attempt,
+                                         JsonNode context, ObjectNode variables,
                                          long executionDeadlineNanos) throws Exception {
         var resource = stateDef.path("Resource").asText();
         var isWaitForToken = resource.endsWith(".waitForTaskToken");
@@ -673,10 +703,10 @@ public class AslExecutor {
                 ? resource.substring(0, resource.length() - ".waitForTaskToken".length())
                 : resource;
         var isActivity = isActivityArn(effectiveResource);
-        var mockedSteps = findMockedResponses(context, stateName);
+        var mockedInvocation = findMockedInvocation(context, stateName);
         // A mocked task never calls the integrated service, so it neither registers a task token
         // nor waits for one; the mocked response stands in for the whole interaction.
-        var needsToken = mockedSteps == null && (isWaitForToken || isActivity);
+        var needsToken = mockedInvocation == null && (isWaitForToken || isActivity);
 
         String taskToken = null;
         if (needsToken) {
@@ -707,8 +737,8 @@ public class AslExecutor {
             addTaskScheduledEvent(chain, profile, stateDef, effectiveInput, sm);
             addTaskStartedEvent(chain, profile);
             try {
-                taskResult = mockedSteps != null
-                        ? mockedTaskResult(mockedSteps, stateName, attempt)
+                taskResult = mockedInvocation != null
+                        ? mockedTaskResult(mockedInvocation.steps(), stateName, mockedInvocation.responseIndex())
                         : invokeResource(effectiveResource, effectiveInput, sm, taskToken,
                                 executionDeadlineNanos, jsonata ? null : stateDef.path("Parameters"));
                 if (tokenFuture != null) {
@@ -760,7 +790,7 @@ public class AslExecutor {
         }
     }
 
-    private List<MockedResponseStep> findMockedResponses(JsonNode context, String stateName) {
+    private MockedTaskInvocation findMockedInvocation(JsonNode context, String stateName) {
         if (activeMocks.isEmpty()) {
             return null;
         }
@@ -768,13 +798,19 @@ public class AslExecutor {
         if (executionArn == null) {
             return null;
         }
-        var testCase = activeMocks.get(executionArn);
-        return testCase != null ? testCase.stateResponses().get(stateName) : null;
+        var activeMock = activeMocks.get(executionArn);
+        if (activeMock == null) {
+            return null;
+        }
+        var steps = activeMock.testCase().stateResponses().get(stateName);
+        return steps != null
+                ? new MockedTaskInvocation(steps, activeMock.nextResponseIndex(stateName))
+                : null;
     }
 
-    private JsonNode mockedTaskResult(List<MockedResponseStep> steps, String stateName, int attempt) {
+    private JsonNode mockedTaskResult(List<MockedResponseStep> steps, String stateName, int responseIndex) {
         for (var step : steps) {
-            if (step.covers(attempt)) {
+            if (step.covers(responseIndex)) {
                 if (step.isThrow()) {
                     // The mocked Error and Cause must reach Retry/Catch unchanged; routing them
                     // through integration error translation would rewrite the error name that
@@ -785,7 +821,7 @@ public class AslExecutor {
             }
         }
         throw new FailStateException("States.Runtime",
-                "No mocked response defined for attempt " + attempt + " of state '" + stateName + "'");
+                "No mocked response defined for attempt " + responseIndex + " of state '" + stateName + "'");
     }
 
     /**
@@ -894,6 +930,31 @@ public class AslExecutor {
         CustomResourceLiveness.tokenIn(payload).ifPresent(customResourceLiveness::touch);
     }
 
+    private FailStateException lambdaFunctionFailure(String functionName, InvokeResult result) {
+        byte[] responsePayload = result.getPayload();
+        String cause = responsePayload == null ? null : new String(responsePayload, StandardCharsets.UTF_8);
+        if (responsePayload == null || responsePayload.length == 0) {
+            LOG.warnf("Lambda function %s returned FunctionError %s without an error payload; using Exception",
+                    functionName, result.getFunctionError());
+            return new FailStateException("Exception", cause);
+        }
+
+        try {
+            JsonNode errorPayload = objectMapper.readTree(responsePayload);
+            JsonNode errorType = errorPayload.path("errorType");
+            if (errorType.isTextual() && !errorType.textValue().isBlank()) {
+                return new FailStateException(errorType.textValue(), cause);
+            }
+            LOG.warnf("Lambda function %s returned FunctionError %s without a non-empty textual errorType; "
+                            + "using Exception",
+                    functionName, result.getFunctionError());
+        } catch (IOException e) {
+            LOG.warnf("Lambda function %s returned an invalid FunctionError payload; using Exception: %s",
+                    functionName, e.getMessage());
+        }
+        return new FailStateException("Exception", cause);
+    }
+
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
                                     long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
@@ -933,7 +994,7 @@ public class AslExecutor {
             InvokeResult result = lambdaExecutor.invoke(fn, payloadBytes, InvocationType.RequestResponse);
 
             if (result.getFunctionError() != null) {
-                throw new FailStateException("Lambda.AWSLambdaException", result.getFunctionError());
+                throw lambdaFunctionFailure(functionName, result);
             }
 
             byte[] responseBytes = result.getPayload();
@@ -3139,6 +3200,9 @@ public class AslExecutor {
         if (!path.startsWith("$.") && !path.startsWith("$[")) {
             return MissingNode.getInstance();
         }
+        if (isAdvancedJsonPath(path)) {
+            return resolveAdvancedJsonPath(path, root);
+        }
         return walkPath(splitPathSegments(path), 0, root);
     }
 
@@ -3172,6 +3236,13 @@ public class AslExecutor {
         if (!path.startsWith("$.") && !path.startsWith("$[")) {
             return NullNode.getInstance();
         }
+        if (isAdvancedJsonPath(path)) {
+            JsonNode value = resolveAdvancedJsonPath(path, searchRoot);
+            if (!value.isMissingNode()) {
+                return value;
+            }
+            throw unresolvedPayloadTemplateReference(path, fieldKey, reportedInput);
+        }
         String[] parts = splitPathSegments(path);
         if (containsWildcard(parts)) {
             JsonNode value = walkPath(parts, 0, searchRoot);
@@ -3184,7 +3255,177 @@ public class AslExecutor {
         if (lookup.outOfRangeArrayIndex) {
             return NullNode.getInstance();
         }
-        throw new FailStateException("States.Runtime",
+        throw unresolvedPayloadTemplateReference(path, fieldKey, reportedInput);
+    }
+
+    private static boolean isAdvancedJsonPath(String path) {
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = 0; i < path.length(); i++) {
+            char current = path.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"') {
+                quote = current;
+            } else if (current == '.' && i + 1 < path.length() && path.charAt(i + 1) == '.') {
+                return true;
+            } else if (current == '[' && i + 2 < path.length()
+                    && path.charAt(i + 1) == '?' && path.charAt(i + 2) == '(') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private JsonNode resolveAdvancedJsonPath(String path, JsonNode root) {
+        try {
+            String compatiblePath = normalizeJsonPathNullNegation(path);
+            Object result = JsonPath.using(jsonPathConfiguration).parse(root).read(compatiblePath);
+            return result instanceof JsonNode jsonNode ? jsonNode : objectMapper.valueToTree(result);
+        } catch (PathNotFoundException e) {
+            return MissingNode.getInstance();
+        } catch (InvalidPathException e) {
+            throw new FailStateException("States.Runtime", "Invalid JSONPath '" + path + "': " + e.getMessage());
+        }
+    }
+
+    /**
+     * Jayway treats {@code !@.key} as a non-existence check. Step Functions also considers an
+     * explicit null value falsy, so expand only simple negated path operands to include that case.
+     */
+    private static String normalizeJsonPathNullNegation(String path) {
+        StringBuilder normalized = null;
+        int copiedThrough = 0;
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = 0; i < path.length(); i++) {
+            char current = path.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"') {
+                quote = current;
+                continue;
+            }
+            if (current != '!' || !isUnaryJsonPathNegation(path, i)) {
+                continue;
+            }
+
+            int operandStart = i + 1;
+            while (operandStart < path.length() && Character.isWhitespace(path.charAt(operandStart))) {
+                operandStart++;
+            }
+            if (operandStart >= path.length()
+                    || (path.charAt(operandStart) != '@' && path.charAt(operandStart) != '$')) {
+                continue;
+            }
+            int operandEnd = jsonPathOperandEnd(path, operandStart);
+            if (operandEnd < 0) {
+                continue;
+            }
+
+            if (normalized == null) {
+                normalized = new StringBuilder(path.length() + 32);
+            }
+            normalized.append(path, copiedThrough, i)
+                    .append('(')
+                    .append(path, i, operandEnd)
+                    .append(" || ")
+                    .append(path, operandStart, operandEnd)
+                    .append(" == null)");
+            copiedThrough = operandEnd;
+            i = operandEnd - 1;
+        }
+        return normalized == null ? path : normalized.append(path, copiedThrough, path.length()).toString();
+    }
+
+    private static boolean isUnaryJsonPathNegation(String path, int index) {
+        int previous = index - 1;
+        while (previous >= 0 && Character.isWhitespace(path.charAt(previous))) {
+            previous--;
+        }
+        return previous < 0 || "([?&|,".indexOf(path.charAt(previous)) >= 0;
+    }
+
+    private static int jsonPathOperandEnd(String path, int operandStart) {
+        int index = operandStart + 1;
+        boolean hasSegment = false;
+        while (index < path.length()) {
+            char current = path.charAt(index);
+            if (current == '.') {
+                int memberStart = ++index;
+                while (index < path.length() && !isJsonPathOperandDelimiter(path.charAt(index))) {
+                    index++;
+                }
+                if (index == memberStart) {
+                    return -1;
+                }
+                hasSegment = true;
+            } else if (current == '[') {
+                int bracketEnd = simpleJsonPathBracketEnd(path, index);
+                if (bracketEnd < 0) {
+                    return -1;
+                }
+                index = bracketEnd;
+                hasSegment = true;
+            } else {
+                break;
+            }
+        }
+        if (index < path.length() && path.charAt(index) == '(') {
+            return -1;
+        }
+        return hasSegment ? index : -1;
+    }
+
+    private static boolean isJsonPathOperandDelimiter(char value) {
+        return Character.isWhitespace(value) || ".[]()&|=!<>,".indexOf(value) >= 0;
+    }
+
+    private static int simpleJsonPathBracketEnd(String path, int openBracket) {
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = openBracket + 1; i < path.length(); i++) {
+            char current = path.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"') {
+                quote = current;
+            } else if (current == ']') {
+                return i + 1;
+            } else if (current == '[' || current == '?' || current == '(' || current == ')') {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    private static FailStateException unresolvedPayloadTemplateReference(String path, String fieldKey,
+                                                                           JsonNode reportedInput) {
+        return new FailStateException("States.Runtime",
                 "The JSONPath '" + path + "' specified for the field '" + fieldKey
                         + "' could not be found in the input '" + reportedInput + "'");
     }

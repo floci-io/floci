@@ -43,6 +43,7 @@ import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.emr.EmrHandler;
 import io.github.hectorvent.floci.services.memorydb.MemoryDbHandler;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceEntitlementController;
+import io.github.hectorvent.floci.services.marketplace.MarketplaceMeteringController;
 import io.github.hectorvent.floci.services.wafv2.WafV2Handler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kinesisanalytics.KinesisAnalyticsV2JsonHandler;
@@ -50,6 +51,8 @@ import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
 import io.github.hectorvent.floci.services.organizations.OrganizationsJsonHandler;
 import io.github.hectorvent.floci.services.cognitoidentity.CognitoIdentityJsonHandler;
+import io.github.hectorvent.floci.services.globalaccelerator.GlobalAcceleratorJsonHandler;
+import io.github.hectorvent.floci.services.datasync.DataSyncJsonHandler;
 import io.github.hectorvent.floci.services.route53resolver.Route53ResolverJsonHandler;
 import io.github.hectorvent.floci.services.networkfirewall.NetworkFirewallJsonHandler;
 import io.github.hectorvent.floci.services.servicecatalog.ServiceCatalogJsonHandler;
@@ -122,6 +125,8 @@ public class AwsJson11Controller {
     private final LightsailJsonHandler lightsailJsonHandler;
     private final Route53ResolverJsonHandler route53ResolverJsonHandler;
     private final CognitoIdentityJsonHandler cognitoIdentityJsonHandler;
+    private final GlobalAcceleratorJsonHandler globalAcceleratorJsonHandler;
+    private final DataSyncJsonHandler dataSyncJsonHandler;
     private final NetworkFirewallJsonHandler networkFirewallJsonHandler;
     private final ServiceCatalogJsonHandler serviceCatalogJsonHandler;
     private final CloudControlJsonHandler cloudControlJsonHandler;
@@ -133,6 +138,7 @@ public class AwsJson11Controller {
     private final BudgetsJsonHandler budgetsJsonHandler;
     private final ServiceQuotasJsonHandler serviceQuotasJsonHandler;
     private final MarketplaceEntitlementController marketplaceEntitlementController;
+    private final MarketplaceMeteringController marketplaceMeteringController;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -173,6 +179,8 @@ public class AwsJson11Controller {
                                LightsailJsonHandler lightsailJsonHandler,
                                Route53ResolverJsonHandler route53ResolverJsonHandler,
                                CognitoIdentityJsonHandler cognitoIdentityJsonHandler,
+                               GlobalAcceleratorJsonHandler globalAcceleratorJsonHandler,
+                               DataSyncJsonHandler dataSyncJsonHandler,
                                NetworkFirewallJsonHandler networkFirewallJsonHandler,
                                ServiceCatalogJsonHandler serviceCatalogJsonHandler,
                                CloudControlJsonHandler cloudControlJsonHandler,
@@ -183,7 +191,8 @@ public class AwsJson11Controller {
                                IdentityStoreJsonHandler identityStoreJsonHandler,
                                BudgetsJsonHandler budgetsJsonHandler,
                                ServiceQuotasJsonHandler serviceQuotasJsonHandler,
-                               MarketplaceEntitlementController marketplaceEntitlementController) {
+                               MarketplaceEntitlementController marketplaceEntitlementController,
+                               MarketplaceMeteringController marketplaceMeteringController) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -228,6 +237,8 @@ public class AwsJson11Controller {
         this.lightsailJsonHandler = lightsailJsonHandler;
         this.route53ResolverJsonHandler = route53ResolverJsonHandler;
         this.cognitoIdentityJsonHandler = cognitoIdentityJsonHandler;
+        this.globalAcceleratorJsonHandler = globalAcceleratorJsonHandler;
+        this.dataSyncJsonHandler = dataSyncJsonHandler;
         this.networkFirewallJsonHandler = networkFirewallJsonHandler;
         this.serviceCatalogJsonHandler = serviceCatalogJsonHandler;
         this.cloudControlJsonHandler = cloudControlJsonHandler;
@@ -239,6 +250,7 @@ public class AwsJson11Controller {
         this.budgetsJsonHandler = budgetsJsonHandler;
         this.serviceQuotasJsonHandler = serviceQuotasJsonHandler;
         this.marketplaceEntitlementController = marketplaceEntitlementController;
+        this.marketplaceMeteringController = marketplaceMeteringController;
     }
 
     @POST
@@ -264,8 +276,16 @@ public class AwsJson11Controller {
 
         JsonNode request;
         try {
-            request = strictBodyReader.readTree(body);
+            // No payload is how an operation without input goes over the wire, so it reads as {}.
+            request = body == null || body.isBlank()
+                    ? objectMapper.createObjectNode()
+                    : strictBodyReader.readTree(body);
         } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+        // Input is always a structure: a bare null, array or scalar parses but is still a
+        // client serialization error rather than something every handler must guard against.
+        if (!request.isObject()) {
             return JsonErrorResponseUtils.createSerializationErrorResponse();
         }
 
@@ -304,7 +324,7 @@ public class AwsJson11Controller {
                 case "comprehend" -> comprehendJsonHandler.handle(action, request, region);
                 case "rekognition" -> rekognitionJsonHandler.handle(action, request, region);
                 case "pricing" -> pricingJsonHandler.handle(action, request, region);
-                case "transcribe" -> transcribeJsonHandler.handle(action, request, region);
+                case "transcribe" -> transcribeJsonHandler.handle(action, request);
                 case "translate" -> translateJsonHandler.handle(action, request, region);
                 case "ce" -> costExplorerJsonHandler.handle(action, request, region);
                 case "cur" -> curJsonHandler.handle(action, request, region);
@@ -315,6 +335,11 @@ public class AwsJson11Controller {
                 case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
                 case "route53resolver" -> route53ResolverJsonHandler.handle(action, request, region, regionResolver.getAccountId());
                 case "cognito-identity" -> cognitoIdentityJsonHandler.handle(action, request, region);
+                // Global Accelerator is a global service: its resources carry an empty ARN region
+                // segment and are never partitioned by the region the caller signed with, so the
+                // handler takes no region.
+                case "globalaccelerator" -> globalAcceleratorJsonHandler.handle(action, request);
+                case "datasync" -> dataSyncJsonHandler.handle(action, request, region);
                 case "network-firewall" -> networkFirewallJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 case "servicecatalog" -> serviceCatalogJsonHandler.handle(
@@ -331,7 +356,12 @@ public class AwsJson11Controller {
                 case "budgets" -> budgetsJsonHandler.handle(action, request, regionResolver.getAccountId());
                 case "servicequotas" -> serviceQuotasJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
-                case "marketplace" -> marketplaceEntitlementController.handle(action, request, region);
+                case "marketplace" -> {
+                    if (targetMatch.prefix().startsWith("AWSMPEntitlementService.")) {
+                        yield marketplaceEntitlementController.handle(action, request, region);
+                    }
+                    yield marketplaceMeteringController.handle(action, request, region);
+                }
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

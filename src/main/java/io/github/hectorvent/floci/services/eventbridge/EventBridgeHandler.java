@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Connection;
 import io.github.hectorvent.floci.services.eventbridge.model.ConnectionState;
+import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
@@ -237,6 +238,10 @@ public class EventBridgeHandler {
                 if (!batchParamsNode.isMissingNode() && batchParamsNode.isObject()) {
                     target.setBatchParameters(objectMapper.convertValue(batchParamsNode, BatchParameters.class));
                 }
+                JsonNode ecsParamsNode = t.path("EcsParameters");
+                if (!ecsParamsNode.isMissingNode() && ecsParamsNode.isObject()) {
+                    target.setEcsParameters(objectMapper.convertValue(ecsParamsNode, EcsParameters.class));
+                }
                 targets.add(target);
             }
         }
@@ -296,6 +301,9 @@ public class EventBridgeHandler {
             }
             if (t.getBatchParameters() != null) {
                 node.set("BatchParameters", objectMapper.valueToTree(t.getBatchParameters()));
+            }
+            if (t.getEcsParameters() != null) {
+                node.set("EcsParameters", objectMapper.valueToTree(t.getEcsParameters()));
             }
             targetsArray.add(node);
         }

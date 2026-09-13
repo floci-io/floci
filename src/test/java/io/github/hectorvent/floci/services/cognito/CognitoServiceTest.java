@@ -54,6 +54,7 @@ class CognitoServiceTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private CognitoService service;
+    private InMemoryStorage<String, UserPool> poolStore;
     private InMemoryStorage<String, CognitoUser> userStore;
     private InMemoryStorage<String, CognitoGroup> groupStore;
     private InMemoryStorage<String, RevokedTokenInfo> revokedTokenStore;
@@ -62,6 +63,7 @@ class CognitoServiceTest {
 
     @BeforeEach
     void setUp() {
+        poolStore = new InMemoryStorage<>();
         userStore = new InMemoryStorage<>();
         groupStore = new InMemoryStorage<>();
         revokedTokenStore = new InMemoryStorage<>();
@@ -71,7 +73,7 @@ class CognitoServiceTest {
         when(acmService.describeCertificate(anyString(), eq("us-east-1")))
                 .thenAnswer(inv -> issuedCertificate(inv.getArgument(0)));
         service = new CognitoService(
-                new InMemoryStorage<>(),
+                poolStore,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 userStore,
@@ -1527,7 +1529,23 @@ class CognitoServiceTest {
     }
 
     @Test
-    void confirmSignUpNamesDeletedUserPoolInResourceNotFoundMessage() {
+    void confirmSignUpNamesMissingUserPoolInResourceNotFoundMessage() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "test-client", false, false, List.of(), List.of());
+        // DeleteUserPool takes the pool's clients with it, so an orphaned client cannot be
+        // produced through the API. Drop the pool record alone to reach the defensive path.
+        poolStore.delete(pool.getId());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.confirmSignUp(client.getClientId(), "carol", "123456"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("User pool " + pool.getId() + " does not exist.", ex.getMessage());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void confirmSignUpRejectsAClientIdBelongingToADeletedUserPool() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "test-client", false, false, List.of(), List.of());
@@ -1536,7 +1554,7 @@ class CognitoServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.confirmSignUp(client.getClientId(), "carol", "123456"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
-        assertEquals("User pool " + pool.getId() + " does not exist.", ex.getMessage());
+        assertEquals("Client not found", ex.getMessage());
         assertEquals(400, ex.getHttpStatus());
     }
 

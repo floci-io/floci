@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
+import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -39,6 +40,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.lang.reflect.Field;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
@@ -169,6 +172,40 @@ class RdsServiceTest {
         assertNotNull(instance.getDbiResourceId());
         assertTrue(instance.getDbiResourceId().startsWith("db-"));
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:mydb", instance.getDbInstanceArn());
+    }
+
+    @Test
+    void createDbInstanceMakesRequestedPasswordValidBeforeProxyStartsAcceptingConnections() {
+        doAnswer(invocation -> {
+            assertEquals(DbInstanceStatus.CREATING,
+                    rdsService.getDbInstance("mypostgres").getStatus());
+            RdsAuthProxy.MasterPasswordCheck passwordCheck = invocation.getArgument(10);
+            assertTrue(passwordCheck.validate("admin", "secret123"));
+            assertFalse(passwordCheck.validate("admin", "wrong"));
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any());
+
+        DbInstance instance = rdsService.createDbInstance("mypostgres", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
+        assertEquals(DbInstanceStatus.AVAILABLE,
+                rdsService.getDbInstance("mypostgres").getStatus());
+    }
+
+    @Test
+    void createDbInstanceRemovesVisibleRecordWhenProxyStartupFails() {
+        doThrow(new IllegalStateException("proxy down"))
+                .when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                        any(), any(), any(), any(), any());
+
+        assertThrows(IllegalStateException.class, () -> rdsService.createDbInstance(
+                "mypostgres", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro",
+                20, false, null, null, null, null, false));
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("mypostgres"));
     }
 
     @Test
@@ -5482,6 +5519,51 @@ class RdsServiceTest {
                 "mydb", null, null, null, List.of(), "og1", "us-east-1");
 
         assertEquals("og1", modified.getOptionGroupName());
+    }
+
+    @Test
+    void refreshRuntimeHealthMarksDeadContainerFailedAndStopsProxy() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.isContainerRunning("cont-id")).thenReturn(false);
+        DbInstance instance = rdsService.createDbInstance(
+                "dead-db", "postgres", "16", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, null, true);
+
+        DbInstance refreshed = rdsService.refreshDbInstanceRuntimeHealth(instance);
+
+        assertEquals(DbInstanceStatus.FAILED, refreshed.getStatus());
+        verify(proxyManager).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
+        var events = rdsService.describeEvents("dead-db", "db-instance", null, null, 60);
+        assertEquals(1, events.size());
+        assertEquals(List.of("availability"), events.getFirst().eventCategories());
+        assertEquals(refreshed.getDbInstanceArn(), events.getFirst().sourceArn());
+
+        // Repeated health reads do not duplicate the transition event.
+        rdsService.refreshDbInstanceRuntimeHealth(refreshed);
+        assertEquals(1, rdsService.describeEvents("dead-db", "db-instance", null, null, 60).size());
+    }
+
+    @Test
+    void describeEventsPrunesEventsOlderThanFourteenDays() throws Exception {
+        InMemoryStorage<String, RdsEvent> eventStore = new InMemoryStorage<>();
+        Field eventsField = RdsService.class.getDeclaredField("events");
+        eventsField.setAccessible(true);
+        eventsField.set(rdsService, eventStore);
+        Instant now = Instant.now();
+        RdsEvent expired = new RdsEvent("expired", "old-db", "db-instance", "old",
+                List.of("availability"), now.minus(Duration.ofDays(15)), "old-arn");
+        RdsEvent retained = new RdsEvent("retained", "recent-db", "db-instance", "recent",
+                List.of("availability"), now.minus(Duration.ofDays(13)), "recent-arn");
+        eventStore.put(expired.id(), expired);
+        eventStore.put(retained.id(), retained);
+
+        List<RdsEvent> result = rdsService.describeEvents(
+                null, null, now.minus(Duration.ofDays(20)), now.plusSeconds(1), null);
+
+        assertEquals(List.of(retained), result);
+        assertTrue(eventStore.get("retained").isPresent());
+        assertTrue(eventStore.get("expired").isEmpty());
     }
 
     @Test

@@ -21,6 +21,21 @@ public class Ec2InstanceTypeCatalog {
     private static final String CATALOG_RESOURCE_NAME = "ec2/instance-type-catalog.yaml";
     private static final ObjectMapper YAML_MAPPER = new ObjectMapper(new YAMLFactory());
 
+    /**
+     * The burstable performance families and the credit option each one launches with when the
+     * request names none. AWS documents t2 as standard and t3, t3a and t4g as unlimited; every
+     * other family, t1 included, has no credit model at all. The EC2 model's own InstanceType
+     * enum lists t1, t2, t3, t3a and t4g as the only T families, so this table is complete.
+     *
+     * <p>Family derivation rather than a per-type catalog entry, because the catalog holds only
+     * the sizes Floci ships metadata for while a launch may name any size of a burstable family.
+     */
+    private static final Map<String, String> DEFAULT_CPU_CREDITS_BY_FAMILY = Map.of(
+            "t2", "standard",
+            "t3", "unlimited",
+            "t3a", "unlimited",
+            "t4g", "unlimited");
+
     private volatile Loaded loaded;
 
     public Ec2InstanceTypeCatalog() {
@@ -41,6 +56,26 @@ public class Ec2InstanceTypeCatalog {
             return Optional.empty();
         }
         return Optional.ofNullable(loaded().instanceTypesByName.get(instanceType));
+    }
+
+    /**
+     * The credit option a launch of this instance type gets when it names no CreditSpecification,
+     * or empty when the type has no burstable credit model.
+     */
+    public static Optional<String> defaultCpuCredits(String instanceType) {
+        return Optional.ofNullable(DEFAULT_CPU_CREDITS_BY_FAMILY.get(familyOf(instanceType)));
+    }
+
+    public static boolean isBurstablePerformanceType(String instanceType) {
+        return DEFAULT_CPU_CREDITS_BY_FAMILY.containsKey(familyOf(instanceType));
+    }
+
+    private static String familyOf(String instanceType) {
+        if (instanceType == null) {
+            return "";
+        }
+        int separator = instanceType.indexOf('.');
+        return separator < 0 ? instanceType : instanceType.substring(0, separator);
     }
 
     private Loaded loaded() {
@@ -176,6 +211,7 @@ public class Ec2InstanceTypeCatalog {
             type.put("supportedArchitectures", List.copyOf(supportedArchitectures));
             type.put("supportedUsageClasses", List.copyOf(supportedUsageClasses));
             type.put("currentGeneration", currentGeneration == null || currentGeneration);
+            type.put("burstablePerformanceSupported", isBurstablePerformanceType(instanceType));
             Map<String, Object> networkInfo = new LinkedHashMap<>();
             networkInfo.put("encryptionInTransitSupported", encryptionInTransitSupported);
             networkInfo.put("defaultNetworkCardIndex", defaultNetworkCardIndex);

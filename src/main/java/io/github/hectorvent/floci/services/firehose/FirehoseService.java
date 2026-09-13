@@ -66,6 +66,13 @@ public class FirehoseService implements ResourceProvider {
     private final AccountAwareStorageBackend<DeliveryStreamDescription> streamStore;
     private final Map<String, List<byte[]>> buffers = new ConcurrentHashMap<>();
     private final Map<String, Instant> bufferSince = new ConcurrentHashMap<>();
+    // One delivery at a time per stream, from taking the buffer to committing or
+    // restoring its checkpoint. The buffer monitor alone only makes the snapshot atomic:
+    // a second flush could still take records polled past a first flush's checkpoint,
+    // deliver them and commit that position while the first write is still in flight.
+    // If the first write then failed, the durable checkpoint would already sit past its
+    // records, and a restart before the retry would skip them for good.
+    private final Map<String, Object> flushLocks = new ConcurrentHashMap<>();
     private final S3Service s3Service;
     private final KinesisService kinesisService;
     private final RegionResolver regionResolver;
@@ -102,6 +109,7 @@ public class FirehoseService implements ResourceProvider {
     // commits exactly the position that snapshot covered.
     private final Map<String, Map<String, String>> pendingSourceIterators = new ConcurrentHashMap<>();
     private final FirehoseParquetConverter parquetConverter;
+    private final FirehoseLambdaTransformer lambdaTransformer;
     private final Clock clock;
     private final long tickIntervalSeconds;
     private final int flushRecordCount;
@@ -187,7 +195,8 @@ public class FirehoseService implements ResourceProvider {
     @Inject
     public FirehoseService(StorageFactory storageFactory, S3Service s3Service, KinesisService kinesisService,
                            RegionResolver regionResolver, Clock clock, EmulatorConfig config,
-                           FirehoseParquetConverter parquetConverter) {
+                           FirehoseParquetConverter parquetConverter,
+                           FirehoseLambdaTransformer lambdaTransformer) {
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.sourceIteratorStore = storageFactory.create("firehose", "source-iterators.json",
@@ -196,6 +205,7 @@ public class FirehoseService implements ResourceProvider {
         this.kinesisService = kinesisService;
         this.regionResolver = regionResolver;
         this.parquetConverter = parquetConverter;
+        this.lambdaTransformer = lambdaTransformer;
         this.clock = clock;
         this.tickIntervalSeconds = Math.max(1, config.services().firehose().tickIntervalSeconds());
         this.flushRecordCount = Math.max(0, config.services().firehose().flushRecordCount());
@@ -313,7 +323,6 @@ public class FirehoseService implements ResourceProvider {
         if (s3Config != null) {
             s3Config.canonicalizeProcessors();
         }
-        warnIfProcessingEnabled(name, s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", region, accountId,
                 "deliverystream/" + name).toString();
         // CreateDeliveryStream's KinesisStreamSourceConfiguration carries only the ARN and
@@ -392,7 +401,6 @@ public class FirehoseService implements ResourceProvider {
         stream.setLastUpdateTimestamp(java.time.Instant.now());
         streamPut(streamKey, stream);
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
-        warnIfProcessingEnabled(name, stream.s3Destination());
     }
 
     public void startDeliveryStreamEncryption(String name, String keyType, String keyArn) {
@@ -461,20 +469,6 @@ public class FirehoseService implements ResourceProvider {
             throw new AwsException("InvalidArgumentException",
                     "If you specify a value for SizeInMBs, you must also specify a value for IntervalInSeconds, and vice versa.",
                     400);
-        }
-    }
-
-    /**
-     * Says, where the configuration is set, that the transformation will not be applied.
-     * Fires on create and on every update that leaves it enabled, so a caller who keeps
-     * changing the destination keeps being told. Deliberately not in the flush path,
-     * which runs on every buffered delivery: create and update are caller-driven and are
-     * the moments a caller can act on the warning.
-     */
-    private static void warnIfProcessingEnabled(String name, S3Destination s3) {
-        if (s3 != null && s3.isProcessingEnabled()) {
-            LOG.warnv("Delivery stream {0} enables a record transformation, which Floci does not"
-                    + " apply yet; its records will be delivered untransformed", name);
         }
     }
 
@@ -765,8 +759,8 @@ public class FirehoseService implements ResourceProvider {
     }
 
     // Rebased on whatever is current rather than on a map carried across the shard loop,
-    // so that a flush which discarded pending (because its S3 write failed) rolls the
-    // other shards back to committed instead of having this poll re-assert them.
+    // so that a flush which took pending (and, if its S3 write failed, restored it) is
+    // never overwritten by a stale copy this poll carried past that flush.
     private void advanceSourceIterator(String streamKey, String shardId, String iterator) {
         Map<String, String> advanced = new LinkedHashMap<>(sourceIteratorsInUse(streamKey));
         advanced.put(shardId, iterator);
@@ -861,42 +855,61 @@ public class FirehoseService implements ResourceProvider {
             return;
         }
 
-        List<byte[]> toFlush;
-        // Taken with the records, under the same lock: this is the position the records
-        // about to be written cover, and committing it is this flush's job.
-        Map<String, String> checkpoint;
-        synchronized (buffer) {
-            toFlush = new ArrayList<>(buffer);
-            buffer.clear();
-            bufferSince.remove(streamName);
-            checkpoint = pendingSourceIterators.remove(streamName);
-        }
-        if (toFlush.isEmpty()) {
-            // Lost the race against a concurrent flush; nothing left to deliver. Any
-            // checkpoint taken here covers no undelivered records -- it can only have
-            // come from a poll that read an empty page -- so it commits as it stands.
-            commitSourceIterators(streamName, checkpoint);
-            return;
-        }
+        synchronized (flushLocks.computeIfAbsent(streamName, k -> new Object())) {
+            List<byte[]> toFlush;
+            // Taken with the records, under the same lock: this is the position the records
+            // about to be written cover, and committing it is this flush's job.
+            Map<String, String> checkpoint;
+            Instant since;
+            synchronized (buffer) {
+                toFlush = new ArrayList<>(buffer);
+                buffer.clear();
+                since = bufferSince.remove(streamName);
+                checkpoint = pendingSourceIterators.remove(streamName);
+            }
+            if (toFlush.isEmpty()) {
+                // Lost the race for the stream lock; nothing left to deliver. Any
+                // checkpoint taken here covers no undelivered records -- it can only have
+                // come from a poll that read an empty page -- so it commits as it stands.
+                commitSourceIterators(streamName, checkpoint);
+                return;
+            }
 
-        // Every store this delivery touches, Glue and S3 included, reads the account
-        // from the request context, and a scheduled flush has none. Without this the
-        // work would run as the default account rather than the stream's owner: the
-        // stream's Glue table would be missed and its objects would land in the wrong
-        // partition. The sidecar follows the same context, so both sides stay together.
-        RequestScopes.runAs(stream.getAccountId(),
-                () -> deliverBuffer(streamName, stream, toFlush, checkpoint));
+            // Every store this delivery touches, Glue and S3 included, reads the account
+            // from the request context, and a scheduled flush has none. Without this the
+            // work would run as the default account rather than the stream's owner: the
+            // stream's Glue table would be missed and its objects would land in the wrong
+            // partition. The sidecar follows the same context, so both sides stay together.
+            RequestScopes.runAs(stream.getAccountId(),
+                    () -> deliverBuffer(streamName, stream, toFlush, since, checkpoint));
+        }
     }
 
     private void deliverBuffer(String streamName, DeliveryStreamDescription stream,
-                               List<byte[]> toFlush, Map<String, String> checkpoint) {
+                               List<byte[]> toFlush, Instant since, Map<String, String> checkpoint) {
         try {
             String bucket = resolveBucket(stream);
             S3Destination s3 = stream.s3Destination();
+            List<byte[]> records = toFlush;
+            if (s3 != null && s3.isProcessingEnabled()) {
+                ensureBucket(bucket);
+                FirehoseLambdaTransformer.Outcome transformed =
+                        lambdaTransformer.transform(stream, bucket, records, clock.instant());
+                LOG.infov("Transformed {0} records from stream {1} ({2} dropped, {3} failed)",
+                        records.size(), streamName, transformed.droppedRecords(), transformed.failedRecords());
+                records = transformed.records();
+                if (records.isEmpty()) {
+                    // Nothing survived the transform. The batch is accounted for, dropped
+                    // records deliberately leaving no trace and failed ones already in the
+                    // error output, so the source may advance past it.
+                    commitSourceIterators(streamName, checkpoint);
+                    return;
+                }
+            }
             if (s3 != null && s3.isDataFormatConversionEnabled()) {
                 ensureBucket(bucket);
                 FirehoseParquetConverter.Outcome outcome =
-                        parquetConverter.deliver(stream, bucket, toFlush, clock.instant());
+                        parquetConverter.deliver(stream, bucket, records, clock.instant());
                 LOG.infov("Converted {0} records ({1} failed) from stream {2} to s3://{3}/{4}",
                         outcome.convertedRecords(), outcome.failedRecords(), streamName, bucket,
                         outcome.dataKey() != null ? outcome.dataKey() : outcome.errorKey());
@@ -917,7 +930,7 @@ public class FirehoseService implements ResourceProvider {
             // (verified: three "abc" records arrive as the 9 bytes "abcabcabc").
             // See the deviation noted in docs/services/firehose.md.
             ByteArrayOutputStream payload = new ByteArrayOutputStream();
-            for (byte[] data : toFlush) {
+            for (byte[] data : records) {
                 payload.writeBytes(data);
                 if (data.length > 0 && data[data.length - 1] != '\n') {
                     payload.write('\n');
@@ -928,14 +941,38 @@ public class FirehoseService implements ResourceProvider {
             s3Service.putObject(bucket, key, body, "application/octet-stream", Map.of(),
                     new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
             LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3} ({4})",
-                    toFlush.size(), streamName, bucket, key, compression.wireValue());
+                    records.size(), streamName, bucket, key, compression.wireValue());
             // Only now: the records these iterators were read past are durable.
             commitSourceIterators(streamName, checkpoint);
         } catch (Exception e) {
-            LOG.errorv("Failed to flush Firehose stream {0}: {1}", streamName, e.getMessage());
-            // checkpoint is deliberately neither committed nor put back. The durable
-            // checkpoint stays where it was, so the next poll reads these records again
-            // and this failed delivery repairs itself.
+            LOG.errorv("Failed to flush Firehose stream {0}; keeping {1} records buffered for retry: {2}",
+                    streamName, toFlush.size(), e.getMessage());
+            restoreFailedFlush(streamName, toFlush, since, checkpoint);
+        }
+    }
+
+    private void restoreFailedFlush(String streamName, List<byte[]> toFlush, Instant since,
+                                    Map<String, String> checkpoint) {
+        List<byte[]> buffer = buffers.get(streamName);
+        if (buffer != null) {
+            synchronized (buffer) {
+                List<byte[]> restored = new ArrayList<>(toFlush);
+                restored.addAll(buffer);
+                buffer.clear();
+                buffer.addAll(restored);
+                // The restored batch is the oldest data in the buffer again, so the buffering
+                // window starts where it did before the failed flush, not at a record that
+                // arrived while the write was in flight.
+                bufferSince.put(streamName, since != null ? since : clock.instant());
+                if (checkpoint != null) {
+                    Map<String, String> pending = new LinkedHashMap<>(checkpoint);
+                    Map<String, String> concurrent = pendingSourceIterators.get(streamName);
+                    if (concurrent != null) {
+                        pending.putAll(concurrent);
+                    }
+                    pendingSourceIterators.put(streamName, Collections.unmodifiableMap(pending));
+                }
+            }
         }
     }
 

@@ -260,12 +260,13 @@ public class ApiGatewayService {
 
         api.setEndpointConfiguration(endpointConfiguration);
 
-        apiStore.put(apiKey(region, api.getId()), api);
-
         // Create root resource "/"
         ApiGatewayResource root = new ApiGatewayResource();
         root.setId(shortId(8));
         root.setPath("/");
+        api.setRootResourceId(root.getId());
+
+        apiStore.put(apiKey(region, api.getId()), api);
         resourceStore.put(resourceKey(region, api.getId(), root.getId()), root);
 
         LOG.infov("Created REST API: {0} ({1}) in {2}", name, api.getId(), region);
@@ -315,25 +316,18 @@ public class ApiGatewayService {
         return resourceStore.scan(k -> k.startsWith(prefix));
     }
 
-    /**
-     * The id of the resource at "/", or empty if there is no API to read it from.
-     * <p>
-     * ListRestApis renders a snapshot of the APIs and resolves this per API afterwards, so an
-     * API deleted in between is already gone by the time its root is looked up. That must cost
-     * the caller the one member rather than failing the whole listing, which is why a missing
-     * API is empty here instead of a not-found. Every other failure still propagates.
-     */
+    /** The root resource id, with a resource-store fallback for data persisted before it was stored on the API. */
     public Optional<String> findRootResourceId(String region, String apiId) {
-        List<ApiGatewayResource> resources;
-        try {
-            resources = getResources(region, apiId);
-        } catch (AwsException e) {
-            if ("NotFoundException".equals(e.getErrorCode())) {
-                return Optional.empty();
-            }
-            throw e;
+        Optional<RestApi> api = apiStore.get(apiKey(region, apiId));
+        if (api.isEmpty()) {
+            return Optional.empty();
         }
-        return resources.stream()
+        if (api.get().getRootResourceId() != null) {
+            return Optional.of(api.get().getRootResourceId());
+        }
+
+        String prefix = region + "::" + apiId + "::";
+        return resourceStore.scan(k -> k.startsWith(prefix)).stream()
                 .filter(r -> "/".equals(r.getPath()))
                 .map(ApiGatewayResource::getId)
                 .findFirst();
@@ -738,7 +732,11 @@ public class ApiGatewayService {
             String prefix = path.substring(1, path.length() - suffix.length());
             int lastSlash = prefix.lastIndexOf('/');
             if (lastSlash < 0) return;
-            String resourcePath = prefix.substring(0, lastSlash);
+            // AWS escapes the resource path's slashes as ~1 in the patch path ("/~1pets/GET/...")
+            // but reports the setting keyed by the plain path ("pets/GET"), so normalise both the
+            // escaped and unescaped spellings onto that one key.
+            String resourcePath = unescapeJsonPointer(prefix.substring(0, lastSlash));
+            if (resourcePath.startsWith("/")) resourcePath = resourcePath.substring(1);
             String httpMethod = prefix.substring(lastSlash + 1);
             String methodKey = resourcePath + "/" + httpMethod;
 
@@ -747,6 +745,15 @@ public class ApiGatewayService {
             applyMethodSettingValue(setting, settingKey, value);
             return;
         }
+    }
+
+    /**
+     * Reverses RFC 6901 JSON Pointer escaping: {@code ~1} is a literal {@code /} and {@code ~0} a
+     * literal {@code ~}. The order matters: {@code ~1} must be decoded first so that {@code ~01}
+     * (an escaped literal "~1") is not turned into a slash.
+     */
+    static String unescapeJsonPointer(String segment) {
+        return segment.replace("~1", "/").replace("~0", "~");
     }
 
     private void applyMethodSettingValue(MethodSetting setting, String settingKey, String value) {
@@ -2002,9 +2009,9 @@ public class ApiGatewayService {
     }
 
     public void tagResource(String region, String apiId, Map<String, String> tags) {
-        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
         RestApi api = getRestApi(region, apiId);
-        api.getTags().putAll(tags);
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags, apiId);
+        api.getTags().putAll(ReservedTags.stripApiGatewayReservedTags(tags));
         apiStore.put(apiKey(region, apiId), api);
     }
 

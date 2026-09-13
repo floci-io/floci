@@ -30,6 +30,7 @@ public class CodePipelineExecution {
     private List<Map<String, String>> variables = new ArrayList<>();
     private Map<String, String> trigger = new LinkedHashMap<>();
     private List<ActionExecution> actionExecutions = new ArrayList<>();
+    private Map<String, String> stageExecutionStatuses = new LinkedHashMap<>();
     private String currentStage;
     private boolean stopRequested;
     private boolean abandon;
@@ -161,6 +162,15 @@ public class CodePipelineExecution {
 
     public void setActionExecutions(List<ActionExecution> actionExecutions) {
         this.actionExecutions = actionExecutions;
+    }
+
+    public Map<String, String> getStageExecutionStatuses() {
+        return stageExecutionStatuses;
+    }
+
+    public void setStageExecutionStatuses(Map<String, String> stageExecutionStatuses) {
+        this.stageExecutionStatuses = stageExecutionStatuses == null
+                ? new LinkedHashMap<>() : stageExecutionStatuses;
     }
 
     public String getCurrentStage() {

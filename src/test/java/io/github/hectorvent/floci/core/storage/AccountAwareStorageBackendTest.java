@@ -15,6 +15,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -217,6 +218,78 @@ class AccountAwareStorageBackendTest {
                 new AccountAwareStorageBackend.AccountEntry<>("123456789012", "us-east-1::api-a", "account-a"),
                 new AccountAwareStorageBackend.AccountEntry<>("000000000000", "us-east-1::legacy", "legacy")),
                 Set.copyOf(storage.scanAllAccountEntries(key -> key.startsWith("us-east-1::"))));
+    }
+
+    @Test
+    void migrateLegacyEntriesMovesGen0KeyAndDeletesExactSource() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("legacy", "owned");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        storage.migrateLegacyEntries("111111111111", "legacy"::equals,
+                value -> "us-east-1/" + value, "owned"::equals);
+
+        assertEquals("owned", raw.get("111111111111/us-east-1/owned").orElseThrow());
+        assertFalse(raw.get("legacy").isPresent());
+    }
+
+    @Test
+    void migrateLegacyEntriesMovesGen1KeyAndDeletesExactSource() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("111111111111/legacy", "owned");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        storage.migrateLegacyEntries("111111111111", "legacy"::equals,
+                value -> "us-east-1/" + value, "owned"::equals);
+
+        assertEquals("owned", raw.get("111111111111/us-east-1/owned").orElseThrow());
+        assertFalse(raw.get("111111111111/legacy").isPresent());
+    }
+
+    @Test
+    void migrateLegacyEntriesIsIdempotent() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("legacy", "owned");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        storage.migrateLegacyEntries("111111111111", "legacy"::equals,
+                value -> "us-east-1/" + value, "owned"::equals);
+        storage.migrateLegacyEntries("111111111111", "legacy"::equals,
+                value -> "us-east-1/" + value, "owned"::equals);
+
+        assertEquals(Set.of("111111111111/us-east-1/owned"), raw.keys());
+    }
+
+    @Test
+    void migrateLegacyEntriesLeavesNonOwnerUntouched() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("legacy", "foreign");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        storage.migrateLegacyEntries("111111111111", "legacy"::equals,
+                value -> "us-east-1/" + value, "owned"::equals);
+
+        assertEquals("foreign", raw.get("legacy").orElseThrow());
+        assertTrue(raw.get("111111111111/us-east-1/foreign").isEmpty());
+    }
+
+    @Test
+    void migrateLegacyEntriesDeletesSourceWhenDestinationAlreadyExists() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("111111111111/legacy", "stale");
+        raw.put("111111111111/us-east-1/current", "current");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        storage.migrateLegacyEntries("111111111111", "legacy"::equals,
+                value -> "us-east-1/current", "stale"::equals);
+
+        assertEquals("current", raw.get("111111111111/us-east-1/current").orElseThrow());
+        assertFalse(raw.get("111111111111/legacy").isPresent());
     }
 
     /**

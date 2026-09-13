@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.athena.model.QueryExecution;
 import io.github.hectorvent.floci.services.athena.model.QueryExecutionContext;
 import io.github.hectorvent.floci.services.athena.model.ResultConfiguration;
 import io.github.hectorvent.floci.services.athena.model.ResultSet;
+import io.github.hectorvent.floci.services.athena.model.UpdateWorkGroupRequest;
 import io.github.hectorvent.floci.services.athena.model.WorkGroupTag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -76,6 +77,11 @@ public class AthenaJsonHandler {
             case "CreateWorkGroup" -> {
                 CreateWorkGroupRequest createRequest = mapper.treeToValue(request, CreateWorkGroupRequest.class);
                 athenaService.createWorkGroup(createRequest, region);
+                yield Response.ok(Map.of()).build();
+            }
+            case "UpdateWorkGroup" -> {
+                UpdateWorkGroupRequest updateRequest = mapper.treeToValue(request, UpdateWorkGroupRequest.class);
+                athenaService.updateWorkGroup(updateRequest, region);
                 yield Response.ok(Map.of()).build();
             }
             case "ListDataCatalogs" ->

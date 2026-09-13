@@ -234,6 +234,63 @@ class SigV4ValidatorTest {
     }
 
     @Test
+    void validateAcceptsTokenSignedWithStsSessionCredentials() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "sts-generated-secret-key";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(accessKeyId, secretAccessKey);
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01", "default", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900, "session-token");
+
+        assertTrue(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
+    void validateRejectsStsCredentialWithoutIssuedSessionToken() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "sts-generated-secret-key";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(accessKeyId, secretAccessKey);
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01", "default", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900);
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
+    void validateRejectsStsCredentialWithMismatchedSessionToken() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "sts-generated-secret-key";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(accessKeyId, secretAccessKey);
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01", "default", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900, "wrong-session-token");
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
+    void validateRejectsExpiredStsCredentialEvenWithMatchingSessionToken() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "sts-generated-secret-key";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
+                accessKeyId, secretAccessKey, "session-token", Instant.now().minusSeconds(1));
+        SigV4Validator validator = new SigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01", "default", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900, "session-token");
+
+        assertFalse(validator.validate(token, "cache-cluster-01", "default"));
+    }
+
+    @Test
     void validateRejectsTokenSelfSignedWithUnregisteredAccessKeyAsSecret() throws Exception {
         // Only "AKIDCACHE" is registered; the attacker picks an arbitrary, unregistered
         // access key and signs using that same access key as the secret. If the validator

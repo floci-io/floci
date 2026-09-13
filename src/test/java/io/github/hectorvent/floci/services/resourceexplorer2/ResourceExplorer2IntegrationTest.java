@@ -427,6 +427,19 @@ class ResourceExplorer2IntegrationTest {
         }
 
         @Test
+        void listResourcesInvalidNextTokenReturnsValidationError() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("{\"NextToken\":\"!!!not-base64!!!\"}")
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        }
+
+        @Test
         void listResourcesInvalidFilterReturns400() {
             given()
                 .header("Authorization", AUTH)

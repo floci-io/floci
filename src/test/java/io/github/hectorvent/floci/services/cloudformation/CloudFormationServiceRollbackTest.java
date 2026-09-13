@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,6 +48,7 @@ class CloudFormationServiceRollbackTest {
                 provisioner,
                 mock(S3Service.class),
                 mock(SsmService.class),
+                mock(CfnDynamicReferences.class),
                 new ObjectMapper(),
                 config,
                 mock(RegionResolver.class),

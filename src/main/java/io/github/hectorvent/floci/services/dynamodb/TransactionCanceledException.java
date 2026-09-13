@@ -7,7 +7,11 @@ import java.util.List;
 
 public class TransactionCanceledException extends AwsException {
 
-    public record CancellationReason(String code, JsonNode item) {}
+    public record CancellationReason(String code, JsonNode item, String message) {
+        public CancellationReason(String code, JsonNode item) {
+            this(code, item, null);
+        }
+    }
 
     private final List<CancellationReason> cancellationReasons;
 

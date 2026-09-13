@@ -707,6 +707,41 @@ class CloudHsmV2IntegrationTest {
 
     @Test
     @Order(54)
+    void resourcePoliciesRejectClustersBecauseAwsSupportsOnlyBackups() {
+        String clusterId = given()
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateCluster")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "HsmType": "hsm1.medium",
+                    "SubnetIds": ["subnet-policy01"]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("Cluster.ClusterId");
+        String clusterArn = "arn:aws:cloudhsm:us-east-1:000000000000:cluster/" + clusterId;
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutResourcePolicy")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "ResourceArn": "%s",
+                    "Policy": "{}"
+                }
+                """.formatted(clusterArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("CloudHsmInvalidRequestException"));
+    }
+
+    @Test
+    @Order(55)
     void deleteClusterWithHsmsFails() {
         // Create a cluster, add an HSM, then try to delete the cluster
         String tempClusterId = given()
@@ -872,6 +907,32 @@ class CloudHsmV2IntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("CloudHsmResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(55)
+    void tagResourceEnforcesFiftyTagTotalLimit() {
+        String clusterId = given()
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateCluster")
+            .contentType(CONTENT_TYPE)
+            .body("{\"HsmType\":\"hsm1.medium\",\"SubnetIds\":[\"subnet-abcdef99\"]}")
+        .when().post("/")
+        .then().statusCode(200).extract().jsonPath().getString("Cluster.ClusterId");
+
+        StringBuilder firstTags = new StringBuilder("[");
+        for (int i = 0; i < 50; i++) {
+            if (i > 0) firstTags.append(',');
+            firstTags.append("{\"Key\":\"k").append(i).append("\",\"Value\":\"v\"}");
+        }
+        firstTags.append(']');
+        given().header("X-Amz-Target", TARGET_PREFIX + "TagResource").contentType(CONTENT_TYPE)
+            .body("{\"ResourceId\":\"" + clusterId + "\",\"TagList\":" + firstTags + "}")
+        .when().post("/").then().statusCode(200);
+
+        given().header("X-Amz-Target", TARGET_PREFIX + "TagResource").contentType(CONTENT_TYPE)
+            .body("{\"ResourceId\":\"" + clusterId + "\",\"TagList\":[{\"Key\":\"overflow\",\"Value\":\"v\"}]}")
+        .when().post("/").then().statusCode(400)
+            .body("__type", equalTo("CloudHsmResourceLimitExceededException"));
     }
 
     /** Escapes a PEM string as a JSON string value. */

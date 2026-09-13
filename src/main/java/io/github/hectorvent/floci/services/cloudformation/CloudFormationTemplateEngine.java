@@ -14,6 +14,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
 /**
@@ -36,6 +37,7 @@ public class CloudFormationTemplateEngine {
     private final Map<String, JsonNode> mappings;
     private final ObjectMapper objectMapper;
     private final Function<String, String> importValueResolver;
+    private final UnaryOperator<String> dynamicReferenceResolver;
 
     CloudFormationTemplateEngine(String accountId, String region, String stackName, String stackId,
                                  Map<String, String> parameters,
@@ -45,6 +47,29 @@ public class CloudFormationTemplateEngine {
                                  Map<String, JsonNode> mappings,
                                  ObjectMapper objectMapper,
                                  Function<String, String> importValueResolver) {
+        this(accountId, region, stackName, stackId, parameters, physicalIds, resourceAttributes,
+                conditions, mappings, objectMapper, importValueResolver, null);
+    }
+
+    /**
+     * @param dynamicReferenceResolver resolves a value that may contain CloudFormation dynamic
+     *                                 references ({@code {{resolve:ssm:...}}},
+     *                                 {@code {{resolve:secretsmanager:...}}}) against the live
+     *                                 services, leaving a value with no dynamic reference syntax
+     *                                 untouched. {@code null} skips this stage entirely, which
+     *                                 keeps template values that only ever contain intrinsics
+     *                                 (tests, Cloud Control desired-state resolution) free of the
+     *                                 dependency.
+     */
+    CloudFormationTemplateEngine(String accountId, String region, String stackName, String stackId,
+                                 Map<String, String> parameters,
+                                 Map<String, String> physicalIds,
+                                 Map<String, Map<String, String>> resourceAttributes,
+                                 Map<String, Boolean> conditions,
+                                 Map<String, JsonNode> mappings,
+                                 ObjectMapper objectMapper,
+                                 Function<String, String> importValueResolver,
+                                 UnaryOperator<String> dynamicReferenceResolver) {
         this.accountId = accountId;
         this.region = region;
         this.stackName = stackName;
@@ -56,9 +81,33 @@ public class CloudFormationTemplateEngine {
         this.mappings = mappings;
         this.objectMapper = objectMapper;
         this.importValueResolver = importValueResolver;
+        this.dynamicReferenceResolver = dynamicReferenceResolver;
     }
 
+    /**
+     * Resolves a property value, including CloudFormation dynamic reference syntax
+     * ({@code {{resolve:ssm:...}}}, {@code {{resolve:secretsmanager:...}}}) in the result, the same
+     * way {@link #resolveNode} does. This is the entry point every scalar-property resolution in
+     * this codebase goes through, directly or via {@link #resolveNode}, so a dynamic reference is
+     * substituted regardless of which of the two a caller uses.
+     */
     public String resolve(JsonNode node) {
+        return resolveDynamicReferences(resolveIntrinsic(node)).asText();
+    }
+
+    /**
+     * Resolves intrinsics only, leaving any {@code {{resolve:...}}} dynamic reference syntax in the
+     * result untouched. For the one property family where {@code ssm-secure} is a valid dynamic
+     * reference service (RDS {@code MasterUsername}/{@code MasterUserPassword}): {@link #resolve}
+     * rejects {@code ssm-secure} outright since it is invalid everywhere else, so that property has
+     * to skip the general dynamic-reference stage and resolve it separately, with the permission
+     * only that property is allowed.
+     */
+    public String resolveWithoutDynamicReferences(JsonNode node) {
+        return resolveIntrinsic(node);
+    }
+
+    private String resolveIntrinsic(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return "";
         }
@@ -116,7 +165,10 @@ public class CloudFormationTemplateEngine {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return node;
         }
-        if (node.isTextual() || node.isNumber() || node.isBoolean()) {
+        if (node.isTextual()) {
+            return resolveDynamicReferences(node.textValue());
+        }
+        if (node.isNumber() || node.isBoolean()) {
             return node;
         }
         if (node.isObject()) {
@@ -154,6 +206,22 @@ public class CloudFormationTemplateEngine {
             return arr;
         }
         return node;
+    }
+
+    /**
+     * Resolves a value against {@link #dynamicReferenceResolver} when it carries CloudFormation
+     * dynamic reference syntax ({@code {{resolve:ssm:...}}}, {@code {{resolve:secretsmanager:...}}}).
+     * CloudFormation substitutes these for any string property in a template, not only the RDS
+     * master-credential properties that first needed them (see
+     * <a href="https://github.com/floci-io/floci/issues/2213">#2213</a>), so {@link #resolveNode}
+     * applies this to every textual result: a literal string carrying the syntax outright, and the
+     * text an intrinsic function (e.g. {@code Fn::Sub}) produces.
+     */
+    private TextNode resolveDynamicReferences(String value) {
+        if (dynamicReferenceResolver == null || value == null || !value.contains("{{resolve:")) {
+            return TextNode.valueOf(value);
+        }
+        return TextNode.valueOf(dynamicReferenceResolver.apply(value));
     }
 
     /**

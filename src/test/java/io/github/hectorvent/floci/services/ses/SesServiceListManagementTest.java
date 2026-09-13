@@ -62,15 +62,19 @@ class SesServiceListManagementTest {
     }
 
     private void send(List<String> to, String topicName) {
-        service.sendEmail(FROM, to, null, null, null, "Subject", "body", null,
+        service.sendEmail(FROM, to, null, null, null, null, "Subject", "body", null,
                 null, List.of(), List.of(), new ListManagementOptions(LIST, topicName), REGION);
     }
 
-    @SuppressWarnings("unchecked")
-    private List<String> capturedRelayTo() {
-        ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass(List.class);
-        verify(smtpRelay).relay(any(), captor.capture(), any(), any(), any(), any(), any(), any(), any());
+    private SmtpRelay.RelayMessage capturedRelay() {
+        ArgumentCaptor<SmtpRelay.RelayMessage> captor =
+                ArgumentCaptor.forClass(SmtpRelay.RelayMessage.class);
+        verify(smtpRelay).relay(captor.capture());
         return captor.getValue();
+    }
+
+    private List<String> capturedRelayTo() {
+        return capturedRelay().to();
     }
 
     @Test
@@ -96,7 +100,7 @@ class SesServiceListManagementTest {
     void topicDefaultOptOut_suppressesContactWithNoExplicitPreference() {
         // Promos defaults OPT_OUT and noprefs has no explicit Promos preference -> suppressed.
         send(List.of("noprefs@example.com"), "Promos");
-        verify(smtpRelay, never()).relay(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(smtpRelay, never()).relay(any(SmtpRelay.RelayMessage.class));
     }
 
     @Test
@@ -116,7 +120,7 @@ class SesServiceListManagementTest {
     @Test
     void nonExistentContactList_failsTheSend() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.sendEmail(FROM, List.of("sportsin@example.com"), null, null, null,
+                service.sendEmail(FROM, List.of("sportsin@example.com"), null, null, null, null,
                         "Subject", "body", null, null, List.of(), List.of(),
                         new ListManagementOptions("ghost-list", null), REGION));
         assertEquals(404, ex.getHttpStatus());
@@ -126,7 +130,7 @@ class SesServiceListManagementTest {
     void unknownTopic_failsTheSend() {
         // A TopicName not defined on the list is rejected rather than silently skipping suppression.
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.sendEmail(FROM, List.of("sportsin@example.com"), null, null, null,
+                service.sendEmail(FROM, List.of("sportsin@example.com"), null, null, null, null,
                         "Subject", "body", null, null, List.of(), List.of(),
                         new ListManagementOptions(LIST, "GhostTopic"), REGION));
         assertEquals(400, ex.getHttpStatus());
@@ -136,7 +140,7 @@ class SesServiceListManagementTest {
     void noListManagementOptions_leavesRecipientsUntouched() {
         // Without ListManagementOptions the contact list is never consulted: an unsubscribed contact
         // is not suppressed and no contact is auto-created.
-        service.sendEmail(FROM, List.of("unsub@example.com"), null, null, null,
+        service.sendEmail(FROM, List.of("unsub@example.com"), null, null, null, null,
                 "Subject", "body", null, null, List.of(), List.of(), null, REGION);
         assertEquals(List.of("unsub@example.com"), capturedRelayTo());
     }
@@ -144,7 +148,7 @@ class SesServiceListManagementTest {
     @Test
     void singleRecipient_replacesUnsubscribePlaceholder() {
         // newbie is not a contact (auto-created, Sports defaults OPT_IN) so the send reaches the relay.
-        service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null,
+        service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null, null,
                 "Subject", "text", "<p>Unsub: {{amazonSESUnsubscribeUrl}}</p>",
                 null, List.of(), List.of(), new ListManagementOptions(LIST, "Sports"), REGION);
         String html = capturedRelayBodyHtml();
@@ -157,7 +161,7 @@ class SesServiceListManagementTest {
     @Test
     void multiRecipient_doesNotReplacePlaceholder() {
         service.sendEmail(FROM, List.of("newbie@example.com", "sportsin@example.com"), null, null, null,
-                "Subject", "text", "<p>Unsub: {{amazonSESUnsubscribeUrl}}</p>",
+                null, "Subject", "text", "<p>Unsub: {{amazonSESUnsubscribeUrl}}</p>",
                 null, List.of(), List.of(), new ListManagementOptions(LIST, "Sports"), REGION);
         assertTrue(capturedRelayBodyHtml().contains("{{amazonSESUnsubscribeUrl}}"),
                 "multi-recipient send must not inject the unsubscribe link");
@@ -199,23 +203,17 @@ class SesServiceListManagementTest {
         return contactStore.get("contact::" + REGION + "::" + LIST + "::" + email).orElseThrow();
     }
 
-    @SuppressWarnings("unchecked")
     private String capturedRelayBodyHtml() {
-        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(smtpRelay).relay(any(), any(), any(), any(), any(), any(), any(), captor.capture(), any());
-        return captor.getValue();
+        return capturedRelay().bodyHtml();
     }
 
-    @SuppressWarnings("unchecked")
     private List<MessageHeader> capturedRelayHeaders() {
-        ArgumentCaptor<List<MessageHeader>> captor = ArgumentCaptor.forClass(List.class);
-        verify(smtpRelay).relay(any(), any(), any(), any(), any(), any(), any(), any(), captor.capture());
-        return captor.getValue();
+        return capturedRelay().headers();
     }
 
     @Test
     void singleRecipient_addsListUnsubscribeHeadersToRelay() {
-        service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null,
+        service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null, null,
                 "Subject", "text", "<p>x</p>", null, List.of(), List.of(),
                 new ListManagementOptions(LIST, "Sports"), REGION);
         List<MessageHeader> headers = capturedRelayHeaders();
@@ -227,7 +225,7 @@ class SesServiceListManagementTest {
 
     @Test
     void callerSuppliedUnsubscribeHeader_isOverriddenNotDuplicated() {
-        service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null,
+        service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null, null,
                 "Subject", "text", "<p>x</p>", null, List.of(),
                 List.of(new MessageHeader("List-Unsubscribe", "<https://caller.example/u>")),
                 new ListManagementOptions(LIST, "Sports"), REGION);

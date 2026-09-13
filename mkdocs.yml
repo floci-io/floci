@@ -107,6 +107,7 @@ nav:
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
     - Cognito Identity: services/cognitoidentity.md
+    - Global Accelerator: services/globalaccelerator.md
     - KMS: services/kms.md
     - CloudHSM v2: services/cloudhsmv2.md
     - Kinesis: services/kinesis.md
@@ -153,10 +154,12 @@ nav:
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
+    - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
     - Managed Prometheus (AMP): services/managed-prometheus.md
     - GuardDuty: services/guardduty.md
     - Connect: services/connect.md
+    - AppIntegrations: services/appintegrations.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
@@ -168,6 +171,7 @@ nav:
     - EC2: services/ec2.md
     - Lightsail: services/lightsail.md
     - AppConfig: services/appconfig.md
+    - Bedrock: services/bedrock.md
     - Bedrock Runtime: services/bedrock-runtime.md
     - Bedrock AgentCore: services/bedrock-agentcore.md
     - ELB v2: services/elb.md
@@ -192,6 +196,7 @@ nav:
     - AWS IoT Core: services/iot.md
     - AppSync: services/appsync.md
     - Transfer Family: services/transfer.md
+    - DataSync: services/datasync.md
     - AWS Config: services/config.md
     - EMR: services/emr.md
     - EMR Serverless: services/emr-serverless.md
@@ -205,6 +210,7 @@ nav:
     - Pricing: services/pricing.md
     - Cost Explorer: services/ce.md
     - Cost and Usage Reports: services/cur.md
+    - BCM Pricing Calculator: services/bcm-pricing-calculator.md
     - BCM Data Exports: services/bcm-data-exports.md
   - Testcontainers:
     - Overview: testcontainers/index.md

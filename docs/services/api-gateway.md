@@ -186,7 +186,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 - Client Certificates (5 operations)
 - `GetExport` / `ImportDocumentationParts`
 
-The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports `AWS_PROXY` (Lambda proxy), `AWS` (Lambda with VTL request/response templates), and `MOCK` integrations; other integration types return an error.
+The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports `AWS_PROXY` (Lambda proxy), `AWS` (Lambda with VTL request/response templates), and `MOCK` integrations; other integration types return an error. A `MOCK` integration renders its request template and uses the `statusCode` it produces to pick the integration response, exactly as AWS does: the first response whose `selectionPattern` matches wins, otherwise the response without a pattern (the default) answers. This is what makes CORS preflights declared with a `204` response (CDK's `addCorsPreflight`) carry their `Access-Control-*` headers.
 
 ### Examples
 

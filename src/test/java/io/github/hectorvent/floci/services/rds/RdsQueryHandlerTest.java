@@ -56,6 +56,39 @@ class RdsQueryHandlerTest {
         handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
     }
 
+    @Test
+    void describeEvents_reconcilesOnlyTheRequestedDbInstance() {
+        DbInstance requested = makeInstance("requested");
+        when(service.listDbInstances("requested", null)).thenReturn(List.of(requested));
+        when(service.describeEvents("requested", "db-instance", null, null, null))
+                .thenReturn(List.of());
+        MultivaluedMap<String, String> p = params();
+        p.add("SourceIdentifier", "requested");
+        p.add("SourceType", "db-instance");
+
+        Response response = handler.handle("DescribeEvents", p);
+
+        assertEquals(200, response.getStatus());
+        verify(service).listDbInstances("requested", null);
+        verify(service).refreshDbInstanceRuntimeHealth(requested);
+        verify(service, never()).listDbInstances(null, null);
+    }
+
+    @Test
+    void describeEvents_doesNotReconcileInstancesForAnotherSourceType() {
+        when(service.describeEvents("cluster", "db-cluster", null, null, null))
+                .thenReturn(List.of());
+        MultivaluedMap<String, String> p = params();
+        p.add("SourceIdentifier", "cluster");
+        p.add("SourceType", "db-cluster");
+
+        Response response = handler.handle("DescribeEvents", p);
+
+        assertEquals(200, response.getStatus());
+        verify(service, never()).listDbInstances(any(), any());
+        verify(service, never()).refreshDbInstanceRuntimeHealth(any());
+    }
+
     // ──────────────────────────── DBInstances XML tag ────────────────────────────
 
     @Test
@@ -293,7 +326,7 @@ class RdsQueryHandlerTest {
         when(service.createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1")))
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false)))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -313,14 +346,15 @@ class RdsQueryHandlerTest {
         verify(service).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"));
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false));
     }
 
     @Test
     void createDbClusterWithoutManagedSecretOmitsMasterUserSecretElement() {
         DbCluster cluster = makeCluster("mycluster");
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any(), any(), any(), any(), eq(false), isNull()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), eq(false), isNull(),
+                any(), anyBoolean()))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();

@@ -4,8 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.batch.BatchService;
+import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.eventbridge.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
+import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
+import io.github.hectorvent.floci.services.eventbridge.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
@@ -34,6 +39,7 @@ class EventBridgeInvokerTest {
     private BatchService batchService;
     private FirehoseService firehoseService;
     private EventBridgeService eventBridgeService;
+    private EcsService ecsService;
     private RegionResolver regionResolver;
 
     @BeforeEach
@@ -44,6 +50,7 @@ class EventBridgeInvokerTest {
         batchService = mock(BatchService.class);
         firehoseService = mock(FirehoseService.class);
         eventBridgeService = mock(EventBridgeService.class);
+        ecsService = mock(EcsService.class);
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         when(eventBridgeService.putEvents(anyList(), anyString(), any()))
@@ -55,6 +62,8 @@ class EventBridgeInvokerTest {
                 batchService,
                 firehoseService,
                 eventBridgeService,
+                ecsService,
+                new io.github.hectorvent.floci.services.ecs.EcsJsonHandler(ecsService, new ObjectMapper()),
                 regionResolver,
                 new ObjectMapper(),
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
@@ -155,6 +164,138 @@ class EventBridgeInvokerTest {
                 isNull(),
                 eq("us-west-2")
         );
+    }
+
+    @Test
+    void invokeTarget_ecsClusterTarget_runsTaskWithEcsParameters() {
+        Target target = new Target("id1",
+                "arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster", null, null);
+        EcsParameters ecsParameters = new EcsParameters();
+        ecsParameters.setTaskDefinitionArn("arn:aws:ecs:us-west-2:000000000000:task-definition/my-task:3");
+        ecsParameters.setTaskCount(2);
+        ecsParameters.setLaunchType("FARGATE");
+        ecsParameters.setGroup("my-group");
+        AwsVpcConfiguration awsVpcConfiguration = new AwsVpcConfiguration();
+        awsVpcConfiguration.setSubnets(List.of("subnet-1", "subnet-2"));
+        awsVpcConfiguration.setSecurityGroups(List.of("sg-1"));
+        awsVpcConfiguration.setAssignPublicIp("ENABLED");
+        NetworkConfiguration networkConfiguration = new NetworkConfiguration();
+        networkConfiguration.setAwsvpcConfiguration(awsVpcConfiguration);
+        ecsParameters.setNetworkConfiguration(networkConfiguration);
+        target.setEcsParameters(ecsParameters);
+
+        invoker.invokeTarget(target, "{\"detail\":{}}", "us-east-1");
+
+        ArgumentCaptor<io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration> networkCaptor =
+                ArgumentCaptor.forClass(io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration.class);
+        verify(ecsService).runTask(
+                eq("arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster"),
+                eq("arn:aws:ecs:us-west-2:000000000000:task-definition/my-task:3"),
+                eq(2),
+                eq(LaunchType.FARGATE),
+                isNull(),
+                eq("my-group"),
+                eq(List.of()),
+                networkCaptor.capture(),
+                eq("us-west-2")
+        );
+        assertEquals(List.of("subnet-1", "subnet-2"),
+                networkCaptor.getValue().getAwsvpcConfiguration().getSubnets());
+        assertEquals(List.of("sg-1"),
+                networkCaptor.getValue().getAwsvpcConfiguration().getSecurityGroups());
+        assertEquals("ENABLED", networkCaptor.getValue().getAwsvpcConfiguration().getAssignPublicIp());
+    }
+
+    @Test
+    void invokeTarget_ecsClusterTarget_defaultsTaskCountAndGroupWhenAbsent() {
+        Target target = new Target("id1",
+                "arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster", null, null);
+        EcsParameters ecsParameters = new EcsParameters();
+        ecsParameters.setTaskDefinitionArn("arn:aws:ecs:us-west-2:000000000000:task-definition/my-task:1");
+        target.setEcsParameters(ecsParameters);
+
+        invoker.invokeTarget(target, "{\"detail\":{}}", "us-east-1");
+
+        verify(ecsService).runTask(
+                eq("arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster"),
+                eq("arn:aws:ecs:us-west-2:000000000000:task-definition/my-task:1"),
+                eq(1),
+                isNull(),
+                isNull(),
+                eq("eventbridge"),
+                eq(List.of()),
+                isNull(),
+                eq("us-west-2")
+        );
+    }
+
+    @Test
+    void invokeTarget_ecsClusterTargetWithInputTransformer_passesThroughContainerOverrides() {
+        Target target = new Target("id1",
+                "arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster", null, null);
+        EcsParameters ecsParameters = new EcsParameters();
+        ecsParameters.setTaskDefinitionArn("arn:aws:ecs:us-west-2:000000000000:task-definition/my-task:1");
+        target.setEcsParameters(ecsParameters);
+        target.setInputTransformer(new InputTransformer(
+                Map.of("orderId", "$.detail.orderId"),
+                "{\"containerOverrides\":[{\"name\":\"app\",\"command\":[\"process\",\"<orderId>\"],"
+                        + "\"environment\":[{\"name\":\"ORDER_ID\",\"value\":\"<orderId>\"}]}]}"));
+
+        invoker.invokeTarget(target, "{\"detail\":{\"orderId\":\"o-42\"}}", "us-east-1");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<io.github.hectorvent.floci.services.ecs.model.ContainerOverride>> overridesCaptor =
+                ArgumentCaptor.forClass(List.class);
+        verify(ecsService).runTask(
+                eq("arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster"),
+                eq("arn:aws:ecs:us-west-2:000000000000:task-definition/my-task:1"),
+                eq(1),
+                isNull(),
+                isNull(),
+                eq("eventbridge"),
+                overridesCaptor.capture(),
+                isNull(),
+                eq("us-west-2")
+        );
+        io.github.hectorvent.floci.services.ecs.model.ContainerOverride override = overridesCaptor.getValue().get(0);
+        assertEquals("app", override.getName());
+        assertEquals(List.of("process", "o-42"), override.getCommand());
+        assertEquals("ORDER_ID", override.getEnvironment().get(0).name());
+        assertEquals("o-42", override.getEnvironment().get(0).value());
+    }
+
+    @Test
+    void invokeTarget_ecsClusterTargetWithMalformedTransformedOutput_launchesWithoutOverrides() {
+        Target target = new Target("id1",
+                "arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster", null, null);
+        EcsParameters ecsParameters = new EcsParameters();
+        ecsParameters.setTaskDefinitionArn("arn:aws:ecs:us-west-2:000000000000:task-definition/my-task:1");
+        target.setEcsParameters(ecsParameters);
+        target.setInput("not-json");
+
+        assertDoesNotThrow(() -> invoker.invokeTarget(target, "{\"detail\":{}}", "us-east-1"));
+
+        verify(ecsService).runTask(
+                eq("arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster"),
+                eq("arn:aws:ecs:us-west-2:000000000000:task-definition/my-task:1"),
+                eq(1),
+                isNull(),
+                isNull(),
+                eq("eventbridge"),
+                eq(List.of()),
+                isNull(),
+                eq("us-west-2")
+        );
+    }
+
+    @Test
+    void invokeTarget_ecsClusterTargetWithoutEcsParameters_skipsWithoutThrowing() {
+        Target target = new Target("id1",
+                "arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster", null, null);
+
+        assertDoesNotThrow(() -> invoker.invokeTarget(target, "{\"detail\":{}}", "us-east-1"));
+
+        verify(ecsService, never()).runTask(any(), any(), anyInt(), any(), any(), any(), anyList(), any(), any());
     }
 
     @Test

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -18,6 +19,7 @@ import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
 import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
+import io.github.hectorvent.floci.services.s3.model.ObjectAnnotation;
 import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
 import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
@@ -93,6 +95,7 @@ public class S3Controller {
     private final AccountResolver accountResolver;
     private final RequestContext requestContext;
     private final IamService iamService;
+    private final IamEnforcementFilter iamEnforcementFilter;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
@@ -103,7 +106,8 @@ public class S3Controller {
                         CloudTrailService cloudTrailService,
                         AccountResolver accountResolver,
                         RequestContext requestContext,
-                        IamService iamService) {
+                        IamService iamService,
+                        IamEnforcementFilter iamEnforcementFilter) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
@@ -114,6 +118,7 @@ public class S3Controller {
         this.accountResolver = accountResolver;
         this.requestContext = requestContext;
         this.iamService = iamService;
+        this.iamEnforcementFilter = iamEnforcementFilter;
     }
 
     private void emitCloudTrailEvent(String eventName, String bucket, String key,
@@ -481,7 +486,7 @@ public class S3Controller {
     public Response listObjects(@PathParam("bucket") String bucket,
                                 @QueryParam("prefix") String prefix,
                                 @QueryParam("delimiter") String delimiter,
-                                @QueryParam("max-keys") Integer maxKeys,
+                                @QueryParam("max-keys") String maxKeys,
                                 @QueryParam("list-type") String listType,
                                 @QueryParam("continuation-token") String continuationToken,
                                 @QueryParam("start-after") String startAfter,
@@ -634,7 +639,7 @@ public class S3Controller {
 
             s3Service.authorizeListBucket(bucket, authorization);
 
-            int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
+            int max = resolveMaxKeys(maxKeys);
             boolean v1 = !"2".equals(listType);
             String effectiveStartAfter = v1 && marker != null ? marker : startAfter;
             String effectiveContinuationToken = v1 ? null : continuationToken;
@@ -749,6 +754,11 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-grant-read-acp"),
                         httpHeaders.getHeaderString("x-amz-grant-write-acp"));
                 return Response.ok().build();
+            }
+
+            if (hasQueryParam(uriInfo, "annotation")) {
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectAnnotation", authorization);
+                return handlePutObjectAnnotation(bucket, key, body, uriInfo, httpHeaders);
             }
 
             if (uploadId != null && partNumber != null) {
@@ -883,6 +893,17 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectTagging", authorization);
                 return handleGetObjectTagging(bucket, key);
+            }
+            if (hasQueryParam(uriInfo, "annotation")) {
+                String annotationNameParam = uriInfo.getQueryParameters().getFirst("annotationName");
+                // An empty annotationName is not a Get request for the empty name: it falls
+                // through to ListObjectAnnotations, matching the blank-name put semantics.
+                if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
+                    s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAnnotation", authorization);
+                    return handleGetObjectAnnotation(bucket, key, uriInfo, httpHeaders);
+                }
+                s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListObjectAnnotations", authorization);
+                return handleListObjectAnnotations(bucket, key, uriInfo);
             }
             if (hasQueryParam(uriInfo, "retention")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectRetention", authorization);
@@ -1105,6 +1126,19 @@ public class S3Controller {
                     return headOnlyResponse(websiteResponse);
                 }
             }
+            // HEAD honors the annotation subresource so a HEAD probe reports the same status and
+            // annotation metadata a GET would, instead of falling through to the object's headers.
+            if (hasQueryParam(uriInfo, "annotation")) {
+                String annotationNameParam = uriInfo.getQueryParameters().getFirst("annotationName");
+                // An empty annotationName is not a Get request for the empty name: it falls
+                // through to ListObjectAnnotations, matching the blank-name put semantics.
+                if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
+                    s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAnnotation", authorization);
+                    return headOnlyResponse(handleGetObjectAnnotation(bucket, key, uriInfo, httpHeaders));
+                }
+                s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListObjectAnnotations", authorization);
+                return headOnlyResponse(handleListObjectAnnotations(bucket, key, uriInfo));
+            }
             s3Service.authorizeGetObject(bucket, key, versionId, authorization);
 
             S3Object obj = s3Service.headObject(bucket, key, versionId);
@@ -1238,6 +1272,15 @@ public class S3Controller {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObjectTagging", authorization);
                 s3Service.deleteObjectTagging(bucket, key);
                 return Response.noContent().build();
+            }
+            if (hasQueryParam(uriInfo, "annotation")) {
+                boolean bypass = "true".equalsIgnoreCase(
+                        httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+                s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObjectAnnotation", authorization);
+                if (bypass) {
+                    s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
+                }
+                return handleDeleteObjectAnnotation(bucket, key, uriInfo, httpHeaders, bypass);
             }
             if (uploadId != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:AbortMultipartUpload", authorization);
@@ -1612,13 +1655,13 @@ public class S3Controller {
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
-    private Response handleListObjectVersions(String bucket, String prefix, String delimiter, Integer maxKeys,
+    private Response handleListObjectVersions(String bucket, String prefix, String delimiter, String maxKeys,
                                               String keyMarker, String versionIdMarker, String encodingType) {
         if (hasText(versionIdMarker) && !hasText(keyMarker)) {
             throw new AwsException("InvalidArgument",
                     "A version-id marker cannot be specified without a key marker.", 400);
         }
-        int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
+        int max = resolveMaxKeys(maxKeys);
         S3Service.ListVersionsResult result =
                 s3Service.listObjectVersions(bucket, prefix, delimiter, max, keyMarker, versionIdMarker);
         XmlBuilder xml = new XmlBuilder()
@@ -1740,13 +1783,27 @@ public class S3Controller {
                         new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
 
-            config.setEventBridgeEnabled(xml.contains("<EventBridgeConfiguration"));
+            config.setEventBridgeEnabled(parseEventBridgeConfiguration(xml));
 
             s3Service.putBucketNotificationConfiguration(bucket, config);
             return Response.ok().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    private static boolean parseEventBridgeConfiguration(String xml) {
+        if (!"NotificationConfiguration".equals(XmlParser.rootElementName(xml))) {
+            throw new AwsException("MalformedXML", "The XML you provided was not well-formed.", 400);
+        }
+        List<String> children = XmlParser.childElementNames(xml, "NotificationConfiguration");
+        long eventBridgeConfigurations = children.stream()
+                .filter("EventBridgeConfiguration"::equals)
+                .count();
+        if (eventBridgeConfigurations > 1) {
+            throw new AwsException("MalformedXML", "The XML you provided was not well-formed.", 400);
+        }
+        return eventBridgeConfigurations == 1;
     }
 
     private record ParsedNotificationGroup(String id, String arn, List<String> events,
@@ -1883,9 +1940,11 @@ public class S3Controller {
      * Format: hex-size;chunk-signature=sig\r\n data \r\n ... 0;chunk-signature=sig\r\n
      */
     private byte[] decodeAwsChunked(byte[] body, String contentEncoding, String contentSha256) {
-        boolean isAwsChunked = (contentEncoding != null && contentEncoding.contains("aws-chunked"))
+        boolean isAwsChunked = (contentEncoding != null
+                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked"))
                 || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".equals(contentSha256)
-                || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER".equals(contentSha256);
+                || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
+                || "STREAMING-UNSIGNED-PAYLOAD-TRAILER".equals(contentSha256);
         if (!isAwsChunked) {
             return body;
         }
@@ -2094,6 +2153,188 @@ public class S3Controller {
         }
         xml.end("TagSet").end("Tagging");
         return xml.build();
+    }
+
+    // --- Object Annotations ---
+
+    private Response handlePutObjectAnnotation(String bucket, String key, byte[] body,
+                                               UriInfo uriInfo, HttpHeaders httpHeaders) {
+        try {
+            // Strip aws-chunked framing when present, like the PutObject path this handler
+            // mirrors: a streaming-signed request otherwise persists its framing bytes as
+            // the annotation payload.
+            byte[] payload = decodeAwsChunked(body != null ? body : new byte[0],
+                    httpHeaders.getHeaderString("Content-Encoding"),
+                    httpHeaders.getHeaderString("x-amz-content-sha256"));
+            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            String algorithmHeader = getChecksumAlgorithm(httpHeaders);
+            ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(algorithmHeader);
+            validateChecksumHeaders(httpHeaders, payload, algorithmHeader);
+            validateContentMd5(httpHeaders, payload);
+            ObjectAnnotation annotation = s3Service.putObjectAnnotation(bucket, key, annotationName,
+                    versionId, payload, httpHeaders.getHeaderString("x-amz-object-if-match"), algorithm);
+            Response.ResponseBuilder response = Response.ok(putObjectAnnotationXml(annotation))
+                    .type(MediaType.APPLICATION_XML)
+                    .header("ETag", annotation.getETag());
+            if (annotation.getVersionId() != null) {
+                response.header("x-amz-object-version-id", annotation.getVersionId());
+            }
+            appendAnnotationChecksumHeaders(response, annotation);
+            appendAnnotationSseHeader(response, annotation);
+            emitCloudTrailEvent("PutObjectAnnotation", bucket, key, payload.length, 0L, null, null);
+            return response.build();
+        } catch (AwsException e) {
+            emitCloudTrailEvent("PutObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleGetObjectAnnotation(String bucket, String key,
+                                               UriInfo uriInfo, HttpHeaders httpHeaders) {
+        try {
+            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            ObjectAnnotation annotation = s3Service.getObjectAnnotation(bucket, key, annotationName, versionId);
+            byte[] payload = s3Service.readObjectAnnotationPayload(annotation);
+            Response.ResponseBuilder response = Response.ok((Object) payload)
+                    .type(MediaType.APPLICATION_OCTET_STREAM)
+                    .header("Content-Length", payload.length)
+                    .header("ETag", annotation.getETag())
+                    .header("Last-Modified", RFC_822.format(annotation.getLastModified()));
+            // No Accept-Ranges: range requests are not honored on annotation payloads.
+            if (annotation.getVersionId() != null) {
+                response.header("x-amz-object-version-id", annotation.getVersionId());
+            }
+            if ("ENABLED".equalsIgnoreCase(httpHeaders.getHeaderString("x-amz-checksum-mode"))) {
+                appendAnnotationChecksumHeaders(response, annotation);
+            }
+            appendAnnotationSseHeader(response, annotation);
+            emitCloudTrailEvent("GetObjectAnnotation", bucket, key, 0L, payload.length, null, null);
+            return response.build();
+        } catch (AwsException e) {
+            emitCloudTrailEvent("GetObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleListObjectAnnotations(String bucket, String key, UriInfo uriInfo) {
+        try {
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            String prefix = uriInfo.getQueryParameters().getFirst("annotation-prefix");
+            String token = uriInfo.getQueryParameters().getFirst("continuation-token");
+            String maxRaw = uriInfo.getQueryParameters().getFirst("max-annotation-results");
+            Integer max = null;
+            if (maxRaw != null && !maxRaw.isBlank()) {
+                try {
+                    max = Integer.parseInt(maxRaw);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("InvalidArgument",
+                            "max-annotation-results must be an integer.", 400);
+                }
+            }
+            S3Service.ListObjectAnnotationsResult result =
+                    s3Service.listObjectAnnotations(bucket, key, prefix, max, token, versionId);
+            XmlBuilder xml = new XmlBuilder()
+                    .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                    .start("ListObjectAnnotationsOutput", AwsNamespaces.S3)
+                    .start("Annotations");
+            for (ObjectAnnotation annotation : result.annotations()) {
+                xml.start("AnnotationEntry")
+                   .elem("AnnotationName", annotation.getAnnotationName())
+                   .elem("ChecksumAlgorithm", annotation.getChecksumAlgorithm())
+                   .elem("ETag", annotation.getETag())
+                   .elem("LastModified", ISO_FORMAT.format(annotation.getLastModified()))
+                   .elem("Size", annotation.getSize())
+                   .end("AnnotationEntry");
+            }
+            xml.end("Annotations")
+               .elem("Bucket", bucket)
+               .elem("Key", key);
+            if (prefix != null) {
+                xml.elem("AnnotationPrefix", prefix);
+            }
+            xml.elem("MaxAnnotationResults", result.maxAnnotationResults())
+               .elem("AnnotationCount", result.annotations().size())
+               .elem("IsTruncated", result.isTruncated());
+            if (token != null) {
+                xml.elem("ContinuationToken", token);
+            }
+            if (result.isTruncated()) {
+                xml.elem("NextContinuationToken", result.nextContinuationToken());
+            }
+            xml.end("ListObjectAnnotationsOutput");
+            Response.ResponseBuilder response = Response.ok(xml.build()).type(MediaType.APPLICATION_XML);
+            String versionIdOfPage = result.annotations().isEmpty()
+                    ? versionId : result.annotations().get(0).getVersionId();
+            if (versionIdOfPage != null) {
+                response.header("x-amz-object-version-id", versionIdOfPage);
+            }
+            emitCloudTrailEvent("ListObjectAnnotations", bucket, key, 0L, 0L, null, null);
+            return response.build();
+        } catch (AwsException e) {
+            emitCloudTrailEvent("ListObjectAnnotations", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleDeleteObjectAnnotation(String bucket, String key,
+                                                  UriInfo uriInfo, HttpHeaders httpHeaders,
+                                                  boolean bypassGovernance) {
+        try {
+            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            String parentVersionId = s3Service.deleteObjectAnnotation(bucket, key, annotationName, versionId,
+                    httpHeaders.getHeaderString("x-amz-object-if-match"), bypassGovernance);
+            Response.ResponseBuilder response = Response.noContent();
+            if (parentVersionId != null) {
+                response.header("x-amz-object-version-id", parentVersionId);
+            }
+            emitCloudTrailEvent("DeleteObjectAnnotation", bucket, key, 0L, 0L, null, null);
+            return response.build();
+        } catch (AwsException e) {
+            emitCloudTrailEvent("DeleteObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private String putObjectAnnotationXml(ObjectAnnotation annotation) {
+        return new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("PutObjectAnnotationOutput", AwsNamespaces.S3)
+                .elem("Key", annotation.getKey())
+                .elem("AnnotationName", annotation.getAnnotationName())
+                .end("PutObjectAnnotationOutput")
+                .build();
+    }
+
+    private void appendAnnotationChecksumHeaders(Response.ResponseBuilder response, ObjectAnnotation annotation) {
+        if (annotation.getChecksumAlgorithm() == null || annotation.getChecksumValue() == null) {
+            return;
+        }
+        response.header(ObjectAnnotation.checksumHeaderName(annotation.getChecksumAlgorithm()), annotation.getChecksumValue())
+                .header("x-amz-checksum-type", "FULL_OBJECT");
+    }
+
+    private void appendAnnotationSseHeader(Response.ResponseBuilder response, ObjectAnnotation annotation) {
+        if (annotation.getServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", annotation.getServerSideEncryption());
+        }
+    }
+
+    private void validateContentMd5(HttpHeaders httpHeaders, byte[] body) {
+        String contentMd5 = httpHeaders.getHeaderString("Content-MD5");
+        if (contentMd5 == null) {
+            return;
+        }
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("MD5").digest(body);
+            if (!contentMd5.equals(java.util.Base64.getEncoder().encodeToString(digest))) {
+                throw new AwsException("BadDigest", "The Content-MD5 you specified did not match the payload.", 400);
+            }
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 algorithm is not available", e);
+        }
     }
 
     // --- Object Lock Configuration ---
@@ -2321,6 +2562,7 @@ public class S3Controller {
                                       String contentType, HttpHeaders httpHeaders) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
+        authorizeCopySourceRead(httpHeaders, sourceBucket, sourceObject.objectKey());
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -2332,6 +2574,19 @@ public class S3Controller {
         Map<String, String> replacementTagging = "REPLACE".equalsIgnoreCase(taggingDirective)
                 ? (taggingHeader != null ? parseInlineTaggingHeader(taggingHeader) : Map.of())
                 : null;
+        // The AWS SDK (and real S3) marshal the copy annotation directive as
+        // x-amz-object-annotation-directive; the user guide also names x-amz-annotation-directive,
+        // so both are accepted.
+        String annotationDirective = httpHeaders.getHeaderString("x-amz-object-annotation-directive");
+        if (annotationDirective == null) {
+            annotationDirective = httpHeaders.getHeaderString("x-amz-annotation-directive");
+        }
+        if (annotationDirective != null
+                && !"COPY".equalsIgnoreCase(annotationDirective)
+                && !"EXCLUDE".equalsIgnoreCase(annotationDirective)) {
+            throw new AwsException("InvalidRequest",
+                    "x-amz-annotation-directive must be COPY or EXCLUDE.", 400);
+        }
         S3Object copy = s3Service.copyObject(sourceBucket, sourceObject.objectKey(), destBucket, destKey,
                 sourceObject.versionId(),
                 new CopyObjectOptions()
@@ -2353,6 +2608,7 @@ public class S3Controller {
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
                         .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
+                        .withAnnotationDirective(annotationDirective)
                         .withAcl(cannedAcl)
                         .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
                         .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
@@ -2386,6 +2642,7 @@ public class S3Controller {
                                            String uploadId, int partNumber, HttpHeaders httpHeaders) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
+        authorizeCopySourceRead(httpHeaders, sourceBucket, sourceObject.objectKey());
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
@@ -2970,6 +3227,22 @@ public class S3Controller {
             lcFields.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
         }
 
+        /*
+         * IamEnforcementFilter's own filter() method only ever sees the Authorization header or,
+         * for a presigned URL, the X-Amz-Credential query parameter - a presigned POST's
+         * credential arrives only inside this multipart form body, invisible at that JAX-RS
+         * filter stage. Evaluate the signing principal's IAM identity policy here whenever a
+         * credential is present, independent of whether S3's own presigned-POST signature and
+         * condition checks (s3.enforce-auth) are enabled, so an IAM deny is not bypassed by
+         * running S3 without its own presigned-POST enforcement. authorizeAdditionalResource
+         * itself no-ops when IAM enforcement is disabled.
+         */
+        String credential = lcFields.get("x-amz-credential");
+        if (credential != null && !credential.isEmpty()) {
+            iamEnforcementFilter.authorizeAdditionalResource(
+                    "Credential=" + credential, "s3:PutObject", S3PublicAccessEvaluator.objectArn(bucket, key));
+        }
+
         if (s3Service.isAuthEnforced()) {
             validatePresignedPostAuth(lcFields, bucket, key, fileData.length);
         } else {
@@ -3051,7 +3324,8 @@ public class S3Controller {
         }
 
         String accessKeyId = credential.split("/", 2)[0];
-        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(iamService, accessKeyId);
+        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(
+                iamService, accessKeyId, fields.get("x-amz-security-token"));
         if (secretKey.isEmpty()
                 || !S3PostPolicySigner.verifySignature(policy, credential, signature, secretKey.get())) {
             throw new AwsException("SignatureDoesNotMatch",
@@ -3059,13 +3333,10 @@ public class S3Controller {
                             + "Check your key and signing method.", 403);
         }
 
-        // Route through the same authorization check every other S3 write path uses, so this
-        // path automatically inherits any future strengthening (e.g. per-principal IAM policy
-        // evaluation) instead of silently staying behind. Today it only confirms accessKeyId is
-        // known - strictly weaker than the signature check just performed above - but that will
-        // change if authorizeObjectWrite grows real policy evaluation.
+        // Route through the same bucket-policy/ACL check every other S3 write path uses, so this
+        // path automatically inherits any future strengthening there too.
         s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject",
-                new S3Service.RequestAuthorization(true, accessKeyId));
+                new S3Service.RequestAuthorization(true, accessKeyId, fields.get("x-amz-security-token")));
 
         validatePolicyExpiration(policy);
         validatePolicyConditions(policy, bucket, fields, contentLength);
@@ -3439,6 +3710,25 @@ public class S3Controller {
         return Response.ok(xml.build()).build();
     }
 
+    /**
+     * AWS accepts any integer from 0 to {@link Integer#MAX_VALUE} for {@code max-keys} and treats
+     * a missing parameter as 1000. Zero is a valid request for an empty page. Anything else,
+     * negative, non-numeric or overflowing, is rejected with the same InvalidArgument response.
+     */
+    private static int resolveMaxKeys(String maxKeys) {
+        if (maxKeys == null) {
+            return 1000;
+        }
+        if (maxKeys.matches("\\d{1,10}") && Long.parseLong(maxKeys) <= Integer.MAX_VALUE) {
+            return Integer.parseInt(maxKeys);
+        }
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("ArgumentName", "maxKeys");
+        detail.put("ArgumentValue", maxKeys);
+        throw new AwsException("InvalidArgument",
+                "Argument maxKeys must be an integer between 0 and 2147483647", 400, detail);
+    }
+
     private Response handlePutBucketWebsite(String bucket, byte[] body) {
         String xml = new String(body, StandardCharsets.UTF_8);
         String indexDoc = XmlParser.extractFirst(xml, "Suffix", null);
@@ -3448,6 +3738,19 @@ public class S3Controller {
         }
         s3Service.putBucketWebsite(bucket, new WebsiteConfiguration(indexDoc, errorDoc));
         return Response.ok().build();
+    }
+
+    /**
+     * Authorizes {@code s3:GetObject} on the CopyObject/UploadPartCopy source, which only ever appears
+     * in the {@code x-amz-copy-source} header and is otherwise invisible to the request-level IAM filter
+     * that authorizes the destination from the URL path. Real S3 requires both permissions: a caller
+     * allowed to write to the destination bucket must not be able to exfiltrate an object it cannot read.
+     * A no-op when IAM enforcement is disabled, matching {@link IamEnforcementFilter}'s own bypass rules.
+     */
+    private void authorizeCopySourceRead(HttpHeaders httpHeaders, String sourceBucket, String sourceKey) {
+        String resource = S3PublicAccessEvaluator.objectArn(sourceBucket, sourceKey);
+        iamEnforcementFilter.authorizeAdditionalResource(
+                httpHeaders.getHeaderString("Authorization"), "s3:GetObject", resource);
     }
 
     /**

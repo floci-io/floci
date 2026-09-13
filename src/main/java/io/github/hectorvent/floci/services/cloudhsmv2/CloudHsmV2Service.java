@@ -140,7 +140,7 @@ public class CloudHsmV2Service {
             }
         }
         cluster.setSubnetMapping(subnetMapping);
-        cluster.setSourceBackupId(sourceBackupId);
+        cluster.setSourceBackupId(sourceBackup != null ? sourceBackup.getBackupId() : null);
         cluster.setSecurityGroup("sg-" + generateShortId());
         cluster.setCreateTimestamp(Instant.now());
         cluster.setBackupPolicy(DEFAULT_BACKUP_POLICY);
@@ -188,6 +188,11 @@ public class CloudHsmV2Service {
             LOG.warnv("Failed to generate emulated hardware certs: {0}", e.getMessage());
         }
 
+        if (sourceBackup != null && sourceBackup.getClusterCertificate() != null) {
+            certs.setClusterCertificate(sourceBackup.getClusterCertificate());
+            certs.setClusterCsr(null);
+            cluster.setState(ClusterState.INITIALIZED);
+        }
         cluster.setCertificates(certs);
 
         String storageKey = regionKey(region, clusterId);
@@ -427,7 +432,7 @@ public class CloudHsmV2Service {
 
     // ──────────────────────────── TagResource ────────────────────────────
 
-    public void tagResource(String resourceId, Map<String, String> tags, String region) {
+    public synchronized void tagResource(String resourceId, Map<String, String> tags, String region) {
         if (resourceId == null || resourceId.isBlank()) {
             throw new AwsException("CloudHsmInvalidRequestException", "ResourceId is required.", 400);
         }
@@ -436,20 +441,28 @@ public class CloudHsmV2Service {
         }
         if (resourceId.startsWith("backup-")) {
             Backup backup = getBackup(resourceId, region);
-            if (tags != null && !tags.isEmpty()) {
-                backup.getTagList().putAll(tags);
+            Map<String, String> merged = new LinkedHashMap<>(backup.getTagList());
+            merged.putAll(tags);
+            if (merged.size() > 50) {
+                throw new AwsException("CloudHsmResourceLimitExceededException",
+                        "The resource cannot have more than 50 tags.", 400);
             }
+            backup.setTagList(merged);
             backups.put(regionKey(region, resourceId), backup);
         } else {
             Cluster cluster = getCluster(resourceId, region);
-            if (tags != null && !tags.isEmpty()) {
-                cluster.getTagList().putAll(tags);
+            Map<String, String> merged = new LinkedHashMap<>(cluster.getTagList());
+            merged.putAll(tags);
+            if (merged.size() > 50) {
+                throw new AwsException("CloudHsmResourceLimitExceededException",
+                        "The resource cannot have more than 50 tags.", 400);
             }
+            cluster.setTagList(merged);
             clusters.put(regionKey(region, resourceId), cluster);
         }
     }
 
-    public void untagResource(String resourceId, List<String> tagKeys, String region) {
+    public synchronized void untagResource(String resourceId, List<String> tagKeys, String region) {
         if (resourceId == null || resourceId.isBlank()) {
             throw new AwsException("CloudHsmInvalidRequestException", "ResourceId is required.", 400);
         }
@@ -595,6 +608,9 @@ public class CloudHsmV2Service {
         backup.setNeverExpires("False");
         backup.setMode(cluster.getMode());
         backup.setHsmType(cluster.getHsmType());
+        if (cluster.getCertificates() != null) {
+            backup.setClusterCertificate(cluster.getCertificates().getClusterCertificate());
+        }
         backups.put(regionKey(region, backup.getBackupId()), backup);
     }
 
@@ -673,6 +689,7 @@ public class CloudHsmV2Service {
         copy.setSourceCluster(source.getClusterId());
         copy.setMode(source.getMode());
         copy.setHsmType(source.getHsmType());
+        copy.setClusterCertificate(source.getClusterCertificate());
         copy.setNeverExpires(source.getNeverExpires());
         backups.put(regionKey(destinationRegion, copy.getBackupId()), copy);
         return copy;
@@ -681,45 +698,40 @@ public class CloudHsmV2Service {
     // ──────────────────────────── Resource Policies ────────────────────────────
 
     public void putResourcePolicy(String resourceArn, String policy, String region) {
-        String id = extractId(resourceArn);
-        if (id.startsWith("backup-")) {
-            Backup backup = getBackup(id, region);
-            if (!"READY".equals(backup.getBackupState())) {
-                throw new AwsException("CloudHsmInvalidRequestException", "Backup must be READY to apply a policy", 400);
-            }
-            backup.setResourcePolicy(policy);
-            backups.put(regionKey(region, id), backup);
-        } else {
-            Cluster cluster = getCluster(id, region);
-            cluster.setResourcePolicy(policy);
-            clusters.put(regionKey(region, id), cluster);
+        if (policy != null && (policy.isEmpty() || policy.length() > 20_000)) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "Policy must be between 1 and 20000 characters.", 400);
         }
+        String id = resourcePolicyBackupId(resourceArn);
+        Backup backup = getBackup(id, region);
+        if (!"READY".equals(backup.getBackupState())) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "Backup must be READY to apply a policy", 400);
+        }
+        backup.setResourcePolicy(policy);
+        backups.put(regionKey(region, id), backup);
     }
 
     public String getResourcePolicy(String resourceArn, String region) {
-        String id = extractId(resourceArn);
-        if (id.startsWith("backup-")) {
-            return getBackup(id, region).getResourcePolicy();
-        } else {
-            return getCluster(id, region).getResourcePolicy();
-        }
+        return getBackup(resourcePolicyBackupId(resourceArn), region).getResourcePolicy();
     }
 
     public String deleteResourcePolicy(String resourceArn, String region) {
-        String id = extractId(resourceArn);
-        String oldPolicy = null;
-        if (id.startsWith("backup-")) {
-            Backup backup = getBackup(id, region);
-            oldPolicy = backup.getResourcePolicy();
-            backup.setResourcePolicy(null);
-            backups.put(regionKey(region, id), backup);
-        } else {
-            Cluster cluster = getCluster(id, region);
-            oldPolicy = cluster.getResourcePolicy();
-            cluster.setResourcePolicy(null);
-            clusters.put(regionKey(region, id), cluster);
-        }
+        String id = resourcePolicyBackupId(resourceArn);
+        Backup backup = getBackup(id, region);
+        String oldPolicy = backup.getResourcePolicy();
+        backup.setResourcePolicy(null);
+        backups.put(regionKey(region, id), backup);
         return oldPolicy;
+    }
+
+    private String resourcePolicyBackupId(String resourceArn) {
+        String id = extractId(resourceArn);
+        if (!id.startsWith("backup-")) {
+            throw new AwsException("CloudHsmInvalidRequestException",
+                    "AWS CloudHSM resource policies are supported only for backups.", 400);
+        }
+        return id;
     }
 
     private String extractId(String arn) {

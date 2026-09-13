@@ -1168,9 +1168,9 @@ public class ApiGatewayV2Service {
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
-        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
         TaggedResource target = parseArn(resourceArn);
         if (target.isStage()) {
+            ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
             Stage stage = getStage(target.region(), target.apiId(), target.stageName());
             if (tags != null && !tags.isEmpty()) {
                 if (stage.getTags() == null) {
@@ -1182,11 +1182,12 @@ public class ApiGatewayV2Service {
             return;
         }
         Api api = getApi(target.region(), target.apiId());
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags, target.apiId());
         if (tags != null && !tags.isEmpty()) {
             if (api.getTags() == null) {
                 api.setTags(new java.util.HashMap<>());
             }
-            api.getTags().putAll(tags);
+            api.getTags().putAll(ReservedTags.stripApiGatewayReservedTags(tags));
         }
         apiStore.put(apiKey(target.region(), target.apiId()), api);
     }

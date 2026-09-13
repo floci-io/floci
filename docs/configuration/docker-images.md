@@ -9,9 +9,10 @@ Every image tag combines two independent choices: **what's inside** (variant) an
 | Variant | Contents | When to use |
 |---|---|---|
 | **Standard** | Floci native binary only | General use: CI, local dev, Testcontainers **(recommended)** |
+| **Baseline** | Floci native binary compiled for ARMv8.0 (`armv8-a`) | ARM64 hosts without LSE, including Raspberry Pi 4-class CPUs |
 | **Compat** | Floci + Python 3 + AWS CLI + boto3 | Workflows that need AWS tooling available inside the container |
 
-The compat image runs the same native binary as the standard image, so startup time and memory footprint are identical. Only the image size increases.
+The compat image runs the same native binary as the standard image, so startup time and memory footprint are identical. Only the image size increases. The baseline image is different: it is an ARM64-only release artifact compiled for the ARMv8.0 ISA floor and is not published on nightly channels.
 
 The standard image is built on Red Hat UBI 9 micro. Besides Floci it contains only bash and coreutils. There is no package manager, curl, grep or sed inside. Pick the compat image when you need tools inside the container.
 
@@ -28,12 +29,12 @@ Release images are stable and recommended for most use cases. Between trains, `n
 
 Combining both axes gives the complete set of published tags:
 
-|  | Standard | Compat |
-|---|---|---|
-| **Release (latest)** | `latest` ✅ | `latest-compat` |
-| **Release (pinned)** | `x.y.z` | `x.y.z-compat` |
-| **Nightly (floating)** | `nightly` | `nightly-compat` |
-| **Nightly (dated)** | `nightly-mmddyyyy` | `nightly-mmddyyyy-compat` |
+|  | Standard | Baseline (ARM64 only) | Compat |
+|---|---|---|---|
+| **Release (latest)** | `latest` ✅ | `latest-baseline` | `latest-compat` |
+| **Release (pinned)** | `x.y.z` | `x.y.z-baseline` | `x.y.z-compat` |
+| **Nightly (floating)** | `nightly` | — | `nightly-compat` |
+| **Nightly (dated)** | `nightly-mmddyyyy` | — | `nightly-mmddyyyy-compat` |
 
 Dated nightly tags (e.g. `nightly-05022026`) name one night's build of `main`. A same-day rerun of the nightly workflow republishes that day's tag, so for a build you can rely on not changing, pin a release version.
 
@@ -49,6 +50,9 @@ image: floci/floci:latest
 # Compat release : includes AWS CLI and boto3
 image: floci/floci:latest-compat
 
+# ARM64 baseline release : Raspberry Pi 4 / pre-LSE AArch64 cores
+image: floci/floci:latest-baseline
+
 # Pinned release : reproducible builds
 image: floci/floci:x.y.z
 
@@ -58,7 +62,13 @@ image: floci/floci:nightly
 
 ## Multi-Architecture
 
-All images are published as multi-arch manifests supporting `linux/amd64` and `linux/arm64`. Docker selects the correct variant automatically.
+Standard and compat images are published as multi-arch manifests supporting `linux/amd64` and `linux/arm64`. Baseline images are intentionally `linux/arm64` only.
+
+## Raspberry Pi 4 and older ARM64 CPUs
+
+If the standard ARM64 image exits with `CPU features [FP, ASIMD, CRC32, LSE] not supported`, use the `-baseline` release tag. The baseline image is compiled with GraalVM `-march=armv8-a`, so it does not require LSE. For example, use `floci/floci:latest-baseline` or pin `floci/floci:x.y.z-baseline`.
+
+The baseline variant currently covers the Docker image only. The standalone `floci-linux-arm64` binary remains tracked in [#1114](https://github.com/floci-io/floci/issues/1114).
 
 ## Reusable Image Publishing
 

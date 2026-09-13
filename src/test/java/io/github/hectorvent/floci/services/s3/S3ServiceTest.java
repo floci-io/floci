@@ -656,7 +656,7 @@ class S3ServiceTest {
     // =========================================================================
 
     private static final S3Service.RequestAuthorization UNSIGNED =
-            new S3Service.RequestAuthorization(false, null);
+            new S3Service.RequestAuthorization(false, null, null);
 
     private void websiteBucket(String index, String errorDoc) {
         s3Service.createBucket("site", "us-east-1");

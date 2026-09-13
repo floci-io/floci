@@ -7,10 +7,24 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.athena.model.*;
-import io.github.hectorvent.floci.services.glue.model.Column;
+import io.github.hectorvent.floci.services.athena.model.CreateWorkGroupConfigurationRequest;
+import io.github.hectorvent.floci.services.athena.model.CreateWorkGroupRequest;
+import io.github.hectorvent.floci.services.athena.model.DataCatalog;
+import io.github.hectorvent.floci.services.athena.model.QueryExecution;
+import io.github.hectorvent.floci.services.athena.model.QueryExecutionContext;
+import io.github.hectorvent.floci.services.athena.model.QueryExecutionState;
+import io.github.hectorvent.floci.services.athena.model.ResultConfiguration;
+import io.github.hectorvent.floci.services.athena.model.ResultConfigurationUpdates;
+import io.github.hectorvent.floci.services.athena.model.ResultSet;
+import io.github.hectorvent.floci.services.athena.model.UpdateWorkGroupRequest;
+import io.github.hectorvent.floci.services.athena.model.WorkGroup;
+import io.github.hectorvent.floci.services.athena.model.WorkGroupConfiguration;
+import io.github.hectorvent.floci.services.athena.model.WorkGroupConfigurationUpdates;
+import io.github.hectorvent.floci.services.athena.model.WorkGroupEngineVersionRequest;
+import io.github.hectorvent.floci.services.athena.model.WorkGroupTag;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
+import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -25,7 +39,16 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -37,6 +60,7 @@ public class AthenaService {
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
     private static final String DEFAULT_ENGINE_VERSION = "Athena engine version 3";
+    private static final long MIN_BYTES_SCANNED_CUTOFF_PER_QUERY = 10_000_000L;
     private static final String WORKGROUP_RESOURCE = "workgroup/";
     private static final String DATA_CATALOG_RESOURCE = "datacatalog/";
     private static final Set<String> CATALOG_TYPES = Set.of("LAMBDA", "GLUE", "HIVE", "FEDERATED");
@@ -146,6 +170,9 @@ public class AthenaService {
 
         // Submit async — caller gets the ID immediately while execution runs in background
         vertx.executeBlocking(() -> {
+            // Athena rejects a query that leaves an injected partition column unconstrained. It fails
+            // the query rather than the submission, which is what throwing here produces.
+            PartitionProjection.assertInjectedColumnsFiltered(query, tablesForProjectionCheck(database));
             String setupDdl = ddlBuilder.build(database);
             if (outputLocation != null) {
                 ensureOutputBucket(outputLocation);
@@ -161,6 +188,20 @@ public class AthenaService {
         });
 
         return id;
+    }
+
+    /** Tables of the query's database, or none when the catalog cannot answer. */
+    private List<Table> tablesForProjectionCheck(String database) {
+        if (database == null || database.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<Table> tables = glueService.getTables(database);
+            return tables == null ? List.of() : tables;
+        } catch (Exception e) {
+            LOG.debugv("Could not fetch tables for projection check on {0}: {1}", database, e.getMessage());
+            return List.of();
+        }
     }
 
     public QueryExecution getQueryExecution(String id) {
@@ -205,9 +246,33 @@ public class AthenaService {
     public Map<String, Object> getWorkGroup(String name, String region) {
         String resolved = name == null || name.isBlank() ? DEFAULT_WORKGROUP : name;
         if (DEFAULT_WORKGROUP.equals(resolved)) {
-            return primaryWorkGroupSummary();
+            return toWorkGroupDetail(primaryWorkGroup(region));
         }
         return toWorkGroupDetail(requireWorkGroup(region, resolved));
+    }
+
+    public synchronized void updateWorkGroup(UpdateWorkGroupRequest request, String region) {
+        validateWorkGroupName(request.getWorkGroup());
+        validateWorkGroupDescription(request.getDescription());
+        validateWorkGroupState(request.getState());
+        validateWorkGroupConfigurationUpdates(request.getConfigurationUpdates());
+
+        WorkGroup workGroup = DEFAULT_WORKGROUP.equals(request.getWorkGroup())
+                ? primaryWorkGroup(region)
+                : requireWorkGroup(region, request.getWorkGroup());
+        if (request.getDescription() != null) {
+            workGroup.setDescription(request.getDescription());
+        }
+        if (request.getState() != null) {
+            workGroup.setState(request.getState());
+        }
+        WorkGroupConfiguration configuration = workGroup.getConfiguration();
+        if (configuration == null) {
+            configuration = defaultWorkGroupConfiguration();
+            workGroup.setConfiguration(configuration);
+        }
+        mergeWorkGroupConfiguration(configuration, request.getConfigurationUpdates());
+        workGroupStore.put(workGroupKey(region, workGroup.getName()), workGroup);
     }
 
     public void deleteWorkGroup(String name, String region) {
@@ -276,8 +341,9 @@ public class AthenaService {
 
     public List<Map<String, Object>> listWorkGroups(String region) {
         List<Map<String, Object>> workGroups = new ArrayList<>();
-        workGroups.add(primaryWorkGroupSummary());
+        workGroups.add(toWorkGroupDetail(primaryWorkGroup(region)));
         workGroups.addAll(workGroupStore.scan(k -> k.startsWith(region + ":")).stream()
+                .filter(workGroup -> !DEFAULT_WORKGROUP.equals(workGroup.getName()))
                 .sorted(Comparator.comparing(WorkGroup::getName))
                 .map(this::toWorkGroupSummary)
                 .toList());
@@ -563,6 +629,45 @@ public class AthenaService {
         return normalized;
     }
 
+    private void mergeWorkGroupConfiguration(WorkGroupConfiguration configuration,
+                                             WorkGroupConfigurationUpdates updates) {
+        if (updates == null) {
+            return;
+        }
+
+        ResultConfigurationUpdates resultUpdates = updates.getResultConfigurationUpdates();
+        if (resultUpdates != null) {
+            if (Boolean.TRUE.equals(resultUpdates.getRemoveOutputLocation())) {
+                configuration.setResultConfiguration(null);
+            } else if (resultUpdates.getOutputLocation() != null) {
+                configuration.setResultConfiguration(new ResultConfiguration(resultUpdates.getOutputLocation()));
+            }
+        }
+        if (updates.getEnforceWorkGroupConfiguration() != null) {
+            configuration.setEnforceWorkGroupConfiguration(updates.getEnforceWorkGroupConfiguration());
+        }
+        if (updates.getPublishCloudWatchMetricsEnabled() != null) {
+            configuration.setPublishCloudWatchMetricsEnabled(updates.getPublishCloudWatchMetricsEnabled());
+        }
+        if (updates.getRequesterPaysEnabled() != null) {
+            configuration.setRequesterPaysEnabled(updates.getRequesterPaysEnabled());
+        }
+        if (Boolean.TRUE.equals(updates.getRemoveBytesScannedCutoffPerQuery())) {
+            configuration.setBytesScannedCutoffPerQuery(null);
+        } else if (updates.getBytesScannedCutoffPerQuery() != null) {
+            configuration.setBytesScannedCutoffPerQuery(updates.getBytesScannedCutoffPerQuery());
+        }
+        if (updates.getEngineVersion() != null) {
+            String selectedEngineVersion = updates.getEngineVersion().getSelectedEngineVersion();
+            if (selectedEngineVersion != null) {
+                QueryExecution.EngineVersion engineVersion = new QueryExecution.EngineVersion();
+                engineVersion.setSelectedEngineVersion(selectedEngineVersion);
+                engineVersion.setEffectiveEngineVersion(resolveEffectiveEngineVersion(selectedEngineVersion));
+                configuration.setEngineVersion(engineVersion);
+            }
+        }
+    }
+
     private String resolveEffectiveEngineVersion(String selectedEngineVersion) {
         if (selectedEngineVersion == null || selectedEngineVersion.isBlank() || "AUTO".equals(selectedEngineVersion)) {
             return DEFAULT_ENGINE_VERSION;
@@ -587,21 +692,14 @@ public class AthenaService {
         return engineVersion;
     }
 
-    private Map<String, Object> primaryWorkGroupSummary() {
-        return Map.of(
-                "Name", DEFAULT_WORKGROUP,
-                "State", "ENABLED",
-                "Configuration", Map.of(
-                        "EngineVersion", Map.of(
-                                "SelectedEngineVersion", DEFAULT_ENGINE_VERSION,
-                                "EffectiveEngineVersion", DEFAULT_ENGINE_VERSION
-                        ),
-                        "ResultConfiguration", Map.of("OutputLocation", "s3://" + DEFAULT_OUTPUT_BUCKET + "/results/"),
-                        "EnforceWorkGroupConfiguration", false,
-                        "PublishCloudWatchMetricsEnabled", false,
-                        "RequesterPaysEnabled", false
-                )
-        );
+    private WorkGroup primaryWorkGroup(String region) {
+        return workGroupStore.get(workGroupKey(region, DEFAULT_WORKGROUP)).orElseGet(() -> {
+            WorkGroup workGroup = new WorkGroup();
+            workGroup.setName(DEFAULT_WORKGROUP);
+            workGroup.setState("ENABLED");
+            workGroup.setConfiguration(defaultWorkGroupConfiguration());
+            return workGroup;
+        });
     }
 
     private Map<String, Object> toWorkGroupDetail(WorkGroup workGroup) {
@@ -818,6 +916,38 @@ public class AthenaService {
         }
         if (!name.matches("[A-Za-z0-9._-]{1,128}")) {
             throw new AwsException("InvalidRequestException", "Invalid WorkGroup name: " + name, 400);
+        }
+    }
+
+    private void validateWorkGroupDescription(String description) {
+        if (description != null && description.length() > 1024) {
+            throw new AwsException("InvalidRequestException",
+                    "Description must be 0 to 1024 characters.", 400);
+        }
+    }
+
+    private void validateWorkGroupState(String state) {
+        if (state != null && !Set.of("ENABLED", "DISABLED").contains(state)) {
+            throw new AwsException("InvalidRequestException",
+                    "State must be ENABLED or DISABLED.", 400);
+        }
+    }
+
+    private void validateWorkGroupConfigurationUpdates(WorkGroupConfigurationUpdates updates) {
+        if (updates == null) {
+            return;
+        }
+        Long bytesScannedCutoff = updates.getBytesScannedCutoffPerQuery();
+        if (bytesScannedCutoff != null && bytesScannedCutoff < MIN_BYTES_SCANNED_CUTOFF_PER_QUERY) {
+            throw new AwsException("InvalidRequestException",
+                    "BytesScannedCutoffPerQuery must be at least "
+                            + MIN_BYTES_SCANNED_CUTOFF_PER_QUERY + ".", 400);
+        }
+        WorkGroupEngineVersionRequest engineVersion = updates.getEngineVersion();
+        if (engineVersion != null && engineVersion.getSelectedEngineVersion() != null
+                && engineVersion.getSelectedEngineVersion().isBlank()) {
+            throw new AwsException("InvalidRequestException",
+                    "SelectedEngineVersion must not be empty.", 400);
         }
     }
 

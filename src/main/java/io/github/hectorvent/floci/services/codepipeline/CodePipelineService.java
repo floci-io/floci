@@ -45,6 +45,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
@@ -52,6 +53,7 @@ public class CodePipelineService {
     private static final Logger LOG = Logger.getLogger(CodePipelineService.class);
     private static final String DEFAULT_EXECUTION_MODE = "SUPERSEDED";
     private static final String DEFAULT_PIPELINE_TYPE = "V1";
+    private static final int MAX_ACTIVE_EXECUTIONS = 50;
     private static final long POLL_INTERVAL_MS = 100L;
 
     private final AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
@@ -64,6 +66,10 @@ public class CodePipelineService {
     private final S3Service s3Service;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Map<String, Object> pipelineLocks = new ConcurrentHashMap<>();
+    // Admission is serialized per pipeline on its own lock. A QUEUED worker holds the pipelineLocks
+    // monitor for its whole run, so counting under that monitor would block StartPipelineExecution
+    // until the running execution finished.
+    private final Map<String, Object> startLocks = new ConcurrentHashMap<>();
     private final Map<String, byte[]> runtimeArtifacts = new ConcurrentHashMap<>();
 
     @Inject
@@ -146,6 +152,7 @@ public class CodePipelineService {
                         execution.setStopRequested(false);
                         execution.setAbandon(false);
                         execution.setActionExecutions(new ArrayList<>());
+                        execution.setStageExecutionStatuses(new LinkedHashMap<>());
                         putExecution(execution);
                         executor.submit(() -> runExecution(pipeline, execution));
                     }, () -> {
@@ -281,10 +288,42 @@ public class CodePipelineService {
             trigger.put("clientRequestToken", clientToken);
         }
         execution.setTrigger(trigger);
-        putExecution(execution);
+        if (!persistExecutionIfSlotAvailable(execution)) {
+            throw new AwsException("ConcurrentPipelineExecutionsLimitExceededException",
+                    "The pipeline has reached the limit for concurrent pipeline executions", 400);
+        }
         applyExecutionMode(execution);
-        executor.submit(() -> runExecution(pipeline, execution));
+        try {
+            executor.submit(() -> runExecution(pipeline, execution));
+        } catch (RejectedExecutionException exception) {
+            execution.setStatus("Failed");
+            execution.setStatusSummary("Pipeline execution could not be scheduled.");
+            execution.setLastUpdateTime(now());
+            putExecution(execution);
+            throw new AwsException("ConflictException",
+                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
+                            + "Try again later.", 400);
+        }
         return mapper.createObjectNode().put("pipelineExecutionId", execution.getPipelineExecutionId());
+    }
+
+    private boolean persistExecutionIfSlotAvailable(CodePipelineExecution execution) {
+        if (!List.of("QUEUED", "PARALLEL").contains(execution.getExecutionMode())) {
+            putExecution(execution);
+            return true;
+        }
+        synchronized (startLocks.computeIfAbsent(lockKey(execution), ignored -> new Object())) {
+            long active = executions(execution.getAccountId(), execution.getRegion(), execution.getPipelineName())
+                    .stream()
+                    .filter(candidate -> "InProgress".equals(candidate.getStatus())
+                            || "Stopping".equals(candidate.getStatus()))
+                    .count();
+            if (active >= MAX_ACTIVE_EXECUTIONS) {
+                return false;
+            }
+            putExecution(execution);
+            return true;
+        }
     }
 
     private ObjectNode stopPipelineExecution(JsonNode request, String region, String account) {
@@ -299,6 +338,9 @@ public class CodePipelineService {
         execution.setStatus("Stopping");
         execution.setStatusSummary(request.path("reason").asText("Stop requested."));
         execution.setLastUpdateTime(now());
+        if (execution.getCurrentStage() != null) {
+            execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopping");
+        }
         if (execution.isAbandon()) {
             execution.getActionExecutions().stream()
                     .filter(a -> "InProgress".equals(a.getStatus()))
@@ -385,7 +427,8 @@ public class CodePipelineService {
 
     private ObjectNode getPipelineState(JsonNode request, String region, String account) {
         CodePipelinePipeline pipeline = requirePipeline(account, region, text(request, "name"));
-        CodePipelineExecution latest = executions(account, region, pipeline.getName()).stream().findFirst().orElse(null);
+        List<CodePipelineExecution> pipelineExecutions = executions(account, region, pipeline.getName());
+        CodePipelineExecution latest = pipelineExecutions.stream().findFirst().orElse(null);
         ObjectNode response = mapper.createObjectNode();
         response.put("pipelineName", pipeline.getName());
         response.put("pipelineVersion", pipeline.getVersion());
@@ -414,11 +457,15 @@ public class CodePipelineService {
                             .ifPresent(a -> actionState.set("latestExecution", actionStateNode(a)));
                 }
             }
-            if (latest != null && stageName.equals(latest.getCurrentStage())) {
+            CodePipelineExecution latestStageExecution = pipelineExecutions.stream()
+                    .filter(execution -> hasStageExecution(execution, stageName))
+                    .findFirst()
+                    .orElse(null);
+            if (latestStageExecution != null) {
                 ObjectNode latestExecution = state.putObject("latestExecution");
-                latestExecution.put("pipelineExecutionId", latest.getPipelineExecutionId());
-                latestExecution.put("status", latest.getStatus());
-                latestExecution.put("type", latest.getExecutionType());
+                latestExecution.put("pipelineExecutionId", latestStageExecution.getPipelineExecutionId());
+                latestExecution.put("status", stageExecutionStatus(latestStageExecution, stageName));
+                latestExecution.put("type", latestStageExecution.getExecutionType());
             }
         }
         return response;
@@ -495,9 +542,16 @@ public class CodePipelineService {
                     "The approval action has already been approved or rejected.", 400);
         }
 
-        approval.setStatus("Approved".equals(status) ? "Succeeded" : "Failed");
+        boolean approved = "Approved".equals(status);
+        approval.setStatus(approved ? "Succeeded" : "Failed");
         approval.setSummary(summary);
         approval.setLastUpdateTime(now());
+        if (!approved) {
+            execution.setStatus("Failed");
+            execution.setStatusSummary("Action " + actionName + " failed: " + summary);
+            execution.getStageExecutionStatuses().put(stageName, "Failed");
+            execution.setLastUpdateTime(now());
+        }
         putExecution(execution);
         return mapper.createObjectNode().put("approvedAt", now());
     }
@@ -742,17 +796,30 @@ public class CodePipelineService {
                     if (finishIfStopped(execution)) {
                         return;
                     }
-                    execution.setCurrentStage(stage.path("name").asText());
+                    String stageName = stage.path("name").asText();
+                    execution.setCurrentStage(stageName);
+                    execution.getStageExecutionStatuses().put(stageName, "InProgress");
                     execution.setLastUpdateTime(now());
                     putExecution(execution);
                     runStage(pipeline, execution, stage);
-                    if ("Failed".equals(execution.getStatus()) || finishIfStopped(execution)) {
+                    if ("Failed".equals(execution.getStatus())) {
+                        execution.getStageExecutionStatuses().put(stageName, "Failed");
                         return;
                     }
+                    if (finishIfStopped(execution)) {
+                        return;
+                    }
+                    execution.getStageExecutionStatuses().put(stageName, "Succeeded");
+                    execution.setCurrentStage(null);
+                    execution.setLastUpdateTime(now());
+                    putExecution(execution);
                 }
                 execution.setStatus("Succeeded");
                 execution.setStatusSummary("Pipeline execution succeeded.");
             } catch (Exception e) {
+                if (execution.getCurrentStage() != null) {
+                    execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
+                }
                 execution.setStatus("Failed");
                 execution.setStatusSummary(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
                 LOG.errorf(e, "CodePipeline execution %s failed", execution.getPipelineExecutionId());
@@ -1052,6 +1119,9 @@ public class CodePipelineService {
         execution.setStatus("Stopped");
         execution.setStatusSummary("Pipeline execution stopped.");
         execution.setLastUpdateTime(now());
+        if (execution.getCurrentStage() != null) {
+            execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopped");
+        }
         putExecution(execution);
         return true;
     }
@@ -1312,6 +1382,32 @@ public class CodePipelineService {
                 .toList();
     }
 
+    private boolean hasStageExecution(CodePipelineExecution execution, String stage) {
+        return execution.getStageExecutionStatuses().containsKey(stage)
+                || !actionExecutionsForStage(execution, stage).isEmpty();
+    }
+
+    private String stageExecutionStatus(CodePipelineExecution execution, String stage) {
+        List<ActionExecution> actions = actionExecutionsForStage(execution, stage);
+        if (actions.stream().anyMatch(action -> "Failed".equals(action.getStatus()))) {
+            return "Failed";
+        }
+        String trackedStatus = execution.getStageExecutionStatuses().get(stage);
+        if (trackedStatus != null) {
+            return trackedStatus;
+        }
+        if (actions.stream().anyMatch(action -> "InProgress".equals(action.getStatus()))) {
+            return "InProgress";
+        }
+        if (actions.stream().anyMatch(action -> "Abandoned".equals(action.getStatus()))) {
+            return "Stopped";
+        }
+        if (actions.stream().allMatch(action -> "Succeeded".equals(action.getStatus()))) {
+            return "Succeeded";
+        }
+        return "Failed";
+    }
+
     private List<Map<String, Object>> objectList(JsonNode node) {
         if (node == null || !node.isArray()) {
             return new ArrayList<>();
@@ -1451,6 +1547,14 @@ public class CodePipelineService {
     @PreDestroy
     void shutdown() {
         executor.shutdownNow();
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                LOG.warn("CodePipeline execution workers did not stop within the shutdown timeout");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            LOG.warn("Interrupted while stopping CodePipeline execution workers", exception);
+        }
     }
 
     private record Page(int start, int end) {

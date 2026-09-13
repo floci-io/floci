@@ -26,6 +26,31 @@ final class Ipv4Cidrs {
         return x[0] <= y[1] && y[0] <= x[1];
     }
 
+    /**
+     * True when {@code host} is one of the addresses AWS keeps for itself inside {@code cidr}.
+     *
+     * <p>The reserved set is the first four addresses of the subnet plus the last one. CreateSubnet
+     * states it directly in ec2/2016-11-15: "Amazon Web Services reserves both the first four and
+     * the last IPv4 address in each subnet's CIDR block. They're not available for your use."
+     * None of the five can be assigned to a resource, so anything asking for a specific interface
+     * address has to refuse them.
+     *
+     * <p>Small blocks need no special case. A /28, the smallest subnet AWS accepts, keeps 11 of its
+     * 16 addresses, a /29 keeps three, and a block of four addresses or fewer keeps none, which is
+     * the arithmetic working rather than failing. The two ends are clamped so they cannot cross,
+     * and an address outside {@code cidr} is not reserved by it.
+     *
+     * @param host a single address as "a.b.c.d/32"
+     */
+    static boolean isSubnetReserved(String cidr, String host) {
+        long[] block = parse(cidr);
+        long address = parse(host)[0];
+        if (address < block[0] || address > block[1]) {
+            return false;
+        }
+        return address <= Math.min(block[0] + 3, block[1]) || address == block[1];
+    }
+
     /** True when {@code cidr} parses as an IPv4 block, so the other checks can be applied to it. */
     static boolean isIpv4(String cidr) {
         try {

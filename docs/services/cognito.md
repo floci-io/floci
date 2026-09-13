@@ -6,7 +6,7 @@
 Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth token endpoint, so local clients can mint and validate Cognito-like access tokens against RS256 signing keys.
 
 `CreateUserPool` supports overiding several values using user-pool tags **only** at creation time:
-* `floci:override-id`, to pin the resulting `UserPool.Id`. 
+* `floci:override-id`, to pin the resulting `UserPool.Id`. Because a pinned id is caller-chosen it can be reused, which AWS never does. `DeleteUserPool` therefore deletes everything the pool owns (users, groups, app clients, resource servers, revoked token records and outstanding verification codes) so a pool recreated on the same id starts empty rather than inheriting the deleted pool's password hashes and client secrets.
 * `floci:override-cognito-client-id`
   * set to `use-name` to use the client name as client ID.
   * set to `append-to-name:-somestring` to append a string to the client name to be used as client ID.
@@ -29,7 +29,7 @@ An action given a user pool ID that does not resolve returns `ResourceNotFoundEx
 | DescribeUserPool | Returns the stored user pool configuration. |
 | ListUserPools | Lists local user pools visible in the request region. |
 | UpdateUserPool | Updates mutable user pool settings and persisted user-pool tags. |
-| DeleteUserPool | Deletes a local user pool and its related state. |
+| DeleteUserPool | Deletes a local user pool and everything it owns: users, groups, app clients, resource servers, identity providers, revoked tokens and verification codes. Refused with `InvalidParameterException` while a domain is still configured. |
 | GetUserPoolMfaConfig | Returns the pool's MFA mode and, once configured, its software-token setting. |
 | SetUserPoolMfaConfig | Sets `MfaConfiguration` (`OFF`/`ON`/`OPTIONAL`) and `SoftwareTokenMfaConfiguration`. An absent `MfaConfiguration` means `OFF`, and turning MFA off drops the factor configuration with it. Validation follows the live service: `OFF` alongside a software-token, email or SMS factor is rejected, and `ON`/`OPTIONAL` with none of those three is rejected, in both cases on the member being present, not on its `Enabled` value. `WebAuthnConfiguration` sits outside both rules, as it does in AWS. SMS, email and WebAuthn configurations are validated and not stored: Floci cannot deliver those factors, so keeping the config would imply a capability it does not have. |
 

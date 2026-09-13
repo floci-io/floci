@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -29,6 +31,9 @@ import static org.hamcrest.Matchers.not;
 @TestProfile(S3AuthEnforcementIntegrationTest.S3AuthProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class S3AuthEnforcementIntegrationTest {
+
+    @Inject
+    IamService iamService;
 
     private static final String PUBLIC_BUCKET = "auth-public-bucket";
     private static final String PRIVATE_BUCKET = "auth-private-bucket";
@@ -1424,6 +1429,33 @@ class S3AuthEnforcementIntegrationTest {
 
     private static String credential(String accessKeyId) {
         return accessKeyId + "/" + SIGNING_DATE + "/us-east-1/s3/aws4_request";
+    }
+
+    @Test
+    @Order(45)
+    void signedRequestWithTemporaryCredentialRequiresIssuedSessionToken() {
+        String accessKeyId = "ASIAS3NORMALREQUEST";
+        String sessionToken = "issued-session-token";
+        iamService.registerSession(
+                accessKeyId,
+                "temp-key-material",
+                sessionToken,
+                null,
+                Instant.now().plusSeconds(3600),
+                null);
+        String authorization = authorizationHeader(accessKeyId);
+        String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
+
+        given().header("Authorization", authorization)
+                .header("X-Amz-Security-Token", sessionToken)
+                .when().get(path).then().statusCode(200).body(equalTo("private body"));
+
+        given().header("Authorization", authorization)
+                .when().get(path).then().statusCode(403).body(containsString("InvalidAccessKeyId"));
+
+        given().header("Authorization", authorization)
+                .header("X-Amz-Security-Token", "other-session-token")
+                .when().get(path).then().statusCode(403).body(containsString("InvalidAccessKeyId"));
     }
 
     private static String presignedSignature(String method, String path,

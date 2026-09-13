@@ -62,6 +62,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEve
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
@@ -215,6 +216,7 @@ final class CfnProvisionerFixture {
          * behind silently.
          */
         private List<CfnResourceProvisioner> inferredProvisioners() {
+            ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
             if (s3Service != null) {
@@ -315,6 +317,9 @@ final class CfnProvisionerFixture {
             }
             if (batchService != null) {
                 discovered.add(new BatchCfnProvisioner(batchService));
+            }
+            if (rdsService != null) {
+                discovered.add(new RdsCfnProvisioner(rdsService, dynamicReferences));
             }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));
@@ -586,6 +591,21 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        /**
+         * Wires {@link CfnDynamicReferences} from the services already named, the way CDI does in
+         * production, so a test resolving {{@code resolve:ssm:...}} does not have to know that
+         * resolution moved out of the provisioner.
+         *
+         * <p>Called before the registry is built, not only from {@link #build()}: RdsCfnProvisioner
+         * takes it as a constructor argument, so inferring the provisioners needs it in hand.
+         */
+        private void ensureDynamicReferences() {
+            if (dynamicReferences == null) {
+                dynamicReferences = new CfnDynamicReferences(
+                        secretsManagerService, ssmService, objectMapper);
+            }
+        }
+
         /** The registry {@link #build()} would use: explicit if the test chose one, else inferred. */
         CloudFormationResourceRegistry buildRegistry() {
             return registryChosenByTest
@@ -597,13 +617,7 @@ final class CfnProvisionerFixture {
             if (!registryChosenByTest) {
                 resourceRegistry = buildRegistry();
             }
-            if (dynamicReferences == null) {
-                // Wire it from the services already named, the way CDI does in production, so a
-                // test resolving {{resolve:ssm:...}} or {{resolve:secretsmanager:...}} does not
-                // have to know that resolution moved out of the provisioner.
-                dynamicReferences = new CfnDynamicReferences(
-                        secretsManagerService, ssmService, objectMapper);
-            }
+            ensureDynamicReferences();
             return new CloudFormationResourceProvisioner(
                     s3Service,
                     snsService,

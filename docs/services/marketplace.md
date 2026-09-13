@@ -49,11 +49,31 @@ Floci emulates AWS Marketplace APIs under the shared `aws-marketplace` SigV4 sig
 | `UpdatePurchaseOrders` | Updates purchase orders for an agreement |
 | `GetEntitlements` | - |
 | `PutDeploymentParameter` | Creates or updates an AWS Marketplace deployment parameter |
+| `GetBuyerDashboard` | Returns an embeddable AWS Marketplace buyer dashboard URL |
+| `BatchMeterUsage` | Submits a batch of Marketplace usage records |
+| `MeterUsage` | Submits metered usage for a Marketplace product |
+| `RegisterUsage` | Registers container product usage and returns a signed token |
+| `ResolveCustomer` | Resolves a Marketplace registration token to customer identity |
+| `GetListing` | Returns full buyer-facing listing details |
+| `GetOffer` | Returns an offer and its associated product information |
+| `GetOfferSet` | Returns an offer set and its associated offers and products |
+| `GetOfferTerms` | Returns the terms attached to an offer with pagination |
+| `GetProduct` | Returns Marketplace product details |
+| `ListFulfillmentOptions` | Lists fulfillment options available for a product |
+| `ListPurchaseOptions` | Lists buyer purchase options with filtering and pagination |
+| `SearchFacets` | Returns paginated facet values for matching listings |
+| `SearchListings` | Searches listings with filtering, sorting, and pagination |
 <!-- floci:actions:end -->
 
 ## Marketplace Catalog
 
 Catalog change sets use AWS states (`PREPARING`, `APPLYING`, `SUCCEEDED`, and `CANCELLED`). Floci applies supported entity mutations locally when a change set is observed and persists entities, change sets, tags, resource policies, and assessments through `StorageFactory`, isolated by AWS account.
+
+### Known deviations
+
+- `ListEntities` rejects the `EntityTypeFilters` and `EntityTypeSort` request members with a `ValidationException`. AWS accepts these entity-type-specific filter and sort documents; Floci only supports the generic `FilterList` and `Sort` members.
+- Change sets do not progress asynchronously. A change set stays in `PREPARING` until it is next observed through `DescribeChangeSet` or `ListChangeSets`, at which point Floci applies it and moves it straight to `SUCCEEDED` in the same call. The `APPLYING` state is never returned, and change sets never reach `FAILED`; `CancelChangeSet` only succeeds while a change set is still unobserved.
+- The Marketplace Catalog API is served only in `us-east-1`, matching the single AWS endpoint. Requests signed for any other region are rejected with a `ValidationException` instead of being routed to a regional endpoint.
 
 ## Marketplace Agreement
 
@@ -72,6 +92,22 @@ AWS exposes this service as read-only: `GetEntitlements` is the only public oper
 ## Marketplace Deployment
 
 Deployment parameters and idempotency records are persisted through `StorageFactory` and isolated by AWS account.
+
+## Marketplace Reporting
+
+Marketplace Reporting validates buyer dashboard requests and returns account-scoped local embed URLs for supported dashboard identifiers.
+
+### Known deviations
+
+- AWS limits `GetBuyerDashboard` to an AWS Organizations management account or a delegated administrator registered for procurement insights. Floci does not currently enforce that Organizations-role prerequisite.
+
+## Marketplace Metering
+
+Metering records and idempotency state are persisted through `StorageFactory`, isolated by AWS account and region. `RegisterUsage` produces locally signed PS256 JWTs with an emulator-generated RSA key.
+
+## Marketplace Discovery
+
+Marketplace Discovery reads the shared Marketplace Catalog entity backend and exposes listing, offer, purchase-option, facet, filtering, sorting, and pagination behavior across the supported Discovery regions.
 
 
 
