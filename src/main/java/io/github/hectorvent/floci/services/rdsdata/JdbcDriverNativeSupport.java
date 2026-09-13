@@ -5,8 +5,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 /**
  * Registers the JDBC driver classes that are instantiated by name in a native image.
  * DriverManager loads the drivers through ServiceLoader, MySQL Connector/J creates its
- * connection URL, socket factory, logger and exceptions through Class.forName, and the
- * PostgreSQL driver creates PGobject subtypes reflectively when reading result sets.
+ * connection URL, socket factory, logger and exceptions through Class.forName.
  */
 @RegisterForReflection(classNames = {
     "com.mysql.cj.jdbc.Driver",
@@ -37,16 +36,6 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
     "com.mysql.cj.exceptions.UnableToConnectException",
     "com.mysql.cj.exceptions.UnsupportedConnectionStringException",
     "com.mysql.cj.exceptions.WrongArgumentException",
-    "org.postgresql.Driver",
-    "org.postgresql.util.PGobject",
-    "org.postgresql.util.PGInterval",
-    "org.postgresql.util.PGmoney",
-    "org.postgresql.geometric.PGbox",
-    "org.postgresql.geometric.PGcircle",
-    "org.postgresql.geometric.PGline",
-    "org.postgresql.geometric.PGlseg",
-    "org.postgresql.geometric.PGpath",
-    "org.postgresql.geometric.PGpoint",
-    "org.postgresql.geometric.PGpolygon"
+    "org.postgresql.Driver"
 }, methods = false, fields = false, ignoreNested = true)
 public class JdbcDriverNativeSupport {}
