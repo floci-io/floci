@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
 import io.github.hectorvent.floci.services.ecs.model.Failure;
+import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
@@ -1117,6 +1118,29 @@ public class EcsJsonHandler {
             n.set("logConfiguration", logNode);
         }
 
+        if (def.getHealthCheck() != null) {
+            HealthCheck hc = def.getHealthCheck();
+            ObjectNode hcNode = objectMapper.createObjectNode();
+            if (hc.command() != null) {
+                ArrayNode cmd = objectMapper.createArrayNode();
+                hc.command().forEach(cmd::add);
+                hcNode.set("command", cmd);
+            }
+            if (hc.interval() != null) {
+                hcNode.put("interval", hc.interval());
+            }
+            if (hc.timeout() != null) {
+                hcNode.put("timeout", hc.timeout());
+            }
+            if (hc.retries() != null) {
+                hcNode.put("retries", hc.retries());
+            }
+            if (hc.startPeriod() != null) {
+                hcNode.put("startPeriod", hc.startPeriod());
+            }
+            n.set("healthCheck", hcNode);
+        }
+
         return n;
     }
 
@@ -1419,6 +1443,9 @@ public class EcsJsonHandler {
             }
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
             def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
+            if (item.has("healthCheck")) {
+                def.setHealthCheck(parseHealthCheck(item.path("healthCheck")));
+            }
 
             if (item.has("command") && item.path("command").isArray()) {
                 List<String> cmd = new ArrayList<>();
@@ -1501,6 +1528,20 @@ public class EcsJsonHandler {
         }
         List<Secret> secretOptions = node.has("secretOptions") ? parseSecrets(node.path("secretOptions")) : null;
         return new LogConfiguration(logDriver, options, secretOptions);
+    }
+
+    private HealthCheck parseHealthCheck(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        List<String> command = node.has("command") && node.path("command").isArray()
+                ? jsonArrayToList(node.path("command"))
+                : null;
+        Integer interval = node.has("interval") ? node.path("interval").asInt() : null;
+        Integer timeout = node.has("timeout") ? node.path("timeout").asInt() : null;
+        Integer retries = node.has("retries") ? node.path("retries").asInt() : null;
+        Integer startPeriod = node.has("startPeriod") ? node.path("startPeriod").asInt() : null;
+        return new HealthCheck(command, interval, timeout, retries, startPeriod);
     }
 
     private List<Volume> parseVolumes(JsonNode node) {
