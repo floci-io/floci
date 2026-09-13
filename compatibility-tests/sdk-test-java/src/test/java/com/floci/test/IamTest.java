@@ -144,7 +144,9 @@ class IamTest {
             try {
                 iam.detachUserPolicy(DetachUserPolicyRequest.builder()
                         .userName(USER_NAME).policyArn(READ_ONLY_POLICY_ARN).build());
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+                // The policy may not have been attached if the test failed before reaching cleanup.
+            }
             try {
                 iam.removeUserFromGroup(RemoveUserFromGroupRequest.builder()
                         .groupName(GROUP_NAME).userName(USER_NAME).build());
