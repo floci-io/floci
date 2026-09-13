@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import java.util.ArrayList;
+import java.util.List;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import io.restassured.response.Response;
@@ -10,6 +12,8 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Redshift zero-ETL integrations.
@@ -177,17 +181,62 @@ class RedshiftIntegrationsIntegrationTest {
     }
 
     @Test
-    void describePagesWithAMarker() {
-        for (int i = 0; i < 3; i++) {
-            query("Action", "CreateIntegration", "IntegrationName", "zetl-page-" + i,
+    void describeCrossesAPageBoundaryAndResumesFromTheMarker() {
+        // 21 records against the smallest legal page size guarantees more than one page. Other
+        // tests in this class share the store, so the assertions below are about the traversal
+        // rather than absolute counts.
+        for (int i = 0; i < 21; i++) {
+            query("Action", "CreateIntegration", "IntegrationName", String.format("zetl-page-%02d", i),
                     "SourceArn", SOURCE + "-" + i, "TargetArn", TARGET)
                     .then().statusCode(200);
         }
 
-        String body = query("Action", "DescribeIntegrations", "MaxRecords", "20")
+        String firstPage = query("Action", "DescribeIntegrations", "MaxRecords", "20")
                 .then().statusCode(200).extract().body().asString();
-        // Three records fit inside the smallest legal page, so no marker is emitted.
-        assertFalse(body.contains("<Marker>"), "terminal page must omit Marker");
+        assertEquals(20, arnsIn(firstPage).size(), "a full page must carry exactly MaxRecords records");
+        assertTrue(firstPage.contains("<Marker>"), "a non-terminal page must carry a Marker");
+
+        // Walk every page, proving the marker resumes correctly rather than repeating or skipping.
+        List<String> seen = new ArrayList<>(arnsIn(firstPage));
+        String marker = between(firstPage, "<Marker>", "</Marker>");
+        String page = firstPage;
+        int guard = 0;
+        while (page.contains("<Marker>") && guard++ < 20) {
+            marker = between(page, "<Marker>", "</Marker>");
+            page = query("Action", "DescribeIntegrations", "MaxRecords", "20", "Marker", marker)
+                    .then().statusCode(200).extract().body().asString();
+            List<String> arns = arnsIn(page);
+            assertFalse(arns.isEmpty(), "a page reached through a Marker must not be empty");
+            for (String arn : arns) {
+                assertFalse(seen.contains(arn), "no record may appear on two pages: " + arn);
+            }
+            seen.addAll(arns);
+        }
+        assertFalse(page.contains("<Marker>"), "the final page must omit Marker");
+
+        // The traversal must have seen every record exactly once.
+        List<String> everything = arnsIn(
+                query("Action", "DescribeIntegrations", "MaxRecords", "100")
+                        .then().statusCode(200).extract().body().asString());
+        assertEquals(everything.size(), seen.size(), "paging must omit nothing");
+        assertTrue(seen.containsAll(everything), "paging must return the same records as one page");
+        assertTrue(seen.size() >= 21, "the 21 records created here must all be reachable");
+    }
+
+    private static List<String> arnsIn(String xml) {
+        List<String> arns = new ArrayList<>();
+        int from = 0;
+        while ((from = xml.indexOf("<IntegrationArn>", from)) >= 0) {
+            int start = from + "<IntegrationArn>".length();
+            arns.add(xml.substring(start, xml.indexOf("</IntegrationArn>", start)));
+            from = start;
+        }
+        return arns;
+    }
+
+    private static String between(String xml, String open, String close) {
+        int start = xml.indexOf(open) + open.length();
+        return xml.substring(start, xml.indexOf(close, start));
     }
 
     @Test
