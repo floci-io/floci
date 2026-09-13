@@ -19,7 +19,7 @@ import static org.mockito.Mockito.when;
 /**
  * Unit tests for the RegisterTaskDefinition JSON wire path in {@link EcsJsonHandler}:
  * container-level {@code healthCheck} must be parsed from the request, stored on the
- * container definition, and serialized back in the response with the AWS wire shape —
+ * container definition, and serialized back in the response with the AWS wire shape,
  * and must stay absent from the response when the request omitted it.
  */
 class EcsJsonHandlerHealthCheckTest {
