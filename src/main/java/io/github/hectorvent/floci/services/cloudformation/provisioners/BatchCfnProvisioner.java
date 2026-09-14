@@ -394,6 +394,7 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             req.set("containerProperties",
                     containerProperties(ctx.engine().resolveNode(props.get("ContainerProperties"))));
         }
+        // NodeProperties (multinode job definitions) is not translated here yet.
         putStringMapFromObject(req, "parameters", props, "Parameters", ctx);
         if (props != null && props.has("RetryStrategy")) {
             req.set("retryStrategy", retryStrategy(ctx.engine().resolveNode(props.get("RetryStrategy"))));

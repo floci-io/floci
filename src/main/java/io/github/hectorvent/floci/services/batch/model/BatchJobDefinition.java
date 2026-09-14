@@ -18,6 +18,7 @@ public class BatchJobDefinition {
     private String status;
     private String type;
     private BatchContainerProperties containerProperties;
+    private BatchNodeProperties nodeProperties;
     private Map<String, String> parameters = new HashMap<>();
     private BatchRetryStrategy retryStrategy;
     private BatchTimeout timeout;
@@ -73,6 +74,14 @@ public class BatchJobDefinition {
 
     public void setContainerProperties(BatchContainerProperties containerProperties) {
         this.containerProperties = containerProperties;
+    }
+
+    public BatchNodeProperties getNodeProperties() {
+        return nodeProperties;
+    }
+
+    public void setNodeProperties(BatchNodeProperties nodeProperties) {
+        this.nodeProperties = nodeProperties;
     }
 
     public Map<String, String> getParameters() {
