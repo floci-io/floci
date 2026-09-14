@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
@@ -15,6 +16,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.vertx.core.Vertx;
@@ -23,7 +25,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -31,6 +35,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -39,6 +44,10 @@ import java.util.concurrent.Executors;
 public class DynamoDbStreamsEventSourcePoller implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbStreamsEventSourcePoller.class);
+    private static final DateTimeFormatter S3_ON_FAILURE_PATH_DATE_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy/MM/dd").withZone(ZoneOffset.UTC);
+    private static final DateTimeFormatter S3_ON_FAILURE_FILE_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH.mm.ss").withZone(ZoneOffset.UTC);
 
     /** Raised by the stream when a stored checkpoint has aged out of the retained window. */
     private static final String TRIMMED_DATA_ACCESS_EXCEPTION = "TrimmedDataAccessException";
@@ -52,6 +61,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     private final PipesFilterMatcher filterMatcher;
     private final SqsService sqsService;
     private final SnsService snsService;
+    private final S3Service s3Service;
     private final String baseUrl;
     private final long pollIntervalMs;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
@@ -72,7 +82,8 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                                             EmulatorConfig config,
                                             PipesFilterMatcher filterMatcher,
                                             SqsService sqsService,
-                                            SnsService snsService) {
+                                            SnsService snsService,
+                                            S3Service s3Service) {
         this.vertx = vertx;
         this.streamService = streamService;
         this.executorService = executorService;
@@ -84,6 +95,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         this.filterMatcher = filterMatcher;
         this.sqsService = sqsService;
         this.snsService = snsService;
+        this.s3Service = s3Service;
     }
 
     public void startPersistedPollers() {
@@ -400,16 +412,30 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         }
 
         try {
-            String payload = buildOnFailurePayload(esm, shardId, records, invokeResult, invokeCount);
-            String region = AwsArnUtils.regionOrDefault(destinationArn, esm.getRegion());
-
             if (destinationArn.contains(":sqs:")) {
+                String region = AwsArnUtils.regionOrDefault(destinationArn, esm.getRegion());
                 String queueUrl = AwsArnUtils.arnToQueueUrl(destinationArn, baseUrl);
+                String payload = buildOnFailurePayload(esm, shardId, records, invokeResult, invokeCount);
                 sqsService.sendMessage(queueUrl, payload, 0, region);
                 LOG.infov("DynamoDB Streams ESM {0}: sent failed batch to SQS DLQ {1}", esm.getUuid(), destinationArn);
             } else if (destinationArn.contains(":sns:")) {
+                String region = AwsArnUtils.regionOrDefault(destinationArn, esm.getRegion());
+                String payload = buildOnFailurePayload(esm, shardId, records, invokeResult, invokeCount);
                 snsService.publish(destinationArn, null, payload, "ESM OnFailure", region);
                 LOG.infov("DynamoDB Streams ESM {0}: sent failed batch to SNS DLQ {1}", esm.getUuid(), destinationArn);
+            } else if (destinationArn.contains(":s3:")) {
+                AwsArnUtils.Arn arn = AwsArnUtils.parse(destinationArn);
+                if (!"s3".equals(arn.service()) || arn.resource().isBlank()) {
+                    throw new IllegalArgumentException("Invalid S3 destination ARN: " + destinationArn);
+                }
+                String key = buildS3OnFailureKey(esm.getUuid(), shardId, Instant.now(), UUID.randomUUID());
+                String s3Payload = buildS3OnFailurePayload(esm, shardId, records, invokeResult, invokeCount);
+                RequestScopes.runAs(esm.getAccountId(), () ->
+                        s3Service.putObject(arn.resource(), key,
+                                s3Payload.getBytes(StandardCharsets.UTF_8),
+                                "application/json", Map.of()));
+                LOG.infov("DynamoDB Streams ESM {0}: sent failed batch to S3 bucket {1} with key {2}",
+                        esm.getUuid(), arn.resource(), key);
             } else {
                 LOG.warnv("DynamoDB Streams ESM {0}: unsupported OnFailure destination ARN {1}",
                         esm.getUuid(), destinationArn);
@@ -418,6 +444,26 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
             LOG.errorv("DynamoDB Streams ESM {0}: failed to send to OnFailure destination {1}: {2}",
                     esm.getUuid(), destinationArn, e.getMessage());
         }
+    }
+
+    private String buildS3OnFailurePayload(EventSourceMapping esm, String shardId,
+                                            List<DynamoDbStreamRecord> records,
+                                            InvokeResult invokeResult,
+                                            int invokeCount) {
+        try {
+            ObjectNode root = (ObjectNode) objectMapper.readTree(
+                    buildOnFailurePayload(esm, shardId, records, invokeResult, invokeCount));
+            root.put("payload", buildDynamoDbEvent(records, esm));
+            return objectMapper.writeValueAsString(root);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to serialize S3 OnFailure payload", e);
+        }
+    }
+
+    static String buildS3OnFailureKey(String esmUuid, String shardId, Instant now, UUID randomId) {
+        return "aws/lambda/" + esmUuid + "/" + shardId + "/"
+                + S3_ON_FAILURE_PATH_DATE_FORMATTER.format(now) + "/"
+                + S3_ON_FAILURE_FILE_TIME_FORMATTER.format(now) + "-" + randomId;
     }
 
     private String buildOnFailurePayload(EventSourceMapping esm, String shardId,

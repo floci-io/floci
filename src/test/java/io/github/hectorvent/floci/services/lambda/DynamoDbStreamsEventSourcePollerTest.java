@@ -5,24 +5,43 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.Bucket;
+import io.github.hectorvent.floci.services.s3.model.ObjectAnnotation;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.github.hectorvent.floci.services.s3.model.S3ObjectUpdatedEvent;
+import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
+import jakarta.enterprise.event.Event;
+import jakarta.enterprise.inject.Instance;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,10 +65,13 @@ import static org.mockito.Mockito.when;
  * (in-memory only), so after a restart the sequence numbers restart from 1 and a stale checkpoint
  * would silently skip every new record.
  */
+@QuarkusTest
 class DynamoDbStreamsEventSourcePollerTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String ACCOUNT_ID = "000000000000";
+    private static final String AMBIENT_ACCOUNT_ID = "222233334444";
+    private static final String BUCKET_OWNER_ACCOUNT_ID = "111122223333";
     private static final String STREAM_ARN =
             "arn:aws:dynamodb:us-east-1:000000000000:table/t/stream/2026-08-01T00:00:00.000";
     private static final String STALE_CHECKPOINT = "000000000000000000634";
@@ -63,6 +85,10 @@ class DynamoDbStreamsEventSourcePollerTest {
     private PipesFilterMatcher filterMatcher;
     private io.github.hectorvent.floci.services.sqs.SqsService sqsService;
     private io.github.hectorvent.floci.services.sns.SnsService snsService;
+    private io.github.hectorvent.floci.services.s3.S3Service s3Service;
+
+    @Inject
+    Instance<RequestContext> requestContextInstance;
 
     @BeforeEach
     void setUp() {
@@ -81,12 +107,13 @@ class DynamoDbStreamsEventSourcePollerTest {
         filterMatcher = new PipesFilterMatcher(OBJECT_MAPPER);
         sqsService = mock(io.github.hectorvent.floci.services.sqs.SqsService.class);
         snsService = mock(io.github.hectorvent.floci.services.sns.SnsService.class);
+        s3Service = mock(io.github.hectorvent.floci.services.s3.S3Service.class);
 
         // A mocked Vertx makes setPeriodic a no-op, so startPolling registers no live timer and
         // the tests drive pollAndInvoke deterministically.
         poller = new DynamoDbStreamsEventSourcePoller(
                 mock(Vertx.class), streamService, executorService, functionStore,
-                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService);
+                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service);
     }
 
     private EventSourceMapping persistedStreamsEsmWithStaleCheckpoint() {
@@ -160,7 +187,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     private DynamoDbStreamsEventSourcePoller pollerWith(EsmStore store) {
         return new DynamoDbStreamsEventSourcePoller(
                 mock(Vertx.class), streamService, executorService, functionStore,
-                store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService);
+                store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service);
     }
 
     /**
@@ -629,6 +656,141 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertTrue(dlqPayload.path("DDBStreamBatchInfo").has("approximateArrivalOfFirstRecord"));
         assertTrue(dlqPayload.path("DDBStreamBatchInfo").has("approximateArrivalOfLastRecord"));
         assertFalse(dlqPayload.has("hasBeenTruncated"));
+    }
+
+    @Test
+    void maxRetryAttemptsExhaustedUsesEsmAccountOutsideRequestContext() throws Exception {
+        S3OnFailureDelivery delivery = deliverFailedBatchToS3(ACCOUNT_ID, false);
+
+        assertS3FailureRecord(delivery, ACCOUNT_ID);
+        assertTrue(delivery.objects().keysForAccount(AMBIENT_ACCOUNT_ID).isEmpty(),
+                "the async/default account must not receive a shadow failure object");
+    }
+
+    @Test
+    void maxRetryAttemptsExhaustedDeliversOriginalEventToCrossAccountBucketOwner() throws Exception {
+        S3OnFailureDelivery delivery = deliverFailedBatchToS3(BUCKET_OWNER_ACCOUNT_ID, true);
+
+        assertS3FailureRecord(delivery, BUCKET_OWNER_ACCOUNT_ID);
+        assertTrue(delivery.objects().keysForAccount(ACCOUNT_ID).isEmpty(),
+                "the ESM account must not receive a shadow object for a cross-account bucket");
+        assertTrue(delivery.objects().keysForAccount(AMBIENT_ACCOUNT_ID).isEmpty(),
+                "the async/default account must not receive a shadow failure object");
+    }
+
+    private S3OnFailureDelivery deliverFailedBatchToS3(
+            String bucketOwnerAccountId, boolean globalBucketNamespace) {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        InvokeResult err = new InvokeResult();
+        err.setFunctionError("Unhandled");
+        err.setStatusCode(200);
+        err.setRequestId("req-s3");
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(err);
+
+        EsmStore store = mock(EsmStore.class);
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRetryAttempts(0);
+
+        EventSourceMapping.DestinationConfig destConfig = new EventSourceMapping.DestinationConfig();
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination("arn:aws:s3:::my-failed-events");
+        destConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destConfig);
+
+        AccountAwareStorageBackend<Bucket> buckets = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), requestContextInstance, AMBIENT_ACCOUNT_ID);
+        AccountAwareStorageBackend<S3Object> objects = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), requestContextInstance, AMBIENT_ACCOUNT_ID);
+        AccountAwareStorageBackend<ObjectAnnotation> annotations = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), requestContextInstance, AMBIENT_ACCOUNT_ID);
+        AccountAwareStorageBackend<String> accountPublicAccessBlocks = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), requestContextInstance, AMBIENT_ACCOUNT_ID);
+        buckets.putForAccount(bucketOwnerAccountId, "my-failed-events", new Bucket("my-failed-events"));
+
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(eq("s3"), anyString(), any())).thenAnswer(invocation -> {
+            String fileName = invocation.getArgument(1);
+            return switch (fileName) {
+                case "s3-buckets.json" -> buckets;
+                case "s3-objects.json" -> objects;
+                case "s3-annotations.json" -> annotations;
+                case "s3-account-public-access-block.json" -> accountPublicAccessBlocks;
+                default -> throw new AssertionError("Unexpected S3 store: " + fileName);
+            };
+        });
+
+        EmulatorConfig.StorageConfig storageConfig = mock(EmulatorConfig.StorageConfig.class);
+        when(storageConfig.persistentPath()).thenReturn(Path.of("target", "s3-onfailure-test").toString());
+        EmulatorConfig.ServiceStorageOverrides storageOverrides = mock(EmulatorConfig.ServiceStorageOverrides.class);
+        EmulatorConfig.S3StorageConfig s3StorageConfig = mock(EmulatorConfig.S3StorageConfig.class);
+        when(storageConfig.services()).thenReturn(storageOverrides);
+        when(storageOverrides.s3()).thenReturn(s3StorageConfig);
+        when(s3StorageConfig.mode()).thenReturn(Optional.of("memory"));
+        when(config.storage()).thenReturn(storageConfig);
+        EmulatorConfig.S3ServiceConfig s3Config = mock(EmulatorConfig.S3ServiceConfig.class);
+        when(s3Config.globalBucketNamespace()).thenReturn(globalBucketNamespace);
+        when(config.services().s3()).thenReturn(s3Config);
+
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenAnswer(
+                invocation -> requestContextInstance.get().getAccountId());
+        s3Service = new S3Service(
+                storageFactory, config,
+                mock(io.github.hectorvent.floci.services.sqs.SqsService.class),
+                mock(io.github.hectorvent.floci.services.sns.SnsService.class),
+                mock(Instance.class), mock(EventBridgeService.class), mock(Event.class),
+                regionResolver, OBJECT_MAPPER, mock(IamService.class));
+
+        pollerWith(store).pollAndInvoke(esm);
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+
+        return new S3OnFailureDelivery(s3Service, objects);
+    }
+
+    private void assertS3FailureRecord(S3OnFailureDelivery delivery, String expectedOwnerAccountId)
+            throws Exception {
+        String storedObjectKey = delivery.objects().keysForAccount(expectedOwnerAccountId).stream()
+                .filter(key -> key.startsWith("my-failed-events/aws/lambda/esm-f/"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("failure object was not stored in the bucket owner's account"));
+
+        String key = storedObjectKey.substring("my-failed-events/".length());
+        byte[] body = RequestScopes.callAs(ACCOUNT_ID,
+                () -> delivery.s3Service().getObject("my-failed-events", key).getData());
+
+        assertTrue(key.matches(
+                "^aws/lambda/esm-f/shardId-0000000001-00000000001/\\d{4}/\\d{2}/\\d{2}/"
+                        + "\\d{4}-\\d{2}-\\d{2}T\\d{2}\\.\\d{2}\\.\\d{2}-[0-9a-f-]{36}$"));
+
+        JsonNode failureRecord = OBJECT_MAPPER.readTree(new String(body, StandardCharsets.UTF_8));
+        assertEquals("RetryAttemptsExhausted",
+                failureRecord.path("requestContext").path("condition").asText());
+        assertEquals(1, failureRecord.path("requestContext").path("approximateInvokeCount").asInt());
+        assertEquals("req-s3", failureRecord.path("requestContext").path("requestId").asText());
+        assertTrue(failureRecord.path("payload").isTextual());
+
+        JsonNode originalEvent = OBJECT_MAPPER.readTree(failureRecord.path("payload").asText());
+        assertEquals(1, originalEvent.path("Records").size());
+        assertEquals("s1", originalEvent.path("Records").get(0)
+                .path("dynamodb").path("SequenceNumber").asText());
+    }
+
+    private record S3OnFailureDelivery(
+            S3Service s3Service, AccountAwareStorageBackend<S3Object> objects) {
+    }
+
+    @Test
+    void s3OnFailureKeyUsesUtcLayout() {
+        UUID randomId = UUID.fromString("12345678-1234-1234-1234-123456789abc");
+
+        String key = DynamoDbStreamsEventSourcePoller.buildS3OnFailureKey(
+                "esm-1", "shard-1", Instant.parse("2026-09-14T23:07:08Z"), randomId);
+
+        assertEquals("aws/lambda/esm-1/shard-1/2026/09/14/"
+                + "2026-09-14T23.07.08-12345678-1234-1234-1234-123456789abc", key);
     }
 
     @Test
