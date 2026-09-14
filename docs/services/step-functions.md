@@ -129,7 +129,9 @@ A batch closes on `MaxItemsPerBatch`, on `MaxInputBytesPerBatch`, or on the 256 
 ceiling AWS applies whether or not a byte limit is declared. Either limit may be given as a
 `...Path` field, or as an expression in a JSONata state machine. With neither declared, items fill
 one batch up to that ceiling. The size measured is the serialized child payload, envelope and
-`BatchInput` included, not the items alone.
+`BatchInput` included, not the items alone. An item that would exceed the ceiling on its own can
+never start a child execution, so the state fails with `States.DataLimitExceeded` rather than
+building a batch AWS would reject: reduce the item with `ItemSelector` first.
 
 `MaxConcurrency` then bounds concurrent batches, and the Map result has one entry per batch rather
 than per item. `DescribeMapRun` reports items under `itemCounts` and batches under

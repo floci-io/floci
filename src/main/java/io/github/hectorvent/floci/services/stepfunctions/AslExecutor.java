@@ -2633,6 +2633,14 @@ public class AslExecutor {
                 childItem = resolveParameters(itemTransform, mapInput,
                         mapItemContext(context, resolvedItems, item, i));
             }
+            // An item that cannot fit a batch even on its own can never start a child execution, so
+            // the run fails rather than exporting a batch AWS would reject.
+            int aloneBytes = envelopeBytes + serializedBytes(childItem);
+            if (aloneBytes > MAX_BATCH_INPUT_BYTES) {
+                throw new FailStateException("States.DataLimitExceeded",
+                        "The item at index " + i + " is " + aloneBytes + " bytes as a child input, over the "
+                                + MAX_BATCH_INPUT_BYTES + " byte maximum. Reduce it with ItemSelector.");
+            }
             // The separator this item adds once it is not the first element of the array.
             int itemBytes = serializedBytes(childItem) + (current.size() > 0 ? 1 : 0);
             boolean itemsFull = maxItemsPerBatch > 0 && current.size() >= maxItemsPerBatch;

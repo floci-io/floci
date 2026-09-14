@@ -1175,6 +1175,59 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithItemBatcher_failsWhenASingleItemExceedsTheCeiling() throws Exception {
+        createBucket("map-inputs-oversized");
+        putObject("map-inputs-oversized", "oversized.json",
+                "[{\"pad\":\"" + "x".repeat(300_000) + "\"}]");
+
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON"
+                                },
+                                "Arguments": {
+                                    "Bucket": "map-inputs-oversized",
+                                    "Key": "oversized.json"
+                                }
+                            },
+                            "ItemBatcher": {
+                                "MaxItemsPerBatch": 10
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Keep",
+                                "States": {
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-item-batcher-oversized", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.DataLimitExceeded", failure.jsonPath().getString("error"));
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_objectIteratesKeyValuePairs() throws Exception {
         createBucket("map-inputs-object");
         putObject("map-inputs-object", "workers.json", """
