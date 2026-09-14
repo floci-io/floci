@@ -55,7 +55,56 @@
 
 `Encrypt`, `Decrypt`, and `ReEncrypt` apply real RSAES-OAEP for RSA keys (`RSA_2048`, `RSA_3072`, `RSA_4096`) when `EncryptionAlgorithm` is `RSAES_OAEP_SHA_1` or `RSAES_OAEP_SHA_256`. The ciphertext is raw RSA output of the modulus length, for example exactly 256 bytes for `RSA_2048`. A ciphertext produced locally with the public key from `GetPublicKey` decrypts the same way it does on real AWS, which makes the usual envelope pattern work. Only the encrypting side needs the public key. As on real AWS, asymmetric `Decrypt` requires `KeyId`, an `EncryptionContext` is rejected for asymmetric keys, and plaintext larger than the OAEP capacity of the key fails validation.
 
-Symmetric keys keep the emulator's internal ciphertext format, which is not compatible with ciphertexts from real AWS KMS.
+Symmetric keys keep the emulator's internal ciphertext format, described below, which is not compatible with ciphertexts from real AWS KMS.
+
+## Symmetric Ciphertext Envelope
+
+`Encrypt`, `Decrypt`, `ReEncrypt` and `GenerateDataKey` protect `SYMMETRIC_DEFAULT` plaintext with
+real AES-256-GCM, using a per-key data-encryption key ("backing key") that is generated when the
+key is created, or is the material imported into an `Origin=EXTERNAL` key, and is never exposed by
+any API. The blob is opaque bytes, base64-encoded in JSON exactly like real AWS KMS, but
+internally it is a versioned envelope:
+
+```
+offset      size  field
+0           4     magic "KMS3" (0x4B 0x4D 0x53 0x33)
+4           1     format version (currently 1)
+5           2     key id length (big-endian unsigned short)
+7           N     key id (UTF-8)
+7+N         2     backing key id length (big-endian unsigned short)
+9+N         M     backing key id (UTF-8)
+9+N+M       12    AES-GCM IV (random, generated per call)
+21+N+M      ...   AES-256-GCM ciphertext, followed by the 16-byte GCM tag
+```
+
+The key id lets `Decrypt` identify the key from the blob alone, matching AWS KMS, which does not
+require `KeyId` on `Decrypt` for symmetric keys. The GCM additional authenticated data (AAD) is
+every header byte up to and including the IV, plus the SHA-256 fingerprint of the canonicalized
+`EncryptionContext`. Binding the header into the AAD means decrypting with the wrong key, the
+wrong backing key version, or the wrong `EncryptionContext`, and any bit flip anywhere in the
+blob (header, IV, ciphertext or tag), all fail GCM tag verification the same way and surface as
+`InvalidCiphertextException`, never a plaintext.
+
+`RotateKeyOnDemand` mints a new backing key and switches future encryptions to it, but keeps prior
+backing keys in the key's state, so ciphertext encrypted before a rotation keeps decrypting after
+it, matching real AWS KMS, which also retains prior backing keys.
+
+### Legacy blob formats (read-only)
+
+Two older, unauthenticated formats are still accepted by `Decrypt` for backward compatibility with
+ciphertext produced by earlier versions of this emulator, but are never produced by `Encrypt`
+anymore:
+
+- `kms:v2:<keyId>:<nonceHex>:<contextFingerprintHex>:<base64(plaintext)>`
+- `kms:<keyId>:<base64(plaintext)>`
+
+Neither format used real key material: the payload was the plaintext itself, base64-encoded, so
+anyone holding a v1 or v2 blob could read the plaintext directly, and a tampered blob still
+"decrypted" to the original value. Any ciphertext already persisted in this shape (for example,
+stored in a database from before this fix) keeps decrypting so existing data is not orphaned, but
+new calls to `Encrypt` always produce the AES-GCM envelope described above. Keys created before
+backing keys existed generate their backing key material lazily the first time they are used for
+a cryptographic operation, and persist it from then on.
 
 ## Imported Key Material
 
@@ -81,6 +130,11 @@ future and no more than 365 days out. Once `ValidTo` passes, the material is dro
 returns to `PendingImport`, as does `DeleteImportedKeyMaterial`. Expiry is evaluated when the key
 is next read rather than on a timer, which is not observable through the API. Deleting the
 material of a key that is already in `PendingDeletion` leaves that state in place.
+
+A `SYMMETRIC_DEFAULT` key with `Origin=EXTERNAL` encrypts under the imported material itself: it
+is the backing key named in the ciphertext envelope described above, and no other material is
+ever generated for the key. Deleting or expiring the material removes that backing key, so
+ciphertext produced under it decrypts again only once the same material has been re-imported.
 
 A key in `PendingImport` rejects cryptographic operations, `EnableKey` and `DisableKey` with
 `KMSInvalidStateException`. `CancelKeyDeletion` on a key whose material was never imported, or was

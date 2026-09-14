@@ -2,9 +2,6 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.ses.model.AccountDetails;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
@@ -15,7 +12,6 @@ import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemp
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
-import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
@@ -49,7 +45,6 @@ final class SesServiceTestBuilder {
     private final InMemoryStorage<String, ContactList> contactListStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, Contact> contactStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, String> policyStore = new InMemoryStorage<>();
-    private final InMemoryStorage<String, ReceiptRuleSet> receiptRuleStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, CustomVerificationEmailTemplate> cvetStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, Tenant> tenantStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, TenantResourceAssociation> tenantAssociationStore =
@@ -128,8 +123,6 @@ final class SesServiceTestBuilder {
                 new SesDedicatedIpService(dedicatedIpPoolStore),
                 new SesContactService(contactListStore, contactStore, clock),
                 new SesPolicyService(policyStore, objectMapper),
-                new SesReceiptRuleService(receiptRuleStore, new InMemoryStorage<>(), mock(S3Service.class),
-                        mock(SnsService.class), mock(LambdaService.class), clock),
                 new SesCvetService(cvetStore),
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
                 smtpRelay);

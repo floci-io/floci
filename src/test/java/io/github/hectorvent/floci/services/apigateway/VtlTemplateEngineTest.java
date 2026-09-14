@@ -384,15 +384,36 @@ class VtlTemplateEngineTest {
     }
 
     @Test
-    void inputParams_shorthand_querystringPrecedence() {
-        // querystring should take precedence over path and header
+    void inputParams_shorthand_pathPrecedence() {
+        // AWS searches path, query string, and headers in that order.
         VtlTemplateEngine.VtlContext overlapCtx = new VtlTemplateEngine.VtlContext(
                 "{}", Map.of("shared", "header-val"),
                 Map.of("shared", "query-val"),
                 Map.of("shared", "path-val"),
                 "prod", "GET", "/", "req-1", "000000000000", Map.of(), Map.of());
         String result = engine.evaluate("$input.params('shared')", overlapCtx).body();
-        assertEquals("query-val", result);
+        assertEquals("path-val", result);
+    }
+
+    @Test
+    void inputParams_shorthand_preservesAnEmptyPathValue() {
+        VtlTemplateEngine.VtlContext context = new VtlTemplateEngine.VtlContext(
+                "{}", Map.of("id", "header-id"), Map.of("id", "query-id"), Map.of("id", ""),
+                "prod", "GET", "/items/{id}", "req-123", "000000000000", Map.of(), Map.of());
+
+        assertEquals("", engine.evaluate("$input.params('id')", context).body());
+    }
+
+    @Test
+    void inputParams_shorthand_fallsBackToQueryThenHeaderThenEmpty() {
+        VtlTemplateEngine.VtlContext context = new VtlTemplateEngine.VtlContext(
+                "{}", Map.of("id", "header-id", "empty", "header-empty", "headerOnly", "header-value"),
+                Map.of("id", "query-id", "empty", ""), null,
+                "prod", "GET", "/items", "req-123", "000000000000", Map.of(), Map.of());
+
+        assertEquals("query-id||header-value|", engine.evaluate(
+                "$input.params('id')|$input.params('empty')|$input.params('headerOnly')|$input.params('missing')",
+                context).body());
     }
 
     @Test
