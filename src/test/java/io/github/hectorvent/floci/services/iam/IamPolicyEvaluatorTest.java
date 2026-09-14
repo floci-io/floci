@@ -11,6 +11,10 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 /**
  * SCP semantics in policy evaluation: service control policies gate the decision before
@@ -414,5 +418,50 @@ class IamPolicyEvaluatorTest {
         assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
                 List.of(policy), "dynamodb:GetItem", "*",
                 Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
+    }
+
+    @Test
+    void sameDocumentIsParsedOnce() throws Exception {
+        ObjectMapper mapper = spy(new ObjectMapper());
+        IamPolicyEvaluator cachingEvaluator = new IamPolicyEvaluator(mapper);
+        CallerContext caller = CallerContext.of(List.of(ALLOW_S3_ONLY));
+
+        assertEquals(Decision.ALLOW, cachingEvaluator.evaluate(caller, null, "s3:GetObject", "*", null));
+        assertEquals(Decision.DENY, cachingEvaluator.evaluate(caller, null, "sqs:SendMessage", "*", null));
+
+        verify(mapper, times(1)).readTree(anyString());
+    }
+
+    @Test
+    void malformedDocumentIsParsedOnceAndStillDeniesScpLevel() throws Exception {
+        ObjectMapper mapper = spy(new ObjectMapper());
+        IamPolicyEvaluator cachingEvaluator = new IamPolicyEvaluator(mapper);
+        CallerContext caller = adminWithScps(List.of(List.of(MALFORMED, ALLOW_ALL)));
+
+        assertEquals(Decision.DENY, cachingEvaluator.evaluate(caller, null, "s3:GetObject", "*", null));
+        assertEquals(Decision.DENY, cachingEvaluator.evaluate(caller, null, "s3:GetObject", "*", null));
+
+        verify(mapper, times(1)).readTree(MALFORMED);
+        verify(mapper, times(1)).readTree(ALLOW_ALL);
+    }
+
+    @Test
+    void cacheIsClearedWhenBoundIsExceeded() throws Exception {
+        ObjectMapper mapper = spy(new ObjectMapper());
+        IamPolicyEvaluator cachingEvaluator = new IamPolicyEvaluator(mapper);
+        String first = sidDocument(0);
+        cachingEvaluator.evaluate(CallerContext.of(List.of(first)), null, "s3:GetObject", "*", null);
+        for (int i = 1; i <= IamPolicyEvaluator.MAX_CACHED_DOCUMENTS; i++) {
+            cachingEvaluator.evaluate(CallerContext.of(List.of(sidDocument(i))), null, "s3:GetObject", "*", null);
+        }
+
+        cachingEvaluator.evaluate(CallerContext.of(List.of(first)), null, "s3:GetObject", "*", null);
+
+        verify(mapper, times(2)).readTree(first);
+    }
+
+    private static String sidDocument(int sid) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"S" + sid + "\",\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:*\",\"Resource\":\"*\"}]}";
     }
 }

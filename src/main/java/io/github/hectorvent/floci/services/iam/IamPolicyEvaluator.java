@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Evaluates IAM policy documents against a requested action and resource.
@@ -70,7 +71,12 @@ public class IamPolicyEvaluator {
 
     private static final Logger LOG = Logger.getLogger(IamPolicyEvaluator.class);
 
+    // Parsing is a pure function of the document text, so entries never go stale. The bound
+    // only guards against growth from many distinct session policies.
+    static final int MAX_CACHED_DOCUMENTS = 2048;
+
     private final ObjectMapper objectMapper;
+    private final ConcurrentHashMap<String, CachedDocument> cachedDocuments = new ConcurrentHashMap<>();
 
     @Inject
     public IamPolicyEvaluator(ObjectMapper objectMapper) {
@@ -670,17 +676,42 @@ public class IamPolicyEvaluator {
         }
         boolean anyFailed = false;
         for (String doc : documents) {
-            try {
-                result.addAll(parseStatements(doc));
-            } catch (Exception e) {
-                anyFailed = true;
-                LOG.warnv("Failed to parse policy document: {0}", e.getMessage());
-            }
+            CachedDocument parsed = parseDocument(doc);
+            result.addAll(parsed.statements());
+            anyFailed |= parsed.failed();
         }
         return new ParsedDocuments(result, anyFailed);
     }
 
     private record ParsedDocuments(List<PolicyStatement> statements, boolean anyFailed) {
+    }
+
+    private CachedDocument parseDocument(String document) {
+        if (document == null) {
+            return parseUncached(null);
+        }
+        CachedDocument cached = cachedDocuments.get(document);
+        if (cached != null) {
+            return cached;
+        }
+        CachedDocument parsed = parseUncached(document);
+        if (cachedDocuments.size() >= MAX_CACHED_DOCUMENTS) {
+            cachedDocuments.clear();
+        }
+        cachedDocuments.put(document, parsed);
+        return parsed;
+    }
+
+    private CachedDocument parseUncached(String document) {
+        try {
+            return new CachedDocument(List.copyOf(parseStatements(document)), false);
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse policy document: {0}", e.getMessage());
+            return new CachedDocument(List.of(), true);
+        }
+    }
+
+    private record CachedDocument(List<PolicyStatement> statements, boolean failed) {
     }
 
     private List<PolicyStatement> parseStatements(String document) throws Exception {
