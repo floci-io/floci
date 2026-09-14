@@ -95,6 +95,7 @@ nav:
     - Overview: services/index.md
     - SSM Parameter Store: services/ssm.md
     - SQS: services/sqs.md
+    - Embedded SQS (POC): embedded-sqs-poc.md
     - SNS: services/sns.md
     - SES: services/ses.md
     - S3: services/s3.md
