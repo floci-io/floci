@@ -315,24 +315,24 @@ public class StepFunctionsJsonHandler {
         response.put("maxConcurrency", mapRun.getMaxConcurrency());
         response.put("toleratedFailurePercentage", 0.0);
         response.put("toleratedFailureCount", 0);
-        putMapRunCounts(response.putObject("itemCounts"), mapRun);
-        // One child execution per item: ItemBatcher is not applied, so no execution covers a batch.
-        putMapRunCounts(response.putObject("executionCounts"), mapRun);
+        putMapRunCounts(response.putObject("itemCounts"), mapRun.getItemCount(),
+                mapRun.getSucceededCount(), mapRun.getFailedCount());
+        // An ItemBatcher run has one execution per batch, so the two blocks differ there.
+        putMapRunCounts(response.putObject("executionCounts"), mapRun.getExecutionCount(),
+                mapRun.getSucceededExecutionCount(), mapRun.getFailedExecutionCount());
         response.put("redriveCount", 0);
         return response;
     }
 
     /** A failed item's result counts as written, as on AWS. */
-    private static void putMapRunCounts(ObjectNode counts, MapRun mapRun) {
-        var succeeded = mapRun.getSucceededCount();
-        var failed = mapRun.getFailedCount();
+    private static void putMapRunCounts(ObjectNode counts, int total, int succeeded, int failed) {
         counts.put("pending", 0);
         counts.put("running", 0);
         counts.put("succeeded", succeeded);
         counts.put("failed", failed);
         counts.put("timedOut", 0);
-        counts.put("aborted", mapRun.getItemCount() - succeeded - failed);
-        counts.put("total", mapRun.getItemCount());
+        counts.put("aborted", total - succeeded - failed);
+        counts.put("total", total);
         counts.put("resultsWritten", succeeded + failed);
         counts.put("failuresNotRedrivable", 0);
         counts.put("pendingRedrive", 0);

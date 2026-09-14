@@ -2352,43 +2352,46 @@ public class AslExecutor {
 
         ArrayNode results = objectMapper.createArrayNode();
         int itemCount = items.size();
-        JsonNode[] childInputsByIndex = hasResultWriter ? new JsonNode[itemCount] : null;
-        long[][] childTimingsByIndex = hasResultWriter ? new long[itemCount][] : null;
+        // An ItemBatcher gives each child execution a batch of items rather than one item, so the
+        // children the scheduler runs are the batches. ItemSelector has already been applied to
+        // each item inside them, as on AWS.
+        List<JsonNode> batches = stateDef.has("ItemBatcher")
+                ? buildItemBatches(stateDef, items, resolvedItems, itemTransform, mapInput, jsonata,
+                        context, variables)
+                : null;
+        int childCount = batches == null ? itemCount : batches.size();
+        JsonNode[] childInputsByIndex = hasResultWriter ? new JsonNode[childCount] : null;
+        long[][] childTimingsByIndex = hasResultWriter ? new long[childCount][] : null;
         int requestedConcurrency = resolveMapMaxConcurrency(
                 stateDef, mapInput, jsonata, context, variables);
         int effectiveConcurrency = effectiveMapConcurrency(
-                itemCount, requestedConcurrency, distributed);
+                childCount, requestedConcurrency, distributed);
 
         chain.publish("MapStateStarted", Map.of("length", itemCount));
         MapRunIdentity mapRun = null;
         MapRun mapRunRecord = null;
         if (distributed) {
             mapRun = newMapRunIdentity(stateDef, sm, context);
-            mapRunRecord = newMapRun(mapRun, context, itemCount, requestedConcurrency);
+            mapRunRecord = newMapRun(mapRun, context, itemCount, childCount, requestedConcurrency);
             chain.publish("MapRunStarted", Map.of("mapRunArn", mapRun.arn()));
         }
         var succeededItems = new AtomicInteger();
         var failedItems = new AtomicInteger();
-        var iterationChains = new ArrayList<HistoryChain>(itemCount);
-        for (var i = 0; i < itemCount; i++) {
+        AtomicInteger succeededExecutions = new AtomicInteger();
+        AtomicInteger failedExecutions = new AtomicInteger();
+        var iterationChains = new ArrayList<HistoryChain>(childCount);
+        for (var i = 0; i < childCount; i++) {
             iterationChains.add(distributed ? HistoryChain.ofChildExecution() : chain.fork());
         }
 
         java.util.function.IntFunction<Callable<JsonNode>> makeTask = (i) -> () -> {
             var iterationChain = iterationChains.get(i);
-            JsonNode item = items.get(i);
-            ObjectNode iterContext = ((ObjectNode) context).deepCopy();
-            ObjectNode mapCtx = objectMapper.createObjectNode();
-            ObjectNode mapItem = objectMapper.createObjectNode();
-            mapItem.put("Index", i);
-            if (resolvedItems.source() == MapItemsSource.ITEM_READER_OBJECT) {
-                mapItem.put("Key", item.path("Key").asText());
-                mapItem.set("Value", item.get("Value"));
-            } else {
-                mapItem.set("Value", item);
-            }
-            mapCtx.set("Item", mapItem);
-            iterContext.set("Map", mapCtx);
+            boolean batchedChild = batches != null;
+            JsonNode item = batchedChild ? batches.get(i) : items.get(i);
+            int itemsInChild = batchedChild ? item.path("Items").size() : 1;
+            ObjectNode iterContext = batchedChild
+                    ? ((ObjectNode) context).deepCopy()
+                    : mapItemContext(context, resolvedItems, items.get(i), i);
 
             long startMs = hasResultWriter ? System.currentTimeMillis() : 0L;
             JsonNode branchOutput;
@@ -2397,7 +2400,7 @@ public class AslExecutor {
                     iterationChain.publish("MapIterationStarted", Map.of("name", name, "index", i));
                 }
                 JsonNode iterInput = item;
-                if (itemTransform != null) {
+                if (!batchedChild && itemTransform != null) {
                     // $ in ItemSelector resolves against the Map state's effective input, not the item.
                     iterInput = resolveParameters(itemTransform, mapInput, iterContext);
                 }
@@ -2412,13 +2415,15 @@ public class AslExecutor {
                 branchOutput = executeBranch(startAt, iteratorStates, iterInput, iterationChain, sm,
                         topLevelQueryLanguage, iterContext, variables.deepCopy());
             } catch (FailStateException e) {
-                failedItems.incrementAndGet();
+                failedItems.addAndGet(itemsInChild);
+                failedExecutions.incrementAndGet();
                 if (!distributed && !e.isRuntimeError()) {
                     iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
                 }
                 throw new IterationFailure(i, e);
             }
-            succeededItems.incrementAndGet();
+            succeededItems.addAndGet(itemsInChild);
+            succeededExecutions.incrementAndGet();
             if (!distributed) {
                 iterationChain.publish("MapIterationSucceeded", Map.of("name", name, "index", i));
             }
@@ -2428,11 +2433,11 @@ public class AslExecutor {
             return branchOutput;
         };
 
-        if (itemCount > 0) {
+        if (childCount > 0) {
             List<JsonNode> itemOutputs;
             try {
                 itemOutputs = MapIterationScheduler.execute(
-                        itemCount, Math.max(1, effectiveConcurrency),
+                        childCount, Math.max(1, effectiveConcurrency),
                         i -> () -> callUnderExecutionAccount(sm, makeTask.apply(i)),
                         executionDeadlineNanos);
             } catch (java.util.concurrent.TimeoutException e) {
@@ -2445,7 +2450,8 @@ public class AslExecutor {
                     chain.continueFrom(iterationChains.get(e.index).lastEventId());
                 } else {
                     publishMapRunFailedEvent(chain, e.failure);
-                    recordMapRun(mapRunRecord, "FAILED", succeededItems.get(), failedItems.get());
+                    recordMapRun(mapRunRecord, "FAILED", succeededItems.get(), failedItems.get(),
+                            succeededExecutions.get(), failedExecutions.get());
                 }
                 throw e.failure;
             } finally {
@@ -2457,8 +2463,8 @@ public class AslExecutor {
         JsonNode mapResult = results;
         if (hasResultWriter) {
             ArrayNode childInputs = objectMapper.createArrayNode();
-            List<long[]> childTimings = new ArrayList<>(itemCount);
-            for (int i = 0; i < itemCount; i++) {
+            List<long[]> childTimings = new ArrayList<>(childCount);
+            for (int i = 0; i < childCount; i++) {
                 childInputs.add(childInputsByIndex[i]);
                 childTimings.add(childTimingsByIndex[i]);
             }
@@ -2468,13 +2474,15 @@ public class AslExecutor {
             } catch (FailStateException e) {
                 // A ResultWriter failure fails the Map run on AWS.
                 publishMapRunFailedEvent(chain, e);
-                recordMapRun(mapRunRecord, "FAILED", succeededItems.get(), failedItems.get());
+                recordMapRun(mapRunRecord, "FAILED", succeededItems.get(), failedItems.get(),
+                            succeededExecutions.get(), failedExecutions.get());
                 throw e;
             }
         }
 
         if (distributed) {
-            recordMapRun(mapRunRecord, "SUCCEEDED", succeededItems.get(), failedItems.get());
+            recordMapRun(mapRunRecord, "SUCCEEDED", succeededItems.get(), failedItems.get(),
+                    succeededExecutions.get(), failedExecutions.get());
             chain.publishAside("MapRunSucceeded", null);
         } else {
             chain.continueAfter(iterationChains);
@@ -2543,12 +2551,13 @@ public class AslExecutor {
      * stops at that same instant.
      */
     private static MapRun newMapRun(MapRunIdentity identity, JsonNode context, int itemCount,
-                                    int requestedConcurrency) {
+                                    int executionCount, int requestedConcurrency) {
         var mapRun = new MapRun();
         mapRun.setMapRunArn(identity.arn());
         mapRun.setExecutionArn(context.path("Execution").path("Id").asText(null));
         mapRun.setStartDate(System.currentTimeMillis() / 1000.0);
         mapRun.setItemCount(itemCount);
+        mapRun.setExecutionCount(executionCount);
         // ASL spells an unbounded Map as MaxConcurrency 0, or by omitting it; DescribeMapRun
         // reports that same run as Integer.MAX_VALUE.
         mapRun.setMaxConcurrency(
@@ -2557,12 +2566,112 @@ public class AslExecutor {
     }
 
     /** Kept for every Distributed Map, so the mapRunArn in the history resolves through DescribeMapRun. */
-    private void recordMapRun(MapRun mapRun, String status, int succeededItems, int failedItems) {
+    private void recordMapRun(MapRun mapRun, String status, int succeededItems, int failedItems,
+                              int succeededExecutions, int failedExecutions) {
         mapRun.setStopDate(System.currentTimeMillis() / 1000.0);
         mapRun.setStatus(status);
         mapRun.setSucceededCount(succeededItems);
         mapRun.setFailedCount(failedItems);
+        mapRun.setSucceededExecutionCount(succeededExecutions);
+        mapRun.setFailedExecutionCount(failedExecutions);
         sfnService.get().recordMapRun(mapRun);
+    }
+
+    /** The $$.Map.Item context one iteration sees: its index, its value, and its key for an object dataset. */
+    private ObjectNode mapItemContext(JsonNode context, ResolvedMapItems resolvedItems, JsonNode item, int index) {
+        ObjectNode iterContext = ((ObjectNode) context).deepCopy();
+        ObjectNode mapCtx = objectMapper.createObjectNode();
+        ObjectNode mapItem = objectMapper.createObjectNode();
+        mapItem.put("Index", index);
+        if (resolvedItems.source() == MapItemsSource.ITEM_READER_OBJECT) {
+            mapItem.put("Key", item.path("Key").asText());
+            mapItem.set("Value", item.get("Value"));
+        } else {
+            mapItem.set("Value", item);
+        }
+        mapCtx.set("Item", mapItem);
+        iterContext.set("Map", mapCtx);
+        return iterContext;
+    }
+
+    /**
+     * Groups the items into batches of {@code {"BatchInput": ..., "Items": [...]}}, closing a batch on
+     * MaxItemsPerBatch or MaxInputBytesPerBatch. With neither limit set every item lands in one batch.
+     */
+    private List<JsonNode> buildItemBatches(JsonNode stateDef, JsonNode items, ResolvedMapItems resolvedItems,
+                                            JsonNode itemTransform, JsonNode mapInput, boolean jsonata,
+                                            JsonNode context, ObjectNode variables) throws Exception {
+        JsonNode batcher = stateDef.get("ItemBatcher");
+        int maxItemsPerBatch = resolveBatcherLimit(batcher, "MaxItemsPerBatch", mapInput, jsonata, context, variables);
+        int maxBytesPerBatch = resolveBatcherLimit(batcher, "MaxInputBytesPerBatch", mapInput, jsonata, context, variables);
+
+        JsonNode batchInput = null;
+        if (batcher.has("BatchInput")) {
+            batchInput = jsonata
+                    ? jsonataEvaluator.resolveTemplate(batcher.get("BatchInput"), "ItemBatcher/BatchInput",
+                            buildStatesVar(mapInput, null, context), variables)
+                    : resolveParameters(batcher.get("BatchInput"), mapInput, context);
+        }
+
+        List<JsonNode> batches = new ArrayList<>();
+        ArrayNode current = objectMapper.createArrayNode();
+        int currentBytes = 0;
+        for (int i = 0; i < items.size(); i++) {
+            JsonNode item = items.get(i);
+            JsonNode childItem = item;
+            if (itemTransform != null) {
+                childItem = resolveParameters(itemTransform, mapInput,
+                        mapItemContext(context, resolvedItems, item, i));
+            }
+            int itemBytes = childItem.toString().getBytes(StandardCharsets.UTF_8).length;
+            boolean itemsFull = maxItemsPerBatch > 0 && current.size() >= maxItemsPerBatch;
+            boolean bytesFull = maxBytesPerBatch > 0 && currentBytes + itemBytes > maxBytesPerBatch;
+            if (current.size() > 0 && (itemsFull || bytesFull)) {
+                batches.add(newBatch(batchInput, current));
+                current = objectMapper.createArrayNode();
+                currentBytes = 0;
+            }
+            current.add(childItem);
+            currentBytes += itemBytes;
+        }
+        if (current.size() > 0) {
+            batches.add(newBatch(batchInput, current));
+        }
+        return batches;
+    }
+
+    private JsonNode newBatch(JsonNode batchInput, ArrayNode batchItems) {
+        ObjectNode batch = objectMapper.createObjectNode();
+        if (batchInput != null) {
+            batch.set("BatchInput", batchInput);
+        }
+        batch.set("Items", batchItems);
+        return batch;
+    }
+
+    private int resolveBatcherLimit(JsonNode batcher, String field, JsonNode mapInput, boolean jsonata,
+                                    JsonNode context, ObjectNode variables) {
+        JsonNode value;
+        boolean jsonataExpression = false;
+        if (batcher.has(field + "Path")) {
+            value = resolvePath(batcher.get(field + "Path").asText(), mapInput);
+        } else if (batcher.has(field)) {
+            value = batcher.get(field);
+            if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
+                jsonataExpression = true;
+                JsonNode statesVar = buildStatesVar(mapInput, null, context);
+                value = jsonataEvaluator.evaluateField(value.asText(), field, statesVar, variables);
+            }
+        } else {
+            return 0;
+        }
+
+        if (!value.isIntegralNumber() || value.intValue() <= 0) {
+            throw new FailStateException(
+                    jsonataExpression ? "States.QueryEvaluationError" : "States.Runtime",
+                    field + " must resolve to a positive integer", field);
+        }
+        return value.intValue();
     }
 
     /**

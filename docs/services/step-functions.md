@@ -119,6 +119,20 @@ Results remain in input order even when iterations finish out of order. If an it
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
 iterations.
 
+## Distributed Map ItemBatcher
+
+`ItemBatcher` hands each child execution a batch of items instead of a single item. The child input
+is `{"BatchInput": ..., "Items": [...]}`, with `BatchInput` present only when the state declares it.
+`ItemSelector` still runs per item, before the items are grouped.
+
+A batch closes on `MaxItemsPerBatch` or `MaxInputBytesPerBatch`. Either may be given as a `...Path`
+field, or as an expression in a JSONata state machine. With neither limit set, every item lands in
+one batch.
+
+`MaxConcurrency` then bounds concurrent batches, and the Map result has one entry per batch rather
+than per item. `DescribeMapRun` reports items under `itemCounts` and batches under
+`executionCounts`.
+
 ## Retry policies
 
 `Task`, `Parallel`, and `Map` states honor their `Retry` field. `ErrorEquals` matching
