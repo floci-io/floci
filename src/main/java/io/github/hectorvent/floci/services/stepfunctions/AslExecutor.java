@@ -2370,18 +2370,26 @@ public class AslExecutor {
         int effectiveConcurrency = effectiveMapConcurrency(
                 childCount, requestedConcurrency, distributed);
 
+        // A declared tolerance lets a Distributed Map absorb failed items instead of failing on the
+        // first one. Absent, the state keeps the earlier behaviour and fails with the item's error.
+        ToleratedFailures tolerated = resolveToleratedFailures(stateDef, itemCount, mapInput, jsonata,
+                context, variables);
+
         chain.publish("MapStateStarted", Map.of("length", itemCount));
         MapRunIdentity mapRun = null;
         MapRun mapRunRecord = null;
         if (distributed) {
             mapRun = newMapRunIdentity(stateDef, sm, context);
             mapRunRecord = newMapRun(mapRun, context, itemCount, childCount, requestedConcurrency);
+            mapRunRecord.setToleratedFailureCount(tolerated.declaredCount());
+            mapRunRecord.setToleratedFailurePercentage(tolerated.declaredPercentage());
             chain.publish("MapRunStarted", Map.of("mapRunArn", mapRun.arn()));
         }
         var succeededItems = new AtomicInteger();
         var failedItems = new AtomicInteger();
         AtomicInteger succeededExecutions = new AtomicInteger();
         AtomicInteger failedExecutions = new AtomicInteger();
+        List<Integer> succeededChildren = new ArrayList<>(childCount);
         var iterationChains = new ArrayList<HistoryChain>(childCount);
         for (var i = 0; i < childCount; i++) {
             iterationChains.add(distributed ? HistoryChain.ofChildExecution() : chain.fork());
@@ -2418,12 +2426,21 @@ public class AslExecutor {
                 branchOutput = executeBranch(startAt, iteratorStates, iterInput, iterationChain, sm,
                         topLevelQueryLanguage, iterContext, variables.deepCopy());
             } catch (FailStateException e) {
-                failedItems.addAndGet(itemsInChild);
+                int failedSoFar = failedItems.addAndGet(itemsInChild);
                 failedExecutions.incrementAndGet();
                 if (!distributed && !e.isRuntimeError()) {
                     iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
                 }
-                throw new IterationFailure(i, e);
+                if (!tolerated.declared()) {
+                    throw new IterationFailure(i, e);
+                }
+                if (failedSoFar > tolerated.threshold()) {
+                    throw new IterationFailure(i, new FailStateException(
+                            "States.ExceedToleratedFailureThreshold",
+                            "The map run failed because a tolerated failure threshold was exceeded. "
+                                    + failedSoFar + " of " + itemCount + " items failed."));
+                }
+                return null;
             }
             succeededItems.addAndGet(itemsInChild);
             succeededExecutions.incrementAndGet();
@@ -2460,14 +2477,19 @@ public class AslExecutor {
             } finally {
                 iterationChains.forEach(HistoryChain::abandon);
             }
-            results.addAll(itemOutputs);
+            for (int i = 0; i < itemOutputs.size(); i++) {
+                if (itemOutputs.get(i) != null) {
+                    succeededChildren.add(i);
+                    results.add(itemOutputs.get(i));
+                }
+            }
         }
 
         JsonNode mapResult = results;
         if (hasResultWriter) {
             ArrayNode childInputs = objectMapper.createArrayNode();
-            List<long[]> childTimings = new ArrayList<>(childCount);
-            for (int i = 0; i < childCount; i++) {
+            List<long[]> childTimings = new ArrayList<>(succeededChildren.size());
+            for (int i : succeededChildren) {
                 childInputs.add(childInputsByIndex[i]);
                 childTimings.add(childTimingsByIndex[i]);
             }
@@ -2671,6 +2693,69 @@ public class AslExecutor {
         }
         batch.set("Items", batchItems);
         return batch;
+    }
+
+    /**
+     * The failed-item budget a Distributed Map declared. {@code declaredCount} and
+     * {@code declaredPercentage} are what DescribeMapRun reports; {@code threshold} is the number of
+     * failed items the run absorbs, which is the stricter of the two whenever both are declared.
+     */
+    private record ToleratedFailures(boolean declared, int declaredCount, double declaredPercentage,
+                                     int threshold) {
+    }
+
+    private ToleratedFailures resolveToleratedFailures(JsonNode stateDef, int itemCount, JsonNode mapInput,
+                                                       boolean jsonata, JsonNode context, ObjectNode variables) {
+        boolean hasCount = stateDef.has("ToleratedFailureCount") || stateDef.has("ToleratedFailureCountPath");
+        boolean hasPercentage = stateDef.has("ToleratedFailurePercentage")
+                || stateDef.has("ToleratedFailurePercentagePath");
+        if (!hasCount && !hasPercentage) {
+            return new ToleratedFailures(false, 0, 0.0, 0);
+        }
+
+        int count = hasCount
+                ? resolveToleranceField(stateDef, "ToleratedFailureCount", Integer.MAX_VALUE, mapInput,
+                        jsonata, context, variables)
+                : 0;
+        int percentage = hasPercentage
+                ? resolveToleranceField(stateDef, "ToleratedFailurePercentage", 100, mapInput, jsonata,
+                        context, variables)
+                : 0;
+
+        int fromPercentage = (int) ((long) itemCount * percentage / 100);
+        int threshold;
+        if (hasCount && hasPercentage) {
+            threshold = Math.min(count, fromPercentage);
+        } else if (hasCount) {
+            threshold = count;
+        } else {
+            threshold = fromPercentage;
+        }
+        return new ToleratedFailures(true, count, percentage, threshold);
+    }
+
+    private int resolveToleranceField(JsonNode stateDef, String field, int maximum, JsonNode mapInput,
+                                      boolean jsonata, JsonNode context, ObjectNode variables) {
+        JsonNode value;
+        boolean jsonataExpression = false;
+        if (stateDef.has(field + "Path")) {
+            value = resolvePath(stateDef.get(field + "Path").asText(), mapInput);
+        } else {
+            value = stateDef.get(field);
+            if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
+                jsonataExpression = true;
+                JsonNode statesVar = buildStatesVar(mapInput, null, context);
+                value = jsonataEvaluator.evaluateField(value.asText(), field, statesVar, variables);
+            }
+        }
+
+        if (!value.isIntegralNumber() || value.bigIntegerValue().signum() < 0
+                || value.bigIntegerValue().compareTo(BigInteger.valueOf(maximum)) > 0) {
+            throw new FailStateException(
+                    jsonataExpression ? "States.QueryEvaluationError" : "States.Runtime",
+                    field + " must resolve to an integer between 0 and " + maximum, field);
+        }
+        return value.intValue();
     }
 
     private int resolveBatcherLimit(JsonNode batcher, String field, JsonNode mapInput, boolean jsonata,

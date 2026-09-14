@@ -105,8 +105,9 @@ scheduling time, not when a worker actually picks up the task. `TaskSubmitted`, 
 AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When a
 branch fails, AWS records `*StateAborted` and `MapIterationAborted` events for the states its
 sibling branches were in; Floci cancels the siblings without recording them. A Distributed
-`Map` whose item fails reports the item's own error rather than AWS's
-`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error.
+`Map` that declares no tolerance reports a failed item's own error rather than AWS's
+`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error. A `Map` that
+declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
 
 ## Map concurrency
 
@@ -136,6 +137,21 @@ building a batch AWS would reject: reduce the item with `ItemSelector` first.
 `MaxConcurrency` then bounds concurrent batches, and the Map result has one entry per batch rather
 than per item. `DescribeMapRun` reports items under `itemCounts` and batches under
 `executionCounts`.
+
+## Tolerated failures
+
+`ToleratedFailureCount` and `ToleratedFailurePercentage` let a Distributed `Map` absorb failed items
+instead of failing on the first one. Both accept a `...Path` field, or an expression in a JSONata
+state machine, and the percentage is taken over the item count. Declaring both applies the stricter
+of the two.
+
+An absorbed failure contributes no result, so the `Map` output carries one entry per successful
+child execution, and a `ResultWriter` exports only those. Once the budget is spent, the state fails
+with `States.ExceedToleratedFailureThreshold` and the run emits `MapRunFailed`.
+
+`DescribeMapRun` reports the declared values under `toleratedFailureCount` and
+`toleratedFailurePercentage`. A `Map` that declares neither keeps the earlier behaviour: the first
+failed item fails the state, carrying that item's own error.
 
 ## Retry policies
 

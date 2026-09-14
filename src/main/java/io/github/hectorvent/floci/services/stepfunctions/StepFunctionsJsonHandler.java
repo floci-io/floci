@@ -302,7 +302,8 @@ public class StepFunctionsJsonHandler {
      * {@code arn:aws:states:::aws-sdk:sfn:describeMapRun} Task integration renders the same node in
      * PascalCase, so this is the one place the response is described.
      *
-     * <p>Both tolerances and {@code redriveCount} are zero because Floci implements neither, and
+     * <p>The tolerances are the ones the Map state declared, and default to zero.
+     * {@code redriveCount} is zero because Floci does not implement redrive, and
      * {@code redriveDate} is absent until a run is redriven, which no run here ever is.
      */
     static ObjectNode describeMapRunResponse(ObjectMapper objectMapper, MapRun mapRun) {
@@ -313,8 +314,8 @@ public class StepFunctionsJsonHandler {
         response.put("startDate", mapRun.getStartDate());
         response.put("stopDate", mapRun.getStopDate());
         response.put("maxConcurrency", mapRun.getMaxConcurrency());
-        response.put("toleratedFailurePercentage", 0.0);
-        response.put("toleratedFailureCount", 0);
+        response.put("toleratedFailurePercentage", mapRun.getToleratedFailurePercentage());
+        response.put("toleratedFailureCount", mapRun.getToleratedFailureCount());
         putMapRunCounts(response.putObject("itemCounts"), mapRun.getItemCount(),
                 mapRun.getSucceededCount(), mapRun.getFailedCount());
         // An ItemBatcher run has one execution per batch, so the two blocks differ there.
