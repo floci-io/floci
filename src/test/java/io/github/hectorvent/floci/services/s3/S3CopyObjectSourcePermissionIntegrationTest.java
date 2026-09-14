@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -22,6 +23,20 @@ import static org.hamcrest.Matchers.containsString;
 @TestProfile(S3CopyObjectSourcePermissionIntegrationTest.IamEnforcementProfile.class)
 class S3CopyObjectSourcePermissionIntegrationTest {
 
+    /**
+     * #3573 added S3HeaderSignatureFilter, which verifies the SigV4 header signature whenever
+     * floci.services.s3.enforce-auth is on, and this profile turns it on. A hand built header with a
+     * placeholder signature no longer reaches the handler, so every S3 call here signs for real.
+     */
+    private static final S3RequestSigner ROOT_SIGNER = S3RequestSigner.signedAs("test", "test");
+
+    /** An access key pair: signing needs the secret, not only the id. */
+    private record UserCredentials(String accessKeyId, String secretAccessKey) {
+        S3RequestSigner signer() {
+            return S3RequestSigner.signedAs(accessKeyId, secretAccessKey);
+        }
+    }
+
     private static final String REGION = "us-east-1";
 
     @Test
@@ -35,14 +50,14 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         createBucketAsRoot(destBucket);
         putObjectAsRoot(sourceBucket, "private-secret.txt", "top secret payload");
 
-        String accessKeyId = createUser(userName);
+        UserCredentials caller = createUser(userName);
         putUserPolicy(userName, "DestWriteOnly", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%1$s/*"}
                 ]}""".formatted(destBucket));
 
         given()
-                .header("Authorization", auth(accessKeyId, "s3"))
+                .filter(caller.signer())
                 .header("x-amz-copy-source", "/" + sourceBucket + "/private-secret.txt")
         .when()
                 .put("/" + destBucket + "/exfiltrated.txt")
@@ -62,7 +77,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         createBucketAsRoot(destBucket);
         putObjectAsRoot(sourceBucket, "allowed.txt", "not secret");
 
-        String accessKeyId = createUser(userName);
+        UserCredentials caller = createUser(userName);
         putUserPolicy(userName, "SourceReadDestWrite", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
@@ -70,7 +85,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 ]}""".formatted(sourceBucket, destBucket));
 
         given()
-                .header("Authorization", auth(accessKeyId, "s3"))
+                .filter(caller.signer())
                 .header("x-amz-copy-source", "/" + sourceBucket + "/allowed.txt")
         .when()
                 .put("/" + destBucket + "/copied.txt")
@@ -89,7 +104,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         createBucketAsRoot(destBucket);
         putObjectAsRoot(sourceBucket, "allowed.txt", "resource policy grant");
 
-        String accessKeyId = createUser(userName);
+        UserCredentials caller = createUser(userName);
         putUserPolicy(userName, "DestWriteOnly", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
@@ -98,7 +113,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 sourceBucket, allowUserReadPolicy(sourceBucket, userName, "s3:GetObject"));
 
         given()
-                .header("Authorization", auth(accessKeyId, "s3"))
+                .filter(caller.signer())
                 .header("x-amz-copy-source", "/" + sourceBucket + "/allowed.txt")
         .when()
                 .put("/" + destBucket + "/copied.txt")
@@ -118,7 +133,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         enableVersioningAsRoot(sourceBucket);
         String versionId = putVersionedObjectAsRoot(sourceBucket, "versioned.txt", "versioned source");
 
-        String accessKeyId = createUser(userName);
+        UserCredentials caller = createUser(userName);
         putUserPolicy(userName, "DestWriteOnly", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
@@ -127,7 +142,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 sourceBucket, allowUserReadPolicy(sourceBucket, userName, "s3:GetObjectVersion"));
 
         given()
-                .header("Authorization", auth(accessKeyId, "s3"))
+                .filter(caller.signer())
                 .header("x-amz-copy-source",
                         "/" + sourceBucket + "/versioned.txt?versionId=" + versionId)
         .when()
@@ -147,7 +162,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         createBucketAsRoot(destBucket);
         putObjectAsRoot(sourceBucket, "private-secret.txt", "top secret payload");
 
-        String accessKeyId = createUser(userName);
+        UserCredentials caller = createUser(userName);
         putUserPolicy(userName, "DestWriteOnly", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%1$s/*"}
@@ -156,7 +171,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         String uploadId = initiateMultipartUploadAsRoot(destBucket, "exfiltrated.txt");
 
         given()
-                .header("Authorization", auth(accessKeyId, "s3"))
+                .filter(caller.signer())
                 .header("x-amz-copy-source", "/" + sourceBucket + "/private-secret.txt")
                 .queryParam("uploadId", uploadId)
                 .queryParam("partNumber", 1)
@@ -179,7 +194,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         putObjectAsRoot(sourceBucket, "denied.txt", "bucket policy protected");
         putBucketPolicyAsRoot(sourceBucket, denyGetObjectPolicy(sourceBucket));
 
-        String accessKeyId = createUser(userName);
+        UserCredentials caller = createUser(userName);
         putUserPolicy(userName, "SourceReadDestWrite", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
@@ -187,7 +202,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 ]}""".formatted(sourceBucket, destBucket));
 
         given()
-                .header("Authorization", auth(accessKeyId, "s3"))
+                .filter(caller.signer())
         .when()
                 .get("/" + sourceBucket + "/denied.txt")
         .then()
@@ -195,7 +210,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 .body(containsString("<Code>AccessDenied</Code>"));
 
         given()
-                .header("Authorization", auth(accessKeyId, "s3"))
+                .filter(caller.signer())
                 .header("x-amz-copy-source", "/" + sourceBucket + "/denied.txt")
         .when()
                 .put("/" + destBucket + "/copied.txt")
@@ -235,7 +250,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         putObjectAsRoot(sourceBucket, "denied.txt", "bucket policy protected");
         putBucketPolicyAsRoot(sourceBucket, denyGetObjectPolicy(sourceBucket));
 
-        String accessKeyId = createUser(userName);
+        UserCredentials caller = createUser(userName);
         putUserPolicy(userName, "SourceReadDestWrite", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
@@ -244,7 +259,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         String uploadId = initiateMultipartUploadAsRoot(destBucket, "copied.txt");
 
         given()
-                .header("Authorization", auth(accessKeyId, "s3"))
+                .filter(caller.signer())
                 .header("x-amz-copy-source", "/" + sourceBucket + "/denied.txt")
                 .queryParam("uploadId", uploadId)
                 .queryParam("partNumber", 1)
@@ -277,7 +292,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static void createBucketAsRoot(String bucket) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .filter(ROOT_SIGNER)
         .when()
                 .put("/" + bucket)
         .then()
@@ -286,7 +301,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static void putObjectAsRoot(String bucket, String key, String body) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .filter(ROOT_SIGNER)
                 .contentType("text/plain")
                 .body(body)
         .when()
@@ -297,7 +312,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static void putPublicObjectAsRoot(String bucket, String key, String body) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .filter(ROOT_SIGNER)
                 .header("x-amz-acl", "public-read")
                 .contentType("text/plain")
                 .body(body)
@@ -309,7 +324,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static void enableVersioningAsRoot(String bucket) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .filter(ROOT_SIGNER)
                 .contentType("application/xml")
                 .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
         .when()
@@ -320,7 +335,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static String putVersionedObjectAsRoot(String bucket, String key, String body) {
         return given()
-                .header("Authorization", auth("test", "s3"))
+                .filter(ROOT_SIGNER)
                 .contentType("text/plain")
                 .body(body)
         .when()
@@ -333,7 +348,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static void putBucketPolicyAsRoot(String bucket, String policy) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .filter(ROOT_SIGNER)
                 .contentType("application/json")
                 .body(policy)
         .when()
@@ -366,7 +381,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static String initiateMultipartUploadAsRoot(String bucket, String key) {
         return given()
-                .header("Authorization", auth("test", "s3"))
+                .filter(ROOT_SIGNER)
                 .queryParam("uploads", "")
         .when()
                 .post("/" + bucket + "/" + key)
@@ -378,7 +393,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 .getString("InitiateMultipartUploadResult.UploadId");
     }
 
-    private static String createUser(String userName) {
+    private static UserCredentials createUser(String userName) {
         given()
                 .formParam("Action", "CreateUser")
                 .formParam("UserName", userName)
@@ -388,7 +403,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         .then()
                 .statusCode(200);
 
-        return given()
+        io.restassured.path.xml.XmlPath key = given()
                 .formParam("Action", "CreateAccessKey")
                 .formParam("UserName", userName)
                 .header("Authorization", auth("test", "iam"))
@@ -397,7 +412,10 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         .then()
                 .statusCode(200)
                 .extract()
-                .path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
+                .xmlPath();
+        return new UserCredentials(
+                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"),
+                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey"));
     }
 
     private static void putUserPolicy(String userName, String policyName, String policyDocument) {
