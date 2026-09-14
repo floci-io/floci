@@ -85,6 +85,12 @@ class S3GlobalBucketNamespaceTest {
         assertDoesNotThrow(() ->
                 globalNs.putObject("shared-assets-bucket", "member-asset.json", memberAsset,
                         "application/json", Map.of()));
+        assertTrue(objects.getForAccount(
+                        ACCOUNT_A, "shared-assets-bucket/member-asset.json").isPresent(),
+                "a cross-account write must persist in the bucket owner's partition");
+        assertTrue(objects.getForAccount(
+                        ACCOUNT_B, "shared-assets-bucket/member-asset.json").isEmpty(),
+                "a cross-account write must not create a shadow object in the caller's partition");
         assertArrayEquals(memberAsset,
                 globalNs.getObject("shared-assets-bucket", "member-asset.json").getData());
 

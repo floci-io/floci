@@ -20,6 +20,12 @@ final class S3PublicAccessEvaluator {
         NEUTRAL
     }
 
+    record PrincipalPolicyEvaluation(
+            PublicAccessDecision decision,
+            boolean directPrincipalAllow
+    ) {
+    }
+
     private S3PublicAccessEvaluator() {
     }
 
@@ -66,12 +72,25 @@ final class S3PublicAccessEvaluator {
             String action,
             String resourceArn,
             Map<String, String> context) {
+        return principalPolicyEvaluation(
+                objectMapper, policy, principalType, principalValue, action, resourceArn, context).decision();
+    }
+
+    static PrincipalPolicyEvaluation principalPolicyEvaluation(
+            ObjectMapper objectMapper,
+            String policy,
+            String principalType,
+            String principalValue,
+            String action,
+            String resourceArn,
+            Map<String, String> context) {
         if (policy == null || policy.isBlank()) {
-            return PublicAccessDecision.NEUTRAL;
+            return new PrincipalPolicyEvaluation(PublicAccessDecision.NEUTRAL, false);
         }
         try {
             JsonNode statements = objectMapper.readTree(policy).path("Statement");
             boolean allowed = false;
+            boolean directPrincipalAllow = false;
             Iterable<JsonNode> iterable = statements.isArray() ? statements : List.of(statements);
             for (JsonNode statement : iterable) {
                 String effect = statement.path("Effect").asText("");
@@ -87,14 +106,18 @@ final class S3PublicAccessEvaluator {
                     continue;
                 }
                 if ("Deny".equalsIgnoreCase(effect)) {
-                    return PublicAccessDecision.DENY;
+                    return new PrincipalPolicyEvaluation(PublicAccessDecision.DENY, false);
                 }
                 allowed = true;
+                directPrincipalAllow |= principalDirectlyMatches(
+                        statement, principalType, principalValue);
             }
-            return allowed ? PublicAccessDecision.ALLOW : PublicAccessDecision.NEUTRAL;
+            PublicAccessDecision decision = allowed
+                    ? PublicAccessDecision.ALLOW : PublicAccessDecision.NEUTRAL;
+            return new PrincipalPolicyEvaluation(decision, directPrincipalAllow);
         } catch (JsonProcessingException e) {
             LOG.debugv("Failed to evaluate S3 bucket policy for principal access: {0}", e.getMessage());
-            return PublicAccessDecision.NEUTRAL;
+            return new PrincipalPolicyEvaluation(PublicAccessDecision.NEUTRAL, false);
         }
     }
 
@@ -130,6 +153,52 @@ final class S3PublicAccessEvaluator {
         if (statement.hasNonNull("NotPrincipal")) {
             return !principalNodeMatches(
                     statement.path("NotPrincipal"), principalType, principalValue);
+        }
+        return false;
+    }
+
+    private static boolean principalDirectlyMatches(
+            JsonNode statement, String principalType, String principalValue) {
+        return statement.hasNonNull("Principal")
+                && principalNodeDirectlyMatches(
+                        statement.path("Principal"), principalType, principalValue);
+    }
+
+    private static boolean principalNodeDirectlyMatches(
+            JsonNode principal, String principalType, String principalValue) {
+        if (principal == null || principal.isMissingNode() || principal.isNull()) {
+            return false;
+        }
+        if (principal.isTextual() || principal.isArray()) {
+            return principalValueDirectlyMatches(principal, principalValue);
+        }
+        if (!principal.isObject()) {
+            return false;
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = principal.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (field.getKey().equalsIgnoreCase(principalType)
+                    && principalValueDirectlyMatches(field.getValue(), principalValue)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean principalValueDirectlyMatches(JsonNode candidate, String principalValue) {
+        if (candidate == null || candidate.isNull()) {
+            return false;
+        }
+        if (candidate.isTextual()) {
+            return candidate.asText().equals(principalValue);
+        }
+        if (candidate.isArray()) {
+            for (JsonNode item : candidate) {
+                if (principalValueDirectlyMatches(item, principalValue)) {
+                    return true;
+                }
+            }
         }
         return false;
     }
