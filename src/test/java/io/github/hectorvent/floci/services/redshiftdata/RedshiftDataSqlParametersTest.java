@@ -118,4 +118,14 @@ class RedshiftDataSqlParametersTest {
         assertEquals("select 'a\\' , ?", parsed.sql());
         assertEquals(List.of("x"), parsed.parameterOrder());
     }
+
+    @Test
+    void doesNotTreatBackticksAsQuotedIdentifiers() {
+        ParsedSql parsed =
+                RedshiftDataSqlParameters.parse("select `x:y` from t where id = :id");
+        assertEquals("select `x?` from t where id = ?", parsed.sql());
+        assertEquals(List.of("y", "id"), parsed.parameterOrder());
+
+        assertTrue(RedshiftDataSqlParameters.isMultiStatement("select `a;b`"));
+    }
 }

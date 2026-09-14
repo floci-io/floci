@@ -91,4 +91,13 @@ class RdsDataSqlParametersTest {
         assertEquals("select `a\\` , id from t where id = ?", parsed.sql());
         assertEquals(List.of("id"), parsed.parameterOrder());
     }
+
+    @Test
+    void postgresModeDoesNotTreatBackslashAsEscapeEvenInEscapeStringLiteral() {
+        ParsedSql parsed = RdsDataSqlParameters.parse(
+                "select E'it\\'s :value' as v where id = :id", false);
+
+        assertEquals("select E'it\\'s ?' as v where id = :id", parsed.sql());
+        assertEquals(List.of("value"), parsed.parameterOrder());
+    }
 }

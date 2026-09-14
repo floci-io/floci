@@ -35,7 +35,7 @@ final class RedshiftDataSqlParameters {
      * (the PostgreSQL default with {@code standard_conforming_strings} on).
      */
     static ParsedSql parse(String sql) {
-        return SqlParameterParser.parse(sql);
+        return SqlParameterParser.parse(sql, SqlParameterParser.Options.REDSHIFT);
     }
 
     /**
@@ -94,6 +94,6 @@ final class RedshiftDataSqlParameters {
      * characters (with only whitespace after) are permitted.
      */
     static boolean isMultiStatement(String sql) {
-        return SqlParameterParser.isMultiStatement(sql);
+        return SqlParameterParser.isMultiStatement(sql, SqlParameterParser.Options.REDSHIFT);
     }
 }

@@ -40,7 +40,7 @@ final class RdsDataSqlParameters {
      * with {@code standard_conforming_strings} on).
      */
     static ParsedSql parse(String sql) {
-        return SqlParameterParser.parse(sql);
+        return parse(sql, false);
     }
 
     /**
@@ -50,7 +50,9 @@ final class RdsDataSqlParameters {
      * colon inside any of those is left untouched.
      */
     static ParsedSql parse(String sql, boolean backslashEscapes) {
-        return SqlParameterParser.parse(sql, backslashEscapes);
+        return SqlParameterParser.parse(sql, backslashEscapes
+                ? SqlParameterParser.Options.RDS_MYSQL
+                : SqlParameterParser.Options.RDS_POSTGRESQL);
     }
 
     /**

@@ -20,6 +20,20 @@ public final class SqlParameterParser {
     }
 
     /**
+     * Dialect-specific quoting and escape rules for SQL parameter parsing.
+     *
+     * @param allowBackticks whether backticks ({@code `}) delimit identifiers (e.g. MySQL / RDS Data)
+     * @param backslashEscapes whether backslash escapes characters in string literals (e.g. MySQL)
+     * @param escapeStrings whether PostgreSQL escape strings ({@code E'...'}/{@code e'...'})
+     *                      honor backslash escapes (e.g. Redshift Data API)
+     */
+    public record Options(boolean allowBackticks, boolean backslashEscapes, boolean escapeStrings) {
+        public static final Options REDSHIFT = new Options(false, false, true);
+        public static final Options RDS_MYSQL = new Options(true, true, false);
+        public static final Options RDS_POSTGRESQL = new Options(true, false, false);
+    }
+
+    /**
      * SQL rewritten with positional {@code ?} placeholders, plus the ordered
      * list of parameter names each placeholder was derived from.
      * A name repeats once per occurrence in the original SQL.
@@ -28,28 +42,12 @@ public final class SqlParameterParser {
     }
 
     /**
-     * Rewrites {@code :name} placeholders to positional {@code ?} without
-     * treating backslash as an unconditional string-literal escape (the
-     * PostgreSQL default with {@code standard_conforming_strings} on).
-     */
-    public static ParsedSql parse(String sql) {
-        return parse(sql, false);
-    }
-
-    /**
      * Rewrites {@code :name} placeholders to positional {@code ?}, skipping over
      * string literals, quoted/backtick identifiers, line and block comments,
-     * PostgreSQL {@code ::} casts, and PostgreSQL dollar-quoted strings so a
-     * colon inside any of those is left untouched.
-     *
-     * @param backslashEscapes when {@code true}, a backslash inside a single- or
-     *        double-quoted string escapes the next character (MySQL/MariaDB
-     *        default, i.e. {@code NO_BACKSLASH_ESCAPES} disabled). Backtick
-     *        identifiers never honor backslash escaping. When {@code false},
-     *        only PostgreSQL escape string literals ({@code E'...'}/{@code e'...'})
-     *        honor backslash escaping.
+     * PostgreSQL {@code ::} casts, and PostgreSQL dollar-quoted strings according
+     * to {@code options}.
      */
-    public static ParsedSql parse(String sql, boolean backslashEscapes) {
+    public static ParsedSql parse(String sql, Options options) {
         StringBuilder out = new StringBuilder(sql.length());
         List<String> order = new ArrayList<>();
         int len = sql.length();
@@ -73,8 +71,8 @@ public final class SqlParameterParser {
                 continue;
             }
 
-            if (c == '\'' || c == '"' || c == '`') {
-                int end = skipQuoted(sql, i, c, backslashEscapes);
+            if (c == '\'' || c == '"' || (options.allowBackticks() && c == '`')) {
+                int end = skipQuoted(sql, i, c, options);
                 out.append(sql, i, end);
                 i = end;
                 continue;
@@ -122,17 +120,7 @@ public final class SqlParameterParser {
      * so a {@code ;} inside any of those is not counted. Trailing {@code ;}
      * characters (with only whitespace after) are permitted.
      */
-    public static boolean isMultiStatement(String sql) {
-        return isMultiStatement(sql, false);
-    }
-
-    /**
-     * Whether {@code sql} holds more than one statement, applying the same
-     * literal, identifier, comment, and dollar-quote skipping as {@link #parse}
-     * so a {@code ;} inside any of those is not counted. Trailing {@code ;}
-     * characters (with only whitespace after) are permitted.
-     */
-    public static boolean isMultiStatement(String sql, boolean backslashEscapes) {
+    public static boolean isMultiStatement(String sql, Options options) {
         int len = sql.length();
         int i = 0;
         boolean sawSemicolon = false;
@@ -151,8 +139,8 @@ public final class SqlParameterParser {
                 continue;
             }
 
-            if (c == '\'' || c == '"' || c == '`') {
-                i = skipQuoted(sql, i, c, backslashEscapes);
+            if (c == '\'' || c == '"' || (options.allowBackticks() && c == '`')) {
+                i = skipQuoted(sql, i, c, options);
                 continue;
             }
 
@@ -175,9 +163,10 @@ public final class SqlParameterParser {
         return false;
     }
 
-    private static int skipQuoted(String sql, int start, char quote, boolean backslashEscapes) {
+    private static int skipQuoted(String sql, int start, char quote, Options options) {
         int len = sql.length();
-        boolean escapable = (backslashEscapes && quote != '`') || isEscapeStringStart(sql, start, quote);
+        boolean escapable = (options.backslashEscapes() && quote != '`')
+                || (options.escapeStrings() && isEscapeStringStart(sql, start, quote));
         int i = start + 1;
         while (i < len) {
             char c = sql.charAt(i);
