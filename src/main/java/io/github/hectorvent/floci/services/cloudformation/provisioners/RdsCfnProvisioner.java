@@ -29,7 +29,8 @@ import java.util.Set;
  *
  * <p>Every type here deletes by physical id alone, so the id-only
  * {@link #delete(String, String, String)} serves all seven and none of them appears in the
- * engine's {@code DELETE_NEEDS_STACK_RESOURCE} set.
+ * engine's {@code DELETE_NEEDS_STACK_RESOURCE} set. {@code DBCluster} is the one type that
+ * replaces through {@link ReplacementCleanup}; see {@code provisionDbCluster}.
  *
  * <p>Unlike most extractions this one does not take {@code RdsService} out of the monolith.
  * {@code AWS::SecretsManager::SecretTargetAttachment} is still served there and reads an
@@ -84,7 +85,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     public void delete(String resourceType, String physicalId, String region) {
         switch (resourceType) {
             case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId, region);
-            case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId, region);
+            case "AWS::RDS::DBCluster" -> CfnDeletes.safeDelete("DB cluster", physicalId,
+                    () -> rdsService.deleteDbCluster(physicalId, region), "DBClusterNotFoundFault");
             case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId, region);
             case "AWS::RDS::DBProxyTargetGroup" -> clearDbProxyTargetGroupSafe(physicalId, region);
             case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId, region);
@@ -94,6 +96,40 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             default -> throw new IllegalStateException(
                     "RdsCfnProvisioner received an unsupported type: " + resourceType);
         }
+    }
+
+    // ── replacement lifecycle: only AWS::RDS::DBCluster records one, so the other types answer
+    // "no cleanup owed" through ReplacementCleanup's own empty-record handling ──
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    /**
+     * A replacement is undone through the cleanup record: the resource names the displaced cluster
+     * again and the replacement is deleted. Without a record the update was in place, and putting
+     * that back needs a snapshot this provisioner does not keep, so the engine keeps reporting it
+     * as not rolled back, as before.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return ReplacementCleanup.rollback(resource, this::delete);
     }
 
     private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -255,12 +291,24 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * A DB cluster follows CloudFormation's replacement lifecycle. {@code DBClusterIdentifier},
+     * {@code EngineMode} and {@code StorageEncrypted} are createOnlyProperties in the
+     * {@code AWS::RDS::DBCluster} schema, so a change to any of them creates the replacement under
+     * a distinct physical id first and leaves the displaced cluster standing: it is deleted once
+     * the stack update commits ({@link #completeUpdate}), or the resource is pointed back at it and
+     * the replacement is removed when a later resource fails the update ({@link #rollbackUpdate}).
+     * A cluster the template names explicitly has no distinct id to move to, which is the update
+     * CloudFormation refuses for a custom-named resource, so it is refused here the same way.
+     */
     private void provisionDbCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                     ProvisionContext ctx, String region) {
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         String explicitId = resolveOptional(props, "DBClusterIdentifier", engine);
         String priorPhysicalId = r.getPhysicalId();
+        boolean customNamed = explicitId != null && !explicitId.isBlank();
         String id;
-        if (explicitId != null && !explicitId.isBlank()) {
+        if (customNamed) {
             id = explicitId;
         } else if (priorPhysicalId != null) {
             id = priorPhysicalId;
@@ -271,6 +319,20 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         // Same re-invocation rationale as provisionDbInstance above; modifyDbCluster only reconciles
         // password and IAM auth, mirroring that method's existing scope.
         DbCluster cluster = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbCluster);
+        String engineMode = resolveOptional(props, "EngineMode", engine);
+        boolean storageEncrypted = parseBoolProp(props, "StorageEncrypted", engine);
+        if (cluster != null && requiresDbClusterReplacement(cluster, engineMode, storageEncrypted)) {
+            if (customNamed) {
+                throw new AwsException("ValidationError",
+                        "CloudFormation cannot update a stack when a custom-named resource requires "
+                                + "replacing. Rename " + id + " and update the stack again.", 400);
+            }
+            id = ctx.generatePhysicalName(r.getLogicalId(), 60, true);
+            LOG.infov("Replacing DB cluster {0} with {1}: EngineMode/StorageEncrypted changed from "
+                            + "{2}/{3} to {4}/{5}", priorPhysicalId, id, cluster.getEngineMode(),
+                    cluster.isStorageEncrypted(), engineMode, storageEncrypted);
+            cluster = null;
+        }
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
                     id,
@@ -293,8 +355,6 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             String databaseName = resolveOptional(props, "DatabaseName", engine);
             boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
             String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
-            String engineMode = resolveOptional(props, "EngineMode", engine);
-            boolean storageEncrypted = parseBoolProp(props, "StorageEncrypted", engine);
             if (engineMode == null && !storageEncrypted) {
                 if (serverlessV2MinCapacity == null && serverlessV2MaxCapacity == null
                         && serverlessV2SecondsUntilAutoPause == null) {
@@ -311,7 +371,6 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                         serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                         false, null, engineMode, storageEncrypted);
             }
-            deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbCluster, "DB cluster");
         }
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
@@ -328,6 +387,23 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (cluster.getDbClusterResourceId() != null) {
             r.getAttributes().put("DBClusterResourceId", cluster.getDbClusterResourceId());
         }
+        // A provision that left the resource with a new physical id replaced the cluster: the
+        // displaced one is deleted once the update commits, or restored if the update rolls back.
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /**
+     * Whether the template's {@code EngineMode}/{@code StorageEncrypted} differ from the cluster on
+     * file. Both are createOnlyProperties, so a difference means replacement. A template without
+     * {@code EngineMode} means the RDS default {@code provisioned}, and a cluster persisted before
+     * the mode was tracked reports no mode at all, which is the same default.
+     */
+    private static boolean requiresDbClusterReplacement(DbCluster existing, String engineMode,
+                                                        boolean storageEncrypted) {
+        String desiredMode = firstNonBlank(engineMode, "provisioned");
+        String currentMode = firstNonBlank(existing.getEngineMode(), "provisioned");
+        return !desiredMode.equalsIgnoreCase(currentMode)
+                || existing.isStorageEncrypted() != storageEncrypted;
     }
 
     private Double parseServerlessV2Capacity(JsonNode props, String field,

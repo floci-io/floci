@@ -1338,6 +1338,16 @@ public interface EmulatorConfig {
         // DurationSeconds is omitted. AWS allows 900 to 3600.
         @WithDefault("900")
         int defaultCredentialDurationSeconds();
+
+        // Bounds for the per-cluster auth proxy: how long a client has to complete the
+        // startup/auth handshake, how long a backend connect attempt may take, and how many
+        // concurrent connections the proxy accepts before refusing new ones.
+        @WithDefault("10000")
+        int proxyHandshakeTimeoutMillis();
+        @WithDefault("5000")
+        int proxyBackendConnectTimeoutMillis();
+        @WithDefault("100")
+        int proxyMaxConnections();
     }
 
     interface RdsServiceConfig {
@@ -1374,6 +1384,16 @@ public interface EmulatorConfig {
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        // Bounds for the per-instance auth proxy: how long a client has to complete the
+        // startup/auth handshake, how long a backend connect attempt may take, and how many
+        // concurrent connections the proxy accepts before refusing new ones.
+        @WithDefault("10000")
+        int proxyHandshakeTimeoutMillis();
+        @WithDefault("5000")
+        int proxyBackendConnectTimeoutMillis();
+        @WithDefault("100")
+        int proxyMaxConnections();
     }
 
     interface RdsDataServiceConfig {
@@ -1753,6 +1773,23 @@ public interface EmulatorConfig {
 
         @WithDefault("256")
         int defaultCpuUnits();
+
+        /**
+         * Approved parent directories for task definition host volume bind mounts
+         * (volumes[].host.sourcePath). A sourcePath must resolve under one of these roots.
+         * Empty (the default) rejects every host volume sourcePath unless
+         * {@link #allowUnsafeHostVolumes()} is set, subject to the always-on traversal,
+         * bare-root, and Docker socket blocks below.
+         */
+        Optional<List<String>> hostVolumeRoots();
+
+        /**
+         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes,
+         * allowing any absolute path. Traversal segments, the bare root "/", and the Docker
+         * socket (or any ancestor directory that contains it) are still always rejected.
+         */
+        @WithDefault("false")
+        boolean allowUnsafeHostVolumes();
     }
 
     interface ResourceGroupsTaggingServiceConfig {

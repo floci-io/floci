@@ -8186,7 +8186,7 @@ class CloudFormationIntegrationTest {
                   "Type": "AWS::Serverless::Function",
                   "Properties": {
                     "PackageType": "Image",
-                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest"
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest"
                   }
                 }
               }
@@ -8223,7 +8223,7 @@ class CloudFormationIntegrationTest {
             .then()
             .statusCode(200)
             .body("Configuration.PackageType", equalTo("Image"))
-            .body("Code.ImageUri", equalTo("000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest"));
+            .body("Code.ImageUri", equalTo("000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest"));
     }
 
     @Test
@@ -8240,7 +8240,7 @@ class CloudFormationIntegrationTest {
                   "Type": "AWS::Serverless::Function",
                   "Properties": {
                     "PackageType": "Image",
-                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest",
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest",
                     "ImageConfig": {
                       "EntryPoint": ["/bootstrap"],
                       "Command": ["handler.main"],

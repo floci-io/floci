@@ -915,7 +915,7 @@ public class CodeDeployService {
                                                Map<String, Object> event) throws InterruptedException {
         for (Map<String, Object> step : hookSteps) {
             String location = (String) step.get("location");
-            int timeout = toInt(step.get("timeout"), 300);
+            int timeout = toInt(step.get("timeout"), 3600);
             String runas = (String) step.getOrDefault("runas", "root");
 
             if (location == null) {
@@ -994,7 +994,14 @@ public class CodeDeployService {
                         steps.forEach(s -> {
                             Map<String, Object> step = new java.util.LinkedHashMap<>();
                             if (s.has("location")) { step.put("location", s.get("location").asText()); }
-                            if (s.has("timeout")) { step.put("timeout", s.get("timeout").asInt(300)); }
+                            if (s.hasNonNull("timeout")) {
+                                JsonNode value = s.get("timeout");
+                                int timeout = value.asInt(0);
+                                if ((!value.isNumber() && !value.isTextual()) || timeout <= 0) {
+                                    throw new IllegalArgumentException("Invalid script timeout");
+                                }
+                                step.put("timeout", timeout);
+                            }
                             if (s.has("runas")) { step.put("runas", s.get("runas").asText("root")); }
                             stepList.add(step);
                         });

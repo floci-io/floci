@@ -151,11 +151,14 @@ class ApiGatewayGreedyPathParameterIntegrationTest {
 
     @Test @Order(7)
     void pathOutsideTheParentPrefixDoesNotMatch() {
-        // The greedy resource must not have become a catch-all for the whole API.
+        // The greedy resource must not have become a catch-all for the whole API. Reaching no
+        // resource at all is the no-match response, which AWS renders as 403 "Missing
+        // Authentication Token" rather than 404.
         given()
                 .when().get("/execute-api/" + apiId + "/test/other/img/logo.png")
                 .then()
-                .statusCode(404);
+                .statusCode(403)
+                .body("message", equalTo("Missing Authentication Token"));
     }
 
     @Test @Order(99)

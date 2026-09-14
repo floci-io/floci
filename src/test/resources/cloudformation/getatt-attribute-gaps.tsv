@@ -1,3 +1,4 @@
+AWS::AppSync::GraphQLApi	GraphQLEndpointArn	the private-endpoint ARN of the GraphQL endpoint; Floci serves one public endpoint and has no private-endpoint model
 AWS::CertificateManager::Certificate	Id	schema gives no description; Ref returns the ARN and the legacy spec gives the type no attributes
 AWS::CodeBuild::Project	Id	schema gives no description; AWS's Id may differ from the project name Floci uses
 AWS::CodePipeline::CustomActionType	Id	schema gives no description; the custom action has no separate id in Floci
@@ -43,4 +44,7 @@ AWS::RDS::DBInstance	ReadReplicaDBInstanceIdentifiers	read replicas are not emul
 AWS::RDS::DBInstance	ResumeFullAutomationModeTime	RDS Custom automation mode is not emulated
 AWS::RDS::DBInstance	SecondaryAvailabilityZone	multi-AZ secondary placement is not emulated
 AWS::RDS::DBInstance	StatusInfos	read-replica status detail is not emulated
+AWS::Redshift::Cluster	DeferMaintenanceIdentifier	Floci does not emulate deferred maintenance windows
+AWS::Redshift::Cluster	MasterPasswordSecretArn	only set when ManageMasterPassword is true, which Floci rejects
 AWS::SQS::QueuePolicy	Id	schema gives no description; the policy has no backing entity to take an id from
+AWS::SecretsManager::Secret	Id	Fn::GetAtt Id on a secret is its ARN, which the provisioner already sets as the physical id and as Arn; closable, deferred to a follow-up PR to keep this one a pure move

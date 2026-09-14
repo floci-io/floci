@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.Semaphore;
 
 /**
  * TCP auth proxy for a single RDS DB instance or cluster.
@@ -28,6 +29,9 @@ public class RdsAuthProxy {
     private final RdsSigV4Validator sigV4;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final MasterPasswordCheck passwordValidator;
+    private final int handshakeTimeoutMillis;
+    private final int backendConnectTimeoutMillis;
+    private final Semaphore connectionPermits;
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -36,7 +40,9 @@ public class RdsAuthProxy {
                         DatabaseEngine engine, boolean iamEnabled,
                         String masterUsername, String masterPassword, String dbName,
                         RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
-                        MasterPasswordCheck passwordValidator) {
+                        MasterPasswordCheck passwordValidator,
+                        int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                        int maxConnections) {
         this.instanceId = instanceId;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -48,6 +54,9 @@ public class RdsAuthProxy {
         this.sigV4 = sigV4;
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
+        this.handshakeTimeoutMillis = handshakeTimeoutMillis;
+        this.backendConnectTimeoutMillis = backendConnectTimeoutMillis;
+        this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
     }
 
     public void start(int proxyPort) throws IOException {
@@ -82,8 +91,20 @@ public class RdsAuthProxy {
         while (running) {
             try {
                 Socket client = serverSocket.accept();
+                if (!connectionPermits.tryAcquire()) {
+                    LOG.warnv("Refusing RDS connection for instance {0}: connection limit reached",
+                            instanceId);
+                    closeQuietly(client);
+                    continue;
+                }
                 Thread.ofVirtual().name("rds-proxy-conn-" + instanceId)
-                        .start(() -> handleConnection(client));
+                        .start(() -> {
+                            try {
+                                handleConnection(client);
+                            } finally {
+                                connectionPermits.release();
+                            }
+                        });
             } catch (IOException e) {
                 if (running) {
                     LOG.warnv("Accept error for RDS instance {0}: {1}", instanceId, e.getMessage());
@@ -94,10 +115,9 @@ public class RdsAuthProxy {
 
     private void handleConnection(Socket client) {
         Socket backend = null;
+        PostgresProtocolHandler.AuthenticatedSession session = null;
         try {
             client.setTcpNoDelay(true);
-            backend = new Socket(backendHost, backendPort);
-            backend.setTcpNoDelay(true);
 
             // RDS only proxy-validates the master user; a non-master user passes through so the
             // backend enforces its own credentials.
@@ -112,32 +132,52 @@ public class RdsAuthProxy {
 
             switch (engine) {
                 case POSTGRES -> {
-                    PostgresProtocolHandler.AuthenticatedSession session =
-                            PostgresProtocolHandler.authenticate(
-                                    client, backend, masterUsername, masterPassword, dbName,
-                                    iamEnabled, sigV4, tlsCertificates, authAdapter);
+                    PostgresProtocolHandler.BackendConnector connector = () -> {
+                        Socket backendSocket = new Socket();
+                        backendSocket.connect(new InetSocketAddress(backendHost, backendPort),
+                                backendConnectTimeoutMillis);
+                        backendSocket.setTcpNoDelay(true);
+                        return backendSocket;
+                    };
+                    session = PostgresProtocolHandler.authenticate(
+                                    client, connector, masterUsername, masterPassword, dbName,
+                                    iamEnabled, sigV4, tlsCertificates, authAdapter,
+                                    handshakeTimeoutMillis);
                     if (session != null) {
-                        PostgresProtocolHandler.bridge(session, backend);
+                        PostgresProtocolHandler.bridge(session);
                     }
                 }
-                case MYSQL, MARIADB -> MySqlProtocolHandler.handleAuth(
-                        client, backend, masterUsername, masterPassword,
-                        iamEnabled, sigV4, tlsCertificates, authAdapter);
+                case MYSQL, MARIADB -> {
+                    backend = new Socket();
+                    backend.connect(new InetSocketAddress(backendHost, backendPort),
+                            backendConnectTimeoutMillis);
+                    backend.setTcpNoDelay(true);
+                    MySqlProtocolHandler.handleAuth(
+                            client, backend, masterUsername, masterPassword,
+                            iamEnabled, sigV4, tlsCertificates, authAdapter,
+                            handshakeTimeoutMillis);
+                }
             }
         } catch (Exception e) {
             LOG.debugv("RDS connection error for instance {0}: {1}", instanceId, e.getMessage());
         } finally {
             // A handler's success path bridges then closes both sockets; every other path
             // (early return on a bare probe, auth failure, thrown IOException) can leave the
-            // backend DB connection open. Closing here is idempotent.
+            // backend DB connection open. Closing here is idempotent, and also covers a
+            // RuntimeException thrown between authenticate() returning a session and bridge()
+            // finishing its own cleanup, which would otherwise leak session.backend().
             closeQuietly(client);
-            if (backend != null) {
-                closeQuietly(backend);
+            closeQuietly(backend);
+            if (session != null) {
+                closeQuietly(session.backend());
             }
         }
     }
 
     private static void closeQuietly(Socket s) {
+        if (s == null) {
+            return;
+        }
         try {
             s.close();
         } catch (IOException e) {

@@ -24,4 +24,11 @@ class RedshiftProxyConfigTest {
     void redshiftEndpointHostDefaultsToEmpty() {
         assertEquals(Optional.empty(), config.services().redshift().endpointHost());
     }
+
+    @Test
+    void redshiftProxyBoundsHaveDefaults() {
+        assertEquals(10000, config.services().redshift().proxyHandshakeTimeoutMillis());
+        assertEquals(5000, config.services().redshift().proxyBackendConnectTimeoutMillis());
+        assertEquals(100, config.services().redshift().proxyMaxConnections());
+    }
 }

@@ -223,6 +223,7 @@ class EsmIntegrationTest {
                 .body("""
                         {
                           "BisectBatchOnFunctionError": true,
+                          "MaximumRetryAttempts": 3,
                           "DestinationConfig": {
                             "OnFailure": {
                               "Destination": "%s"
@@ -235,6 +236,7 @@ class EsmIntegrationTest {
                 .then()
                 .statusCode(202)
                 .body("BisectBatchOnFunctionError", equalTo(true))
+                .body("MaximumRetryAttempts", equalTo(3))
                 .body("DestinationConfig.OnFailure.Destination", equalTo(destinationArn));
 
         given()
@@ -243,6 +245,7 @@ class EsmIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("BisectBatchOnFunctionError", equalTo(true))
+                .body("MaximumRetryAttempts", equalTo(3))
                 .body("DestinationConfig.OnFailure.Destination", equalTo(destinationArn));
 
         given()
@@ -266,6 +269,7 @@ class EsmIntegrationTest {
                 .then()
                 .statusCode(202)
                 .body("$", not(hasKey("BisectBatchOnFunctionError")))
+                .body("$", not(hasKey("MaximumRetryAttempts")))
                 .body("$", not(hasKey("DestinationConfig")))
                 .extract()
                 .path("UUID");

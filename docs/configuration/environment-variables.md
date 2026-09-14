@@ -417,8 +417,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECR_ENABLED` | `true` | Enable the ECR service |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` | Docker image for the ECR registry sidecar |
 | `FLOCI_SERVICES_ECR_REGISTRY_CONTAINER_NAME` | `floci-ecr-registry` | Name of the ECR registry sidecar container |
-| `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First port in the ECR registry range |
-| `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last port in the ECR registry range |
+| `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First private loopback port for the backing registry |
+| `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last private loopback port for the backing registry |
 | `FLOCI_SERVICES_ECR_TLS_ENABLED` | `false` | Enable TLS for the ECR registry |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Keep the ECR registry container running when Floci stops |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | Repository URI style: `hostname` (`<account>.dkr.ecr.<region>.localhost`) or `path` |
@@ -447,6 +447,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default task memory when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default task CPU units when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | _(none)_ | Comma-separated allowlist of parent directories host volume `sourcePath`s must resolve under. By default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
+| `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing `HOST_VOLUME_ROOTS`; traversal, the bare root, and the Docker socket (or an ancestor directory of it, e.g. `/var/run`) are still always rejected |
 
 ### EC2
 

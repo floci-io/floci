@@ -90,13 +90,10 @@ def extract_switch_actions(java_source: str) -> list[str]:
     return out
 
 
-def extract_rest_actions(java_source: str) -> list[str]:
-    """ucfirst(method name) of @GET/@POST/@PUT/@DELETE/@PATCH methods, source order.
+CLASS_EXTENDS_RE = re.compile(r"public\s+(?:abstract\s+)?class\s+\w+\s+extends\s+([A-Za-z0-9_]+)")
 
-    Only applies to classes containing a class-level @Path. Returns [] otherwise.
-    """
-    if not CLASS_PATH_RE.search(java_source):
-        return []
+
+def _extract_raw_rest_methods(java_source: str) -> list[str]:
     actions: list[str] = []
     pending = False
     for line in java_source.splitlines():
@@ -119,6 +116,26 @@ def extract_rest_actions(java_source: str) -> list[str]:
     return actions
 
 
+def extract_rest_actions(java_source: str, source_path: Path | None = None) -> list[str]:
+    """ucfirst(method name) of @GET/@POST/@PUT/@DELETE/@PATCH methods, source order.
+
+    Only applies to classes containing a class-level @Path. Returns [] otherwise.
+    Inherited methods from a superclass in the same directory are included first.
+    """
+    if not CLASS_PATH_RE.search(java_source):
+        return []
+    actions: list[str] = []
+    if source_path is not None:
+        extends_match = CLASS_EXTENDS_RE.search(java_source)
+        if extends_match:
+            super_name = extends_match.group(1)
+            super_path = source_path.parent / f"{super_name}.java"
+            if super_path.exists():
+                actions.extend(_extract_raw_rest_methods(super_path.read_text(encoding="utf-8")))
+    actions.extend(_extract_raw_rest_methods(java_source))
+    return actions
+
+
 def extract_actions(entry: ServiceEntry) -> list[str]:
     """Merged, deduped, override-corrected action list for a service.
 
@@ -133,7 +150,7 @@ def extract_actions(entry: ServiceEntry) -> list[str]:
         if source.mode == "switch":
             raw = extract_switch_actions(text)
         elif source.mode == "rest":
-            raw = extract_rest_actions(text)
+            raw = extract_rest_actions(text, source.path)
         else:
             raise ValueError(f"unknown mode: {source.mode!r}")
         for name in raw:
