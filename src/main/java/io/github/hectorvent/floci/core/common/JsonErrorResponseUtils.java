@@ -1,10 +1,16 @@
 package io.github.hectorvent.floci.core.common;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import jakarta.ws.rs.core.Response;
 
+import java.util.Map;
+
 public class JsonErrorResponseUtils {
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private JsonErrorResponseUtils() {
         // Do not instantiate
@@ -15,11 +21,33 @@ public class JsonErrorResponseUtils {
     }
 
     public static Response createErrorResponse(AwsException e) {
+        if (e.getExtendedData() != null) {
+            return createExtendedErrorResponse(e);
+        }
         JsonNode item = null;
         if (e instanceof ConditionalCheckFailedException){
             item = ((ConditionalCheckFailedException) e).getItem();
         }
         return createErrorResponse(e.getHttpStatus(), e.getErrorCode(), e.jsonType(), e.getMessage(), item);
+    }
+
+    /**
+     * AwsJson11Controller dispatches services like WAFv2 through this class rather than the
+     * generic {@code AwsExceptionMapper} JAX-RS provider, so extendedData (Field/Parameter/Reason
+     * style structured errors) needs its own serialization path here to reach the client at all.
+     */
+    private static Response createExtendedErrorResponse(AwsException e) {
+        String queryErrorFault = (e.getHttpStatus() < 500) ? "Sender" : "Receiver";
+        ObjectNode node = OBJECT_MAPPER.createObjectNode();
+        node.put("__type", e.jsonType());
+        node.put("message", e.getMessage());
+        for (Map.Entry<String, Object> entry : e.getExtendedData().entrySet()) {
+            node.set(entry.getKey(), OBJECT_MAPPER.valueToTree(entry.getValue()));
+        }
+        return Response.status(e.getHttpStatus())
+                .header("x-amzn-query-error", e.getErrorCode() + ";" + queryErrorFault)
+                .entity(node)
+                .build();
     }
 
     public static Response createUnknownOperationErrorResponse(String target) {

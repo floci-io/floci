@@ -97,7 +97,7 @@ public class AppSyncExecutionController {
             AppSyncAuthContext authContext;
             try {
                 authContext = authMiddleware.authenticate(
-                        headerMap(headers), api, authRequestInfo(parsed, headers));
+                        headerMap(headers), api, authRequestInfo(parsed, headers, body));
             } catch (AppSyncTransportException e) {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
             }
@@ -203,7 +203,7 @@ public class AppSyncExecutionController {
         return map;
     }
 
-    private AuthRequestInfo authRequestInfo(ParsedRequest parsed, HttpHeaders headers) {
+    private AuthRequestInfo authRequestInfo(ParsedRequest parsed, HttpHeaders headers, String rawBody) {
         String accountId = requestContext.getAccountId() != null ? requestContext.getAccountId() : "000000000000";
         String region = requestContext.getRegion() != null ? requestContext.getRegion() : "us-east-1";
         String requestId = headers.getHeaderString("x-amzn-RequestId");
@@ -218,7 +218,8 @@ public class AppSyncExecutionController {
                 requestId,
                 accountId,
                 region,
-                headerMap(headers));
+                headerMap(headers),
+                rawBody);
     }
 
     private static List<String> sourceIp(HttpHeaders headers) {

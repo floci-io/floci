@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -49,7 +50,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
     @Order(1)
     void createBucket() {
         given()
-        .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID))
+        .filter(S3RequestSigner.signedAs(LEGACY_ACCESS_KEY_ID, LEGACY_SECRET_KEY))
         .when()
             .put("/" + BUCKET)
         .then()
@@ -95,7 +96,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .body("Error.Code", org.hamcrest.Matchers.equalTo("SignatureDoesNotMatch"));
 
         given()
-            .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID))
+            .filter(S3RequestSigner.signedAs(LEGACY_ACCESS_KEY_ID, LEGACY_SECRET_KEY))
         .when()
             .get("/" + BUCKET + "/" + key)
         .then()
@@ -251,7 +252,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .header("ETag", notNullValue());
 
         given()
-            .header("Authorization", authorizationHeader(LEGACY_ACCESS_KEY_ID))
+            .filter(S3RequestSigner.signedAs(LEGACY_ACCESS_KEY_ID, LEGACY_SECRET_KEY))
         .when()
             .get("/" + BUCKET + "/" + key)
         .then()

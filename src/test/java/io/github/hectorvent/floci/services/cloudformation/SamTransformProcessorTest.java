@@ -938,6 +938,35 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_implicitApiCognitoAuthorizerReportsUnsupportedCapability() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Api": {"Auth": {
+                "DefaultAuthorizer": "MyCognitoAuth",
+                "Authorizers": {"MyCognitoAuth": {
+                  "AuthType": "COGNITO_USER_POOLS",
+                  "UserPoolArn": "arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_example"
+                }}
+              }}},
+              "Resources": {
+                "Fn": {"Type": "AWS::Serverless::Function", "Properties": {
+                  "Handler": "index.handler", "Runtime": "nodejs20.x", "InlineCode": "code",
+                  "Events": {"Get": {"Type": "Api", "Properties": {"Path": "/x", "Method": "GET"}}}
+                }}
+              }
+            }
+            """);
+
+        AwsException error = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("SAM implicit REST API authorizer MyCognitoAuth configures a Cognito user pool "
+                + "authorizer, which Floci does not support for SAM implicit REST APIs yet.", error.getMessage());
+        assertFalse(error.getMessage().contains("FunctionPayloadType"));
+    }
+
+    @Test
     void expandSamTemplate_implicitApiEventCanOptOutOfGlobalAuthorizer() throws Exception {
         JsonNode template = objectMapper.readTree("""
             {

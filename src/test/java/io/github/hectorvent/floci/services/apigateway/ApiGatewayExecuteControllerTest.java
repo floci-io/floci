@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
@@ -134,6 +136,107 @@ class ApiGatewayExecuteControllerTest {
         assertEquals(
                 objectMapper.valueToTree(List.of("first", "second", "third")),
                 event.path("multiValueHeaders").path("X-Dup"));
+    }
+
+    @Test
+    void duplicateQueryParamUsesLastSingleValueAndPreservesAllMultiValues() {
+        // Measured against a real REST API (us-west-2, Lambda proxy integration):
+        // ?x=1&x=2&x=3 yields queryStringParameters {"x":"3"} and
+        // multiValueQueryStringParameters {"x":["1","2","3"]}, matching how AWS
+        // collapses duplicate request headers.
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.add("x", "1");
+        queryParams.add("x", "2");
+        queryParams.add("x", "3");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(queryParams);
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        ObjectNode event = objectMapper.createObjectNode();
+        ApiGatewayExecuteController controller = controller(objectMapper);
+        controller.putQueryStringParameters(event, uriInfo);
+        controller.putMultiValueQueryStringParameters(event, uriInfo);
+
+        assertEquals("3", event.path("queryStringParameters").path("x").asText());
+        assertEquals(
+                objectMapper.valueToTree(List.of("1", "2", "3")),
+                event.path("multiValueQueryStringParameters").path("x"));
+    }
+
+    @Test
+    void repeatedQueryParamEndingEmptyKeepsTheTrailingEmptyValue() {
+        // ?x=1&x= yields {"x":""}: the last value wins even when it is empty.
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.add("x", "1");
+        queryParams.add("x", "");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(queryParams);
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        ObjectNode event = objectMapper.createObjectNode();
+        ApiGatewayExecuteController controller = controller(objectMapper);
+        controller.putQueryStringParameters(event, uriInfo);
+
+        assertEquals("", event.path("queryStringParameters").path("x").asText());
+    }
+
+    @Test
+    void bracketedQueryParamNameSurvivesUnchanged() {
+        // JSON:API style filter[status]=open reaches the integration with the brackets intact;
+        // AWS does not rewrite or drop the name. Pinned so the parameter map stays a passthrough.
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.add("filter[status]", "open");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(queryParams);
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        ObjectNode event = objectMapper.createObjectNode();
+        ApiGatewayExecuteController controller = controller(objectMapper);
+        controller.putQueryStringParameters(event, uriInfo);
+        controller.putMultiValueQueryStringParameters(event, uriInfo);
+
+        assertEquals("open", event.path("queryStringParameters").path("filter[status]").asText());
+        assertEquals(
+                objectMapper.valueToTree(List.of("open")),
+                event.path("multiValueQueryStringParameters").path("filter[status]"));
+    }
+
+    @Test
+    void absentQueryStringYieldsExplicitNulls() {
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        ObjectNode event = objectMapper.createObjectNode();
+        ApiGatewayExecuteController controller = controller(objectMapper);
+        controller.putQueryStringParameters(event, uriInfo);
+        controller.putMultiValueQueryStringParameters(event, uriInfo);
+
+        assertTrue(event.path("queryStringParameters").isNull());
+        assertTrue(event.path("multiValueQueryStringParameters").isNull());
+    }
+
+    @Test
+    void convertsAuthorizerValuesToAwsVtlStringShape() {
+        Map<String, Object> result = ApiGatewayExecuteController.vtlAuthorizerContext(
+                "real-principal",
+                Map.of(
+                        "principalId", "context-principal",
+                        "stringKey", "value",
+                        "numberKey", 1,
+                        "booleanKey", true));
+
+        assertEquals(Map.of(
+                "principalId", "real-principal",
+                "stringKey", "value",
+                "numberKey", "1",
+                "booleanKey", "true"), result);
+    }
+
+    @Test
+    void omitsEmptyAuthorizerVtlContext() {
+        assertNull(ApiGatewayExecuteController.vtlAuthorizerContext(null, null));
+        assertNull(ApiGatewayExecuteController.vtlAuthorizerContext(null, Map.of()));
     }
 
     // ── Lambda proxy response Content-Type header matching ──────

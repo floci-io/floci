@@ -369,6 +369,10 @@ public class LambdaController {
             node.put("BisectBatchOnFunctionError", esm.getBisectBatchOnFunctionError());
         }
 
+        if (esm.getMaximumRetryAttempts() != null) {
+            node.put("MaximumRetryAttempts", esm.getMaximumRetryAttempts());
+        }
+
         if (esm.getDestinationConfig() != null && esm.getDestinationConfig().getOnFailure() != null) {
             ObjectNode destinationConfig = node.putObject("DestinationConfig");
             ObjectNode onFailure = destinationConfig.putObject("OnFailure");

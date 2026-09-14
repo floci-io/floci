@@ -25,6 +25,29 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 ```
 
+The container normally switches to the unprivileged `floci` user (UID 1001), including when started with `--user root`. If the mounted socket is accessible only to root, set the entrypoint option `FLOCI_RUN_AS_ROOT=true` to keep Floci running as root:
+
+```bash
+docker run --rm -p 4566:4566 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e FLOCI_RUN_AS_ROOT=true \
+  floci/floci:latest
+```
+
+In Docker Compose, use the same environment variable:
+
+```yaml
+services:
+  floci:
+    image: floci/floci:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      FLOCI_RUN_AS_ROOT: "true"
+```
+
+Use this only when the socket's permissions require root. Without the option, Floci retains its unprivileged default. The setting applies to the container entrypoint, not to `floci.docker` configuration.
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.

@@ -55,6 +55,10 @@ runtimes reach `READY` immediately and hold metadata only. See
 | `UpdateMemory` | Updates a memory resource |
 | `DeleteMemory` | Deletes a memory resource |
 | `ListMemories` | Lists memory resources |
+| `CreateEvent` | Appends an event to a memory. `sessionId` is optional and generated when omitted |
+| `ListEvents` | Lists a session's events, newest first. `POST` to the session path, not `GET` |
+| `GetEvent` | Returns one event |
+| `DeleteEvent` | Deletes one event and echoes its id |
 | `CreateBrowser` | Creates a custom browser |
 | `GetCodeInterpreter` | Returns a custom or system code interpreter |
 | `DeleteCodeInterpreter` | Deletes a custom code interpreter |
@@ -79,6 +83,26 @@ runtimes reach `READY` immediately and hold metadata only. See
 
 A `DEFAULT` endpoint is created automatically with each runtime, and each runtime
 is associated with an auto-created, resolvable workload identity.
+
+## Memory events
+
+The event data plane is backed by real storage, so what a read returns is what was written rather
+than a fixed answer. Behaviour measured against real AgentCore:
+
+- events come back **newest first**, and the event id embeds a zero-padded timestamp so ids sort
+  chronologically as plain strings
+- `includePayloads: false` omits the `payload` key entirely rather than emptying it
+- `maxResults` accepts 1 to 100
+- a **malformed** memory id is a `ValidationException`, while a **well-formed but unknown** one is a
+  `ResourceNotFoundException`. A memory id is a name followed by exactly ten alphanumerics
+- an unknown actor or session is an empty list, not an error
+- a new event lands on the `main` branch, and an empty payload is accepted, though `payload` is a
+  required member: omitting it is a `ValidationException` while `[]` is valid
+- `CreateEvent` answers `201`, not `200`
+- `ListEvents` pages with `nextToken` and defaults to 20 events when a caller names no `maxResults`
+
+Memory *records* (extraction and retrieval) are not emulated: they depend on an extraction engine
+rather than on stored events.
 
 ## Data plane — `InvokeAgentRuntime`
 

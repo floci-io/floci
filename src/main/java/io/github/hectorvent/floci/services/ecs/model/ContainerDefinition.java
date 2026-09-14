@@ -20,6 +20,7 @@ public class ContainerDefinition {
     private List<String> entryPoint;
     private List<MountPoint> mountPoints;
     private LogConfiguration logConfiguration;
+    private HealthCheck healthCheck;
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -59,4 +60,7 @@ public class ContainerDefinition {
 
     public LogConfiguration getLogConfiguration() { return logConfiguration; }
     public void setLogConfiguration(LogConfiguration logConfiguration) { this.logConfiguration = logConfiguration; }
+
+    public HealthCheck getHealthCheck() { return healthCheck; }
+    public void setHealthCheck(HealthCheck healthCheck) { this.healthCheck = healthCheck; }
 }

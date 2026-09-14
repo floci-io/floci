@@ -61,17 +61,20 @@ public class S3Object {
     }
 
     public S3Object(String bucketName, String key, byte[] data, String contentType) {
+        this(bucketName, key, data, contentType, computeETag(data));
+    }
+
+    public S3Object(String bucketName, String key, byte[] data, String contentType, String eTag) {
         this.bucketName = bucketName;
         this.key = key;
         this.data = data;
         this.contentType = contentType != null ? contentType : "application/octet-stream";
         this.size = data.length;
         this.lastModified = Instant.now().truncatedTo(ChronoUnit.MILLIS);
-        this.eTag = computeETag(data);
+        this.eTag = eTag;
         this.metadata = new HashMap<>();
         this.storageClass = "STANDARD";
         this.checksum = new S3Checksum();
-        this.checksum.setChecksumSHA256(S3Checksum.sha256Base64(data));
         this.checksum.setChecksumType(ChecksumType.FULL_OBJECT);
         this.parts = new ArrayList<>();
         this.tags = new HashMap<>();
