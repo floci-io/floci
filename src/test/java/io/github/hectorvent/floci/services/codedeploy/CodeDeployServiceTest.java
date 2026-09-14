@@ -11,12 +11,15 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.ssm.SsmCommandService;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.awaitility.Awaitility.await;
@@ -50,9 +53,13 @@ class CodeDeployServiceTest {
     }
 
     private CodeDeployService newService(Duration hookCallbackTimeout) {
+        return newService(hookCallbackTimeout, Clock.systemUTC());
+    }
+
+    private CodeDeployService newService(Duration hookCallbackTimeout, Clock clock) {
         CodeDeployService svc = new CodeDeployService(lambdaService, mock(EcsService.class),
                 mock(ElbV2Service.class), ssmCommandService, mock(Ec2Service.class), new ObjectMapper(),
-                new RegionResolver(REGION, ACCOUNT_ID), null, hookCallbackTimeout);
+                new RegionResolver(REGION, ACCOUNT_ID), null, hookCallbackTimeout, clock);
         svc.initializeStorage();
         return svc;
     }
@@ -123,6 +130,29 @@ class CodeDeployServiceTest {
         assertEquals("ScriptTimedOut", diagnostics.get("errorCode"));
         assertEquals("Script at specified location: scripts/start_server.sh failed to complete in 1 seconds",
                 diagnostics.get("message"));
+    }
+
+    @Test
+    void ssmScriptRunningPastThirtySecondsWithinDeclaredTimeoutSucceeds() {
+        MutableClock clock = new MutableClock();
+        CodeDeployService clockedService = newService(Duration.ofHours(1), clock);
+        clockedService.registerOnPremisesInstance(REGION, "instance-1", "arn:aws:sts::000000000000:session/s",
+                "arn:aws:iam::000000000000:user/u");
+        when(ssmCommandService.isInstanceRegistered("instance-1", REGION)).thenReturn(true);
+        when(ssmCommandService.sendCommandToInstance(eq("instance-1"), anyString(), any(), eq(300), eq(REGION)))
+                .thenReturn("cmd-long");
+        AtomicInteger polls = new AtomicInteger();
+        when(ssmCommandService.getCommandInvocationStatus("cmd-long", "instance-1", REGION))
+                .thenAnswer(invocation -> {
+                    clock.advance(Duration.ofSeconds(20));
+                    return polls.incrementAndGet() < 3 ? "InProgress" : "Success";
+                });
+
+        String deploymentId = createServerDeployment(clockedService, "app-ssm-long", "group-ssm-long", 300);
+
+        Deployment deployment = awaitTerminal(clockedService, deploymentId, Duration.ofSeconds(5));
+
+        assertEquals("Succeeded", deployment.getStatus());
     }
 
     // ---- Lambda platform hooks ----------------------------------------------------------
@@ -290,8 +320,13 @@ class CodeDeployServiceTest {
     // ---- Helpers --------------------------------------------------------------------------
 
     private String createServerDeployment(String appName, String groupName, int timeoutSeconds) {
-        service.createApplication(REGION, appName, "Server", null);
-        service.createDeploymentGroup(REGION, appName, groupName, "CodeDeployDefault.AllAtOnce", ROLE_ARN, null);
+        return createServerDeployment(service, appName, groupName, timeoutSeconds);
+    }
+
+    private String createServerDeployment(CodeDeployService target, String appName, String groupName,
+                                          int timeoutSeconds) {
+        target.createApplication(REGION, appName, "Server", null);
+        target.createDeploymentGroup(REGION, appName, groupName, "CodeDeployDefault.AllAtOnce", ROLE_ARN, null);
         String appSpec = """
                 os: linux
                 hooks:
@@ -301,7 +336,7 @@ class CodeDeployServiceTest {
                 """.formatted(timeoutSeconds);
         Map<String, Object> revision = Map.of("revisionType", "AppSpecContent",
                 "appSpecContent", Map.of("content", appSpec));
-        return service.createDeployment(REGION, appName, groupName, null, revision, "server hook test");
+        return target.createDeployment(REGION, appName, groupName, null, revision, "server hook test");
     }
 
     private void createLambdaAppAndGroup(String appName, String groupName) {
