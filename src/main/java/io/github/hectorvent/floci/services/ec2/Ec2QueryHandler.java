@@ -672,6 +672,7 @@ public class Ec2QueryHandler {
     // ─── Instance handlers ────────────────────────────────────────────────────
 
     private Response handleRunInstances(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         String imageId = p.getFirst("ImageId");
         String instanceType = p.getFirst("InstanceType");
         int minCount = Integer.parseInt(p.getOrDefault("MinCount", List.of("1")).get(0));

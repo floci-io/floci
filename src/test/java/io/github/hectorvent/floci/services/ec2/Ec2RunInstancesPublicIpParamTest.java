@@ -16,6 +16,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -28,6 +29,17 @@ import static org.mockito.Mockito.when;
 class Ec2RunInstancesPublicIpParamTest {
 
     private static final String REGION = "us-east-1";
+
+    @Test
+    void dryRunDoesNotReachProvisioningService() {
+        Ec2Service service = mock(Ec2Service.class);
+        Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
+                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class));
+        MultivaluedMap<String, String> request = params("DryRun", "true");
+        assertEquals(412, handler.handle("RunInstances", request, REGION).getStatus());
+        verifyNoInteractions(service);
+    }
 
     @Test
     void topLevelAssociatePublicIpAddressReachesTheService() {
