@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.vtl.VtlUtilFunctions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -28,11 +28,7 @@ import org.apache.velocity.util.introspection.TypeConversionHandlerImpl;
 import org.apache.velocity.util.introspection.UberspectImpl;
 
 import java.io.StringWriter;
-import java.net.URLDecoder;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.AbstractMap;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -336,68 +332,34 @@ public class VtlTemplateEngine {
         /**
          * Escapes a string using EcmaScript/JavaScript string rules.
          * Matches AWS API Gateway behavior (Apache Commons Lang escapeEcmaScript).
-         * Escapes: backslash, double/single quotes, forward slash, control chars,
-         * and non-ASCII characters (outside 0x20-0x7E) as unicode escape sequences.
          */
         public String escapeJavaScript(String s) {
-            if (s == null) return "";
-            StringBuilder sb = new StringBuilder(s.length() + 16);
-            for (int i = 0; i < s.length(); i++) {
-                char c = s.charAt(i);
-                switch (c) {
-                    case '\\' -> sb.append("\\\\");
-                    case '"' -> sb.append("\\\"");
-                    case '\'' -> sb.append("\\'");
-                    case '/' -> sb.append("\\/");
-                    case '\b' -> sb.append("\\b");
-                    case '\t' -> sb.append("\\t");
-                    case '\n' -> sb.append("\\n");
-                    case '\f' -> sb.append("\\f");
-                    case '\r' -> sb.append("\\r");
-                    default -> {
-                        if (c < 0x20 || c > 0x7E) {
-                            sb.append("\\u").append(String.format("%04x", (int) c));
-                        } else {
-                            sb.append(c);
-                        }
-                    }
-                }
-            }
-            return sb.toString();
+            return VtlUtilFunctions.escapeJavaScript(s);
         }
 
         /** URL-encodes a string. */
         public String urlEncode(String s) {
-            if (s == null) return "";
-            return URLEncoder.encode(s, StandardCharsets.UTF_8);
+            return VtlUtilFunctions.urlEncode(s);
         }
 
         /** URL-decodes a string. */
         public String urlDecode(String s) {
-            if (s == null) return "";
-            return URLDecoder.decode(s, StandardCharsets.UTF_8);
+            return VtlUtilFunctions.urlDecode(s);
         }
 
         /** Base64-encodes a string. */
         public String base64Encode(String s) {
-            if (s == null) return "";
-            return Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
+            return VtlUtilFunctions.base64Encode(s);
         }
 
         /** Base64-decodes a string. */
         public String base64Decode(String s) {
-            if (s == null) return "";
-            return new String(Base64.getDecoder().decode(s), StandardCharsets.UTF_8);
+            return VtlUtilFunctions.base64Decode(s);
         }
 
         /** Parses a JSON string into a Map/List structure navigable in VTL. */
         public Object parseJson(String s) {
-            if (s == null || s.isEmpty()) return Map.of();
-            try {
-                return objectMapper.readValue(s, Object.class);
-            } catch (JsonProcessingException e) {
-                return Map.of();
-            }
+            return VtlUtilFunctions.parseJson(objectMapper, s);
         }
     }
 }

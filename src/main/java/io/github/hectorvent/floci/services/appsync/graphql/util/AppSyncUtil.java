@@ -2,10 +2,8 @@ package io.github.hectorvent.floci.services.appsync.graphql.util;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.vtl.VtlUtilFunctions;
 
-import java.net.URLDecoder;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.regex.Pattern;
 
@@ -50,59 +48,27 @@ public class AppSyncUtil {
     public MapUtil getMap() { return mapUtil; }
 
     public String escapeJavaScript(String s) {
-        if (s == null) return "";
-        StringBuilder sb = new StringBuilder(s.length() + 16);
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '\\' -> sb.append("\\\\");
-                case '"' -> sb.append("\\\"");
-                case '\'' -> sb.append("\\'");
-                case '/' -> sb.append("\\/");
-                case '\b' -> sb.append("\\b");
-                case '\t' -> sb.append("\\t");
-                case '\n' -> sb.append("\\n");
-                case '\f' -> sb.append("\\f");
-                case '\r' -> sb.append("\\r");
-                default -> {
-                    if (c < 0x20 || c > 0x7E) {
-                        sb.append("\\u").append(String.format("%04x", (int) c));
-                    } else {
-                        sb.append(c);
-                    }
-                }
-            }
-        }
-        return sb.toString();
+        return VtlUtilFunctions.escapeJavaScript(s);
     }
 
     public String urlEncode(String s) {
-        if (s == null) return "";
-        return URLEncoder.encode(s, StandardCharsets.UTF_8);
+        return VtlUtilFunctions.urlEncode(s);
     }
 
     public String urlDecode(String s) {
-        if (s == null) return "";
-        return URLDecoder.decode(s, StandardCharsets.UTF_8);
+        return VtlUtilFunctions.urlDecode(s);
     }
 
     public String base64Encode(byte[] data) {
-        if (data == null) return "";
-        return Base64.getEncoder().encodeToString(data);
+        return VtlUtilFunctions.base64Encode(data);
     }
 
     public String base64Decode(String s) {
-        if (s == null) return "";
-        return new String(Base64.getDecoder().decode(s), StandardCharsets.UTF_8);
+        return VtlUtilFunctions.base64Decode(s);
     }
 
     public Object parseJson(String s) {
-        if (s == null || s.isEmpty()) return Map.of();
-        try {
-            return objectMapper.readValue(s, Object.class);
-        } catch (JsonProcessingException e) {
-            return Map.of();
-        }
+        return VtlUtilFunctions.parseJson(objectMapper, s);
     }
 
     public String toJson(Object o) {
