@@ -66,7 +66,7 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -128,7 +128,7 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -184,7 +184,7 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, "admin", "secret",
                                 false, testSigV4Validator(), tlsCertificates,
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -282,7 +282,7 @@ class MySqlProtocolHandlerTest {
                         MySqlProtocolHandler.handleAuth(
                                 proxyClient, backend, "admin", "secret",
                                 false, testSigV4Validator(), tlsCertificates,
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT);
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -324,6 +324,41 @@ class MySqlProtocolHandlerTest {
                 backendThread.join(5_000);
                 assertEquals(false, authThread.isAlive(), "authThread did not terminate");
                 assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+    }
+
+    @Test
+    void silentBackendHandshakeFailsWithinTheConfiguredTimeoutInsteadOfHanging() throws Exception {
+        try (ServerSocket silentBackend = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                Socket proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", silentBackend.getLocalPort());
+
+                AtomicReference<IOException> authFailure = new AtomicReference<>();
+                Thread authThread = Thread.ofVirtual().start(() -> {
+                    try {
+                        MySqlProtocolHandler.handleAuth(
+                                proxyClient, backend, "admin", "secret",
+                                false, testSigV4Validator(), testTlsCertificates(),
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 200);
+                    } catch (IOException e) {
+                        authFailure.set(e);
+                    }
+                });
+
+                // The silent backend accepts the TCP connection but never sends its Handshake V10;
+                // the backend-side handshake read deadline must fire well within the 5s join instead
+                // of hanging forever.
+                authThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertNotNull(authFailure.get(),
+                        "expected handleAuth to fail once the backend stayed silent");
+
+                ourClient.close();
+                proxyClient.close();
             }
         }
     }

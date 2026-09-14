@@ -434,6 +434,7 @@ public class ApiGatewayService {
         method.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         method.setAuthorizerId((String) request.get("authorizerId"));
         method.setRequestValidatorId((String) request.get("requestValidatorId"));
+        method.setApiKeyRequired(Boolean.TRUE.equals(request.get("apiKeyRequired")));
 
         @SuppressWarnings("unchecked")
         Map<String, Boolean> reqParams = (Map<String, Boolean>) request.get("requestParameters");
@@ -2000,11 +2001,25 @@ public class ApiGatewayService {
         MethodConfig method = getMethod(region, apiId, resourceId, httpMethod);
         if (patchOperations != null) {
             for (Map<String, String> op : patchOperations) {
-                if (!"replace" .equals(op.get("op"))) continue;
+                String path = op.getOrDefault("path", "");
+                String opType = op.get("op");
+                String value = op.get("value");
+                if ("/apiKeyRequired".equals(path)) {
+                    if (!"replace".equals(opType)) {
+                        throw new AwsException("BadRequestException", "Invalid patch operation '" + opType + "' for path '" + path + "'. Supported operation is: replace", 400);
+                    }
+                    if (value == null || (!"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value))) {
+                        throw new AwsException("BadRequestException", "Invalid boolean value '" + value + "' for apiKeyRequired. Must be 'true' or 'false'", 400);
+                    }
+                }
+            }
+            for (Map<String, String> op : patchOperations) {
+                if (!"replace".equals(op.get("op"))) continue;
                 String path = op.getOrDefault("path", "");
                 String value = op.get("value");
-                if ("/authorizationType" .equals(path)) method.setAuthorizationType(value);
-                else if ("/authorizerId" .equals(path)) method.setAuthorizerId(value);
+                if ("/authorizationType".equals(path)) method.setAuthorizationType(value);
+                else if ("/authorizerId".equals(path)) method.setAuthorizerId(value);
+                else if ("/apiKeyRequired".equals(path)) method.setApiKeyRequired(Boolean.parseBoolean(value));
             }
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));

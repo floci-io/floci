@@ -5,8 +5,10 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.mockito.Mockito;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ServerSocket;
@@ -121,6 +123,185 @@ class RedshiftInterceptingBridgeTest {
         testClientEnd.getOutputStream().flush();
 
         assertArrayEquals(parsePacket, nextForwarded().toPacketBytes());
+    }
+
+    @Test
+    void rewritesDdlParseWhilePreservingNameAndParameterOids() throws IOException {
+        startBridge();
+        PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage(
+                "ddl", "CREATE TABLE sales (id int ENCODE az64, d date) "
+                        + "DISTSTYLE KEY DISTKEY (id) SORTKEY (d)", List.of(23, 25));
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeParse(parse, parse.sql()));
+        testClientEnd.getOutputStream().flush();
+
+        PostgresWireDecoder backendDecoder = new PostgresWireDecoder(testBackendEnd.getInputStream());
+        PostgresWireDecoder.ParseMessage forwarded = backendDecoder.decodeParse(backendDecoder.nextMessage());
+
+        assertEquals("ddl", forwarded.statementName());
+        assertEquals(List.of(23, 25), forwarded.parameterTypeOids());
+        String sql = forwarded.sql().toUpperCase();
+        assertFalse(sql.contains("DISTSTYLE"), sql);
+        assertFalse(sql.contains("DISTKEY"), sql);
+        assertFalse(sql.contains("SORTKEY"), sql);
+        assertFalse(sql.contains("ENCODE"), sql);
+    }
+
+    @Test
+    void parameterizedCopyParseFallsOpenByteForByte() throws IOException {
+        startBridge();
+        PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage(
+                "copy", "COPY t FROM 's3://b/in/data'", List.of(25));
+        byte[] packet = PostgresWireDecoder.encodeParse(parse, parse.sql());
+
+        testClientEnd.getOutputStream().write(packet);
+        testClientEnd.getOutputStream().flush();
+
+        assertArrayEquals(packet, nextForwarded().toPacketBytes());
+    }
+
+    @Test
+    void pipelinedExtendedCopyPreservesResponseOrderAndSyncReadyForQuery() throws Exception {
+        startBridge();
+        Mockito.when(s3Stub.objectExists("b", "in/data")).thenReturn(true);
+        Mockito.when(s3Stub.getObject("b", "in/data")).thenReturn(
+                new S3Object("b", "in/data", "1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+        AtomicReference<Throwable> backendFailure = new AtomicReference<>();
+        Thread backend = Thread.ofVirtual().start(() -> {
+            try {
+                PostgresWireDecoder decoder = new PostgresWireDecoder(testBackendEnd.getInputStream());
+                PostgresWireDecoder.ParseMessage parse = decoder.decodeParse(decoder.nextMessage());
+                assertTrue(parse.sql().contains("FROM STDIN"), parse.sql());
+                writeBackendFrame('1', new byte[0]);
+                assertEquals('B', decoder.nextMessage().type());
+                writeBackendFrame('2', new byte[0]);
+                assertEquals('D', decoder.nextMessage().type());
+                writeBackendFrame('n', new byte[0]);
+                assertEquals('E', decoder.nextMessage().type());
+                writeBackendFrame('G', new byte[]{0, 0, 0});
+                while (decoder.nextMessage().type() != 'c') {
+                    // Consume CopyData until the bridge completes CopyIn.
+                }
+                assertEquals('S', decoder.nextMessage().type());
+                writeBackendFrame('C', "COPY 1\0".getBytes(StandardCharsets.US_ASCII));
+                writeBackendFrame('Z', new byte[]{'I'});
+            } catch (Throwable failure) {
+                backendFailure.compareAndSet(null, failure);
+            }
+        });
+
+        PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage(
+                "copy-s", "COPY t FROM 's3://b/in/data'", List.of());
+        ByteArrayOutputStream pipeline = new ByteArrayOutputStream();
+        pipeline.write(PostgresWireDecoder.encodeParse(parse, parse.sql()));
+        pipeline.write(frame('B', concat(cString("copy-p"), cString("copy-s"), new byte[6])));
+        pipeline.write(frame('D', concat(new byte[]{'P'}, cString("copy-p"))));
+        pipeline.write(frame('E', concat(cString("copy-p"), new byte[4])));
+        pipeline.write(frame('S', new byte[0]));
+        testClientEnd.getOutputStream().write(pipeline.toByteArray());
+        testClientEnd.getOutputStream().flush();
+        PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClientEnd.getInputStream());
+        assertEquals('1', clientDecoder.nextMessage().type());
+        assertEquals('2', clientDecoder.nextMessage().type());
+        assertEquals('n', clientDecoder.nextMessage().type());
+        assertEquals('C', clientDecoder.nextMessage().type());
+        assertEquals('Z', clientDecoder.nextMessage().type());
+        backend.join();
+        if (backendFailure.get() != null) {
+            throw new AssertionError("fake backend failed", backendFailure.get());
+        }
+    }
+
+    @Test
+    @Timeout(5)
+    void extendedUnloadWithManifestCompletesAfterCopyOutCommandComplete() throws Exception {
+        startBridge();
+        Mockito.when(s3Stub.putObject(
+                Mockito.eq("b"), Mockito.anyString(), Mockito.any(), Mockito.anyString(), Mockito.any()))
+                .thenReturn(null);
+        AtomicReference<Throwable> backendFailure = new AtomicReference<>();
+        Thread backend = Thread.ofVirtual().start(() -> {
+            try {
+                PostgresWireDecoder decoder = new PostgresWireDecoder(testBackendEnd.getInputStream());
+                PostgresWireDecoder.ParseMessage parse = decoder.decodeParse(decoder.nextMessage());
+                assertTrue(parse.sql().startsWith("COPY (select id from t) TO STDOUT"), parse.sql());
+                assertEquals('B', decoder.nextMessage().type());
+                assertEquals('D', decoder.nextMessage().type());
+                assertEquals('E', decoder.nextMessage().type());
+                assertEquals('S', decoder.nextMessage().type());
+                writeBackendFrame('1', new byte[0]);
+                writeBackendFrame('2', new byte[0]);
+                writeBackendFrame('n', new byte[0]);
+                writeBackendFrame('H', new byte[]{0, 0, 0});
+                writeBackendFrame('d', "1\n".getBytes(StandardCharsets.US_ASCII));
+                writeBackendFrame('c', new byte[0]);
+                writeBackendFrame('C', "COPY 1\0".getBytes(StandardCharsets.US_ASCII));
+                writeBackendFrame('Z', new byte[]{'I'});
+            } catch (Throwable failure) {
+                backendFailure.compareAndSet(null, failure);
+            }
+        });
+
+        PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage(
+                "unload-s", "UNLOAD ('select id from t') TO 's3://b/out/' MANIFEST", List.of());
+        ByteArrayOutputStream pipeline = new ByteArrayOutputStream();
+        pipeline.write(PostgresWireDecoder.encodeParse(parse, parse.sql()));
+        pipeline.write(frame('B', concat(cString("unload-p"), cString("unload-s"), new byte[6])));
+        pipeline.write(frame('D', concat(new byte[]{'P'}, cString("unload-p"))));
+        pipeline.write(frame('E', concat(cString("unload-p"), new byte[4])));
+        pipeline.write(frame('S', new byte[0]));
+        testClientEnd.getOutputStream().write(pipeline.toByteArray());
+        testClientEnd.getOutputStream().flush();
+        testClientEnd.setSoTimeout(3000);
+
+        backend.join(1000);
+        if (backendFailure.get() != null) {
+            throw new AssertionError("fake backend failed", backendFailure.get());
+        }
+        PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClientEnd.getInputStream());
+        assertEquals('1', clientDecoder.nextMessage().type());
+        assertEquals('2', clientDecoder.nextMessage().type());
+        assertEquals('n', clientDecoder.nextMessage().type());
+        assertEquals('C', clientDecoder.nextMessage().type());
+        assertEquals('Z', clientDecoder.nextMessage().type());
+        backend.join();
+        if (backendFailure.get() != null) {
+            throw new AssertionError("fake backend failed", backendFailure.get());
+        }
+    }
+
+    private void writeBackendFrame(char type, byte[] body) throws IOException {
+        testBackendEnd.getOutputStream().write(frame(type, body));
+        testBackendEnd.getOutputStream().flush();
+    }
+
+    private static byte[] frame(char type, byte[] body) {
+        int length = 4 + body.length;
+        byte[] packet = new byte[5 + body.length];
+        packet[0] = (byte) type;
+        packet[1] = (byte) (length >>> 24);
+        packet[2] = (byte) (length >>> 16);
+        packet[3] = (byte) (length >>> 8);
+        packet[4] = (byte) length;
+        System.arraycopy(body, 0, packet, 5, body.length);
+        return packet;
+    }
+
+    private static byte[] cString(String value) {
+        return concat(value.getBytes(StandardCharsets.UTF_8), new byte[]{0});
+    }
+
+    private static byte[] concat(byte[]... values) {
+        int length = 0;
+        for (byte[] value : values) {
+            length += value.length;
+        }
+        byte[] result = new byte[length];
+        int offset = 0;
+        for (byte[] value : values) {
+            System.arraycopy(value, 0, result, offset, value.length);
+            offset += value.length;
+        }
+        return result;
     }
 
     @Test

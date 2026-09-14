@@ -10,6 +10,7 @@ import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -17,6 +18,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -85,6 +87,12 @@ class S3GlobalBucketNamespaceTest {
         assertDoesNotThrow(() ->
                 globalNs.putObject("shared-assets-bucket", "member-asset.json", memberAsset,
                         "application/json", Map.of()));
+        assertTrue(objects.getForAccount(
+                        ACCOUNT_A, "shared-assets-bucket/member-asset.json").isPresent(),
+                "a cross-account write must persist in the bucket owner's partition");
+        assertTrue(objects.getForAccount(
+                        ACCOUNT_B, "shared-assets-bucket/member-asset.json").isEmpty(),
+                "a cross-account write must not create a shadow object in the caller's partition");
         assertArrayEquals(memberAsset,
                 globalNs.getObject("shared-assets-bucket", "member-asset.json").getData());
 
@@ -203,5 +211,68 @@ class S3GlobalBucketNamespaceTest {
         AwsException notFound = assertThrows(AwsException.class,
                 () -> globalNs.getBucketPolicy("central-logs-bucket"));
         assertEquals("NoSuchBucketPolicy", notFound.getErrorCode());
+    }
+
+    @Test
+    void objectMetadataOperationsResolveAndPersistCrossAccount() {
+        Instance<RequestContext> ctx = mutableContext();
+        AccountAwareStorageBackend<Bucket> buckets =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
+        AccountAwareStorageBackend<S3Object> objects =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
+        S3Service globalNs = new S3Service(
+                buckets, objects, Path.of("s3-gns-object-metadata-test"), true, true);
+
+        caller.set(ACCOUNT_A);
+        globalNs.createBucket("shared-metadata-bucket", "us-east-1");
+        globalNs.putBucketVersioning("shared-metadata-bucket", "Enabled");
+        S3Object created = globalNs.putObject(
+                "shared-metadata-bucket", "object.txt", "payload".getBytes(UTF_8),
+                "text/plain", Map.of());
+        String versionId = created.getVersionId();
+
+        caller.set(ACCOUNT_B);
+        globalNs.putObjectTagging(
+                "shared-metadata-bucket", "object.txt", Map.of("environment", "shared"));
+        assertEquals(Map.of("environment", "shared"),
+                globalNs.getObjectTagging("shared-metadata-bucket", "object.txt"));
+
+        Instant retainUntil = Instant.parse("2035-01-01T00:00:00Z");
+        globalNs.putObjectRetention(
+                "shared-metadata-bucket", "object.txt", versionId,
+                "GOVERNANCE", retainUntil, true);
+        assertEquals(retainUntil, globalNs.getObjectRetention(
+                "shared-metadata-bucket", "object.txt", versionId).getRetainUntilDate());
+
+        globalNs.putObjectLegalHold("shared-metadata-bucket", "object.txt", null, "ON");
+        assertEquals("ON", globalNs.getObjectLegalHold(
+                "shared-metadata-bucket", "object.txt", null).getLegalHoldStatus());
+
+        String defaultAcl = globalNs.getObjectAcl(
+                "shared-metadata-bucket", "object.txt", versionId);
+        assertTrue(defaultAcl.contains(ACCOUNT_A));
+        assertFalse(defaultAcl.contains(ACCOUNT_B));
+        globalNs.putObjectAcl(
+                "shared-metadata-bucket", "object.txt", versionId,
+                "", "public-read", null, null, null, null, null);
+        String storedAcl = globalNs.getObjectAcl(
+                "shared-metadata-bucket", "object.txt", versionId);
+        assertTrue(storedAcl.contains(ACCOUNT_A));
+        assertFalse(storedAcl.contains(ACCOUNT_B));
+
+        globalNs.deleteObjectTagging("shared-metadata-bucket", "object.txt");
+        assertTrue(globalNs.getObjectTagging("shared-metadata-bucket", "object.txt").isEmpty());
+
+        String currentKey = "shared-metadata-bucket/object.txt";
+        String versionKey = currentKey + "#v#" + versionId;
+        S3Object ownerVersion = objects.getForAccount(ACCOUNT_A, versionKey)
+                .orElseThrow(() -> new AssertionError("version vanished from owner partition"));
+        assertEquals(retainUntil, ownerVersion.getRetainUntilDate());
+        assertEquals(storedAcl, ownerVersion.getAcl());
+        assertTrue(objects.getForAccount(ACCOUNT_A, currentKey).isPresent());
+        assertTrue(objects.getForAccount(ACCOUNT_B, currentKey).isEmpty(),
+                "cross-account metadata writes must not create a caller shadow object");
+        assertTrue(objects.getForAccount(ACCOUNT_B, versionKey).isEmpty(),
+                "cross-account version metadata writes must stay in the owner partition");
     }
 }

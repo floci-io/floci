@@ -262,7 +262,7 @@ class SamTransformProcessorTest {
                   "Type": "AWS::Serverless::Function",
                   "Properties": {
                     "PackageType": "Image",
-                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest"
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest"
                   }
                 }
               }
@@ -273,7 +273,7 @@ class SamTransformProcessorTest {
 
         JsonNode lambdaProps = expanded.path("Resources").path("MyFunc").path("Properties");
         assertEquals("Image", lambdaProps.path("PackageType").asText());
-        assertEquals("000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest",
+        assertEquals("000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest",
                 lambdaProps.path("Code").path("ImageUri").asText());
         // No Handler/Runtime were declared and none should be synthesized by the transform itself —
         // CloudFormationResourceProvisioner is responsible for not defaulting them once it sees
@@ -337,7 +337,7 @@ class SamTransformProcessorTest {
                   "Type": "AWS::Serverless::Function",
                   "Properties": {
                     "PackageType": "Image",
-                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest",
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest",
                     "ImageConfig": {
                       "EntryPoint": ["/bootstrap"],
                       "Command": ["handler.main"],
@@ -935,6 +935,35 @@ class SamTransformProcessorTest {
         }
         assertTrue(customMethod, "expected the implicit method to reference the generated authorizer");
         assertTrue(authPermission, "expected SAM to grant API Gateway permission to invoke the authorizer");
+    }
+
+    @Test
+    void expandSamTemplate_implicitApiCognitoAuthorizerReportsUnsupportedCapability() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Api": {"Auth": {
+                "DefaultAuthorizer": "MyCognitoAuth",
+                "Authorizers": {"MyCognitoAuth": {
+                  "AuthType": "COGNITO_USER_POOLS",
+                  "UserPoolArn": "arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_example"
+                }}
+              }}},
+              "Resources": {
+                "Fn": {"Type": "AWS::Serverless::Function", "Properties": {
+                  "Handler": "index.handler", "Runtime": "nodejs20.x", "InlineCode": "code",
+                  "Events": {"Get": {"Type": "Api", "Properties": {"Path": "/x", "Method": "GET"}}}
+                }}
+              }
+            }
+            """);
+
+        AwsException error = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("SAM implicit REST API authorizer MyCognitoAuth configures a Cognito user pool "
+                + "authorizer, which Floci does not support for SAM implicit REST APIs yet.", error.getMessage());
+        assertFalse(error.getMessage().contains("FunctionPayloadType"));
     }
 
     @Test

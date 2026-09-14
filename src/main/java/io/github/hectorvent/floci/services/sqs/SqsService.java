@@ -40,6 +40,10 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
     private static final int MAX_TERMINAL_MOVE_TASKS = 10;
     private static final Duration TERMINAL_MOVE_TASK_TTL = Duration.ofHours(1);
+    /** AWS accepts MaximumMessageSize between 1 KiB and 1 MiB; 1 MiB is also the default.
+     * Both the maximum and the default were raised from 256 KiB in August 2025. */
+    private static final int MIN_MAXIMUM_MESSAGE_SIZE = 1024;
+    private static final int AWS_MAXIMUM_MESSAGE_SIZE = 1048576;
 
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;
@@ -152,6 +156,9 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private final int defaultVisibilityTimeout;
     private final int maxMessageSize;
+    /** Upper bound accepted for the MaximumMessageSize attribute. Raising max-message-size above
+     * the AWS limit widens this bound so the configured default stays settable explicitly. */
+    private final int maxAllowedMessageSize;
     private final String baseUrl;
     private final RegionResolver regionResolver;
     private final boolean clearFifoDeduplicationCacheOnPurge;
@@ -228,6 +235,7 @@ public class SqsService implements Resettable, ResourceProvider {
         this.dedupStore = dedupStore;
         this.defaultVisibilityTimeout = defaultVisibilityTimeout;
         this.maxMessageSize = maxMessageSize;
+        this.maxAllowedMessageSize = Math.max(AWS_MAXIMUM_MESSAGE_SIZE, maxMessageSize);
         this.baseUrl = baseUrl;
         this.regionResolver = regionResolver;
         this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
@@ -362,6 +370,8 @@ public class SqsService implements Resettable, ResourceProvider {
             attributes.put("FifoQueue", "true");
         }
 
+        validateMaximumMessageSize(attributes);
+
         String accountId = regionResolver.getAccountId();
         String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
         String storageKey = regionKey(region, queueUrl);
@@ -483,6 +493,26 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.put("ApproximateNumberOfMessages", String.valueOf(counts.visible()));
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
         attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
+
+        // Derived at read time and never stored, so it cannot go stale behind a
+        // KmsMasterKeyId that was later cleared. A KMS key always wins; otherwise an
+        // explicit SqsManagedSseEnabled stands, and a queue with neither reports the AWS
+        // default. What AWS does with a queue whose KMS key is cleared is not documented
+        // crisply, so reverting to the default is a choice, not a copied behaviour.
+        if (hasKmsMasterKey(attrs)) {
+            attrs.put("SqsManagedSseEnabled", "false");
+        } else {
+            attrs.putIfAbsent("SqsManagedSseEnabled", "true");
+        }
+        attrs.putIfAbsent("VisibilityTimeout", String.valueOf(defaultVisibilityTimeout));
+        // Report the size that SendMessage actually enforces. A queue stored before the
+        // range existed can carry a value above the ceiling, and advertising it would
+        // promise a payload the send path then rejects.
+        attrs.put("MaximumMessageSize",
+                String.valueOf(parseMaxMessageSize(attrs.get("MaximumMessageSize"))));
+        attrs.putIfAbsent("DelaySeconds", "0");
+        attrs.putIfAbsent("ReceiveMessageWaitTimeSeconds", "0");
+        attrs.putIfAbsent("MessageRetentionPeriod", "345600");
 
         if (attributeNames == null || attributeNames.contains("All")) {
             return attrs;
@@ -649,10 +679,45 @@ public class SqsService implements Resettable, ResourceProvider {
             return maxMessageSize;
         }
         try {
-            return Math.min(1048576, Math.max(1024, Integer.parseInt(value)));
+            return Math.min(maxAllowedMessageSize,
+                    Math.max(MIN_MAXIMUM_MESSAGE_SIZE, Integer.parseInt(value.trim())));
         } catch (NumberFormatException ignored) {
             return maxMessageSize;
         }
+    }
+
+    /**
+     * Reject a MaximumMessageSize outside the range AWS accepts, on CreateQueue and
+     * SetQueueAttributes alike. An empty value on SetQueueAttributes resets the attribute
+     * and is left to the caller.
+     */
+    private void validateMaximumMessageSize(Map<String, String> attributes) {
+        if (attributes == null) {
+            return;
+        }
+        String value = attributes.get("MaximumMessageSize");
+        if (value == null || value.isEmpty()) {
+            return;
+        }
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value.trim());
+        } catch (NumberFormatException ignored) {
+            throw invalidMaximumMessageSize();
+        }
+        if (parsed < MIN_MAXIMUM_MESSAGE_SIZE || parsed > maxAllowedMessageSize) {
+            throw invalidMaximumMessageSize();
+        }
+    }
+
+    private AwsException invalidMaximumMessageSize() {
+        return new AwsException("InvalidAttributeValue",
+                "Invalid value for the parameter MaximumMessageSize.", 400);
+    }
+
+    private static boolean hasKmsMasterKey(Map<String, String> attributes) {
+        String keyId = attributes.get("KmsMasterKeyId");
+        return keyId != null && !keyId.isEmpty();
     }
 
     /**
@@ -940,6 +1005,7 @@ public class SqsService implements Resettable, ResourceProvider {
         Queue queue = queueStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
+        validateMaximumMessageSize(attributes);
         if (attributes != null) {
             for (Map.Entry<String, String> entry : attributes.entrySet()) {
                 if (entry.getValue() == null || entry.getValue().isEmpty()) {

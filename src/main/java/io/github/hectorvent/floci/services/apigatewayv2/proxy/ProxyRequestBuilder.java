@@ -35,6 +35,10 @@ public class ProxyRequestBuilder {
         list.add(value);
         headers.put(name, list);
     }
+    public void overwriteHeader(String name, List<String> values) {
+        if (values == null) { headers.remove(name); return; }
+        headers.put(name, new ArrayList<>(values));
+    }
     public void appendHeader(String name, String value) {
         if (value == null) return;
         headers.computeIfAbsent(name, k -> new ArrayList<>()).add(value);
@@ -46,6 +50,10 @@ public class ProxyRequestBuilder {
         List<String> list = new ArrayList<>();
         list.add(value);
         queryParams.put(name, list);
+    }
+    public void overwriteQuery(String name, List<String> values) {
+        if (values == null) { queryParams.remove(name); return; }
+        queryParams.put(name, new ArrayList<>(values));
     }
     public void appendQuery(String name, String value) {
         if (value == null) return;
