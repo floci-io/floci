@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
@@ -81,6 +83,8 @@ class IamEnforcementFilterTest {
         when(arnBuilder.build(any(), any(), any(), any())).thenReturn("*");
         // Default: scopes are already canonical. Alias handling is asserted explicitly below.
         when(catalog.canonicalCredentialScope(anyString())).thenAnswer(inv -> inv.getArgument(0));
+        when(evaluator.evaluateResourcePolicy(any(), any(), any(), any(), any()))
+                .thenReturn(ResourcePolicyDecision.NEUTRAL);
     }
 
     private IamEnforcementFilter newFilter() {
@@ -117,9 +121,10 @@ class IamEnforcementFilterTest {
                         ]}""")));
         when(arnBuilder.buildResources("lambda", containerRequest, "us-east-1", "222233334444"))
                 .thenReturn(List.of("arn:aws:lambda:us-east-1:222233334444:function:fn"));
-        when(evaluator.evaluate(
+        when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
-                isNull(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("lambda:InvokeFunction"),
                 eq("arn:aws:lambda:us-east-1:222233334444:function:fn"),
                 isNull()))
@@ -154,9 +159,10 @@ class IamEnforcementFilterTest {
                         ]}""")));
         when(arnBuilder.buildResources("dynamodb", containerRequest, "us-east-1", "000000000000"))
                 .thenReturn(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"));
-        when(evaluator.evaluate(
+        when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
-                isNull(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:GetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"),
                 isNull()))
@@ -191,9 +197,21 @@ class IamEnforcementFilterTest {
                         "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
                         "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
                 ));
-        when(evaluator.evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"), isNull()))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("dynamodb:BatchGetItem"),
+                eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
+                isNull()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
-        when(evaluator.evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"), isNull()))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("dynamodb:BatchGetItem"),
+                eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
+                isNull()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(conditionContextResolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest))
                 .thenReturn(null);
@@ -201,8 +219,20 @@ class IamEnforcementFilterTest {
         IamEnforcementFilter filter = newFilter();
         filter.filter(containerRequest);
 
-        verify(evaluator).evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"), isNull());
-        verify(evaluator).evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"), isNull());
+        verify(evaluator).evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("dynamodb:BatchGetItem"),
+                eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
+                isNull());
+        verify(evaluator).evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("dynamodb:BatchGetItem"),
+                eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
+                isNull());
         verify(containerRequest, never()).abortWith(any());
     }
 
@@ -225,9 +255,21 @@ class IamEnforcementFilterTest {
                         "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
                         "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
                 ));
-        when(evaluator.evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"), isNull()))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("dynamodb:BatchGetItem"),
+                eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
+                isNull()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
-        when(evaluator.evaluate(any(), isNull(), eq("dynamodb:BatchGetItem"), eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"), isNull()))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("dynamodb:BatchGetItem"),
+                eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
+                isNull()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
         when(conditionContextResolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest))
                 .thenReturn(null);
@@ -253,7 +295,7 @@ class IamEnforcementFilterTest {
         filter.filter(containerRequest);
 
         verify(iamService, never()).resolveCallerContext(any());
-        verify(evaluator, never()).evaluate(any(), any(), any(), any(), any());
+        verify(evaluator, never()).evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any());
         verify(containerRequest, never()).abortWith(any());
     }
 
@@ -278,12 +320,24 @@ class IamEnforcementFilterTest {
                         ]}""")));
         when(conditionContextResolver.resolve("ec2", "ec2:TerminateInstances", containerRequest))
                 .thenReturn(conditions);
-        when(evaluator.evaluate(any(), isNull(), eq("ec2:TerminateInstances"), eq("*"), eq(conditions)))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("ec2:TerminateInstances"),
+                eq("*"),
+                eq(conditions)))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
         newFilter().filter(containerRequest);
 
-        verify(evaluator).evaluate(any(), isNull(), eq("ec2:TerminateInstances"), eq("*"), eq(conditions));
+        verify(evaluator).evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("ec2:TerminateInstances"),
+                eq("*"),
+                eq(conditions));
         verify(containerRequest).abortWith(any(Response.class));
     }
 
@@ -293,14 +347,32 @@ class IamEnforcementFilterTest {
         Map<String, List<String>> first = Map.of("aws:ResourceTag/Team", List.of("payments"));
         Map<String, List<String>> second = Map.of("aws:ResourceTag/Team", List.of("engineering"));
         stubTaggedTerminate(containerRequest, first, List.of(second));
-        when(evaluator.evaluate(any(), isNull(), eq("ec2:TerminateInstances"), eq("*"), eq(first)))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("ec2:TerminateInstances"),
+                eq("*"),
+                eq(first)))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
-        when(evaluator.evaluate(any(), isNull(), eq("ec2:TerminateInstances"), eq("*"), eq(second)))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("ec2:TerminateInstances"),
+                eq("*"),
+                eq(second)))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
         newFilter().filter(containerRequest);
 
-        verify(evaluator).evaluate(any(), isNull(), eq("ec2:TerminateInstances"), eq("*"), eq(second));
+        verify(evaluator).evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("ec2:TerminateInstances"),
+                eq("*"),
+                eq(second));
         verify(containerRequest).abortWith(any(Response.class));
     }
 
@@ -310,13 +382,25 @@ class IamEnforcementFilterTest {
         Map<String, List<String>> first = Map.of("aws:ResourceTag/Team", List.of("payments"));
         Map<String, List<String>> second = Map.of("aws:ResourceTag/Team", List.of("payments"));
         stubTaggedTerminate(containerRequest, first, List.of(second));
-        when(evaluator.evaluate(any(), isNull(), eq("ec2:TerminateInstances"), eq("*"), any()))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("ec2:TerminateInstances"),
+                eq("*"),
+                any()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
         newFilter().filter(containerRequest);
 
         verify(evaluator, org.mockito.Mockito.times(2))
-                .evaluate(any(), isNull(), eq("ec2:TerminateInstances"), eq("*"), any());
+                .evaluateResolvedResourcePolicy(
+                        any(),
+                        eq(ResourcePolicyDecision.NEUTRAL),
+                        eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                        eq("ec2:TerminateInstances"),
+                        eq("*"),
+                        any());
         verify(containerRequest, never()).abortWith(any());
     }
 
@@ -364,15 +448,26 @@ class IamEnforcementFilterTest {
                 .thenReturn(List.of("arn:aws:s3:::bucket"));
         when(conditionContextResolver.resolve("s3", "s3:ListBucket", containerRequest))
                 .thenReturn(conditions);
-        when(evaluator.evaluate(any(), isNull(), eq("s3:ListBucket"), eq("arn:aws:s3:::bucket"), eq(conditions)))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("s3:ListBucket"),
+                eq("arn:aws:s3:::bucket"),
+                eq(conditions)))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
         IamEnforcementFilter filter = newFilter();
 
         filter.filter(containerRequest);
 
-        verify(evaluator).evaluate(any(), isNull(), eq("s3:ListBucket"),
-                eq("arn:aws:s3:::bucket"), eq(conditions));
+        verify(evaluator).evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("s3:ListBucket"),
+                eq("arn:aws:s3:::bucket"),
+                eq(conditions));
     }
 
     @Test
@@ -398,7 +493,7 @@ class IamEnforcementFilterTest {
                         ]}""")));
         when(arnBuilder.buildResources(eq("s3"), eq(containerRequest), anyString(), anyString()))
                 .thenReturn(List.of("arn:aws:s3:::bucket/key"));
-        when(evaluator.evaluate(any(), any(), any(), any(), any()))
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
         newFilter().filter(containerRequest);
@@ -735,8 +830,13 @@ class IamEnforcementFilterTest {
                 .thenReturn(List.of("arn:aws:s3:::some-bucket/test.txt"));
         when(conditionContextResolver.resolve("s3", "s3:PutObject", containerRequest))
                 .thenReturn(null);
-        when(evaluator.evaluate(any(), isNull(), eq("s3:PutObject"),
-                eq("arn:aws:s3:::some-bucket/test.txt"), any()))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("s3:PutObject"),
+                eq("arn:aws:s3:::some-bucket/test.txt"),
+                any()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
         newFilter().filter(containerRequest);
@@ -765,15 +865,25 @@ class IamEnforcementFilterTest {
                 .thenReturn(List.of("arn:aws:s3:::some-bucket/test.txt"));
         when(conditionContextResolver.resolve("s3", "s3:PutObject", containerRequest))
                 .thenReturn(null);
-        when(evaluator.evaluate(any(), isNull(), eq("s3:PutObject"),
-                eq("arn:aws:s3:::some-bucket/test.txt"), any()))
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("s3:PutObject"),
+                eq("arn:aws:s3:::some-bucket/test.txt"),
+                any()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
         newFilter().filter(containerRequest);
 
         verify(containerRequest, never()).abortWith(any());
-        verify(evaluator).evaluate(any(), isNull(), eq("s3:PutObject"),
-                eq("arn:aws:s3:::some-bucket/test.txt"), any());
+        verify(evaluator).evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("s3:PutObject"),
+                eq("arn:aws:s3:::some-bucket/test.txt"),
+                any());
     }
 
     @Test

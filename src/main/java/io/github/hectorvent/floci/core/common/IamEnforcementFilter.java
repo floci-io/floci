@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccoun
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -45,8 +46,7 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
- * permissions boundary. Resource-based policies (S3 bucket policy, Lambda resource
- * policy, etc.) are not yet supplied to the primary request-filter path.
+ * permissions boundary, as well as applicable resource policies via {@link ResourcePolicyProvider}.
  *
  * <p>Reads the signing credential from either the {@code Authorization} header or, for a
  * presigned URL, the {@code X-Amz-Credential} query parameter - both request shapes get the
@@ -84,6 +84,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final ResolvedServiceCatalog catalog;
     private final Instance<ScpProvider> scpProvider;
     private final SessionAccountLookup sessionAccountLookup;
+    private final Instance<ResourcePolicyProvider> resourcePolicyProviders;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -98,7 +99,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 CurrentVertxRequest currentVertxRequest,
                                 ResolvedServiceCatalog catalog,
                                 Instance<ScpProvider> scpProvider,
-                                SessionAccountLookup sessionAccountLookup) {
+                                SessionAccountLookup sessionAccountLookup,
+                                Instance<ResourcePolicyProvider> resourcePolicyProviders) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -112,6 +114,26 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.catalog = catalog;
         this.scpProvider = scpProvider;
         this.sessionAccountLookup = sessionAccountLookup;
+        this.resourcePolicyProviders = resourcePolicyProviders;
+    }
+
+    /** Package-private constructor for callers predating resourcePolicyProviders. */
+    IamEnforcementFilter(EmulatorConfig config,
+                         AccountResolver accountResolver,
+                         IamService iamService,
+                         IamPolicyEvaluator evaluator,
+                         IamActionRegistry actionRegistry,
+                         ResourceArnBuilder arnBuilder,
+                         RequestContext requestContext,
+                         IamConditionContextResolver conditionContextResolver,
+                         CloudTrailService cloudTrailService,
+                         CurrentVertxRequest currentVertxRequest,
+                         ResolvedServiceCatalog catalog,
+                         Instance<ScpProvider> scpProvider,
+                         SessionAccountLookup sessionAccountLookup) {
+        this(config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
+                requestContext, conditionContextResolver, cloudTrailService, currentVertxRequest,
+                catalog, scpProvider, sessionAccountLookup, null);
     }
 
     @Override
@@ -202,6 +224,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 ? Optional.of("arn:aws:iam::" + accountId + ":root")
                 : iamService.resolveCallerArn(akid);
         if (principalArn.isPresent()) {
+            caller = caller.withPrincipalArn(principalArn.get());
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
             conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
         }
@@ -214,8 +237,24 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         for (String resource : resources) {
+            List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(credentialScope, resource);
+            String resourceOwnerAccountId = resourcePolicies.isEmpty() ? null : resourcePolicies.getFirst().ownerAccountId();
+            List<String> policyDocs = resourcePolicies.stream()
+                    .map(ResourcePolicyProvider.ResourcePolicy::policyDocument)
+                    .filter(doc -> doc != null && !doc.isBlank())
+                    .toList();
+            List<String> effectiveResourcePolicies = policyDocs.isEmpty() ? null : policyDocs;
+
+            ResourceAccountRelationship accountRelationship = resourceOwnerAccountId == null
+                    || accountId.equals(resourceOwnerAccountId)
+                    ? ResourceAccountRelationship.SAME_ACCOUNT
+                    : ResourceAccountRelationship.CROSS_ACCOUNT;
+
             for (Map<String, List<String>> targetContext : targetContexts) {
-                Decision decision = evaluator.evaluate(caller, null, action, resource, targetContext);
+                ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicy(
+                        effectiveResourcePolicies, caller.principalArn(), action, resource, targetContext);
+                Decision decision = evaluator.evaluateResolvedResourcePolicy(
+                        caller, resourcePolicyDecision, accountRelationship, action, resource, targetContext);
                 if (decision != Decision.DENY) {
                     continue;
                 }
@@ -225,7 +264,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         + " on resource: \"" + resource + "\""
                         + " because no identity-based policy allows the " + action + " action";
                 emitS3DenialIfApplicable(akid, action, resource, ctx, region, denyMessage);
-                ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
+                ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType(), resource));
                 return;
             }
         }
@@ -321,6 +360,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     ? Optional.of("arn:aws:iam::" + accountId + ":root")
                     : iamService.resolveCallerArn(akid);
             if (principalArn.isPresent()) {
+                caller = caller.withPrincipalArn(principalArn.get());
                 conditionContext = new HashMap<>();
                 conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
             }
@@ -497,16 +537,46 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      *   <li>everything else (JSON 1.x, REST-JSON) → keep the historical JSON shape</li>
      * </ul>
      */
+    private List<ResourcePolicyProvider.ResourcePolicy> resolveResourcePolicies(String credentialScope, String resourceArn) {
+        if (resourcePolicyProviders == null || resourcePolicyProviders.isUnsatisfied()) {
+            return List.of();
+        }
+        List<ResourcePolicyProvider.ResourcePolicy> policies = new ArrayList<>();
+        for (ResourcePolicyProvider provider : resourcePolicyProviders) {
+            List<ResourcePolicyProvider.ResourcePolicy> providerPolicies = provider.getResourcePolicies(credentialScope, resourceArn);
+            if (providerPolicies != null && !providerPolicies.isEmpty()) {
+                policies.addAll(providerPolicies);
+            }
+        }
+        return policies;
+    }
+
     // Package-private for unit testing.
     static Response accessDeniedResponse(String action, String credentialScope, MediaType requestMediaType) {
+        return accessDeniedResponse(action, credentialScope, requestMediaType, null);
+    }
+
+    static Response accessDeniedResponse(String action, String credentialScope, MediaType requestMediaType, String resourceArn) {
         String message = "User is not authorized to perform: " + action;
         if ("s3".equals(credentialScope)) {
-            return s3XmlAccessDenied(message);
+            String resourcePath = formatS3ResourcePath(resourceArn);
+            return s3XmlAccessDenied(message, resourcePath);
         }
         if (isFormEncoded(requestMediaType)) {
             return queryXmlAccessDenied(message);
         }
         return jsonAccessDenied(message);
+    }
+
+    private static String formatS3ResourcePath(String resourceArn) {
+        if (resourceArn == null || !resourceArn.startsWith("arn:aws:s3:::")) {
+            return null;
+        }
+        String tail = resourceArn.substring("arn:aws:s3:::".length());
+        if (tail.isEmpty() || "*".equals(tail)) {
+            return null;
+        }
+        return "/" + tail;
     }
 
     private static boolean isFormEncoded(MediaType mt) {
@@ -530,15 +600,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     private static Response s3XmlAccessDenied(String message) {
-        String xml = new XmlBuilder()
+        return s3XmlAccessDenied(message, null);
+    }
+
+    private static Response s3XmlAccessDenied(String message, String resourcePath) {
+        XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")
                   .elem("Code", "AccessDenied")
-                  .elem("Message", message)
-                  .elem("RequestId", UUID.randomUUID().toString())
-                .end("Error")
-                .build();
-        return Response.status(403).type(MediaType.APPLICATION_XML).entity(xml).build();
+                  .elem("Message", message);
+        if (resourcePath != null && !resourcePath.isBlank()) {
+            xml.elem("Resource", resourcePath);
+        }
+        xml.elem("RequestId", UUID.randomUUID().toString())
+           .end("Error");
+        return Response.status(403).type(MediaType.APPLICATION_XML).entity(xml.build()).build();
     }
 
     private static Response jsonAccessDenied(String message) {

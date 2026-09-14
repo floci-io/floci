@@ -336,6 +336,15 @@ Policy evaluation follows the standard AWS precedence:
 5. If a permission boundary is present, it must also explicitly allow the request
 6. No matching effective allow → implicit deny (HTTP 403)
 
+### Resource-based policies
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
+
+- Resource policy statements are matched against the caller's principal ARN (`Principal` and `NotPrincipal` clauses), supporting wildcard, user, role, account root, and service principals.
+- An explicit **Deny** in a resource policy overrides any allows.
+- In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
+- For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
+
 ### Service control policies (SCPs)
 
 When the caller's account belongs to an [Organizations](organizations.md) organization,

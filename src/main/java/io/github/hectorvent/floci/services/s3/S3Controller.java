@@ -3054,6 +3054,10 @@ public class S3Controller {
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
         // surface which input was rejected. They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
+            Object resource = e.getExtendedData().get("Resource");
+            if (resource != null) {
+                xmlBuilder.elem("Resource", resource.toString());
+            }
             Object argumentName = e.getExtendedData().get("ArgumentName");
             Object argumentValue = e.getExtendedData().get("ArgumentValue");
             if (argumentName != null) {
