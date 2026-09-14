@@ -55,6 +55,19 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.parseOptionString;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.readRequiredStringField;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.unexpectedStartError;
+
 /**
  * REST JSON controller for the AWS SES V2 API.
  * Implements the AWS SES V2 wire protocol at /v2/email/* for the operations
@@ -1110,19 +1123,6 @@ public class SesController {
         }
     }
 
-    // Read a typed string member: absent/null returns null, but a present value of the wrong JSON type
-    // is rejected rather than coerced (asText would turn 123 into "123"), matching AWS.
-    private static String stringMemberOrAbsent(JsonNode parent, String field) {
-        JsonNode n = parent.path(field);
-        if (n.isMissingNode() || n.isNull()) {
-            return null;
-        }
-        if (!n.isTextual()) {
-            throw new AwsException("SerializationException", null, 400);
-        }
-        return n.textValue();
-    }
-
     private ObjectNode tenantJson(Tenant tenant) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("TenantName", tenant.tenantName());
@@ -1152,27 +1152,6 @@ public class SesController {
             attrs.put("SuppressionScope", tenant.suppressionAttributes().suppressionScope());
         }
         return node;
-    }
-
-    // Parse an optional array of strings: absent/null returns null, an empty array stays an empty
-    // list (the distinction matters for the suppression-attributes pair rules), and a non-string
-    // element is rejected rather than coerced.
-    private static List<String> stringArrayOrAbsent(JsonNode parent, String field) {
-        JsonNode n = parent.path(field);
-        if (n.isMissingNode() || n.isNull()) {
-            return null;
-        }
-        if (!n.isArray()) {
-            throw new AwsException("SerializationException", null, 400);
-        }
-        List<String> values = new ArrayList<>();
-        for (JsonNode item : n) {
-            if (!item.isTextual()) {
-                throw new AwsException("SerializationException", null, 400);
-            }
-            values.add(item.textValue());
-        }
-        return values;
     }
 
     @POST
@@ -1459,7 +1438,8 @@ public class SesController {
             // Reuse the AWS-aligned SendingEnabled deserialization shared with CreateConfigurationSet:
             // absent -> false, string -> true, null/number -> SerializationException. An empty body
             // / {} therefore disables sending (200). Verified against real AWS.
-            boolean enabled = parseSendingEnabled(readOptionBody(body).path("SendingEnabled"));
+            boolean enabled = parseSendingEnabled(
+                    readOptionBody(objectMapper, body).path("SendingEnabled"));
             sesService.setConfigurationSetSendingEnabled(name, enabled, region);
             LOG.infov("SES V2 PutConfigurationSetSendingOptions: {0} on {1}", enabled, name);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -1475,7 +1455,7 @@ public class SesController {
                                                          String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             Boolean enabled = parseReputationMetricsEnabled(request.path("ReputationMetricsEnabled"));
             boolean effectiveEnabled = enabled != null && enabled;
             sesService.setConfigurationSetReputationOptions(name, effectiveEnabled, region);
@@ -1493,7 +1473,7 @@ public class SesController {
                                                        String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             sesService.setConfigurationSetTrackingOptions(name, parseTrackingOptions(request), region);
             LOG.infov("SES V2 PutConfigurationSetTrackingOptions on {0}", name);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -1509,7 +1489,7 @@ public class SesController {
                                                        String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             sesService.setConfigurationSetDeliveryOptions(name, parseDeliveryOptions(request), region);
             LOG.infov("SES V2 PutConfigurationSetDeliveryOptions on {0}", name);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -1525,7 +1505,7 @@ public class SesController {
                                                         String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             sesService.setConfigurationSetArchivingOptions(name, parseArchivingOptions(request), region);
             LOG.infov("SES V2 PutConfigurationSetArchivingOptions on {0}", name);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -1541,7 +1521,7 @@ public class SesController {
                                                   String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             JsonNode vdmNode = request.path("VdmOptions");
             VdmOptions options = (vdmNode.isMissingNode() || vdmNode.isNull())
                     ? null : parseVdmOptions(vdmNode);
@@ -1560,19 +1540,6 @@ public class SesController {
         }
     }
 
-    /** Parse a configuration-set option PUT body into a JSON object, treating an empty body as {}. */
-    private JsonNode readOptionBody(String body) {
-        try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
-            return request;
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
-    }
-
     private static Boolean parseReputationMetricsEnabled(JsonNode node) {
         if (node.isMissingNode() || node.isNull()) {
             return null;
@@ -1582,17 +1549,6 @@ public class SesController {
                     "ReputationMetricsEnabled must be a boolean.", 400);
         }
         return node.booleanValue();
-    }
-
-    /** Read an optional string member, rejecting a non-string value the way the AWS deserialization layer does. */
-    private static String parseOptionString(JsonNode node, String field) {
-        if (node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        if (!node.isTextual()) {
-            throw new AwsException("BadRequestException", field + " must be a JSON string.", 400);
-        }
-        return node.asText();
     }
 
     private static TrackingOptions parseTrackingOptions(JsonNode node) {
@@ -1895,7 +1851,7 @@ public class SesController {
                                                         String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             String scalingMode = parseOptionString(request.path("ScalingMode"), "ScalingMode");
             sesService.putDedicatedIpPoolScalingAttributes(poolName, scalingMode, region);
             LOG.infov("SES V2 PutDedicatedIpPoolScalingAttributes on {0}", poolName);
@@ -2211,7 +2167,7 @@ public class SesController {
                                          @PathParam("ip") String ip, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             String destinationPoolName = parseOptionString(
                     request.path("DestinationPoolName"), "DestinationPoolName");
             sesService.putDedicatedIpInPool(ip, destinationPoolName, region);
@@ -2228,7 +2184,7 @@ public class SesController {
                                                    @PathParam("ip") String ip, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             sesService.putDedicatedIpWarmupAttributes(ip,
                     parseWarmupPercentage(request.path("WarmupPercentage")), region);
             LOG.infov("SES V2 PutDedicatedIpWarmupAttributes: {0}", ip);
@@ -2365,10 +2321,10 @@ public class SesController {
             // Parse every member first (rejecting wrong JSON types as a serialization error, the way
             // AWS does before validation), then validate the parsed values together so all constraint
             // violations are aggregated into one response.
-            String mailType = requireStringOrAbsent(request, "MailType");
-            String websiteUrl = requireStringOrAbsent(request, "WebsiteURL");
-            String contactLanguage = requireStringOrAbsent(request, "ContactLanguage");
-            String useCaseDescription = requireStringOrAbsent(request, "UseCaseDescription");
+            String mailType = stringMemberOrAbsent(request, "MailType");
+            String websiteUrl = stringMemberOrAbsent(request, "WebsiteURL");
+            String contactLanguage = stringMemberOrAbsent(request, "ContactLanguage");
+            String useCaseDescription = stringMemberOrAbsent(request, "UseCaseDescription");
 
             List<String> additionalContacts = null;
             JsonNode contacts = request.path("AdditionalContactEmailAddresses");
@@ -2407,34 +2363,6 @@ public class SesController {
         }
     }
 
-    // Read a typed string member: absent/null returns null, but a present value of the wrong JSON type
-    // is rejected rather than coerced (asText would turn 123 into "123"), the same as the identity and
-    // configuration-set string members elsewhere in this controller.
-    private static String requireStringOrAbsent(JsonNode parent, String field) {
-        JsonNode n = parent.path(field);
-        if (n.isMissingNode() || n.isNull()) {
-            return null;
-        }
-        if (!n.isTextual()) {
-            throw new AwsException("SerializationException", null, 400);
-        }
-        return n.textValue();
-    }
-
-    // Integer variant of stringMemberOrAbsent: absent/null returns null, non-integral JSON is
-    // rejected rather than coerced, and so is an integral value outside the int range (intValue
-    // would silently truncate it).
-    private static Integer intMemberOrAbsent(JsonNode parent, String field) {
-        JsonNode n = parent.path(field);
-        if (n.isMissingNode() || n.isNull()) {
-            return null;
-        }
-        if (!n.isIntegralNumber() || !n.canConvertToInt()) {
-            throw new AwsException("SerializationException", null, 400);
-        }
-        return n.intValue();
-    }
-
     // Parse an AWS FeatureStatus (ENABLED/DISABLED) field. A required member that is absent, or any
     // value outside the enum, is a Smithy BadRequestException the way AWS returns it; an absent
     // optional member defaults to DISABLED (false).
@@ -2468,7 +2396,7 @@ public class SesController {
     public Response putAccountDedicatedIpWarmupAttributes(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = readOptionBody(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             JsonNode enabledNode = request.path("AutoWarmupEnabled");
             // AutoWarmupEnabled has a default of false: the SDK omits it when false, so a missing
             // member is treated as false rather than rejected. A present value goes through the
@@ -2558,14 +2486,6 @@ public class SesController {
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
-    }
-
-    private static String readRequiredStringField(JsonNode request, String fieldName) {
-        JsonNode node = request.path(fieldName);
-        if (node.isMissingNode() || node.isNull() || !node.isTextual()) {
-            throw new AwsException("BadRequestException", fieldName + " is required.", 400);
-        }
-        return node.asText();
     }
 
     @GET
@@ -2880,61 +2800,6 @@ public class SesController {
         return node;
     }
 
-    private static void requireJsonObject(JsonNode root) {
-        if (root == null || !root.isObject()) {
-            throw new AwsException("BadRequestException",
-                    "Request body must be a JSON object.", 400);
-        }
-    }
-
-    private static JsonNode requireObjectOrAbsent(JsonNode parent, String fieldName) {
-        JsonNode child = parent.path(fieldName);
-        if (!child.isMissingNode() && !child.isNull() && !child.isObject()) {
-            throw new AwsException("BadRequestException",
-                    fieldName + " must be a JSON object.", 400);
-        }
-        return child;
-    }
-
-    /**
-     * Parse a JSON {@code Tags} array node into a list of tag records. Returns {@code null}
-     * when the node is missing or null so callers can decide whether that is an error
-     * (TagResource) or a no-op (CreateConfigurationSet / CreateEmailTemplate). Throws
-     * {@code BadRequestException} when the node is present but not an array.
-     */
-    private List<Tag> parseTagsArray(JsonNode tagsNode) {
-        if (tagsNode.isMissingNode() || tagsNode.isNull()) {
-            return null;
-        }
-        if (!tagsNode.isArray()) {
-            throw new AwsException("BadRequestException", "Tags must be an array.", 400);
-        }
-        List<Tag> out = new ArrayList<>();
-        for (JsonNode t : tagsNode) {
-            // Each element must be a JSON object. A scalar/array/null element is a wire deserialization
-            // error (AWS returns SerializationException for a scalar/array element; it returns a 500
-            // InternalFailure for a null element, a server-side bug we normalize to the same 400).
-            if (!t.isObject()) {
-                throw new AwsException("SerializationException", null, 400);
-            }
-            JsonNode key = t.path("Key");
-            JsonNode value = t.path("Value");
-            // A present-but-non-string Key/Value (number, boolean, object, array) is a wire
-            // deserialization error, not a coercible value: AWS restJson1 rejects it with
-            // SerializationException rather than turning 123 into "123". A missing/null member is left
-            // to the downstream service validation, matching AWS.
-            if (nonStringMember(key) || nonStringMember(value)) {
-                throw new AwsException("SerializationException", null, 400);
-            }
-            out.add(new Tag(key.asText(null), value.asText(null)));
-        }
-        return out;
-    }
-
-    private static boolean nonStringMember(JsonNode node) {
-        return !node.isMissingNode() && !node.isNull() && !node.isTextual();
-    }
-
     /**
      * Parses a {@code SuppressedReasons} JSON array into a list, validating
      * structure only; reason values are validated by the service layer.
@@ -2984,34 +2849,6 @@ public class SesController {
         return coerceBoolean(enabledNode);
     }
 
-    // AWS-verified Jackson coercion for a SES v2 boolean field: a JSON string coerces to true,
-    // while a number/null/array/object is a SerializationException.
-    private static boolean coerceBoolean(JsonNode node) {
-        if (node.isBoolean()) {
-            return node.booleanValue();
-        }
-        if (node.isTextual()) {
-            return true;
-        }
-        if (node.isNull()) {
-            throw new AwsException("SerializationException", null, 400);
-        }
-        if (node.isNumber()) {
-            throw new AwsException("SerializationException",
-                    "NUMBER_VALUE can not be converted to a Boolean", 400);
-        }
-        throw unexpectedStartError(node);
-    }
-
-    private static AwsException unexpectedStartError(JsonNode node) {
-        if (node.isArray()) {
-            return new AwsException("SerializationException",
-                    "Start of list found where not expected", 400);
-        }
-        return new AwsException("SerializationException",
-                "Start of structure or map found where not expected.", 400);
-    }
-
     /**
      * Parse a V2 SES {@code Content.Simple.Headers} / {@code Content.Template.Headers} array
      * (additional message headers, elements use {@code Name}/{@code Value}). Returns an empty
@@ -3059,16 +2896,6 @@ public class SesController {
                         + "' failed to satisfy constraint: Member must not be null", 400);
     }
 
-    /**
-     * Parse a V2 SES {@code EmailTags} / {@code DefaultEmailTags} / {@code ReplacementTags}
-     * array (per-message {@link MessageTag} list whose elements use {@code Name}/{@code Value},
-     * distinct from the resource-tag {@link Tag} {@code Key}/{@code Value} shape). Note that
-     * the per-entry name is {@code ReplacementTags} on the wire — only the top-level field
-     * carries the {@code EmailTags} suffix. Returns an empty list when the node is absent so
-     * callers can pass it through unconditionally.
-     * The {@code fieldName} parameter is reported in the error message when the node is
-     * present but not an array.
-     */
     private static ListManagementOptions parseListManagementOptions(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) {
             return null;
@@ -3093,6 +2920,16 @@ public class SesController {
         return new ListManagementOptions(listNode.textValue(), topicName);
     }
 
+    /**
+     * Parse a V2 SES {@code EmailTags} / {@code DefaultEmailTags} / {@code ReplacementTags}
+     * array (per-message {@link MessageTag} list whose elements use {@code Name}/{@code Value},
+     * distinct from the resource-tag {@link Tag} {@code Key}/{@code Value} shape). Note that
+     * the per-entry name is {@code ReplacementTags} on the wire: only the top-level field
+     * carries the {@code EmailTags} suffix. Returns an empty list when the node is absent so
+     * callers can pass it through unconditionally.
+     * The {@code fieldName} parameter is reported in the error message when the node is
+     * present but not an array.
+     */
     private List<MessageTag> parseEmailTagsArray(JsonNode tagsNode, String fieldName) {
         if (tagsNode.isMissingNode() || tagsNode.isNull()) {
             return List.of();
@@ -3117,20 +2954,4 @@ public class SesController {
         return out;
     }
 
-    private static AwsException remapV1Exception(AwsException e) {
-        return switch (e.getErrorCode()) {
-            case "InvalidParameterValue", "InvalidTemplate", "ValidationError",
-                 "InvalidRenderingParameter", "MissingRenderingAttribute" ->
-                    new AwsException("BadRequestException", e.getMessage(), 400);
-            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist",
-                 "CustomVerificationEmailTemplateDoesNotExist", "FromEmailAddressNotVerified" ->
-                    new AwsException("NotFoundException", e.getMessage(), 404);
-            case "AlreadyExists", "ConfigurationSetAlreadyExists",
-                 "CustomVerificationEmailTemplateAlreadyExists" ->
-                    new AwsException("AlreadyExistsException", e.getMessage(), 400);
-            case "ConfigurationSetSendingPausedException" ->
-                    new AwsException("SendingPausedException", e.getMessage(), 400);
-            default -> e;
-        };
-    }
 }

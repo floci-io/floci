@@ -165,7 +165,7 @@ public class SesCvetService {
 
     private static AwsException cvetNotFound(String templateName) {
         // v1-native code (verified: CustomVerificationEmailTemplateDoesNotExist / 400).
-        // SesController.remapV1Exception translates it to NotFoundException / 404 for the v2 boundary.
+        // SesV2Json.remapV1Exception translates it to NotFoundException / 404 for the v2 boundary.
         return new AwsException("CustomVerificationEmailTemplateDoesNotExist",
                 "Custom verification email template <" + templateName + "> does not exist", 400);
     }
