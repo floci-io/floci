@@ -147,7 +147,21 @@ class BedrockAgentCoreEventIntegrationTest {
         given().contentType(ContentType.JSON).body("{\"maxResults\":101}")
                 .when().post("/memories/" + memoryId + "/actor/a/sessions/s")
                 .then().statusCode(400)
-                .body("__type", equalTo("ValidationException"));
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value '101' at 'maxResults' "
+                        + "failed to satisfy constraint: Member must have value less than or equal to 100"));
+    }
+
+    @Test
+    void maxResultsBelowOneIsRejectedWithTheLowerBound() {
+        String memoryId = createMemory("evtMaxResultsLow");
+
+        given().contentType(ContentType.JSON).body("{\"maxResults\":0}")
+                .when().post("/memories/" + memoryId + "/actor/a/sessions/s")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value '0' at 'maxResults' "
+                        + "failed to satisfy constraint: Member must have value greater than or equal to 1"));
     }
 
     @Test

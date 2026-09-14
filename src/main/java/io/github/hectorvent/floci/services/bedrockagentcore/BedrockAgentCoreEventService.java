@@ -198,12 +198,21 @@ public class BedrockAgentCoreEventService {
         if (maxResults == null) {
             return DEFAULT_MAX_RESULTS;
         }
-        if (maxResults < 1 || maxResults > MAX_RESULTS_LIMIT) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'maxResults' failed to satisfy constraint: "
-                            + "Member must have value less than or equal to " + MAX_RESULTS_LIMIT, 400);
+        if (maxResults < 1) {
+            throw new AwsException("ValidationException", rangeViolation(maxResults,
+                    "Member must have value greater than or equal to 1"), 400);
+        }
+        if (maxResults > MAX_RESULTS_LIMIT) {
+            throw new AwsException("ValidationException", rangeViolation(maxResults,
+                    "Member must have value less than or equal to " + MAX_RESULTS_LIMIT), 400);
         }
         return maxResults;
+    }
+
+    /** AWS quotes the submitted value and cites only the bound that was actually breached. */
+    private static String rangeViolation(int value, String constraint) {
+        return "1 validation error detected: Value '" + value + "' at 'maxResults' "
+                + "failed to satisfy constraint: " + constraint;
     }
 
     // ── helpers ──────────────────────────────────────────────────
