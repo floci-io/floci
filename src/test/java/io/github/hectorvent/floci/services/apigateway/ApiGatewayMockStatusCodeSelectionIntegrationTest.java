@@ -6,6 +6,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -224,6 +226,30 @@ class ApiGatewayMockStatusCodeSelectionIntegrationTest {
                 .statusCode(500)
                 .header("X-Selected", nullValue())
                 .body("message", equalTo("Internal server error"));
+    }
+
+    @Test
+    void pathParameterWinsOverSameNamedQueryAndHeaderInRequestTemplate() {
+        resourceId = given().contentType(ContentType.JSON)
+                .body("{\"pathPart\":\"{id}\"}")
+                .post("/restapis/" + apiId + "/resources/" + resourceId)
+                .then().statusCode(201).extract().path("id");
+        putMethod("GET");
+        putMockIntegration("GET", "#if($input.params('id') == 'path-id')"
+                + "{\"statusCode\":201}#else{\"statusCode\":500}#end");
+        for (String status : List.of("201", "500")) {
+            putIntegrationResponse("GET", status, status, "");
+            putMethodResponse("GET", status);
+        }
+        deploy();
+
+        for (String endpoint : List.of(
+                "/execute-api/" + apiId + "/" + STAGE,
+                "/restapis/" + apiId + "/" + STAGE + "/_user_request_")) {
+            given().queryParam("id", "query-id").header("id", "header-id")
+                    .get(endpoint + "/items/path-id")
+                    .then().statusCode(201);
+        }
     }
 
     private void putMethod(String httpMethod) {

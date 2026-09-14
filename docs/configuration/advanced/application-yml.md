@@ -66,7 +66,7 @@ floci:
       lambda:
         flush-interval-ms: 5000
       cloudwatchlogs:
-        flush-interval-ms: 5000
+        flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
       secretsmanager:
@@ -115,7 +115,7 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30         # Seconds
-      max-message-size: 1048576              # Bytes (1 MB)
+      max-message-size: 1048576              # Bytes (1 MiB, the AWS maximum)
       clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue clears SQS FIFO dedup and SNS FIFO topic dedup for topics subscribed to that queue
 
     s3:
@@ -200,6 +200,7 @@ floci:
     cloudwatchlogs:
       enabled: true
       max-events-per-query: 10000
+      max-stored-events: 20000   # per account; oldest events are evicted once the store exceeds this
 
     cloudwatchmetrics:
       enabled: true
@@ -270,7 +271,7 @@ floci:
       enabled: true
       registry-image: "registry:2"
       registry-container-name: floci-ecr-registry
-      registry-base-port: 5100
+      registry-base-port: 5100              # private loopback backing port range
       registry-max-port: 5199
       data-path: ./data/ecr
       tls-enabled: false

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshiftdata;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;
 
@@ -29,7 +30,7 @@ class RedshiftDataSqlParametersTest {
 
     @Test
     void rewritesNamedPlaceholdersInOrderAndSkipsLiteralsAndCasts() {
-        RedshiftDataSqlParameters.ParsedSql parsed = RedshiftDataSqlParameters.parse(
+        ParsedSql parsed = RedshiftDataSqlParameters.parse(
                 "select * from t where a = :a and b = ':b' and c = :a and d = 1::int");
         assertEquals("select * from t where a = ? and b = ':b' and c = ? and d = 1::int", parsed.sql());
         assertEquals(List.of("a", "a"), parsed.parameterOrder());
@@ -41,7 +42,7 @@ class RedshiftDataSqlParametersTest {
         try (Connection c = DriverManager.getConnection(url, "sa", "")) {
             c.createStatement().execute("create table t (id int, name varchar(20))");
             c.createStatement().execute("insert into t values (2, 'bob')");
-            RedshiftDataSqlParameters.ParsedSql parsed =
+            ParsedSql parsed =
                     RedshiftDataSqlParameters.parse("select name from t where id = :id");
             try (PreparedStatement ps = c.prepareStatement(parsed.sql())) {
                 RedshiftDataSqlParameters.bind(ps, parsed.parameterOrder(), Map.of("id", "2"));
@@ -58,7 +59,7 @@ class RedshiftDataSqlParametersTest {
         String url = "jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1";
         try (Connection c = DriverManager.getConnection(url, "sa", "")) {
             c.createStatement().execute("create table t (id int)");
-            RedshiftDataSqlParameters.ParsedSql parsed =
+            ParsedSql parsed =
                     RedshiftDataSqlParameters.parse("select * from t where id = :id");
             try (PreparedStatement ps = c.prepareStatement(parsed.sql())) {
                 AwsException e = assertThrows(AwsException.class,
@@ -98,7 +99,7 @@ class RedshiftDataSqlParametersTest {
     @Test
     void backslashEscapedQuoteInsideAnEscapeStringDoesNotEndTheLiteral() {
         // E'it\'s :value' is one string literal; :value is literal text, not a bind marker.
-        RedshiftDataSqlParameters.ParsedSql parsed =
+        ParsedSql parsed =
                 RedshiftDataSqlParameters.parse("select E'it\\'s :value' as v where id = :id");
         assertEquals("select E'it\\'s :value' as v where id = ?", parsed.sql());
         assertEquals(List.of("id"), parsed.parameterOrder());
@@ -112,9 +113,19 @@ class RedshiftDataSqlParametersTest {
     @Test
     void plainLiteralStillTreatsBackslashLiterally() {
         // Not an E'' string: backslash is an ordinary character, '' still ends the literal.
-        RedshiftDataSqlParameters.ParsedSql parsed =
+        ParsedSql parsed =
                 RedshiftDataSqlParameters.parse("select 'a\\' , :x");
         assertEquals("select 'a\\' , ?", parsed.sql());
         assertEquals(List.of("x"), parsed.parameterOrder());
+    }
+
+    @Test
+    void doesNotTreatBackticksAsQuotedIdentifiers() {
+        ParsedSql parsed =
+                RedshiftDataSqlParameters.parse("select `x:y` from t where id = :id");
+        assertEquals("select `x?` from t where id = ?", parsed.sql());
+        assertEquals(List.of("y", "id"), parsed.parameterOrder());
+
+        assertTrue(RedshiftDataSqlParameters.isMultiStatement("select `a;b`"));
     }
 }
