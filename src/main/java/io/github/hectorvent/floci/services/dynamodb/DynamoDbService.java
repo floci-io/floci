@@ -1957,7 +1957,7 @@ public class DynamoDbService implements ResourceProvider {
     void deleteScannedItems(List<ExpiredTableScan> scans) {
         int totalDeleted = 0;
         for (ExpiredTableScan scan : scans) {
-            var items = itemsByTable.get(scan.rawKey());
+            ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scan.rawKey());
             if (items == null) {
                 continue;
             }
