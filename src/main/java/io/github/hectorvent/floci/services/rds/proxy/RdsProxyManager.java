@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -18,12 +19,15 @@ public class RdsProxyManager {
 
     private final RdsSigV4Validator sigV4Validator;
     private final RdsProxyTlsCertificates tlsCertificates;
+    private final EmulatorConfig config;
     private final ConcurrentHashMap<String, RdsAuthProxy> proxies = new ConcurrentHashMap<>();
 
     @Inject
-    public RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates) {
+    public RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
+                           EmulatorConfig config) {
         this.sigV4Validator = sigV4Validator;
         this.tlsCertificates = tlsCertificates;
+        this.config = config;
     }
 
     public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
@@ -32,9 +36,12 @@ public class RdsProxyManager {
                                         String masterUsername, String masterPassword, String dbName,
                                         RdsAuthProxy.MasterPasswordCheck passwordValidator) {
         tlsCertificates.ensureHost(advertisedHost);
+        EmulatorConfig.RdsServiceConfig rdsConfig = config.services().rds();
         RdsAuthProxy proxy = new RdsAuthProxy(
                 instanceId, backendHost, backendPort, engine, iamEnabled,
-                masterUsername, masterPassword, dbName, sigV4Validator, tlsCertificates, passwordValidator);
+                masterUsername, masterPassword, dbName, sigV4Validator, tlsCertificates, passwordValidator,
+                rdsConfig.proxyHandshakeTimeoutMillis(), rdsConfig.proxyBackendConnectTimeoutMillis(),
+                rdsConfig.proxyMaxConnections());
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -61,7 +62,8 @@ class Ec2MultiNetworkMetadataIntegrationTest {
         Ec2ContainerManager manager = new Ec2ContainerManager(mock(ContainerBuilder.class), lifecycle,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), mock(DockerHostResolver.class),
                 docker, mock(PortAllocator.class), config, server, mock(Ec2PortForwardManager.class),
-                mock(RegionResolver.class), mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class));
+                mock(RegionResolver.class), mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class));
         Instance instance = new Instance();
         instance.setInstanceId("i-multinetwork");
         instance.setDockerContainerId("guest");

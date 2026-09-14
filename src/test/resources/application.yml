@@ -174,11 +174,17 @@ floci:
       proxy-base-port: 7100
       proxy-max-port: 7199
       default-credential-duration-seconds: 900
+      proxy-handshake-timeout-millis: 10000
+      proxy-backend-connect-timeout-millis: 5000
+      proxy-max-connections: 100
     rds:
       enabled: true
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
+      proxy-handshake-timeout-millis: 10000
+      proxy-backend-connect-timeout-millis: 5000
+      proxy-max-connections: 100
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180

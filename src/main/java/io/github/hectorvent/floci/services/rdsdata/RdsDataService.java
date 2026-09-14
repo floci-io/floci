@@ -6,10 +6,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
-import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -243,7 +244,7 @@ public class RdsDataService implements Resettable {
     private ObjectNode executeOnConnection(Connection connection, DatabaseEngine engine, String sql,
                                            Map<String, JsonNode> parameters, boolean includeMetadata)
             throws SQLException {
-        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
+        ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
         try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
             RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
             return buildResponse(statement, statement.execute(), includeMetadata, engine);
@@ -274,7 +275,7 @@ public class RdsDataService implements Resettable {
         if (parameterSets.isEmpty()) {
             return batchResponse(updateResults);
         }
-        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
+        ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
         try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
             rejectStatementReturningRows(statement, parsed.sql());
             if (returnsGeneratedKeys(engine)) {

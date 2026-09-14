@@ -370,7 +370,8 @@ public interface EmulatorConfig {
     interface CloudWatchLogsStorageConfig {
         Optional<String> mode();
 
-        @WithDefault("5000")
+        // Log events are the largest and most write-heavy store, so they flush less often than the rest.
+        @WithDefault("15000")
         long flushIntervalMs();
     }
 
@@ -1338,6 +1339,16 @@ public interface EmulatorConfig {
         // DurationSeconds is omitted. AWS allows 900 to 3600.
         @WithDefault("900")
         int defaultCredentialDurationSeconds();
+
+        // Bounds for the per-cluster auth proxy: how long a client has to complete the
+        // startup/auth handshake, how long a backend connect attempt may take, and how many
+        // concurrent connections the proxy accepts before refusing new ones.
+        @WithDefault("10000")
+        int proxyHandshakeTimeoutMillis();
+        @WithDefault("5000")
+        int proxyBackendConnectTimeoutMillis();
+        @WithDefault("100")
+        int proxyMaxConnections();
     }
 
     interface RdsServiceConfig {
@@ -1374,6 +1385,16 @@ public interface EmulatorConfig {
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        // Bounds for the per-instance auth proxy: how long a client has to complete the
+        // startup/auth handshake, how long a backend connect attempt may take, and how many
+        // concurrent connections the proxy accepts before refusing new ones.
+        @WithDefault("10000")
+        int proxyHandshakeTimeoutMillis();
+        @WithDefault("5000")
+        int proxyBackendConnectTimeoutMillis();
+        @WithDefault("100")
+        int proxyMaxConnections();
     }
 
     interface RdsDataServiceConfig {
@@ -1494,6 +1515,14 @@ public interface EmulatorConfig {
 
         @WithDefault("10000")
         int maxEventsPerQuery();
+
+        /**
+         * Upper bound on log events kept across all groups. The store is one JSON document rewritten
+         * in full on every flush, so an unbounded store turns a chatty or retrying Lambda into a
+         * sustained multi-hundred-MB/s disk writer. Oldest events are evicted first once exceeded.
+         */
+        @WithDefault("20000")
+        int maxStoredEvents();
 
         /**
          * Artificial Logs Insights query completion delay, in milliseconds. With the default 0,

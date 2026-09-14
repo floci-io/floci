@@ -38,6 +38,8 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     private static final String REGION = "us-east-1";
+    private static final String ACCOUNT_A = "111122223333";
+    private static final String ACCOUNT_B = "222233334444";
 
     @Test
     void copyObjectIsDeniedWhenCallerCannotReadTheSource() {
@@ -115,6 +117,53 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         given()
                 .filter(caller.signer())
                 .header("x-amz-copy-source", "/" + sourceBucket + "/allowed.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void crossAccountCopyRequiresIdentityAndSourceBucketPolicyAllows() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-cross-source-" + suffix;
+        String destBucket = "copy-cross-dest-" + suffix;
+        String userName = "copy-cross-user-" + suffix;
+
+        UserCredentials accountAAdmin = createAccountAdmin("copy-source-admin-" + suffix, ACCOUNT_A);
+        UserCredentials accountBAdmin = createAccountAdmin("copy-dest-admin-" + suffix, ACCOUNT_B);
+        createBucketAsRoot(sourceBucket, accountAAdmin.signer());
+        putObjectAsRoot(sourceBucket, "shared.txt", "cross-account source", accountAAdmin.signer());
+        createBucketAsRoot(destBucket, accountBAdmin.signer());
+
+        UserCredentials caller = createUser(userName, ACCOUNT_B);
+        putUserPolicy(userName, "CopyAccess", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
+                ]}""".formatted(destBucket), ACCOUNT_B);
+        putBucketPolicyAsRoot(
+                sourceBucket,
+                allowUserReadPolicy(sourceBucket, ACCOUNT_B, userName, "s3:GetObject"),
+                accountAAdmin.signer());
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/shared.txt")
+        .when()
+                .put("/" + destBucket + "/denied.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+
+        putUserPolicy(userName, "CopyAccess", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%2$s/*"}
+                ]}""".formatted(sourceBucket, destBucket), ACCOUNT_B);
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/shared.txt")
         .when()
                 .put("/" + destBucket + "/copied.txt")
         .then()
@@ -291,8 +340,12 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     private static void createBucketAsRoot(String bucket) {
+        createBucketAsRoot(bucket, ROOT_SIGNER);
+    }
+
+    private static void createBucketAsRoot(String bucket, S3RequestSigner signer) {
         given()
-                .filter(ROOT_SIGNER)
+                .filter(signer)
         .when()
                 .put("/" + bucket)
         .then()
@@ -300,8 +353,13 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     private static void putObjectAsRoot(String bucket, String key, String body) {
+        putObjectAsRoot(bucket, key, body, ROOT_SIGNER);
+    }
+
+    private static void putObjectAsRoot(
+            String bucket, String key, String body, S3RequestSigner signer) {
         given()
-                .filter(ROOT_SIGNER)
+                .filter(signer)
                 .contentType("text/plain")
                 .body(body)
         .when()
@@ -347,8 +405,13 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     private static void putBucketPolicyAsRoot(String bucket, String policy) {
+        putBucketPolicyAsRoot(bucket, policy, ROOT_SIGNER);
+    }
+
+    private static void putBucketPolicyAsRoot(
+            String bucket, String policy, S3RequestSigner signer) {
         given()
-                .filter(ROOT_SIGNER)
+                .filter(signer)
                 .contentType("application/json")
                 .body(policy)
         .when()
@@ -365,11 +428,16 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     private static String allowUserReadPolicy(String bucket, String userName, String action) {
+        return allowUserReadPolicy(bucket, "000000000000", userName, action);
+    }
+
+    private static String allowUserReadPolicy(
+            String bucket, String accountId, String userName, String action) {
         return """
                 {"Version":"2012-10-17","Statement":[
-                  {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:user/%1$s"},
-                   "Action":"%2$s","Resource":"arn:aws:s3:::%3$s/*"}
-                ]}""".formatted(userName, action, bucket);
+                  {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%1$s:user/%2$s"},
+                   "Action":"%3$s","Resource":"arn:aws:s3:::%4$s/*"}
+                ]}""".formatted(accountId, userName, action, bucket);
     }
 
     private static String allowPublicPutObjectPolicy(String bucket) {
@@ -394,10 +462,14 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     private static UserCredentials createUser(String userName) {
+        return createUser(userName, "test");
+    }
+
+    private static UserCredentials createUser(String userName, String accountId) {
         given()
                 .formParam("Action", "CreateUser")
                 .formParam("UserName", userName)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(accountId, "iam"))
         .when()
                 .post("/")
         .then()
@@ -406,7 +478,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         io.restassured.path.xml.XmlPath key = given()
                 .formParam("Action", "CreateAccessKey")
                 .formParam("UserName", userName)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(accountId, "iam"))
         .when()
                 .post("/")
         .then()
@@ -418,13 +490,27 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey"));
     }
 
+    private static UserCredentials createAccountAdmin(String userName, String accountId) {
+        UserCredentials credentials = createUser(userName, accountId);
+        putUserPolicy(userName, "S3Admin", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:*","Resource":"*"}
+                ]}""", accountId);
+        return credentials;
+    }
+
     private static void putUserPolicy(String userName, String policyName, String policyDocument) {
+        putUserPolicy(userName, policyName, policyDocument, "test");
+    }
+
+    private static void putUserPolicy(
+            String userName, String policyName, String policyDocument, String accountId) {
         given()
                 .formParam("Action", "PutUserPolicy")
                 .formParam("UserName", userName)
                 .formParam("PolicyName", policyName)
                 .formParam("PolicyDocument", policyDocument)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(accountId, "iam"))
         .when()
                 .post("/")
         .then()
@@ -441,7 +527,8 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         public Map<String, String> getConfigOverrides() {
             return Map.of(
                     "floci.services.iam.enforcement-enabled", "true",
-                    "floci.services.s3.enforce-auth", "true");
+                    "floci.services.s3.enforce-auth", "true",
+                    "floci.services.s3.global-bucket-namespace", "true");
         }
     }
 }

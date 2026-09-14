@@ -9,8 +9,10 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestination;
+import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
@@ -197,5 +199,71 @@ class DynamoDbTtlForwardingTest {
             key.set("pk", stringAttr("row-" + i));
             assertNull(reloaded.getItem("TtlTable", key, REGION), "expired removal must be persisted");
         }
+    }
+
+    // A write landing between scanExpiredItems() and deleteScannedItems() must not be lost.
+    @Test
+    void ttlSweep_preserves_item_updated_between_scan_and_delete() throws Exception {
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>();
+        DynamoDbStreamService streamService = new DynamoDbStreamService(mapper, tableStore);
+        KinesisService kinesis = realKinesis();
+        KinesisStreamingForwarder forwarder = new KinesisStreamingForwarder(kinesis, mapper);
+        DynamoDbService svc = new DynamoDbService(
+                tableStore, itemStore, new RegionResolver("us-east-1", "000000000000"),
+                streamService, forwarder);
+
+        seedTtlTable(svc, 2);
+        TableDefinition table = tableStore.get("us-east-1::TtlTable").orElseThrow();
+        StreamDescription sd = streamService.enableStream(
+                table.getTableName(), table.getTableArn(), "NEW_AND_OLD_IMAGES", REGION);
+        KinesisStream stream = kinesis.createStream("ttl-race-stream", 1, REGION);
+        table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(stream.getStreamArn()));
+
+        List<DynamoDbService.ExpiredTableScan> scans = svc.scanExpiredItems();
+        int candidateCount = scans.stream().mapToInt(scan -> scan.itemKeys().size()).sum();
+        assertEquals(2, candidateCount, "both expired rows must be scan candidates");
+
+        // Lands after the scan but before the delete step runs against that stale snapshot.
+        ObjectNode refreshed = mapper.createObjectNode();
+        refreshed.set("pk", stringAttr("row-0"));
+        refreshed.set("expireAt", numberAttr(Instant.now().getEpochSecond() + 3600));
+        refreshed.set("marker", stringAttr("updated-during-sweep"));
+        svc.putItem("TtlTable", refreshed, REGION);
+
+        svc.deleteScannedItems(scans);
+        assertTrue(forwarder.awaitIdle(Duration.ofSeconds(5)), "CDC forwards should drain promptly");
+
+        ObjectNode keyRow0 = mapper.createObjectNode();
+        keyRow0.set("pk", stringAttr("row-0"));
+        JsonNode row0 = svc.getItem("TtlTable", keyRow0, REGION);
+        assertNotNull(row0, "the concurrently updated item must survive the sweep");
+        assertEquals("updated-during-sweep", row0.get("marker").get("S").asText());
+
+        ObjectNode keyRow1 = mapper.createObjectNode();
+        keyRow1.set("pk", stringAttr("row-1"));
+        assertNull(svc.getItem("TtlTable", keyRow1, REGION), "the genuinely expired item must still be removed");
+
+        // The survivor's own update also lands on both destinations as a MODIFY; only the
+        // REMOVE side is what this test is about, so isolate that event before asserting on it.
+        String iterator = streamService.getShardIterator(
+                sd.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        DynamoDbStreamService.GetRecordsResult pulled = streamService.getRecords(iterator, 1000);
+        List<DynamoDbStreamRecord> removes = pulled.records().stream()
+                .filter(record -> "REMOVE".equals(record.getEventName()))
+                .toList();
+        assertEquals(1, removes.size(), "a skipped delete must not emit a stream REMOVE record");
+        assertEquals("row-1", removes.get(0).getKeys().get("pk").get("S").asText());
+
+        List<KinesisRecord> drained = drain(kinesis, "ttl-race-stream");
+        List<JsonNode> kinesisRemoves = new ArrayList<>();
+        for (KinesisRecord record : drained) {
+            JsonNode payload = mapper.readTree(record.getData());
+            if ("REMOVE".equals(payload.get("eventName").asText())) {
+                kinesisRemoves.add(payload);
+            }
+        }
+        assertEquals(1, kinesisRemoves.size(), "a skipped delete must not forward a Kinesis REMOVE record");
+        assertEquals("row-1", kinesisRemoves.get(0).get("dynamodb").get("Keys").get("pk").get("S").asText());
     }
 }

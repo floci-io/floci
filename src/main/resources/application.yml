@@ -152,7 +152,7 @@ floci:
       lambda:
         flush-interval-ms: 5000
       cloudwatchlogs:
-        flush-interval-ms: 5000
+        flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
       secretsmanager:
@@ -369,6 +369,9 @@ floci:
       proxy-max-port: 7199
       default-credential-duration-seconds: 900   # GetClusterCredentials default lifetime (900-3600)
       # endpoint-host: localhost                 # Hostname clients use; empty -> DockerHostResolver
+      proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
+      proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
+      proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
@@ -380,6 +383,9 @@ floci:
       # default-postgres-image: "registry.example.com/postgres:16-alpine"
       # default-mysql-image: "registry.example.com/mysql:8.0"
       # default-mariadb-image: "registry.example.com/mariadb:11"
+      proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
+      proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
+      proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
@@ -406,6 +412,7 @@ floci:
     cloudwatchlogs:
       enabled: true
       max-events-per-query: 10000
+      max-stored-events: 20000
     cloudwatchmetrics:
       enabled: true
     secretsmanager:

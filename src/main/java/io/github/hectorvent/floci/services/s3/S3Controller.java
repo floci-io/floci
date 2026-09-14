@@ -12,7 +12,6 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
-import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
@@ -812,7 +811,7 @@ public class S3Controller {
                 return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, authorization);
             }
 
-            Map<String, String> inlineTags = parseInlineTaggingHeader(tagging);
+            Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
 
             String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
             String retainUntilStr = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
@@ -1388,7 +1387,8 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
                         getChecksumAlgorithm(httpHeaders),
                         httpHeaders.getHeaderString("x-amz-checksum-type"),
-                        parseInlineTaggingHeader(httpHeaders.getHeaderString("x-amz-tagging")));
+                        parseInlineTaggingHeader(
+                                resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo)));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -3606,8 +3606,24 @@ public class S3Controller {
     private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;
 
     /**
-     * Parses an {@code x-amz-tagging} request-header value (URL-encoded
-     * {@code k=v&k=v}) into a tag map. Returns an empty map for null or blank input.
+     * Resolves the inline {@code x-amz-tagging} value for PutObject and CreateMultipartUpload.
+     * The signed request header wins; otherwise the value comes from the {@code x-amz-tagging}
+     * query parameter, where SDK presigners hoist the header while signing only {@code host}.
+     * JAX-RS decodes the query value once, which yields the same URL-encoded {@code k=v&k=v}
+     * string the header form carries, so both sources feed
+     * {@link #parseInlineTaggingHeader(String)} unchanged. Real S3 honors both forms.
+     */
+    private static String resolveInlineTaggingSource(String taggingHeader, UriInfo uriInfo) {
+        if (taggingHeader != null) {
+            return taggingHeader;
+        }
+        return uriInfo.getQueryParameters().getFirst("x-amz-tagging");
+    }
+
+    /**
+     * Parses an {@code x-amz-tagging} value (URL-encoded {@code k=v&k=v}), taken from the
+     * request header or the presigned-URL query parameter, into a tag map. Returns an empty
+     * map for null or blank input.
      *
      * <p>Note: the error codes thrown here ({@code InvalidArgument} for malformed input,
      * {@code BadRequest} for exceeding the 10-tag limit) match real-AWS S3 behavior
@@ -3784,12 +3800,12 @@ public class S3Controller {
                                          S3Service.RequestAuthorization authorization) {
         String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
         String resource = S3PublicAccessEvaluator.objectArn(source.bucket(), source.objectKey());
-        ResourcePolicyDecision resourcePolicyDecision =
+        S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
                 s3Service.signedPrincipalResourcePolicyDecision(
                         source.bucket(), action, resource, authorization);
         iamEnforcementFilter.authorizeAdditionalResource(
                 httpHeaders.getHeaderString("Authorization"), action, resource,
-                resourcePolicyDecision);
+                resourcePolicyEvaluation.decision(), resourcePolicyEvaluation.resourceOwnerAccountId());
         s3Service.authorizeGetObject(
                 source.bucket(), source.objectKey(), source.versionId(), authorization);
     }

@@ -27,10 +27,11 @@ import java.util.regex.Pattern;
 
 /**
  * Owns the SES inbound-mail management domain: receipt rule sets and their rules (the
- * {@code receiptRuleSetStore}) and receipt IP filters (the {@code receiptFilterStore}). Extracted from {@link SesService} in the store-based domain split and reached only through
- * that facade. Action-target validation couples this domain to {@link S3Service},
- * {@link SnsService}, and {@link LambdaService}, reproducing the checks real SES runs against the
- * account; the bounce-sender check arrives as a predicate the facade binds to
+ * {@code receiptRuleSetStore}) and receipt IP filters (the {@code receiptFilterStore}). Extracted
+ * from {@link SesService} in the store-based domain split; the v1 {@link SesQueryHandler} is its
+ * only caller and reaches it directly. Action-target validation couples this domain to
+ * {@link S3Service}, {@link SnsService}, and {@link LambdaService}, reproducing the checks real SES
+ * runs against the account; the bounce-sender check arrives as a predicate the handler binds to
  * {@code SesIdentityService}, keeping identity resolution out of this class's dependencies.
  *
  * <p>Floci has no inbound-mail endpoint, so everything here is stored inertly: stored rules
