@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.glue.model.Job;
 import io.github.hectorvent.floci.services.glue.model.JobCommand;
 import io.github.hectorvent.floci.services.glue.model.JobUpdate;
 import io.github.hectorvent.floci.services.glue.model.Partition;
+import io.github.hectorvent.floci.services.glue.model.PartitionIndex;
 import io.github.hectorvent.floci.services.glue.model.PartitionIndexDescriptor;
 import io.github.hectorvent.floci.services.glue.model.S3Target;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
@@ -32,6 +33,8 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -1260,4 +1263,52 @@ class GlueServiceTest {
         AwsException udfTagEx = assertThrows(AwsException.class, () -> glueService.tagResource(fakeUdfArn, Map.of("k", "v"), REGION));
         assertEquals("EntityNotFoundException", udfTagEx.getErrorCode());
     }
+
+    @Test
+    void concurrentPartitionIndexCreatesStopAtTheCap() throws Exception {
+        Table table = new Table();
+        table.setName("indexed");
+        StorageDescriptor sd = new StorageDescriptor();
+        sd.setColumns(java.util.List.of(new Column("a", "string")));
+        table.setStorageDescriptor(sd);
+        table.setPartitionKeys(java.util.List.of(new Column("a", "string"), new Column("b", "string")));
+        glueService.createTable("db1", table);
+
+        // Two settled indexes leave exactly one slot under the cap of three.
+        createSettledIndex("idx0", "a");
+        createSettledIndex("idx1", "b");
+
+        int attempts = 4;
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(attempts);
+        for (int i = 0; i < attempts; i++) {
+            String indexName = "race" + i;
+            Thread.ofVirtual().start(() -> {
+                try {
+                    start.await();
+                    PartitionIndex index = new PartitionIndex();
+                    index.setIndexName(indexName);
+                    index.setKeys(java.util.List.of("a", "b"));
+                    glueService.createPartitionIndex("db1", "indexed", index);
+                } catch (AwsException | InterruptedException expected) {
+                    // Only the create that takes the last slot succeeds; the rest are rejected.
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        start.countDown();
+        assertTrue(done.await(10, TimeUnit.SECONDS), "partition index creates did not finish");
+
+        assertEquals(3, glueService.getPartitionIndexes("db1", "indexed").size());
+    }
+
+    private void createSettledIndex(String indexName, String key) {
+        PartitionIndex index = new PartitionIndex();
+        index.setIndexName(indexName);
+        index.setKeys(java.util.List.of(key));
+        glueService.createPartitionIndex("db1", "indexed", index);
+        glueService.getPartitionIndexes("db1", "indexed");
+    }
+
 }

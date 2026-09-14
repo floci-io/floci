@@ -451,8 +451,12 @@ public class GlueService {
      * <p>The index is stored {@code CREATING}, as real Glue reports it while the backfill runs. It
      * settles to {@code ACTIVE} on the next {@code GetPartitionIndexes}, so a client that polls
      * sees the transition without the emulator depending on elapsed time.
+     *
+     * <p>Synchronized with the other partition-index methods, and with {@code updateTable}: the cap
+     * and duplicate checks read the stored indexes before writing, so concurrent creates would
+     * otherwise both pass a check that only one of them should.
      */
-    public void createPartitionIndex(String databaseName, String tableName, PartitionIndex index) {
+    public synchronized void createPartitionIndex(String databaseName, String tableName, PartitionIndex index) {
         Table table = getTable(databaseName, tableName);
 
         if (index == null || index.getIndexName() == null || index.getIndexName().isBlank()) {
@@ -512,7 +516,7 @@ public class GlueService {
         LOG.infov("Created Glue partition index: {0}.{1} {2}", databaseName, tableName, index.getIndexName());
     }
 
-    public void deletePartitionIndex(String databaseName, String tableName, String indexName) {
+    public synchronized void deletePartitionIndex(String databaseName, String tableName, String indexName) {
         getTable(databaseName, tableName);
         if (indexName == null || indexName.isBlank()) {
             throw new AwsException("InvalidInputException", "IndexName is required", 400);
@@ -546,7 +550,7 @@ public class GlueService {
      * state and settles it: the next read sees the outcome. A client that polls for {@code ACTIVE}
      * or for the index to vanish, as the Terraform provider does, converges on its second read.
      */
-    public List<PartitionIndexDescriptor> getPartitionIndexes(String databaseName, String tableName) {
+    public synchronized List<PartitionIndexDescriptor> getPartitionIndexes(String databaseName, String tableName) {
         List<PartitionIndexDescriptor> current = readPartitionIndexes(databaseName, tableName);
         for (PartitionIndexDescriptor descriptor : current) {
             String key = partitionIndexKey(databaseName, tableName, descriptor.getIndexName());
