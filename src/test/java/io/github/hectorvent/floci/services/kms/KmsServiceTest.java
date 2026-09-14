@@ -2653,6 +2653,25 @@ class KmsServiceTest {
         }
 
         @Test
+        void legacyImportedSymmetricMaterialIsMigratedToTheEnvelopeBackingKey() {
+            KmsKey key = externalSymmetricKey();
+            byte[] material = material(32, (byte) 11);
+            key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
+            key.setKeyState("Enabled");
+            key.setEnabled(true);
+            key.setBackingKeys(new HashMap<>());
+            key.setCurrentBackingKeyId(null);
+            keyStore.put(REGION + "::" + key.getKeyId(), key);
+
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "legacy-import".getBytes(StandardCharsets.UTF_8), REGION);
+
+            assertArrayEquals("legacy-import".getBytes(StandardCharsets.UTF_8), kmsService.decrypt(ciphertext, REGION));
+            KmsKey migrated = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            assertEquals(1, migrated.getBackingKeys().size());
+            assertNotNull(migrated.getCurrentBackingKeyId());
+        }
+
+        @Test
         void deletingImportedMaterialLeavesNothingThatCanOpenItsCiphertext() throws Exception {
             KmsKey key = externalSymmetricKey();
             importInto(key, material(32, (byte) 42), OAEP_SHA_256);
@@ -2771,6 +2790,19 @@ class KmsServiceTest {
         }
 
         @Test
+        void decryptWithCorruptedBackingKeyIdInHeaderThrowsInvalidCiphertext() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "hello world".getBytes(StandardCharsets.UTF_8), REGION);
+
+            int backingKeyIdStart = 4 + 1 + 2 + key.getKeyId().getBytes(StandardCharsets.UTF_8).length + 2;
+            byte[] tampered = ciphertext.clone();
+            tampered[backingKeyIdStart] ^= 0x01;
+
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.decrypt(tampered, REGION));
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
         void decryptOfTruncatedEnvelopeThrowsInvalidCiphertext() {
             KmsKey key = kmsService.createKey(null, REGION);
             byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "hello world".getBytes(StandardCharsets.UTF_8), REGION);
@@ -2796,6 +2828,31 @@ class KmsServiceTest {
 
             KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
             assertEquals(2, stored.getBackingKeys().size());
+        }
+
+        @Test
+        void concurrentOnDemandRotationsKeepEveryRotation() throws Exception {
+            KmsKey key = kmsService.createKey(null, REGION);
+            int rotationCount = 20;
+            CountDownLatch startGate = new CountDownLatch(1);
+            List<Future<String>> futures = new ArrayList<>();
+
+            try (ExecutorService executor = Executors.newFixedThreadPool(rotationCount)) {
+                for (int i = 0; i < rotationCount; i++) {
+                    futures.add(executor.submit(() -> {
+                        startGate.await();
+                        return kmsService.rotateKeyOnDemand(key.getKeyId(), REGION);
+                    }));
+                }
+                startGate.countDown();
+                for (Future<String> future : futures) {
+                    assertEquals(key.getKeyId(), future.get(10, TimeUnit.SECONDS));
+                }
+            }
+
+            KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            assertEquals(rotationCount, stored.getOnDemandRotationCount());
+            assertEquals(rotationCount + 1, stored.getBackingKeys().size());
         }
 
         @Test
