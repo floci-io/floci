@@ -185,6 +185,13 @@ class BedrockAgentCoreHarnessIntegrationTest {
     }
 
     @Test
+    void aMalformedArnIsReportedAheadOfAMissingRuntimeSessionId() {
+        String body = invoke("anything", null, "{\"messages\": []}", 400);
+        assertThat(body, containsString("harness ARN"));
+        assertThat(body, not(containsString("runtimeSessionId")));
+    }
+
+    @Test
     void anArnWithoutTheTenCharacterSuffixIsRejected() {
         invoke("arn:aws:bedrock-agentcore:us-east-1:000000000000:harness/h-1", SESSION,
                 "{\"messages\": []}", 400);

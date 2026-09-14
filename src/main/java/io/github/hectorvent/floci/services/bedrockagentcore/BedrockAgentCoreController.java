@@ -124,7 +124,8 @@ public class BedrockAgentCoreController {
             throw new AwsException("ValidationException", "Request body is not valid JSON", 400);
         }
 
-        // runtimeSessionId and runtimeUserId are headers on the wire, not body fields.
+        // runtimeSessionId and runtimeUserId are headers on the wire, not body fields. Only the
+        // session id is read: runtimeUserId reaches the harness on AWS but changes nothing here.
         String runtimeSessionId = headers.getHeaderString(SESSION_HEADER);
         Consumer<OutputStream> stream = harnessService.invokeHarness(harnessArn, runtimeSessionId, request);
         LOG.debugv("InvokeHarness: arn={0}, qualifier={1}, session={2}",

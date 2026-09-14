@@ -64,11 +64,13 @@ public class BedrockAgentCoreHarnessService {
     public Consumer<OutputStream> invokeHarness(String harnessArn, String runtimeSessionId, ObjectNode request) {
         // harnessArn rides in the query string and runtimeSessionId in a header, so neither is
         // read from the body. Confirmed against the SDK's own request bindings.
+        // The ARN is validated whole, shape included, before runtimeSessionId is looked at: a request
+        // wrong in both reports the ARN, as AWS does.
         requirePresent(harnessArn, "harnessArn");
-        requirePresent(runtimeSessionId, "runtimeSessionId");
         if (!HARNESS_ARN.matcher(harnessArn).matches()) {
             throw new AwsException("ValidationException", "Invalid harness ARN format.", 400);
         }
+        requirePresent(runtimeSessionId, "runtimeSessionId");
         if (runtimeSessionId.length() < RUNTIME_SESSION_ID_MIN
                 || runtimeSessionId.length() > RUNTIME_SESSION_ID_MAX
                 || !RUNTIME_SESSION_ID.matcher(runtimeSessionId).matches()) {
