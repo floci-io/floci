@@ -100,7 +100,6 @@ public class IamPolicyEvaluator {
                              Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
-        String loweredResource = lowercase(resource);
 
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
         List<PolicyStatement> resourceStmts = resourcePolicies == null ? List.of() : parseAll(resourcePolicies);
@@ -109,12 +108,12 @@ public class IamPolicyEvaluator {
         List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
                 ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
 
-        boolean resourceExplicitDeny = anyExplicitDeny(resourceStmts, loweredAction, loweredResource, ctx);
-        boolean resourceAllow = anyExplicitAllow(resourceStmts, loweredAction, loweredResource, ctx);
+        boolean resourceExplicitDeny = anyExplicitDeny(resourceStmts, loweredAction, resource, ctx);
+        boolean resourceAllow = anyExplicitAllow(resourceStmts, loweredAction, resource, ctx);
         return evaluateParsed(
                 caller, identityStmts, sessionStmts, boundaryStmts,
                 resourceExplicitDeny, resourceAllow, false,
-                ResourceAccountRelationship.SAME_ACCOUNT, loweredAction, loweredResource, ctx);
+                ResourceAccountRelationship.SAME_ACCOUNT, loweredAction, resource, ctx);
     }
 
     /**
@@ -165,7 +164,7 @@ public class IamPolicyEvaluator {
                 resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
                 accountRelationship == null
                         ? ResourceAccountRelationship.CROSS_ACCOUNT : accountRelationship,
-                lowercase(action), lowercase(resource), ctx);
+                lowercase(action), resource, ctx);
     }
 
     private Decision evaluateParsed(
@@ -250,25 +249,24 @@ public class IamPolicyEvaluator {
                                                       Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
-        String loweredResource = lowercase(resource);
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
         List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
                 ? null : parseAll(List.of(caller.sessionPolicyDocument()));
         List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
                 ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
 
-        if (anyExplicitDeny(identityStmts, loweredAction, loweredResource, ctx)
-                || (sessionStmts != null && anyExplicitDeny(sessionStmts, loweredAction, loweredResource, ctx))
-                || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, loweredAction, loweredResource, ctx))) {
+        if (anyExplicitDeny(identityStmts, loweredAction, resource, ctx)
+                || (sessionStmts != null && anyExplicitDeny(sessionStmts, loweredAction, resource, ctx))
+                || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, loweredAction, resource, ctx))) {
             return SimulationDecision.EXPLICIT_DENY;
         }
-        if (!anyExplicitAllow(identityStmts, loweredAction, loweredResource, ctx)) {
+        if (!anyExplicitAllow(identityStmts, loweredAction, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;
         }
-        if (sessionStmts != null && !anyExplicitAllow(sessionStmts, loweredAction, loweredResource, ctx)) {
+        if (sessionStmts != null && !anyExplicitAllow(sessionStmts, loweredAction, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;
         }
-        if (boundaryStmts != null && !anyExplicitAllow(boundaryStmts, loweredAction, loweredResource, ctx)) {
+        if (boundaryStmts != null && !anyExplicitAllow(boundaryStmts, loweredAction, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;
         }
         return SimulationDecision.ALLOWED;
@@ -383,13 +381,17 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    /** Both sides are already lowercased: patterns at parse time, the value once per evaluation. */
-    private boolean matchesAny(List<String> loweredPatterns, String loweredValue) {
-        if (loweredPatterns == null || loweredValue == null) {
+    /**
+     * Case-sensitive glob over the given patterns. Action names are case-insensitive on AWS, so
+     * both sides arrive lowercased: the patterns at parse time and the request action once per
+     * evaluation. Resource ARNs are case-sensitive on AWS and are compared as written.
+     */
+    private boolean matchesAny(List<String> patterns, String value) {
+        if (patterns == null || value == null) {
             return false;
         }
-        for (String pattern : loweredPatterns) {
-            if (globMatchesHelper(pattern, loweredValue, 0, 0)) {
+        for (String pattern : patterns) {
+            if (globMatchesHelper(pattern, value, 0, 0)) {
                 return true;
             }
         }
@@ -739,12 +741,12 @@ public class IamPolicyEvaluator {
 
     private PolicyStatement parseStatement(JsonNode stmt) {
         String effect = stmt.path("Effect").asText("Allow");
-        // Action and Resource matching is case-insensitive, so the patterns are stored
-        // lowercased once here instead of being lowercased on every request.
+        // Action names are case-insensitive on AWS, so they are lowercased once here instead of
+        // on every request. Resource ARNs are case-sensitive on AWS and are kept as written.
         List<String> actions     = lowercaseAll(nodeToList(stmt.get("Action")));
         List<String> notActions  = lowercaseAll(nodeToList(stmt.get("NotAction")));
-        List<String> resources   = lowercaseAll(nodeToList(stmt.get("Resource")));
-        List<String> notResources= lowercaseAll(nodeToList(stmt.get("NotResource")));
+        List<String> resources   = nodeToList(stmt.get("Resource"));
+        List<String> notResources= nodeToList(stmt.get("NotResource"));
         Map<String, Map<String, List<String>>> conditions = parseConditions(stmt.get("Condition"));
         return new PolicyStatement(
                 effect,

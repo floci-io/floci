@@ -461,20 +461,51 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
-    void actionAndResourceMatchingStaysCaseInsensitive() {
+    void actionMatchingIsCaseInsensitive() {
         String mixedCase = "{\"Version\":\"2012-10-17\",\"Statement\":["
-                + "{\"Effect\":\"Allow\",\"Action\":\"S3:GetObject\",\"Resource\":\"ARN:AWS:S3:::Bucket/*\"},"
-                + "{\"Effect\":\"Deny\",\"NotAction\":\"s3:*\",\"NotResource\":\"arn:aws:s3:::*\"}]}";
+                + "{\"Effect\":\"Allow\",\"Action\":\"S3:GetObject\",\"Resource\":\"arn:aws:s3:::bucket/*\"},"
+                + "{\"Effect\":\"Deny\",\"NotAction\":\"s3:*\",\"Resource\":\"*\"}]}";
         CallerContext caller = CallerContext.of(List.of(mixedCase));
 
         assertEquals(Decision.ALLOW,
-                evaluator.evaluate(caller, null, "s3:getobject", "arn:aws:s3:::bucket/Key", null));
+                evaluator.evaluate(caller, null, "s3:getobject", "arn:aws:s3:::bucket/key", null));
         assertEquals(Decision.ALLOW,
-                evaluator.evaluate(caller, null, "S3:GETOBJECT", "arn:aws:s3:::BUCKET/key", null));
-        assertEquals(Decision.DENY,
-                evaluator.evaluate(caller, null, "s3:getobject", "arn:aws:s3:::other/key", null));
+                evaluator.evaluate(caller, null, "S3:GETOBJECT", "arn:aws:s3:::bucket/key", null));
         assertEquals(Decision.DENY,
                 evaluator.evaluate(caller, null, "SQS:SendMessage", "arn:aws:sqs:us-east-1:000000000000:q", null));
+    }
+
+    @Test
+    void resourceMatchingIsCaseSensitive() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"iam:GetUser\","
+                + "\"Resource\":\"arn:aws:iam::000000000000:user/Bob\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"arn:aws:s3:::bucket/Private/*\"}]}";
+        CallerContext caller = CallerContext.of(List.of(policy));
+
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "iam:GetUser", "arn:aws:iam::000000000000:user/Bob", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "iam:GetUser", "arn:aws:iam::000000000000:user/bob", null));
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/Private/report.csv", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/private/report.csv", null));
+    }
+
+    @Test
+    void notResourceMatchingIsCaseSensitive() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Deny\",\"Action\":\"s3:*\","
+                + "\"NotResource\":\"arn:aws:s3:::bucket/Public/*\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}";
+        CallerContext caller = CallerContext.of(List.of(policy));
+
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/Public/index.html", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/public/index.html", null));
     }
 
     private static String sidDocument(int sid) {
