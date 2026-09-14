@@ -167,7 +167,8 @@ class CodePipelineIntegrationTest {
     void pipelineLifecycleExecutesS3SourceAndDeployActions() throws Exception {
         createBucket("codepipeline-source");
         createBucket("codepipeline-destination");
-        putObject("codepipeline-source", "source.zip", "pipeline artifact");
+        String sourceETag = putObject(
+                "codepipeline-source", "source.zip", "pipeline artifact", "release candidate");
 
         String pipelineName = "s3-copy-pipeline";
         post("CreatePipeline", pipeline(pipelineName, """
@@ -238,7 +239,14 @@ class CodePipelineIntegrationTest {
                 .body("pipelineExecution.pipelineName", equalTo(pipelineName))
                 .body("pipelineExecution.status", equalTo("Succeeded"))
                 .body("pipelineExecution.artifactRevisions", hasSize(1))
-                .body("pipelineExecution.artifactRevisions[0].name", equalTo("SourceObject"));
+                .body("pipelineExecution.artifactRevisions[0].name", equalTo("SourceObject"))
+                .body("pipelineExecution.sourceRevisions", hasSize(1))
+                .body("pipelineExecution.sourceRevisions[0].actionName", equalTo("SourceObject"))
+                .body("pipelineExecution.sourceRevisions[0].revisionId", equalTo(unquote(sourceETag)))
+                .body("pipelineExecution.sourceRevisions[0].revisionSummary", equalTo("release candidate"))
+                .body("pipelineExecution.sourceRevisions[0].revisionUrl",
+                        equalTo("s3://codepipeline-source/source.zip"))
+                .body("pipelineExecution.sourceRevisionOverrides", nullValue());
 
         post("ListPipelineExecutions", """
                 {"pipelineName": "%s"}
@@ -247,7 +255,10 @@ class CodePipelineIntegrationTest {
                 .statusCode(200)
                 .body("pipelineExecutionSummaries", hasSize(1))
                 .body("pipelineExecutionSummaries[0].pipelineExecutionId", equalTo(executionId))
-                .body("pipelineExecutionSummaries[0].status", equalTo("Succeeded"));
+                .body("pipelineExecutionSummaries[0].status", equalTo("Succeeded"))
+                .body("pipelineExecutionSummaries[0].sourceRevisions", hasSize(1))
+                .body("pipelineExecutionSummaries[0].sourceRevisions[0].revisionId",
+                        equalTo(unquote(sourceETag)));
 
         post("ListPipelineExecutions", """
                 {
@@ -322,6 +333,198 @@ class CodePipelineIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("pipelines.name", hasItem(pipelineName));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void startPipelineExecutionS3OverridesSelectEffectiveKeyAndVersion() throws Exception {
+        createBucket("codepipeline-source-override");
+        createBucket("codepipeline-override-destination");
+        given()
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+                .put("/codepipeline-source-override?versioning")
+        .then()
+                .statusCode(200);
+
+        putObject("codepipeline-source-override", "source.zip", "default artifact");
+        String oldVersion = given()
+                .contentType("application/octet-stream")
+                .body("selected old version".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        .when()
+                .put("/codepipeline-source-override/alternate.zip")
+        .then()
+                .statusCode(200)
+                .header("x-amz-version-id", notNullValue())
+                .extract().header("x-amz-version-id");
+        putObject("codepipeline-source-override", "alternate.zip", "newer version");
+
+        String pipelineName = "source-revision-override-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-source-override",
+                            "S3ObjectKey": "source.zip",
+                            "AllowOverrideForS3ObjectKey": "true"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-override-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {
+                    "name": "%s",
+                    "sourceRevisions": [
+                        {
+                            "actionName": "SourceObject",
+                            "revisionType": "S3_OBJECT_KEY",
+                            "revisionValue": "alternate.zip"
+                        },
+                        {
+                            "actionName": "SourceObject",
+                            "revisionType": "S3_OBJECT_VERSION_ID",
+                            "revisionValue": "%s"
+                        }
+                    ]
+                }
+                """.formatted(pipelineName, oldVersion))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        waitForExecution(pipelineName, executionId, "Succeeded");
+
+        given()
+                .get("/codepipeline-override-destination/deployed.zip")
+        .then()
+                .statusCode(200)
+                .body(equalTo("selected old version"));
+
+        post("GetPipelineExecution", """
+                {"pipelineName": "%s", "pipelineExecutionId": "%s"}
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecution.sourceRevisions", hasSize(1))
+                .body("pipelineExecution.sourceRevisions[0].actionName", equalTo("SourceObject"))
+                .body("pipelineExecution.sourceRevisions[0].revisionId", equalTo(oldVersion))
+                .body("pipelineExecution.sourceRevisions[0].revisionUrl",
+                        equalTo("s3://codepipeline-source-override/alternate.zip"))
+                .body("pipelineExecution.sourceRevisionOverrides", nullValue());
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void startPipelineExecutionRejectsS3KeyOverrideUnlessActionAllowsIt() {
+        String pipelineName = "source-revision-key-override-validation";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        post("StartPipelineExecution", """
+                {
+                    "name": "%s",
+                    "sourceRevisions": [{
+                        "actionName": "SourceObject",
+                        "revisionType": "S3_OBJECT_KEY",
+                        "revisionValue": "alternate.zip"
+                    }]
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("AllowOverrideForS3ObjectKey"));
+
+        post("StartPipelineExecution", """
+                {
+                    "name": "%s",
+                    "sourceRevisions": [
+                        {
+                            "actionName": "SourceObject",
+                            "revisionType": "S3_OBJECT_VERSION_ID",
+                            "revisionValue": "v1"
+                        },
+                        {
+                            "actionName": "SourceObject",
+                            "revisionType": "S3_OBJECT_VERSION_ID",
+                            "revisionValue": "v2"
+                        }
+                    ]
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("Duplicate S3_OBJECT_VERSION_ID"));
 
         post("DeletePipeline", """
                 {"name": "%s"}
@@ -1388,13 +1591,27 @@ class CodePipelineIntegrationTest {
         given().when().put("/" + bucket).then().statusCode(200);
     }
 
-    private static void putObject(String bucket, String key, String body) {
-        given()
+    private static String putObject(String bucket, String key, String body) {
+        return putObject(bucket, key, body, null);
+    }
+
+    private static String putObject(String bucket, String key, String body, String revisionSummary) {
+        var request = given()
                 .contentType("application/octet-stream")
-                .body(body.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .body(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        if (revisionSummary != null) {
+            request.header("x-amz-meta-codepipeline-artifact-revision-summary", revisionSummary);
+        }
+        return request
         .when()
                 .put("/" + bucket + "/" + key)
         .then()
-                .statusCode(200);
+                .statusCode(200)
+                .header("ETag", notNullValue())
+                .extract().header("ETag");
+    }
+
+    private static String unquote(String value) {
+        return value == null ? null : value.replace("\"", "");
     }
 }
