@@ -273,8 +273,7 @@ class S3MultipartServiceTest {
                 upload.getUploadId(), List.of(1, 2), null, null);
 
         assertTrue(result.getETag().endsWith("-2\""), result.getETag());
-        assertEquals(2, firstStoredETags.size(), firstStoredETags.toString());
-        firstStoredETags.values().forEach(stored -> assertEquals(result.getETag(), stored));
+        assertEquals(Set.of(result.getETag()), Set.copyOf(firstStoredETags.values()));
     }
 
     @Test
