@@ -2825,7 +2825,7 @@ public class AslExecutor {
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
-        if (!"JSON".equals(inputType)) {
+        if (!"JSON".equals(inputType) && !"JSONL".equals(inputType)) {
             throw new FailStateException("States.ItemReaderFailed",
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
@@ -2847,6 +2847,10 @@ public class AslExecutor {
 
         try {
             S3Object object = s3Service.getObject(bucket, key);
+            if ("JSONL".equals(inputType)) {
+                return new ResolvedMapItems(applyMaxItems(itemReader, readJsonLines(object.getData())),
+                        MapItemsSource.ITEM_READER_ARRAY);
+            }
             JsonNode items = objectMapper.readTree(object.getData());
             items = applyItemsPointer(itemReader, items);
             if (items.isObject()) {
@@ -2866,6 +2870,20 @@ public class AslExecutor {
             throw new FailStateException("States.ItemReaderFailed",
                     e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
         }
+    }
+
+    /**
+     * One item per non-empty line. ReaderConfig.ItemsPointer is JSON only on AWS, so a JSONL
+     * dataset is always the whole file.
+     */
+    private ArrayNode readJsonLines(byte[] data) throws IOException {
+        ArrayNode items = objectMapper.createArrayNode();
+        for (String line : new String(data, StandardCharsets.UTF_8).split("\\R")) {
+            if (!line.isBlank()) {
+                items.add(objectMapper.readTree(line));
+            }
+        }
+        return items;
     }
 
     private ArrayNode normalizeObjectItems(JsonNode items) {
