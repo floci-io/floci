@@ -184,8 +184,13 @@ public final class SigV4RequestValidator {
         return value == null ? null : value.replaceAll("\\p{Cntrl}", "");
     }
 
-    private static byte[] deriveSigningKey(String secretKey, String date, String region,
-                                           String service) throws Exception {
+    /**
+     * Public so other SigV4 verifiers with a different canonical-request shape (e.g. S3's real
+     * REST request signing in {@code PreSignedUrlFilter}) can reuse the crypto primitives below
+     * without their own copy, even where they can't reuse {@link #validate}'s query-token flow.
+     */
+    public static byte[] deriveSigningKey(String secretKey, String date, String region,
+                                          String service) throws Exception {
         byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
         byte[] kDate = hmacSha256(kSecret, date);
         byte[] kRegion = hmacSha256(kDate, region);
@@ -193,18 +198,18 @@ public final class SigV4RequestValidator {
         return hmacSha256(kService, "aws4_request");
     }
 
-    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
+    public static byte[] hmacSha256(byte[] key, String data) throws Exception {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static String sha256Hex(String input) throws Exception {
+    public static String sha256Hex(String input) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
     }
 
-    private static String hexEncode(byte[] bytes) {
+    public static String hexEncode(byte[] bytes) {
         StringBuilder sb = new StringBuilder(bytes.length * 2);
         for (byte b : bytes) {
             sb.append(String.format("%02x", b));
