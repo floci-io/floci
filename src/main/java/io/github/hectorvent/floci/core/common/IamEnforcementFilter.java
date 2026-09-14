@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
@@ -254,7 +255,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      */
     public void authorizeAdditionalResource(String authorizationHeader, String action, String resource) {
         authorizeAdditionalResource(
-                authorizationHeader, action, resource, ResourcePolicyDecision.NEUTRAL);
+                authorizationHeader, action, resource, ResourcePolicyDecision.NEUTRAL, null);
     }
 
     /**
@@ -267,6 +268,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String action,
             String resource,
             ResourcePolicyDecision resourcePolicyDecision) {
+        authorizeAdditionalResource(
+                authorizationHeader, action, resource, resourcePolicyDecision, null);
+    }
+
+    /**
+     * Authorizes a secondary resource whose owning account is known. Resource-policy grants
+     * crossing an account boundary require a matching identity-policy grant as well.
+     */
+    public void authorizeAdditionalResource(
+            String authorizationHeader,
+            String action,
+            String resource,
+            ResourcePolicyDecision resourcePolicyDecision,
+            String resourceOwnerAccountId) {
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
@@ -310,8 +325,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
             }
 
+            ResourceAccountRelationship accountRelationship = resourceOwnerAccountId == null
+                    || accountId.equals(resourceOwnerAccountId)
+                    ? ResourceAccountRelationship.SAME_ACCOUNT
+                    : ResourceAccountRelationship.CROSS_ACCOUNT;
             Decision decision = evaluator.evaluateResolvedResourcePolicy(
-                    caller, resourcePolicyDecision, action, resource, conditionContext);
+                    caller, resourcePolicyDecision, accountRelationship,
+                    action, resource, conditionContext);
             if (decision != Decision.DENY) {
                 return;
             }

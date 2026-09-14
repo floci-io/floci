@@ -158,7 +158,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_SQS_ENABLED` | `true` | Enable the SQS service |
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT` | `30` | Default message visibility timeout in seconds |
-| `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MB) |
+| `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MiB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | Reset the deduplication cache when a FIFO queue is purged |
 
 ### SNS
@@ -266,6 +266,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_ENABLED` | `true` | Enable the CloudWatch Logs service |
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_EVENTS_PER_QUERY` | `10000` | Maximum log events returned by a single `FilterLogEvents` or `GetLogEvents` call, and the upper bound for a Logs Insights `limit` |
+| `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_STORED_EVENTS` | `20000` | Maximum log events retained per account across all groups; oldest events are evicted first |
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_QUERY_COMPLETION_DELAY_MS` | `0` | Artificial Logs Insights query delay. With `0` a query completes immediately; a positive value emulates the asynchronous `Running` → `Complete` lifecycle |
 
 ### CloudWatch Metrics
