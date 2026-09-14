@@ -146,8 +146,11 @@ state machine, and the percentage is taken over the item count. Declaring both a
 of the two.
 
 An absorbed failure contributes no result, so the `Map` output carries one entry per successful
-child execution, and a `ResultWriter` exports only those. Once the budget is spent, the state fails
-with `States.ExceedToleratedFailureThreshold` and the run emits `MapRunFailed`.
+child execution. A `ResultWriter` still exports it: successful children go to `SUCCEEDED_0.json` and
+absorbed failures to `FAILED_0.json`, each listed under the matching key of the manifest's
+`ResultFiles`. A failed record carries `Error` and `Cause` in place of an output. Once the budget is
+spent, the state fails with `States.ExceedToleratedFailureThreshold` and the run emits
+`MapRunFailed`.
 
 `DescribeMapRun` reports the declared values under `toleratedFailureCount` and
 `toleratedFailurePercentage`. A `Map` that declares neither keeps the earlier behaviour: the first
