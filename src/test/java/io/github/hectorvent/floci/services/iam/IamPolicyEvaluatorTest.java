@@ -460,6 +460,23 @@ class IamPolicyEvaluatorTest {
         verify(mapper, times(2)).readTree(first);
     }
 
+    @Test
+    void actionAndResourceMatchingStaysCaseInsensitive() {
+        String mixedCase = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"S3:GetObject\",\"Resource\":\"ARN:AWS:S3:::Bucket/*\"},"
+                + "{\"Effect\":\"Deny\",\"NotAction\":\"s3:*\",\"NotResource\":\"arn:aws:s3:::*\"}]}";
+        CallerContext caller = CallerContext.of(List.of(mixedCase));
+
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "s3:getobject", "arn:aws:s3:::bucket/Key", null));
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "S3:GETOBJECT", "arn:aws:s3:::BUCKET/key", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "s3:getobject", "arn:aws:s3:::other/key", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "SQS:SendMessage", "arn:aws:sqs:us-east-1:000000000000:q", null));
+    }
+
     private static String sidDocument(int sid) {
         return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"S" + sid + "\",\"Effect\":\"Allow\","
                 + "\"Action\":\"s3:*\",\"Resource\":\"*\"}]}";
