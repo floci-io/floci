@@ -86,7 +86,7 @@ class EcsContainerManagerFirelensTest {
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, config, regionResolver, awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class), ecrRegistryManager);
+                mock(SecretsManagerService.class), ecrRegistryManager, new HostVolumePolicy(config));
     }
 
     @Test

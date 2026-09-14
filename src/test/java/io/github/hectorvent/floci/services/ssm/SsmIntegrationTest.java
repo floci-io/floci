@@ -1408,4 +1408,106 @@ class SsmIntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    @Test
+    @Order(17)
+    void putParameterWithTagsAndListTagsForResource() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "/demo/tagged-param",
+                    "Value": "hello",
+                    "Type": "String",
+                    "Tags": [
+                        {"Key": "Project", "Value": "demo"},
+                        {"Key": "Env", "Value": "test"}
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Version", equalTo(1));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListTagsForResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "ResourceType": "Parameter",
+                    "ResourceId": "/demo/tagged-param"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TagList", hasSize(2))
+            .body("TagList.find { it.Key == 'Project' }.Value", equalTo("demo"))
+            .body("TagList.find { it.Key == 'Env' }.Value", equalTo("test"));
+    }
+
+    @Test
+    @Order(18)
+    void putParameterOverwritePreservesExistingTags() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "/demo/tagged-param",
+                    "Value": "world",
+                    "Type": "String",
+                    "Overwrite": true
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Version", equalTo(2));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListTagsForResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "ResourceType": "Parameter",
+                    "ResourceId": "/demo/tagged-param"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TagList", hasSize(2))
+            .body("TagList.find { it.Key == 'Project' }.Value", equalTo("demo"));
+    }
+
+    @Test
+    @Order(19)
+    void putParameterOverwriteWithTagsReturns400() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Name": "/demo/tagged-param",
+                    "Value": "updated",
+                    "Type": "String",
+                    "Overwrite": true,
+                    "Tags": [
+                        {"Key": "Project", "Value": "demo2"}
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
 }

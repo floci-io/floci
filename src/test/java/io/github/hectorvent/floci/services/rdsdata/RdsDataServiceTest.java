@@ -48,6 +48,34 @@ class RdsDataServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /**
+     * Message and error code checked against Aurora PostgreSQL 17.7 through the real
+     * Data API on 2026-09-13.
+     */
+    @Test
+    void rejectsPostgresResultTypesTheDataApiDoesNotSupport() throws Exception {
+        ResultSetMetaData meta = mock(ResultSetMetaData.class);
+        when(meta.getColumnCount()).thenReturn(2);
+        when(meta.getColumnTypeName(1)).thenReturn("jsonb");
+        when(meta.getColumnTypeName(2)).thenReturn("point");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> RdsDataService.rejectUnsupportedResultTypes(meta, DatabaseEngine.POSTGRES));
+        assertEquals("UnsupportedResultException", error.getErrorCode());
+        assertEquals("The result contains the unsupported data type POINT.", error.getMessage());
+    }
+
+    @Test
+    void acceptsPostgresResultTypesTheDataApiSupports() throws Exception {
+        ResultSetMetaData meta = mock(ResultSetMetaData.class);
+        when(meta.getColumnCount()).thenReturn(3);
+        when(meta.getColumnTypeName(1)).thenReturn("int4");
+        when(meta.getColumnTypeName(2)).thenReturn("jsonb");
+        when(meta.getColumnTypeName(3)).thenReturn("text");
+
+        RdsDataService.rejectUnsupportedResultTypes(meta, DatabaseEngine.POSTGRES);
+    }
+
     @Test
     void executesSqlAndMapsDataApiResultShape() throws Exception {
         TestHarness harness = new TestHarness();

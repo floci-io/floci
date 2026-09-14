@@ -21,6 +21,7 @@ public class ContainerDefinition {
     private List<MountPoint> mountPoints;
     private LogConfiguration logConfiguration;
     private FirelensConfiguration firelensConfiguration;
+    private HealthCheck healthCheck;
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -65,4 +66,6 @@ public class ContainerDefinition {
     public void setFirelensConfiguration(FirelensConfiguration firelensConfiguration) {
         this.firelensConfiguration = firelensConfiguration;
     }
+    public HealthCheck getHealthCheck() { return healthCheck; }
+    public void setHealthCheck(HealthCheck healthCheck) { this.healthCheck = healthCheck; }
 }

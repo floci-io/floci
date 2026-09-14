@@ -17,13 +17,16 @@ import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -71,7 +74,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class));
+                mock(S3Service.class), 5000, 5000, 100);
         proxy.start(proxyPort);
 
         try (Socket client = new Socket("localhost", proxyPort)) {
@@ -104,35 +107,68 @@ class RedshiftAuthProxyTest {
     }
 
     @Test
-    void closesTheBackendConnectionWhenTheClientDropsMidHandshake() throws Exception {
+    void neverConnectsToTheBackendWhenTheClientDropsBeforeSendingAStartupPacket() throws Exception {
+        // The backend connection is opened only after the client's startup message has been
+        // validated; a client that vanishes beforehand must never cause a backend connection.
         fakeBackend = new ServerSocket(0);
-        CountDownLatch backendClosed = new CountDownLatch(1);
-        Thread.ofVirtual().start(() -> {
-            try (Socket s = fakeBackend.accept()) {
-                // The proxy opens this before reading the client's startup packet; if the
-                // client vanishes, the proxy must close this too — surfaced here as EOF.
-                InputStream in = s.getInputStream();
-                while (in.read() != -1) {
-                    // drain until the proxy closes its end
-                }
-                backendClosed.countDown();
-            } catch (IOException e) {
-                backendClosed.countDown();
-            }
-        });
+        fakeBackend.setSoTimeout(500);
 
         int proxyPort = freePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class));
+                mock(S3Service.class), 5000, 5000, 100);
         proxy.start(proxyPort);
 
         // Connect, then drop without ever sending a startup packet.
         new Socket("localhost", proxyPort).close();
 
-        assertTrue(backendClosed.await(5, TimeUnit.SECONDS),
-                "proxy leaked the backend connection after the client dropped");
+        assertThrows(SocketTimeoutException.class, fakeBackend::accept,
+                "proxy connected to the backend before validating the client's startup message");
+    }
+
+    @Test
+    void idleClientIsDroppedAfterTheConfiguredHandshakeTimeout() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        int proxyPort = freePort();
+        proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                mock(S3Service.class), 200, 5000, 100);
+        proxy.start(proxyPort);
+
+        try (Socket client = new Socket("localhost", proxyPort)) {
+            client.setSoTimeout(5000);
+            // Send nothing; the proxy must drop the connection once the handshake timeout
+            // elapses. The client observes this as EOF once the proxy closes its end.
+            int result = client.getInputStream().read();
+            assertEquals(-1, result, "proxy did not drop an idle client after the handshake timeout");
+        }
+    }
+
+    @Test
+    void refusesAConnectionBeyondTheConfiguredLimit() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        int proxyPort = freePort();
+        proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                mock(S3Service.class), 5000, 5000, 1);
+        proxy.start(proxyPort);
+
+        // Hold the proxy's single connection permit from the test thread itself, so the
+        // refusal below is deterministic rather than a race against a real first connection.
+        Field permitsField = RedshiftAuthProxy.class.getDeclaredField("connectionPermits");
+        permitsField.setAccessible(true);
+        Semaphore permits = (Semaphore) permitsField.get(proxy);
+        assertTrue(permits.tryAcquire(), "expected the single configured permit to be available");
+
+        try (Socket client = new Socket("localhost", proxyPort)) {
+            int result = client.getInputStream().read();
+            assertEquals(-1, result, "connection was not refused once the connection limit was reached");
+        } finally {
+            permits.release();
+        }
     }
 
     @Test
@@ -156,7 +192,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class));
+                mock(S3Service.class), 5000, 5000, 100);
         proxy.start(proxyPort); // must not throw despite the port being busy at first
 
         assertTrue(portAccepts(proxyPort), "proxy never bound the port after the squatter released it");
@@ -169,7 +205,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "old", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class));
+                mock(S3Service.class), 5000, 5000, 100);
         proxy.start(proxyPort);
 
         proxy.updateMasterPassword("rotated");

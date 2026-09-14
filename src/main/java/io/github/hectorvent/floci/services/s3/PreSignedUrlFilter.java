@@ -286,8 +286,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return encoded.toString();
     }
 
-    private static byte[] deriveSigningKey(String secretKey, String date, String region,
-                                           String service) throws Exception {
+    static byte[] deriveSigningKey(String secretKey, String date, String region,
+                                   String service) throws Exception {
         byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
         byte[] kDate = hmacSha256(kSecret, date);
         byte[] kRegion = hmacSha256(kDate, region);
@@ -295,18 +295,18 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return hmacSha256(kService, "aws4_request");
     }
 
-    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
+    static byte[] hmacSha256(byte[] key, String data) throws Exception {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static String sha256Hex(String input) throws Exception {
+    static String sha256Hex(String input) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
     }
 
-    private static String hexEncode(byte[] bytes) {
+    static String hexEncode(byte[] bytes) {
         StringBuilder sb = new StringBuilder(bytes.length * 2);
         for (byte b : bytes) {
             sb.append(String.format("%02x", b));
@@ -314,7 +314,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return sb.toString();
     }
 
-    private Response errorResponse(int status, String code, String message) {
+    static Response errorResponse(int status, String code, String message) {
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")

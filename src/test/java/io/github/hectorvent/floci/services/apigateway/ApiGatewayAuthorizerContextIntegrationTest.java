@@ -35,6 +35,7 @@ class ApiGatewayAuthorizerContextIntegrationTest {
     private static String rootId;
     private static String securedResourceId;
     private static String plainResourceId;
+    private static String mappedResourceId;
     private static String authorizerId;
     private static String deploymentId;
 
@@ -56,6 +57,10 @@ class ApiGatewayAuthorizerContextIntegrationTest {
                     org_id: "ORG001",
                     sub: "test-user",
                     client_id: "my-client",
+                    key_id: "KEY-123",
+                    numKey: 1,
+                    boolKey: true,
+                    identity: JSON.stringify({key_id: "KEY-123", tenant: "t-9"}),
                     methodArn: event.methodArn
                   }
                 });
@@ -66,13 +71,18 @@ class ApiGatewayAuthorizerContextIntegrationTest {
     @Order(2)
     void createProxyLambda() throws Exception {
         createNodeLambda(PROXY_FUNCTION, """
-                exports.handler = async (event) => ({
-                  statusCode: 200,
-                  body: JSON.stringify({
-                    authorizer: event.requestContext?.authorizer ?? null,
-                    hasAuthorizer: Object.prototype.hasOwnProperty.call(event.requestContext ?? {}, "authorizer")
-                  })
-                });
+                exports.handler = async (event) => {
+                  if (!event.requestContext) {
+                    return event;
+                  }
+                  return {
+                    statusCode: 200,
+                    body: JSON.stringify({
+                      authorizer: event.requestContext.authorizer ?? null,
+                      hasAuthorizer: Object.prototype.hasOwnProperty.call(event.requestContext, "authorizer")
+                    })
+                  };
+                };
                 """);
     }
 
@@ -114,6 +124,14 @@ class ApiGatewayAuthorizerContextIntegrationTest {
         plainResourceId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"pathPart\":\"plain\"}")
+                .when().post("/restapis/" + apiId + "/resources/" + rootId)
+                .then()
+                .statusCode(201)
+                .extract().path("id");
+
+        mappedResourceId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"pathPart\":\"mapped\"}")
                 .when().post("/restapis/" + apiId + "/resources/" + rootId)
                 .then()
                 .statusCode(201)
@@ -161,6 +179,19 @@ class ApiGatewayAuthorizerContextIntegrationTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
+                        {
+                          "authorizationType":"CUSTOM",
+                          "authorizerId":"%s",
+                          "requestParameters":{"method.request.header.Authorization":true}
+                        }
+                        """.formatted(authorizerId))
+                .when().put("/restapis/" + apiId + "/resources/" + mappedResourceId + "/methods/PUT")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
                         {"authorizationType":"NONE"}
                         """)
                 .when().put("/restapis/" + apiId + "/resources/" + plainResourceId + "/methods/PUT")
@@ -188,6 +219,37 @@ class ApiGatewayAuthorizerContextIntegrationTest {
                 .contentType(ContentType.JSON)
                 .body(integrationBody)
                 .when().put("/restapis/" + apiId + "/resources/" + plainResourceId + "/methods/PUT/integration")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "type":"AWS",
+                          "httpMethod":"POST",
+                          "uri":"%s",
+                          "requestTemplates":{
+                            "application/json":"#set($identity = $util.parseJson($context.authorizer.identity))#set($numberIsString = $context.authorizer.numKey == \\\"1\\\")#set($booleanIsString = $context.authorizer.boolKey == \\\"true\\\"){\\\"principalId\\\":\\\"$context.authorizer.principalId\\\",\\\"numberIsString\\\":$numberIsString,\\\"booleanIsString\\\":$booleanIsString,\\\"keyId\\\":\\\"$context.authorizer.key_id\\\",\\\"tenant\\\":\\\"$identity.tenant\\\"}"
+                          }
+                        }
+                        """.formatted(proxyUri))
+                .when().put("/restapis/" + apiId + "/resources/" + mappedResourceId + "/methods/PUT/integration")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {
+                          "selectionPattern":"",
+                          "responseTemplates":{
+                            "application/json":"#set($numberIsString = $context.authorizer.numKey == \\\"1\\\")#set($booleanIsString = $context.authorizer.boolKey == \\\"true\\\"){\\\"request\\\":$input.json('$'),\\\"principalId\\\":\\\"$context.authorizer.principalId\\\",\\\"numberIsString\\\":$numberIsString,\\\"booleanIsString\\\":$booleanIsString}"
+                          }
+                        }
+                        """)
+                .when().put("/restapis/" + apiId + "/resources/" + mappedResourceId
+                        + "/methods/PUT/integration/responses/200")
                 .then()
                 .statusCode(201);
     }
@@ -240,6 +302,29 @@ class ApiGatewayAuthorizerContextIntegrationTest {
 
     @Test
     @Order(10)
+    void executeMappedRoute_propagatesAuthorizerContextToRequestTemplate() throws Exception {
+        String response = given()
+                .contentType(ContentType.JSON)
+                .header("Authorization", "Bearer allow")
+                .body("{\"ok\":true}")
+                .when().put("/execute-api/" + apiId + "/test/mapped")
+                .then()
+                .statusCode(200)
+                .extract().asString();
+
+        JsonNode payload = OBJECT_MAPPER.readTree(response);
+        assertEquals("test-user", payload.path("principalId").asText());
+        assertTrue(payload.path("numberIsString").asBoolean());
+        assertTrue(payload.path("booleanIsString").asBoolean());
+        assertEquals("test-user", payload.path("request").path("principalId").asText());
+        assertTrue(payload.path("request").path("numberIsString").asBoolean());
+        assertTrue(payload.path("request").path("booleanIsString").asBoolean());
+        assertEquals("KEY-123", payload.path("request").path("keyId").asText());
+        assertEquals("t-9", payload.path("request").path("tenant").asText());
+    }
+
+    @Test
+    @Order(11)
     void executePlainRoute_doesNotInjectAuthorizerContext() throws Exception {
         String response = given()
                 .contentType(ContentType.JSON)
@@ -255,7 +340,7 @@ class ApiGatewayAuthorizerContextIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void executeSecuredRoute_denyStillReturns403() {
         given()
                 .contentType(ContentType.JSON)

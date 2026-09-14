@@ -2594,6 +2594,48 @@ public class CognitoService implements ResourceProvider {
         return response;
     }
 
+    public void verifyUserAttribute(String accessToken, String attributeName, String code) {
+        VerifiedAccessToken token;
+        try {
+            token = verifyAccessToken(accessToken);
+        } catch (AwsException e) {
+            if ("NotAuthorizedException".equals(e.getErrorCode())
+                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
+                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
+            }
+            throw e;
+        }
+        requireScope(accessToken, "aws.cognito.signin.user.admin");
+        String username = token.username();
+        String poolId = token.poolId();
+
+        if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid attribute name. Only phone_number and email can be verified.", 400);
+        }
+
+        CognitoUser user = adminGetUser(poolId, username);
+        if (blankToNull(user.getAttributes().get(attributeName)) == null) {
+            throw new AwsException("InvalidParameterException",
+                    "Unable to verify attribute: " + attributeName + " no value set to verify",
+                    400);
+        }
+
+        VerificationCode.Purpose purpose = "email".equals(attributeName)
+                ? VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION
+                : VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION;
+        ensureVerificationWiring();
+        try {
+            verificationCodeService.consume(poolId, user.getUsername(), purpose, code);
+        } catch (VerificationCodeException e) {
+            throw mapVerificationCodeException(e);
+        }
+
+        user.getAttributes().put(attributeName + "_verified", "true");
+        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(poolId, user.getUsername()), user);
+    }
+
     public void updateUserAttributes(String accessToken, Map<String, String> attributes) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         String username = token.username();
@@ -3714,6 +3756,43 @@ public class CognitoService implements ResourceProvider {
     }
 
 
+
+    /**
+     * Extracts the space-separated {@code scope} claim from an already-verified access token
+     * (call after {@link #verifyAccessToken}). {@code null} means no scope claim at all, which
+     * every token this simulator currently issues also is not the case for access tokens (see
+     * {@code generateSignedJwt}, which always sets a default scope) but a caller-suppressed
+     * scope list still needs to be tolerated as "no restriction modeled" rather than treated the
+     * same as an empty, restrictive list.
+     */
+    private Set<String> extractScopesFromToken(String token) {
+        try {
+            String[] parts = token.split("\\.", -1);
+            JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
+            String scope = textClaim(claims, "scope");
+            if (scope == null || scope.isBlank()) return null;
+            Set<String> scopes = new HashSet<>();
+            for (String s : scope.split(" ")) {
+                if (!s.isBlank()) scopes.add(s);
+            }
+            return scopes;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * AWS requires an access token carrying the given scope for some operations (for example
+     * VerifyUserAttribute requires aws.cognito.signin.user.admin). Call after
+     * {@link #verifyAccessToken}, which already confirms the token is a valid, unexpired access
+     * token; this only adds the scope check on top.
+     */
+    private void requireScope(String accessToken, String requiredScope) {
+        Set<String> scopes = extractScopesFromToken(accessToken);
+        if (scopes != null && !scopes.contains(requiredScope)) {
+            throw new AwsException("NotAuthorizedException", "Access Token does not have the required scope", 400);
+        }
+    }
 
     /**
      * Validate that a refresh token has not been revoked, including global user sign-out.

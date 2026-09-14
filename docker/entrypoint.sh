@@ -36,7 +36,9 @@ if [ "$(id -u)" = '0' ]; then
     # group. Supplementary groups are set by number, so the group needs no /etc/group entry.
     # --skip-chdir keeps the working directory (/app, where relative data paths resolve); GNU
     # chroot would otherwise chdir to the new root.
-    exec chroot --userspec=1001:0 --groups="$groups" --skip-chdir / "$0" "$@"
+    if [ "${FLOCI_RUN_AS_ROOT:-false}" != 'true' ]; then
+        exec chroot --userspec=1001:0 --groups="$groups" --skip-chdir / "$0" "$@"
+    fi
 fi
 
 if [ "${LOCALSTACK_PARITY:-true}" != "false" ]; then

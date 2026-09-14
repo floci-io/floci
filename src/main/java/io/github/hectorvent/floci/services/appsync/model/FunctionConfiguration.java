@@ -17,6 +17,8 @@ public class FunctionConfiguration {
     private String functionVersion;
     private String functionArn;
     private String code;
+    private Resolver.ResolverRuntime runtime;
+    private Integer maxBatchSize;
 
     public String getFunctionId() { return functionId; }
     public void setFunctionId(String functionId) { this.functionId = functionId; }
@@ -44,4 +46,16 @@ public class FunctionConfiguration {
 
     public String getCode() { return code; }
     public void setCode(String code) { this.code = code; }
+
+    /**
+     * The runtime a pipeline function's {@code code} is written for, {@code APPSYNC_JS} in
+     * practice. Shares {@link Resolver.ResolverRuntime} with the resolver it runs under: AWS
+     * models the two as the same {@code AppSyncRuntime} shape, and a pipeline whose function
+     * and resolver disagreed on the runtime could not execute.
+     */
+    public Resolver.ResolverRuntime getRuntime() { return runtime; }
+    public void setRuntime(Resolver.ResolverRuntime runtime) { this.runtime = runtime; }
+
+    public Integer getMaxBatchSize() { return maxBatchSize; }
+    public void setMaxBatchSize(Integer maxBatchSize) { this.maxBatchSize = maxBatchSize; }
 }

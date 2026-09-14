@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
 import io.github.hectorvent.floci.services.ecs.model.Failure;
+import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
@@ -53,11 +55,13 @@ public class EcsJsonHandler {
 
     private final EcsService service;
     private final ObjectMapper objectMapper;
+    private final HostVolumePolicy hostVolumePolicy;
 
     @Inject
-    public EcsJsonHandler(EcsService service, ObjectMapper objectMapper) {
+    public EcsJsonHandler(EcsService service, ObjectMapper objectMapper, HostVolumePolicy hostVolumePolicy) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.hostVolumePolicy = hostVolumePolicy;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -1128,6 +1132,28 @@ public class EcsJsonHandler {
             }
             n.set("firelensConfiguration", firelensNode);
         }
+        if (def.getHealthCheck() != null) {
+            HealthCheck hc = def.getHealthCheck();
+            ObjectNode hcNode = objectMapper.createObjectNode();
+            if (hc.command() != null) {
+                ArrayNode cmd = objectMapper.createArrayNode();
+                hc.command().forEach(cmd::add);
+                hcNode.set("command", cmd);
+            }
+            if (hc.interval() != null) {
+                hcNode.put("interval", hc.interval());
+            }
+            if (hc.timeout() != null) {
+                hcNode.put("timeout", hc.timeout());
+            }
+            if (hc.retries() != null) {
+                hcNode.put("retries", hc.retries());
+            }
+            if (hc.startPeriod() != null) {
+                hcNode.put("startPeriod", hc.startPeriod());
+            }
+            n.set("healthCheck", hcNode);
+        }
 
         return n;
     }
@@ -1432,6 +1458,9 @@ public class EcsJsonHandler {
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
             def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
             def.setFirelensConfiguration(parseFirelensConfiguration(item.path("firelensConfiguration")));
+            if (item.has("healthCheck")) {
+                def.setHealthCheck(parseHealthCheck(item.path("healthCheck")));
+            }
 
             if (item.has("command") && item.path("command").isArray()) {
                 List<String> cmd = new ArrayList<>();
@@ -1533,6 +1562,20 @@ public class EcsJsonHandler {
         }
         return new FirelensConfiguration(type, options);
     }
+    private HealthCheck parseHealthCheck(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        if (!node.hasNonNull("command") || !node.path("command").isArray() || node.path("command").isEmpty()) {
+            throw new AwsException("ClientException", "HealthCheck command is required.", 400);
+        }
+        List<String> command = jsonArrayToList(node.path("command"));
+        Integer interval = node.has("interval") ? node.path("interval").asInt() : null;
+        Integer timeout = node.has("timeout") ? node.path("timeout").asInt() : null;
+        Integer retries = node.has("retries") ? node.path("retries").asInt() : null;
+        Integer startPeriod = node.has("startPeriod") ? node.path("startPeriod").asInt() : null;
+        return new HealthCheck(command, interval, timeout, retries, startPeriod);
+    }
 
     private List<Volume> parseVolumes(JsonNode node) {
         List<Volume> result = new ArrayList<>();
@@ -1541,6 +1584,9 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             String hostSourcePath = item.path("host").path("sourcePath").asText(null);
+            if (hostSourcePath != null && !hostSourcePath.isBlank()) {
+                hostVolumePolicy.validate(hostSourcePath);
+            }
             EfsVolumeConfiguration efs = parseEfsVolumeConfiguration(item.path("efsVolumeConfiguration"));
             result.add(new Volume(item.path("name").asText(), hostSourcePath, efs));
         }

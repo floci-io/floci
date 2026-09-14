@@ -2983,6 +2983,86 @@ class CognitoServiceTest {
         }
     }
 
+    // KenkoGeek review, PR #2018: VerifyUserAttribute must require an access token (not an
+    // ID token) carrying the aws.cognito.signin.user.admin scope.
+    @Nested
+    class VerifyUserAttributeAuthorization {
+
+        private CognitoService svc;
+        private VerificationCodeService verificationCodeService;
+        private UserPool pool;
+        private UserPoolClient client;
+        private CognitoUser user;
+
+        @BeforeEach
+        void setUpVerification() {
+            verificationCodeService = mock(VerificationCodeService.class);
+            CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+            svc = new CognitoService(
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    "http://localhost:4566",
+                    regionResolver,
+                    null,
+                    acmService,
+                    verificationCodeService,
+                    messageDispatcher,
+                    mock(TlsCertificateManager.class)
+            );
+            pool = svc.createUserPool(Map.of("PoolName", "ScopeTestPool"), "us-east-1");
+            client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+            svc.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
+            svc.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+            user = svc.adminGetUser(pool.getId(), "alice");
+        }
+
+        @Test
+        void rejectsIdTokenEvenThoughItSharesTheSameClaims() {
+            // ID tokens never carry a scope claim (matching real Cognito), so this must be
+            // rejected on token_use alone, before the scope check ever runs.
+            String idToken = svc.generateSignedJwt(user, pool, "id", client, null);
+
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> svc.verifyUserAttribute(idToken, "email", "123456"));
+
+            assertEquals("NotAuthorizedException", ex.getErrorCode());
+            verify(verificationCodeService, never()).consume(any(), any(), any(), any());
+        }
+
+        @Test
+        void rejectsAccessTokenMissingTheRequiredScope() {
+            // Access tokens carry aws.cognito.signin.user.admin by default (generateSignedJwt),
+            // so building one that lacks it means explicitly suppressing the default and
+            // substituting something else, the way a Pre-Token-Generation V2 Lambda trigger would.
+            String accessToken = svc.generateSignedJwt(user, pool, "access", client,
+                    new CognitoService.ClaimsOverride(null, null, null, null,
+                            List.of("openid"), List.of("aws.cognito.signin.user.admin"),
+                            null, null, null));
+
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> svc.verifyUserAttribute(accessToken, "email", "123456"));
+
+            assertEquals("NotAuthorizedException", ex.getErrorCode());
+            verify(verificationCodeService, never()).consume(any(), any(), any(), any());
+        }
+
+        @Test
+        void acceptsDefaultAccessTokenSinceItAlreadyCarriesTheRequiredScope() {
+            String accessToken = svc.generateSignedJwt(user, pool, "access", client, null);
+
+            svc.verifyUserAttribute(accessToken, "email", "123456");
+
+            verify(verificationCodeService).consume(pool.getId(), user.getUsername(),
+                    VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "123456");
+        }
+    }
+
     // ──────── UsernameAttributes=email: immutable UUID username + mutable email alias ────────
 
     private UserPool createEmailAliasPool() {

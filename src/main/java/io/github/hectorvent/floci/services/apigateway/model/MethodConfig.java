@@ -15,6 +15,7 @@ public class MethodConfig {
     private String authorizationType;
     private String authorizerId;
     private String requestValidatorId;
+    private boolean apiKeyRequired;
     private Map<String, Boolean> requestParameters = new HashMap<>();
     private Map<String, String> requestModels = new HashMap<>();
     private Map<String, MethodResponse> methodResponses = new HashMap<>();
@@ -31,6 +32,9 @@ public class MethodConfig {
 
     public String getRequestValidatorId() { return requestValidatorId; }
     public void setRequestValidatorId(String requestValidatorId) { this.requestValidatorId = requestValidatorId; }
+
+    public boolean isApiKeyRequired() { return apiKeyRequired; }
+    public void setApiKeyRequired(boolean apiKeyRequired) { this.apiKeyRequired = apiKeyRequired; }
 
     public Map<String, String> getRequestModels() { return requestModels; }
     public void setRequestModels(Map<String, String> requestModels) {
