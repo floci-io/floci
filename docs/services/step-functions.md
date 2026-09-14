@@ -130,8 +130,9 @@ blank lines are skipped, and `ItemsPointer` does not apply, matching AWS.
 
 A `CSV` dataset takes its field names from the first row, or from `ReaderConfig.CSVHeaders` when
 `CSVHeaderLocation` is `GIVEN`. Every value is a string: a row shorter than the headers pads with
-empty strings, and a longer one drops the surplus. A quoted field may contain commas. A quoted
-field containing a line break is not supported yet.
+empty strings, and a longer one drops the surplus. `ReaderConfig.CSVDelimiter` selects `COMMA`,
+`PIPE`, `SEMICOLON`, `SPACE` or `TAB`, and a quoted field may contain the delimiter or a line
+break without ending the record.
 
 `ReaderConfig.MaxItems` truncates any of them. The `MANIFEST` and `PARQUET` input types, and the
 `arn:aws:states:::s3:listObjectsV2` resource, are not implemented yet: they fail the state with
