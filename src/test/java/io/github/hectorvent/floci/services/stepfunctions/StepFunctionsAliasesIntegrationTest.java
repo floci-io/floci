@@ -190,4 +190,38 @@ class StepFunctionsAliasesIntegrationTest {
                 """.formatted(stateMachineArn))
                 .then().statusCode(400).body(containsString("ValidationException"));
     }
+
+    @Test
+    void createAliasEnforcesTheQuotaOfOneHundredAliasesPerStateMachine() {
+        String name = "alias-quota-" + System.currentTimeMillis();
+        Response created = call("CreateStateMachine", """
+                {"name":"%s","definition":"%s",
+                 "roleArn":"arn:aws:iam::000000000000:role/r","publish":true}
+                """.formatted(name, DEF));
+        String stateMachineArn = created.then().statusCode(200)
+                .extract().jsonPath().getString("stateMachineArn");
+        String versionArn = created.jsonPath().getString("stateMachineVersionArn");
+        String createAliasRequest = """
+                {"name":"%s","routingConfiguration":[
+                 {"stateMachineVersionArn":"%s","weight":100}]}
+                """;
+
+        for (int i = 1; i <= 100; i++) {
+            call("CreateStateMachineAlias", createAliasRequest.formatted("Q-" + i, versionArn))
+                    .then().statusCode(200);
+        }
+
+        call("CreateStateMachineAlias", createAliasRequest.formatted("Q-101", versionArn))
+                .then().statusCode(402)
+                .body(containsString("ServiceQuotaExceededException"));
+        call("CreateStateMachineAlias", createAliasRequest.formatted("Q-1", versionArn))
+                .then().statusCode(200)
+                .body("stateMachineAliasArn", is(stateMachineArn + ":Q-1"));
+
+        call("DeleteStateMachineAlias",
+                "{\"stateMachineAliasArn\":\"" + stateMachineArn + ":Q-1\"}")
+                .then().statusCode(200);
+        call("CreateStateMachineAlias", createAliasRequest.formatted("Q-101", versionArn))
+                .then().statusCode(200);
+    }
 }
