@@ -1436,6 +1436,14 @@ public class SnsService implements Resettable, ResourceProvider {
                         sub.getProtocol(), sub.getEndpoint());
             }
         } catch (Exception e) {
+            // Delivery failures are per-subscriber and never reported to the publisher, which
+            // matches AWS. SNS caps a publish at MAX_PUBLISH_SIZE (262144 bytes) while SQS
+            // accepts up to 1048576 bytes, so for ordinary text the non-raw sqs envelope stays
+            // under the queue limit. That is not a guarantee: the envelope is serialized as
+            // JSON, and escaping expands every control character below 0x20 to six bytes, so a
+            // publish made largely of them can serialize several times larger and cross the
+            // limit. A queue configured with a smaller MaximumMessageSize crosses it more
+            // easily still. Either way the message is dropped here.
             LOG.warnv("Failed to deliver SNS message to {0}: {1}", sub.getEndpoint(), e.getMessage());
         }
     }
