@@ -28,6 +28,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -62,6 +63,7 @@ public class CodeDeployService {
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
     private final Duration hookCallbackTimeout;
+    private final Clock clock;
 
     @Inject
     public CodeDeployService(LambdaService lambdaService, EcsService ecsService,
@@ -69,13 +71,13 @@ public class CodeDeployService {
                              Ec2Service ec2Service, ObjectMapper mapper, RegionResolver regionResolver,
                              StorageFactory storageFactory) {
         this(lambdaService, ecsService, elbV2Service, ssmCommandService, ec2Service, mapper,
-                regionResolver, storageFactory, DEFAULT_HOOK_CALLBACK_TIMEOUT);
+                regionResolver, storageFactory, DEFAULT_HOOK_CALLBACK_TIMEOUT, Clock.systemUTC());
     }
 
     CodeDeployService(LambdaService lambdaService, EcsService ecsService,
                       ElbV2Service elbV2Service, SsmCommandService ssmCommandService,
                       Ec2Service ec2Service, ObjectMapper mapper, RegionResolver regionResolver,
-                      StorageFactory storageFactory, Duration hookCallbackTimeout) {
+                      StorageFactory storageFactory, Duration hookCallbackTimeout, Clock clock) {
         this.lambdaService = lambdaService;
         this.ecsService = ecsService;
         this.elbV2Service = elbV2Service;
@@ -86,6 +88,7 @@ public class CodeDeployService {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.hookCallbackTimeout = hookCallbackTimeout;
+        this.clock = clock;
     }
 
     // ---- Durable (persisted) ----
@@ -961,10 +964,9 @@ public class CodeDeployService {
                         instanceId, "AWS-RunShellScript", Map.of("commands", List.of(script)),
                         timeout, region);
 
-                // Poll until done (max timeout seconds, capped at 30s for emulator)
-                long deadline = System.currentTimeMillis() + Math.min(timeout * 1000L, 30_000L);
+                long deadline = clock.millis() + timeout * 1000L;
                 String invocationStatus = "InProgress";
-                while (System.currentTimeMillis() < deadline && "InProgress".equals(invocationStatus)) {
+                while (clock.millis() < deadline && "InProgress".equals(invocationStatus)) {
                     Thread.sleep(500);
                     invocationStatus = ssmCommandService.getCommandInvocationStatus(commandId, instanceId, region);
                 }
