@@ -18,6 +18,8 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
@@ -28,13 +30,21 @@ import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.LogConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -130,120 +140,183 @@ public class EcsContainerManager {
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
 
-        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
-            String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
+        ContainerDefinition firelensRouter = findFluentBitRouter(taskDef.getContainerDefinitions());
+        Map<String, Map<String, String>> firelensLogOptions =
+                awsFirelensLogOptions(taskDef.getContainerDefinitions());
+        if (!firelensLogOptions.isEmpty() && firelensRouter == null) {
+            throw new AwsException("ClientException",
+                    "awsfirelens log driver requires a fluentbit firelensConfiguration container", 400);
+        }
 
-            // RunTask containerOverrides matched by container name: command replaces
-            // the task-def command; environment is merged over the task-def environment.
-            ContainerOverride override = overridesByName.get(def.getName());
+        String firelensVolumeName = null;
+        String firelensSocketAddress = null;
+        String firelensConfig = null;
+        if (firelensRouter != null) {
+            firelensConfig = FirelensConfigGenerator.fluentBitConfig(firelensContext(
+                    task, taskDef, firelensRouter, firelensLogOptions));
+            firelensVolumeName = ContainerStorageHelper.dockerName(config, "floci-ecs-firelens-" + taskId);
+            lifecycleManager.ensureVolume(firelensVolumeName);
+            firelensSocketAddress = unixSocketAddress(firelensVolumeName);
+        }
 
-            // Build container spec
-            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(imagesByContainer.get(def))
-                    .withName(containerName)
-                    .withEnv(envVarsByContainer.get(def))
-                    .withDockerNetwork(config.services().ecs().dockerNetwork())
-                    // Resolve Floci's endpoint from inside the task container the same way Lambda
-                    // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
-                    // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's
-                    // own loopback.
-                    .withHostDockerInternalOnLinux()
-                    .withEmbeddedDns()
-                    .withLogRotation()
-                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                            "ecs", taskId, regionResolver.getAccountId(), region));
+        List<ContainerDefinition> launchOrder =
+                launchOrder(taskDef.getContainerDefinitions(), firelensRouter);
+        String fluentHost = null;
+        String networkModeName = taskDef.getNetworkMode() != null
+                ? taskDef.getNetworkMode().name()
+                : NetworkMode.bridge.name();
 
-            // Add memory limit if specified
-            if (def.getMemory() != null) {
-                specBuilder.withMemoryMb(def.getMemory());
-            }
+        try {
+            for (ContainerDefinition def : launchOrder) {
+                String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
 
-            // Add port mappings. In bridge/host mode an explicit hostPort is
-            // published to the Docker host literally, matching AWS bridge mode
-            // (mirrors the ECR registry's fixed-port publishing). In awsvpc mode
-            // every AWS task gets its own ENI, so a literal hostPort carries no
-            // host-binding semantics and would collide across tasks on the single
-            // local Docker host (#1778) — awsvpc mappings always get a dynamic
-            // host port in native mode, or expose-only in Docker mode where ECS
-            // consumers reach containers via the docker network IP.
-            if (def.getPortMappings() != null) {
-                boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
-                boolean publishToHost = !containerDetector.isRunningInContainer();
-                for (PortMapping pm : def.getPortMappings()) {
-                    if (!awsvpc && pm.hostPort() > 0) {
-                        specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
-                    } else if (publishToHost) {
-                        specBuilder.withDynamicPort(pm.containerPort());
-                    } else {
-                        specBuilder.withExposedPort(pm.containerPort());
-                    }
+                // RunTask containerOverrides matched by container name: command replaces
+                // the task-def command; environment is merged over the task-def environment.
+                ContainerOverride override = overridesByName.get(def.getName());
+
+                List<String> env = new ArrayList<>(envVarsByContainer.get(def));
+                if (fluentHost != null && def != firelensRouter
+                        && FirelensConfigGenerator.addsTcpForward(networkModeName)) {
+                    env.add("FLUENT_HOST=" + fluentHost);
+                    env.add("FLUENT_PORT=" + FirelensConfigGenerator.FORWARD_PORT);
                 }
-            }
 
-            // Add command and entrypoint if specified. An override command (from
-            // RunTask containerOverrides) takes precedence over the task-def command.
-            List<String> effectiveCommand =
-                    (override != null && override.getCommand() != null && !override.getCommand().isEmpty())
-                            ? override.getCommand()
-                            : def.getCommand();
-            if (effectiveCommand != null && !effectiveCommand.isEmpty()) {
-                specBuilder.withCmd(effectiveCommand);
-            }
-            if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
-                specBuilder.withEntrypoint(def.getEntryPoint());
-            }
+                // Build container spec
+                ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(imagesByContainer.get(def))
+                        .withName(containerName)
+                        .withEnv(env)
+                        .withDockerNetwork(config.services().ecs().dockerNetwork())
+                        // Resolve Floci's endpoint from inside the task container the same way Lambda
+                        // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
+                        // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's
+                        // own loopback.
+                        .withHostDockerInternalOnLinux()
+                        .withEmbeddedDns()
+                        .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                                "ecs", taskId, regionResolver.getAccountId(), region));
 
-            // Bind-mount task-level volumes referenced by this container's mountPoints.
-            // The host source path resolves on the Docker daemon (sibling-container launch),
-            // so it must be an absolute host path. Unresolved volume references are skipped.
-            if (def.getMountPoints() != null) {
-                for (MountPoint mp : def.getMountPoints()) {
-                    if (mp.containerPath() == null) {
-                        continue;
-                    }
-                    String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
-                    EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
-                    if (sourcePath != null) {
-                        // Host volume: bind-mount an absolute path on the Docker host.
-                        if (mp.readOnly()) {
-                            specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
+                boolean awsFirelens = isAwsFirelens(def);
+                if (awsFirelens) {
+                    specBuilder.withLogConfig(awsFirelensLogConfig(def, taskId, firelensSocketAddress));
+                } else {
+                    specBuilder.withLogRotation();
+                }
+
+                if (def == firelensRouter && firelensVolumeName != null) {
+                    specBuilder.withNamedVolume(firelensVolumeName, "/var/run");
+                }
+
+                // Add memory limit if specified
+                if (def.getMemory() != null) {
+                    specBuilder.withMemoryMb(def.getMemory());
+                }
+
+                // Add port mappings. In bridge/host mode an explicit hostPort is
+                // published to the Docker host literally, matching AWS bridge mode
+                // (mirrors the ECR registry's fixed-port publishing). In awsvpc mode
+                // every AWS task gets its own ENI, so a literal hostPort carries no
+                // host-binding semantics and would collide across tasks on the single
+                // local Docker host (#1778) — awsvpc mappings always get a dynamic
+                // host port in native mode, or expose-only in Docker mode where ECS
+                // consumers reach containers via the docker network IP.
+                if (def.getPortMappings() != null) {
+                    boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
+                    boolean publishToHost = !containerDetector.isRunningInContainer();
+                    for (PortMapping pm : def.getPortMappings()) {
+                        if (!awsvpc && pm.hostPort() > 0) {
+                            specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
+                        } else if (publishToHost) {
+                            specBuilder.withDynamicPort(pm.containerPort());
                         } else {
-                            specBuilder.withBind(sourcePath, mp.containerPath());
+                            specBuilder.withExposedPort(pm.containerPort());
                         }
-                    } else if (efs != null) {
-                        mountEfsVolume(specBuilder, efs, mp);
-                    } else {
-                        LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
-                                mp.sourceVolume(), def.getName());
+                    }
+                }
+
+                // Add command and entrypoint if specified. An override command (from
+                // RunTask containerOverrides) takes precedence over the task-def command.
+                List<String> effectiveCommand =
+                        (override != null && override.getCommand() != null && !override.getCommand().isEmpty())
+                                ? override.getCommand()
+                                : def.getCommand();
+                if (effectiveCommand != null && !effectiveCommand.isEmpty()) {
+                    specBuilder.withCmd(effectiveCommand);
+                }
+                if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
+                    specBuilder.withEntrypoint(def.getEntryPoint());
+                }
+
+                // Bind-mount task-level volumes referenced by this container's mountPoints.
+                // The host source path resolves on the Docker daemon (sibling-container launch),
+                // so it must be an absolute host path. Unresolved volume references are skipped.
+                if (def.getMountPoints() != null) {
+                    for (MountPoint mp : def.getMountPoints()) {
+                        if (mp.containerPath() == null) {
+                            continue;
+                        }
+                        String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
+                        EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
+                        if (sourcePath != null) {
+                            // Host volume: bind-mount an absolute path on the Docker host.
+                            if (mp.readOnly()) {
+                                specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
+                            } else {
+                                specBuilder.withBind(sourcePath, mp.containerPath());
+                            }
+                        } else if (efs != null) {
+                            mountEfsVolume(specBuilder, efs, mp);
+                        } else {
+                            LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
+                                    mp.sourceVolume(), def.getName());
+                        }
+                    }
+                }
+
+                ContainerSpec spec = specBuilder.build();
+
+                String dockerId;
+                if (def == firelensRouter) {
+                    dockerId = lifecycleManager.create(spec);
+                    try {
+                        copyFirelensConfig(dockerId, firelensConfig);
+                        lifecycleManager.startCreated(dockerId, spec);
+                    } catch (RuntimeException e) {
+                        lifecycleManager.removeIfExists(dockerId);
+                        throw e;
+                    }
+                    fluentHost = inspectContainerIp(dockerId);
+                } else {
+                    ContainerInfo info = lifecycleManager.createAndStart(spec);
+                    dockerId = info.containerId();
+                }
+
+                LOG.infov("Created ECS container {0} for task {1} container {2}", dockerId, taskId, def.getName());
+
+                // Resolve network bindings for ECS-specific model
+                List<NetworkBinding> networkBindings = resolveNetworkBindings(dockerId, def);
+
+                // Build ECS container model
+                Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
+                runtimeContainers.add(container);
+                containerIds.put(def.getName(), dockerId);
+
+                // awsfirelens containers are shipped to Fluent Bit by Docker; don't also scrape json-file.
+                if (!awsFirelens) {
+                    String logGroup = "/ecs/" + taskDef.getFamily();
+                    String logStream = logStreamer.generateLogStreamName(def.getName() + "/" + taskId);
+                    Closeable logHandle = logStreamer.attach(
+                            dockerId, logGroup, logStream, region,
+                            "ecs:" + taskDef.getFamily() + ":" + def.getName());
+                    if (logHandle != null) {
+                        logStreamsByContainerId.put(dockerId, logHandle);
                     }
                 }
             }
-
-            ContainerSpec spec = specBuilder.build();
-
-            // Create and start container
-            ContainerInfo info = lifecycleManager.createAndStart(spec);
-            String dockerId = info.containerId();
-
-            LOG.infov("Created ECS container {0} for task {1} container {2}", dockerId, taskId, def.getName());
-
-            // Resolve network bindings for ECS-specific model
-            List<NetworkBinding> networkBindings = resolveNetworkBindings(dockerId, def);
-
-            // Build ECS container model
-            Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
-            runtimeContainers.add(container);
-            containerIds.put(def.getName(), dockerId);
-
-            // Attach log streaming
-            String logGroup = "/ecs/" + taskDef.getFamily();
-            String logStream = logStreamer.generateLogStreamName(def.getName() + "/" + taskId);
-
-            Closeable logHandle = logStreamer.attach(
-                    dockerId, logGroup, logStream, region,
-                    "ecs:" + taskDef.getFamily() + ":" + def.getName());
-            if (logHandle != null) {
-                logStreamsByContainerId.put(dockerId, logHandle);
+        } catch (RuntimeException e) {
+            if (firelensVolumeName != null) {
+                lifecycleManager.removeVolume(firelensVolumeName);
             }
+            throw e;
         }
 
         task.setContainers(runtimeContainers);
@@ -251,7 +324,7 @@ public class EcsContainerManager {
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
-        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId);
+        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId, firelensVolumeName);
     }
 
     /**
@@ -274,6 +347,7 @@ public class EcsContainerManager {
         }
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        removeFirelensVolume(handle);
     }
 
     /**
@@ -317,7 +391,175 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        removeFirelensVolume(handle);
         return exitCodes;
+    }
+
+    private void removeFirelensVolume(EcsTaskHandle handle) {
+        if (handle == null || handle.getFirelensVolumeName() == null) {
+            return;
+        }
+        lifecycleManager.removeVolume(handle.getFirelensVolumeName());
+    }
+
+    private static ContainerDefinition findFluentBitRouter(List<ContainerDefinition> defs) {
+        if (defs == null) {
+            return null;
+        }
+        for (ContainerDefinition def : defs) {
+            FirelensConfiguration firelens = def.getFirelensConfiguration();
+            if (firelens != null && "fluentbit".equals(firelens.type())) {
+                return def;
+            }
+        }
+        return null;
+    }
+
+    private static Map<String, Map<String, String>> awsFirelensLogOptions(List<ContainerDefinition> defs) {
+        LinkedHashMap<String, Map<String, String>> options = new LinkedHashMap<>();
+        if (defs == null) {
+            return options;
+        }
+        for (ContainerDefinition def : defs) {
+            if (!isAwsFirelens(def)) {
+                continue;
+            }
+            LogConfiguration log = def.getLogConfiguration();
+            options.put(def.getName(), log.options() != null ? log.options() : Map.of());
+        }
+        return options;
+    }
+
+    private static boolean isAwsFirelens(ContainerDefinition def) {
+        LogConfiguration log = def.getLogConfiguration();
+        return log != null && "awsfirelens".equals(log.logDriver());
+    }
+
+    private static List<ContainerDefinition> launchOrder(
+            List<ContainerDefinition> defs, ContainerDefinition firelensRouter) {
+        if (firelensRouter == null) {
+            return defs;
+        }
+        List<ContainerDefinition> ordered = new ArrayList<>();
+        ordered.add(firelensRouter);
+        for (ContainerDefinition def : defs) {
+            if (def != firelensRouter) {
+                ordered.add(def);
+            }
+        }
+        return ordered;
+    }
+
+    private FirelensConfigGenerator.Context firelensContext(
+            EcsTask task, TaskDefinition taskDef, ContainerDefinition router,
+            Map<String, Map<String, String>> logOptions) {
+        FirelensConfiguration firelens = router.getFirelensConfiguration();
+        Map<String, String> options = firelens.options() != null ? firelens.options() : Map.of();
+        boolean metadata = !"false".equalsIgnoreCase(options.get("enable-ecs-log-metadata"));
+        String external = null;
+        if ("file".equals(options.get("config-file-type"))) {
+            external = options.get("config-file-value");
+        }
+        int memoryMb = 0;
+        if (router.getMemoryReservation() != null) {
+            memoryMb = router.getMemoryReservation();
+        } else if (router.getMemory() != null) {
+            memoryMb = router.getMemory();
+        }
+        String cluster = clusterName(task.getClusterArn());
+        String familyRevision = taskDef.getFamily() + ":" + taskDef.getRevision();
+        String networkMode = taskDef.getNetworkMode() != null
+                ? taskDef.getNetworkMode().name()
+                : NetworkMode.bridge.name();
+        return new FirelensConfigGenerator.Context(
+                networkMode, metadata, cluster, task.getTaskArn(), familyRevision,
+                memoryMb, external, logOptions);
+    }
+
+    private static String clusterName(String clusterArn) {
+        if (clusterArn == null) {
+            return "";
+        }
+        int slash = clusterArn.lastIndexOf('/');
+        return slash >= 0 ? clusterArn.substring(slash + 1) : clusterArn;
+    }
+
+    private String unixSocketAddress(String volumeName) {
+        try {
+            String mountpoint = lifecycleManager.getDockerClient()
+                    .inspectVolumeCmd(volumeName).exec().getMountpoint();
+            if (mountpoint == null || mountpoint.isBlank()) {
+                throw new AwsException("ClientException",
+                        "FireLens socket volume has no mountpoint: " + volumeName, 500);
+            }
+            String path = mountpoint.endsWith("/")
+                    ? mountpoint + "fluent.sock"
+                    : mountpoint + "/fluent.sock";
+            return "unix://" + path;
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ClientException",
+                    "unable to resolve FireLens socket path: " + e.getMessage(), 500);
+        }
+    }
+
+    private LogConfig awsFirelensLogConfig(ContainerDefinition def, String taskId, String socketAddress) {
+        LinkedHashMap<String, String> opts = new LinkedHashMap<>();
+        opts.put("fluentd-address", socketAddress);
+        opts.put("fluentd-async-connect", "true");
+        opts.put("fluentd-sub-second-precision", "true");
+        opts.put("tag", def.getName() + "-firelens-" + taskId);
+        Map<String, String> logOptions = def.getLogConfiguration().options();
+        if (logOptions != null && logOptions.get("log-driver-buffer-limit") != null) {
+            opts.put("fluentd-buffer-limit", logOptions.get("log-driver-buffer-limit"));
+        }
+        return new LogConfig(LogConfig.LoggingType.FLUENTD, opts);
+    }
+
+    private void copyFirelensConfig(String containerId, String configText) {
+        byte[] content = configText.getBytes(StandardCharsets.UTF_8);
+        ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
+        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
+            TarArchiveEntry entry = new TarArchiveEntry("fluent-bit.conf");
+            entry.setSize(content.length);
+            tar.putArchiveEntry(entry);
+            tar.write(content);
+            tar.closeArchiveEntry();
+        } catch (IOException e) {
+            throw new AwsException("ClientException",
+                    "unable to write FireLens config: " + e.getMessage(), 500);
+        }
+        lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
+                .withRemotePath("/fluent-bit/etc")
+                .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
+                .exec();
+    }
+
+    private String inspectContainerIp(String dockerId) {
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
+            String configured = config.services().ecs().dockerNetwork().orElse(null);
+            if (configured != null && networks.get(configured) != null
+                    && isUsableIp(networks.get(configured).getIpAddress())) {
+                return networks.get(configured).getIpAddress();
+            }
+            for (Map.Entry<String, ContainerNetwork> entry : networks.entrySet()) {
+                if (!isDefaultDockerNetwork(entry.getKey())
+                        && isUsableIp(entry.getValue().getIpAddress())) {
+                    return entry.getValue().getIpAddress();
+                }
+            }
+            for (ContainerNetwork net : networks.values()) {
+                if (isUsableIp(net.getIpAddress())) {
+                    return net.getIpAddress();
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not resolve FireLens container IP for {0}: {1}", dockerId, e.getMessage());
+        }
+        return "127.0.0.1";
     }
 
     private void finalizeLogStream(EcsTaskHandle handle, String dockerId) {

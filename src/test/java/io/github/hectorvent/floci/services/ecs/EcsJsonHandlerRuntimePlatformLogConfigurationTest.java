@@ -145,4 +145,37 @@ class EcsJsonHandlerRuntimePlatformLogConfigurationTest {
         assertTrue(td.path("containerDefinitions").get(0).path("logConfiguration").isMissingNode(),
                 "logConfiguration must stay absent for a container that never set it");
     }
+
+    @Test
+    void registerTaskDefinitionRoundTripsFirelensConfiguration() throws Exception {
+        String requestJson = """
+                {
+                  "family": "firelens-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "log_router",
+                      "image": "amazon/aws-for-fluent-bit:stable",
+                      "firelensConfiguration": {
+                        "type": "fluentbit",
+                        "options": {
+                          "enable-ecs-log-metadata": "true",
+                          "config-file-type": "file",
+                          "config-file-value": "/extra.conf"
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode firelens = objectMapper.valueToTree(response.getEntity())
+                .path("taskDefinition").path("containerDefinitions").get(0).path("firelensConfiguration");
+
+        assertEquals("fluentbit", firelens.path("type").asText());
+        assertEquals("true", firelens.path("options").path("enable-ecs-log-metadata").asText());
+        assertEquals("file", firelens.path("options").path("config-file-type").asText());
+        assertEquals("/extra.conf", firelens.path("options").path("config-file-value").asText());
+    }
 }

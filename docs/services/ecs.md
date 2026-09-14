@@ -32,9 +32,19 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 
 `runtimePlatform` and a container's `logConfiguration` are stored and returned exactly as
 registered, so a client that reads back what it wrote (Terraform, or a deploy tool verifying its
-own `RegisterTaskDefinition`) sees no drift. Neither changes how a local task runs: Floci launches
-every task on the host's own architecture, and a task's output stays with its Docker container
-rather than being routed to the configured log driver.
+own `RegisterTaskDefinition`) sees no drift. `runtimePlatform` does not change where a local task
+runs: Floci launches every task on the host's own architecture.
+
+`firelensConfiguration` is stored and returned the same way. A `fluentbit` FireLens container is
+acted on at launch: Floci generates the Fluent Bit config (unix socket input, TCP forward on
+bridge/awsvpc, ECS metadata, optional `@INCLUDE` of a `config-file-type=file` extra config, and
+one `[OUTPUT]` per `awsfirelens` container), starts that router first, and points application
+containers with `logDriver: awsfirelens` at the generated unix socket. Other log drivers,
+including `awslogs`, still stream to CloudWatch via Floci rather than the configured driver.
+The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci does not
+share a network namespace, so the injected `FLUENT_HOST` (the router's container IP) must be
+reachable. `fluentd` FireLens, `config-file-type=s3`, and shared network namespaces (AppConfig
+agent on `127.0.0.1:2772`) are not implemented.
 
 ### Tasks
 

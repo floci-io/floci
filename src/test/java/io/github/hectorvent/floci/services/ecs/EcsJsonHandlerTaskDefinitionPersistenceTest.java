@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
@@ -60,6 +61,10 @@ class EcsJsonHandlerTaskDefinitionPersistenceTest {
                       "logConfiguration": {
                         "logDriver": "awslogs",
                         "options": {"awslogs-group": "/ecs/restart-family"}
+                      },
+                      "firelensConfiguration": {
+                        "type": "fluentbit",
+                        "options": {"enable-ecs-log-metadata": "true"}
                       }
                     }
                   ],
@@ -81,6 +86,11 @@ class EcsJsonHandlerTaskDefinitionPersistenceTest {
         assertNotNull(logConfiguration, "logConfiguration must survive a restart");
         assertEquals("awslogs", logConfiguration.logDriver());
         assertEquals("/ecs/restart-family", logConfiguration.options().get("awslogs-group"));
+
+        FirelensConfiguration firelens = td.getContainerDefinitions().getFirst().getFirelensConfiguration();
+        assertNotNull(firelens, "firelensConfiguration must survive a restart");
+        assertEquals("fluentbit", firelens.type());
+        assertEquals("true", firelens.options().get("enable-ecs-log-metadata"));
 
         assertEquals(1, td.getVolumes().size(), "task-level volumes must survive a restart");
         assertEquals("/host/data", td.getVolumes().getFirst().hostSourcePath());

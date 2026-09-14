@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
@@ -1114,6 +1115,20 @@ public class EcsJsonHandler {
             n.set("logConfiguration", logNode);
         }
 
+        if (def.getFirelensConfiguration() != null) {
+            FirelensConfiguration firelens = def.getFirelensConfiguration();
+            ObjectNode firelensNode = objectMapper.createObjectNode();
+            if (firelens.type() != null) {
+                firelensNode.put("type", firelens.type());
+            }
+            if (firelens.options() != null) {
+                ObjectNode options = objectMapper.createObjectNode();
+                firelens.options().forEach(options::put);
+                firelensNode.set("options", options);
+            }
+            n.set("firelensConfiguration", firelensNode);
+        }
+
         return n;
     }
 
@@ -1416,6 +1431,7 @@ public class EcsJsonHandler {
             }
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
             def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
+            def.setFirelensConfiguration(parseFirelensConfiguration(item.path("firelensConfiguration")));
 
             if (item.has("command") && item.path("command").isArray()) {
                 List<String> cmd = new ArrayList<>();
@@ -1498,6 +1514,24 @@ public class EcsJsonHandler {
         }
         List<Secret> secretOptions = node.has("secretOptions") ? parseSecrets(node.path("secretOptions")) : null;
         return new LogConfiguration(logDriver, options, secretOptions);
+    }
+
+    private FirelensConfiguration parseFirelensConfiguration(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        String type = node.path("type").asText(null);
+        if (type == null) {
+            return null;
+        }
+        Map<String, String> options = null;
+        if (node.path("options").isObject()) {
+            LinkedHashMap<String, String> parsed = new LinkedHashMap<>();
+            node.path("options").fields()
+                    .forEachRemaining(entry -> parsed.put(entry.getKey(), entry.getValue().asText()));
+            options = parsed;
+        }
+        return new FirelensConfiguration(type, options);
     }
 
     private List<Volume> parseVolumes(JsonNode node) {

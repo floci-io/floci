@@ -9,9 +9,9 @@ import java.util.Map;
  * The {@code logConfiguration} of an ECS container definition:
  * {@code {"logDriver": "awslogs", "options": {...}, "secretOptions": [{"name": ..., "valueFrom": ...}]}}.
  *
- * <p>Modelled for RegisterTaskDefinition/DescribeTaskDefinition round-trip fidelity. Floci does not
- * route container output to the configured driver — a local task's logs stay with its Docker
- * container — so the {@code awslogs} options are stored and returned rather than acted upon.
+ * <p>Stored and returned for RegisterTaskDefinition/DescribeTaskDefinition round-trip. At launch,
+ * {@code awsfirelens} is routed through the task's Fluent Bit FireLens container. Other drivers
+ * (including {@code awslogs}) stay with the Docker container and Floci's CloudWatch log streamer.
  */
 @RegisterForReflection
 public record LogConfiguration(String logDriver, Map<String, String> options, List<Secret> secretOptions) {
