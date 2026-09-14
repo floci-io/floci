@@ -52,6 +52,10 @@ Floci emulates the AWS WAF v2 management API. Web ACLs, IP sets, regex pattern s
 
 WAF v2 resources are partitioned by `Scope`: `REGIONAL` (ALB, API Gateway, AppSync) or `CLOUDFRONT`. Pass `--scope` on every call; `CLOUDFRONT`-scoped requests must target `us-east-1` as on real AWS.
 
+## IP set addresses
+
+`CreateIPSet` and `UpdateIPSet` require every entry in `Addresses` to be in CIDR notation matching the set's `IPAddressVersion`: an IPv4 address with a `/1`-`/32` prefix, or an IPv6 address with a `/1`-`/128` prefix (a `/0` prefix is rejected, matching AWS). A bare address with no prefix, a prefix outside that range, or an address that does not match the declared `IPAddressVersion` is rejected with `WAFInvalidParameterException`.
+
 ## Example
 
 ```bash

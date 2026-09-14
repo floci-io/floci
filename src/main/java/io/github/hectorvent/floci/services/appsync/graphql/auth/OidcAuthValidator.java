@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync.graphql.auth;
 
+import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -7,15 +8,24 @@ import java.time.Clock;
 import java.util.Map;
 import java.util.regex.Pattern;
 
+/**
+ * Verifies an OIDC bearer token's RS256 signature against the configured provider's own JWKS,
+ * reusing {@link JwtSignatureVerifier} (already used by the HTTP API JWT authorizer): it fetches
+ * {@code {issuer}/.well-known/openid-configuration}, resolves the token's {@code kid} against the
+ * JWKS it points to, and fails closed on any network error, unreachable issuer, unsupported
+ * algorithm, or unmatched key.
+ */
 @ApplicationScoped
 public class OidcAuthValidator {
 
     private final JwtClaimsDecoder jwtClaimsDecoder;
+    private final JwtSignatureVerifier jwtSignatureVerifier;
     private final Clock clock;
 
     @Inject
-    public OidcAuthValidator(JwtClaimsDecoder jwtClaimsDecoder, Clock clock) {
+    public OidcAuthValidator(JwtClaimsDecoder jwtClaimsDecoder, JwtSignatureVerifier jwtSignatureVerifier, Clock clock) {
         this.jwtClaimsDecoder = jwtClaimsDecoder;
+        this.jwtSignatureVerifier = jwtSignatureVerifier;
         this.clock = clock;
     }
 
@@ -26,6 +36,7 @@ public class OidcAuthValidator {
     ) {
         Map<String, Object> claims = jwtClaimsDecoder.decode(authorization)
                 .orElseThrow(AppSyncAuth::unauthorized);
+        verifySignature(authorization, oidcConfig);
         if (claims.get("sub") == null || String.valueOf(claims.get("sub")).isBlank()) {
             throw AppSyncAuth.unauthorized();
         }
@@ -39,6 +50,25 @@ public class OidcAuthValidator {
             throw AppSyncAuth.unauthorized();
         }
         return IdentityBuilder.oidc(claims);
+    }
+
+    /**
+     * Verifies against the <em>configured</em> issuer's JWKS regardless of {@code skipIssuer}:
+     * that configured URL is the only OIDC provider this API trusts, so it is what signs the keys
+     * to check against even when the token's own {@code iss} claim is not separately asserted to
+     * equal it.
+     */
+    private void verifySignature(String authorization, Map<String, Object> oidcConfig) {
+        String issuer = oidcConfig == null ? null : CognitoAuthValidator.coerceString(oidcConfig.get("issuer"), null);
+        if (issuer == null) {
+            throw AppSyncAuth.unauthorized();
+        }
+        String token = jwtClaimsDecoder.rawToken(authorization).orElseThrow(AppSyncAuth::unauthorized);
+        try {
+            jwtSignatureVerifier.verify(token, issuer);
+        } catch (JwtSignatureVerifier.JwtVerificationException e) {
+            throw AppSyncAuth.unauthorized();
+        }
     }
 
     boolean matchesProvider(Map<String, Object> claims, Map<String, Object> oidcConfig, boolean skipIssuer) {

@@ -54,7 +54,7 @@ A request identifies its target cluster one of two ways:
 - **`CancelStatement`** returns `{ "Status": true }`. In Floci a statement is already terminal by the time it can be cancelled, so `CancelStatement` sets `Status=ABORTED` only when the statement was not already `FINISHED`. An unknown statement id returns `ResourceNotFoundException`.
 - **`WithEvent`** is accepted and ignored: no EventBridge event is published.
 - **`ExecuteSql` and `BatchExecuteSql`** (the deprecated pre-2020 operations) return `ValidationException`.
-- **Type mapping.** JDBC `BOOLEAN` and `BIT` map to `booleanValue`; integer types to `longValue`; floating-point types to `doubleValue`; `NUMERIC` and `DECIMAL` to `stringValue` (as AWS does); binary types to `blobValue`; everything else, including dates, timestamps, uuid, and json, to `stringValue`. A SQL `NULL` maps to `isNull`.
+- **Type mapping.** JDBC `BOOLEAN` and `BIT` map to `booleanValue`; integer types to `longValue`; floating-point types to `doubleValue`; `NUMERIC` and `DECIMAL` to `stringValue` (as AWS does); binary types to `blobValue`; everything else, including dates, timestamps, and uuid, to `stringValue`. A SQL `NULL` maps to `isNull`. A result column of type `line`, `json`, or `jsonb` fails the statement with the Redshift error text.
 
 ## Configuration
 

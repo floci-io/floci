@@ -91,7 +91,7 @@ class EcsContainerManagerPortMappingsTest {
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService,
-                ecrRegistryManager);
+                ecrRegistryManager, mock(HostVolumePolicy.class));
     }
 
     private void startWith(List<PortMapping> portMappings) {

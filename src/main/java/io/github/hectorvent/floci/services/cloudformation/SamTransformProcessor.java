@@ -566,6 +566,13 @@ class SamTransformProcessor {
             Map.Entry<String, JsonNode> entry = it.next();
             String name = entry.getKey();
             JsonNode config = entry.getValue();
+            if (config.has("UserPoolArn")
+                    || "COGNITO_USER_POOLS".equals(config.path("AuthType").asText())) {
+                throw new AwsException("ValidationError",
+                        "SAM implicit REST API authorizer " + name
+                                + " configures a Cognito user pool authorizer, which Floci does not "
+                                + "support for SAM implicit REST APIs yet.", 400);
+            }
             String payloadType = config.path("FunctionPayloadType").asText("TOKEN");
             if (!"REQUEST".equals(payloadType)) {
                 throw new AwsException("ValidationError",

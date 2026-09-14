@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.configservice.AwsConfigService;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
@@ -38,6 +39,9 @@ public class ConfigCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         JsonNode resolved = ctx.engine().resolveNode(props);
+        if (!resolved.path("Source").isObject()) {
+            throw new AwsException("ValidationError", CONFIG_RULE + " requires Source", 400);
+        }
         String previousName = resource.getPhysicalId();
         String name = text(resolved, "ConfigRuleName");
         if (name == null || name.isBlank()) {
@@ -55,7 +59,7 @@ public class ConfigCfnProvisioner implements CfnResourceProvisioner {
         resource.getAttributes().put("ConfigRuleId", rule.configRuleId());
         if (previousName != null && !previousName.equals(name)) {
             try {
-                deleteIfPresent(ctx.region(), previousName);
+                deleteRule(ctx.region(), previousName);
             } catch (RuntimeException e) {
                 // old rule may still be referenced elsewhere; new rule is already tracked
                 LOG.warnv("Config CFN replacement cleanup of rule {0} tolerated: {1}",
@@ -66,17 +70,15 @@ public class ConfigCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        deleteIfPresent(region, physicalId);
+        deleteRule(region, physicalId);
     }
 
-    private void deleteIfPresent(String region, String name) {
+    private void deleteRule(String region, String name) {
         if (name == null) {
             return;
         }
-        if (configService.describeConfigRules(region, List.of()).stream()
-                .anyMatch(rule -> name.equals(rule.configRuleName()))) {
-            configService.deleteConfigRule(region, name);
-        }
+        CfnDeletes.safeDelete("Config rule", name, () -> configService.deleteConfigRule(region, name),
+                "NoSuchConfigRuleException");
     }
 
     private Scope scope(JsonNode node) {
@@ -116,10 +118,11 @@ public class ConfigCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private List<String> strings(JsonNode nodes) {
-        List<String> values = new ArrayList<>();
-        if (nodes.isArray()) {
-            nodes.forEach(node -> values.add(node.asText()));
+        if (!nodes.isArray()) {
+            return null;
         }
+        List<String> values = new ArrayList<>();
+        nodes.forEach(node -> values.add(node.asText()));
         return values;
     }
 

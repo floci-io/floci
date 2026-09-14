@@ -67,6 +67,7 @@ public class EcsContainerManager {
     private final SsmService ssmService;
     private final SecretsManagerService secretsManagerService;
     private final EcrRegistryManager ecrRegistryManager;
+    private final HostVolumePolicy hostVolumePolicy;
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -78,7 +79,8 @@ public class EcsContainerManager {
                                LaunchedContainerAwsEnv awsEnv,
                                SsmService ssmService,
                                SecretsManagerService secretsManagerService,
-                               EcrRegistryManager ecrRegistryManager) {
+                               EcrRegistryManager ecrRegistryManager,
+                               HostVolumePolicy hostVolumePolicy) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -88,6 +90,7 @@ public class EcsContainerManager {
         this.awsEnv = awsEnv;
         this.ssmService = ssmService;
         this.secretsManagerService = secretsManagerService;
+        this.hostVolumePolicy = hostVolumePolicy;
         this.ecrRegistryManager = ecrRegistryManager;
     }
 
@@ -203,7 +206,13 @@ public class EcsContainerManager {
                     String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
                     EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
                     if (sourcePath != null) {
-                        // Host volume: bind-mount an absolute path on the Docker host.
+                        // Host volume: bind-mount an absolute path on the Docker host. Re-validate
+                        // here (not just at RegisterTaskDefinition time): this narrows the window
+                        // between validation and mount for a symlink swapped in afterward, and
+                        // also covers task definitions persisted before this policy existed. A
+                        // rejection is not swallowed, it propagates out of startTask and is
+                        // surfaced by EcsService as the task's stoppedReason.
+                        hostVolumePolicy.validate(sourcePath);
                         if (mp.readOnly()) {
                             specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
                         } else {

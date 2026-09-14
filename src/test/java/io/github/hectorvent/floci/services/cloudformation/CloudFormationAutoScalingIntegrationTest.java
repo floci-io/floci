@@ -48,6 +48,10 @@ class CloudFormationAutoScalingIntegrationTest {
                         "MaxSize": 3,
                         "DesiredCapacity": 2,
                         "AvailabilityZones": ["us-east-1a"],
+                        "DesiredCapacityType": "units",
+                        "CapacityRebalance": true,
+                        "MaxInstanceLifetime": 86400,
+                        "DefaultInstanceWarmup": 300,
                         "Tags": [
                           {"Key": "cluster", "Value": "demo", "PropagateAtLaunch": true},
                           {"Key": "control-plane", "Value": "only", "PropagateAtLaunch": false}
@@ -56,7 +60,8 @@ class CloudFormationAutoScalingIntegrationTest {
                     }
                   },
                   "Outputs": {
-                    "AsgArn": {"Value": {"Fn::GetAtt": ["Asg", "Arn"]}}
+                    "AsgArn": {"Value": {"Fn::GetAtt": ["Asg", "Arn"]}},
+                    "AsgSchemaArn": {"Value": {"Fn::GetAtt": ["Asg", "AutoScalingGroupARN"]}}
                   }
                 }
                 """.formatted(lcName, asgName);
@@ -83,7 +88,12 @@ class CloudFormationAutoScalingIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
-            .body(containsString(":autoScalingGroup:" + asgName));
+            .body(containsString(":autoScalingGroup:" + asgName))
+            // AutoScalingGroupARN is the name the registry schema defines, so it is the one real
+            // CloudFormation resolves. An unset attribute does not fail the stack: Fn::GetAtt falls
+            // back to the literal "Asg.AutoScalingGroupARN", which is what this rules out.
+            .body(containsString("<OutputKey>AsgSchemaArn</OutputKey>"))
+            .body(not(containsString("Asg.AutoScalingGroupARN")));
 
         // The group really exists in Auto Scaling and references the launch configuration.
         given()
@@ -102,7 +112,14 @@ class CloudFormationAutoScalingIntegrationTest {
             .body(containsString("<PropagateAtLaunch>true</PropagateAtLaunch>"))
             .body(containsString("<Key>control-plane</Key>"))
             .body(containsString("<Value>only</Value>"))
-            .body(containsString("<PropagateAtLaunch>false</PropagateAtLaunch>"));
+            .body(containsString("<PropagateAtLaunch>false</PropagateAtLaunch>"))
+            // The CloudFormation path used to pass AsgOptionalFields.none(), so a template setting
+            // these four had them dropped without any error. #3494 added them to the service and
+            // left the wiring to this provisioner.
+            .body(containsString("<DesiredCapacityType>units</DesiredCapacityType>"))
+            .body(containsString("<CapacityRebalance>true</CapacityRebalance>"))
+            .body(containsString("<MaxInstanceLifetime>86400</MaxInstanceLifetime>"))
+            .body(containsString("<DefaultInstanceWarmup>300</DefaultInstanceWarmup>"));
     }
 
     @Test

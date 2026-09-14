@@ -447,6 +447,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default task memory when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default task CPU units when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | _(none)_ | Comma-separated allowlist of parent directories host volume `sourcePath`s must resolve under. By default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
+| `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing `HOST_VOLUME_ROOTS`; traversal, the bare root, and the Docker socket (or an ancestor directory of it, e.g. `/var/run`) are still always rejected |
 
 ### EC2
 

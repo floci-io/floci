@@ -1963,6 +1963,7 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("httpMethod", m.getHttpMethod());
         node.put("authorizationType", m.getAuthorizationType());
+        node.put("apiKeyRequired", m.isApiKeyRequired());
         if (m.getAuthorizerId() != null) node.put("authorizerId", m.getAuthorizerId());
         if (m.getRequestValidatorId() != null) node.put("requestValidatorId", m.getRequestValidatorId());
         if (m.getRequestModels() != null && !m.getRequestModels().isEmpty()) {

@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -110,7 +111,15 @@ public class SsmJsonHandler {
         String description = request.has("Description") ? request.path("Description").asText() : null;
         boolean overwrite = request.path("Overwrite").asBoolean(false);
 
-        long version = ssmService.putParameter(name, value, type, description, overwrite, region);
+        Map<String, String> tags = null;
+        if (request.has("Tags") && request.path("Tags").isArray()) {
+            tags = new LinkedHashMap<>();
+            for (JsonNode t : request.path("Tags")) {
+                tags.put(t.path("Key").asText(), t.path("Value").asText());
+            }
+        }
+
+        long version = ssmService.putParameter(name, value, type, description, overwrite, tags, region);
 
         return Response.ok(new PutParameterResponse(version)).build();
     }

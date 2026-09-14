@@ -2,11 +2,14 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 
 /**
  * End-to-end check that CloudFormation registers real {@code Fn::GetAtt} attributes for
@@ -159,5 +162,116 @@ class CloudFormationWafV2ConfigGetAttIntegrationTest {
         .then()
             .statusCode(200)
             .body("ConfigRules[0].ConfigRuleName", org.hamcrest.Matchers.equalTo(ruleName));
+    }
+
+    @Test
+    void createStackWithoutWebAclVisibilityConfigFailsWithRequiredPropertyReason() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-wafv2-required-stack-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Acl": {
+                      "Type": "AWS::WAFv2::WebACL",
+                      "Properties": {
+                        "Name": "cfn-acl-required-%s",
+                        "Scope": "REGIONAL",
+                        "DefaultAction": {"Allow": {}}
+                      }
+                    }
+                  }
+                }
+                """.formatted(suffix);
+
+        createStack(stackName, template);
+
+        describeStackEvents(stackName)
+            .body(containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"))
+            .body(containsString(
+                    "<ResourceStatusReason>AWS::WAFv2::WebACL requires VisibilityConfig</ResourceStatusReason>"));
+    }
+
+    @Test
+    void createStackWithoutConfigRuleSourceFailsWithRequiredPropertyReason() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-config-required-stack-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Rule": {
+                      "Type": "AWS::Config::ConfigRule",
+                      "Properties": {
+                        "ConfigRuleName": "cfn-rule-required-%s"
+                      }
+                    }
+                  }
+                }
+                """.formatted(suffix);
+
+        createStack(stackName, template);
+
+        describeStackEvents(stackName)
+            .body(containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"))
+            .body(containsString(
+                    "<ResourceStatusReason>AWS::Config::ConfigRule requires Source</ResourceStatusReason>"));
+    }
+
+    @Test
+    void configRuleTagScopeOmitsComplianceResourceTypes() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String ruleName = "cfn-rule-tagscope-" + suffix;
+        String stackName = "cfn-config-tagscope-stack-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Rule": {
+                      "Type": "AWS::Config::ConfigRule",
+                      "Properties": {
+                        "ConfigRuleName": "%s",
+                        "Scope": {"TagKey": "env", "TagValue": "prod"},
+                        "Source": {"Owner": "AWS", "SourceIdentifier": "REQUIRED_TAGS"}
+                      }
+                    }
+                  }
+                }
+                """.formatted(ruleName);
+
+        createStack(stackName, template);
+
+        given()
+            .contentType(CONFIG_JSON)
+            .header("X-Amz-Target", CONFIG_TARGET_PREFIX + "DescribeConfigRules")
+            .body("{\"ConfigRuleNames\":[\"" + ruleName + "\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConfigRules[0].Scope.TagKey", org.hamcrest.Matchers.equalTo("env"))
+            .body("ConfigRules[0].Scope", not(hasKey("ComplianceResourceTypes")));
+    }
+
+    private void createStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private ValidatableResponse describeStackEvents(String stackName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }

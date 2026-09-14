@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -21,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -317,5 +319,64 @@ class SqsCfnProvisionerTest {
     void deleteQueuePolicyIsNoOp() {
         provisioner.delete("AWS::SQS::QueuePolicy", "queue-policy-abc", "us-east-1");
         verifyNoInteractions(sqs);
+    }
+
+    @Test
+    void queueTagsFromTheTemplateReachTheQueue() {
+        // The registry schema declares Tags on AWS::SQS::Queue, but the provisioner never read the
+        // property, so a tagged template produced an untagged queue and nothing reported it.
+        when(sqs.createQueue(eq("the-queue"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("the-queue", "http://q/the-queue"));
+        when(sqs.listQueueTags("http://q/the-queue", "us-east-1")).thenReturn(Map.of());
+        StackResource r = resource("AWS::SQS::Queue", "MyQueue");
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "the-queue");
+        props.putArray("Tags")
+                .add(mapper.createObjectNode().put("Key", "env").put("Value", "prod"))
+                .add(mapper.createObjectNode().put("Key", "team").put("Value", "platform"));
+
+        provisioner.provision(r, props, ctx());
+
+        verify(sqs).tagQueue("http://q/the-queue", Map.of("env", "prod", "team", "platform"),
+                "us-east-1");
+        verify(sqs, never()).untagQueue(anyString(), any(), anyString());
+    }
+
+    @Test
+    void updateUntagsOnlyTheKeyTheTemplateDropped() {
+        // CloudFormation drives tags to the template's desired state, so a dropped key is untagged.
+        // Calling tagQueue alone would leave "owner" on the queue forever: SQS has no replace-tags
+        // call, which is why this goes through staleTagKeys the way AcmCfnProvisioner does.
+        when(sqs.listQueueTags("http://q/orders", "us-east-1"))
+                .thenReturn(new HashMap<>(Map.of("env", "prod", "owner", "alice")));
+        StackResource r = resource("AWS::SQS::Queue", "Orders");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "orders")));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "orders");
+        props.putArray("Tags")
+                .add(mapper.createObjectNode().put("Key", "env").put("Value", "staging"));
+
+        provisioner.provision(r, props, updateCtx("http://q/orders"));
+
+        verify(sqs).untagQueue("http://q/orders", List.of("owner"), "us-east-1");
+        verify(sqs).tagQueue("http://q/orders", Map.of("env", "staging"), "us-east-1");
+    }
+
+    @Test
+    void updateWithTheTagsPropertyGoneUntagsTheQueueCompletely() {
+        // Dropping Tags altogether is the edge the reconcile docstring promises but nothing pinned.
+        // It holds only because resolveTags answers an empty map rather than null: were that to
+        // change, every key would silently survive an update that asked for none.
+        when(sqs.listQueueTags("http://q/orders", "us-east-1"))
+                .thenReturn(new HashMap<>(Map.of("env", "prod", "owner", "alice")));
+        StackResource r = resource("AWS::SQS::Queue", "Orders");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "orders")));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "orders");
+
+        provisioner.provision(r, props, updateCtx("http://q/orders"));
+
+        // Order is not part of the contract: staleTagKeys walks a HashMap's key set.
+        verify(sqs).untagQueue(eq("http://q/orders"),
+                argThat(keys -> keys.size() == 2 && keys.containsAll(List.of("env", "owner"))),
+                eq("us-east-1"));
+        verify(sqs, never()).tagQueue(anyString(), any(), anyString());
     }
 }

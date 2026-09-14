@@ -16,8 +16,14 @@ AWS::ApiGatewayV2::Deployment	LEGACY_SWITCH
 AWS::ApiGatewayV2::Integration	LEGACY_SWITCH
 AWS::ApiGatewayV2::Route	LEGACY_SWITCH
 AWS::ApiGatewayV2::Stage	LEGACY_SWITCH
-AWS::AutoScaling::AutoScalingGroup	LEGACY_SWITCH
-AWS::AutoScaling::LaunchConfiguration	LEGACY_SWITCH
+AWS::AppSync::ApiKey	AppSyncCfnProvisioner
+AWS::AppSync::DataSource	AppSyncCfnProvisioner
+AWS::AppSync::FunctionConfiguration	AppSyncCfnProvisioner
+AWS::AppSync::GraphQLApi	AppSyncCfnProvisioner
+AWS::AppSync::GraphQLSchema	AppSyncCfnProvisioner
+AWS::AppSync::Resolver	AppSyncCfnProvisioner
+AWS::AutoScaling::AutoScalingGroup	AutoScalingGroupCfnProvisioner
+AWS::AutoScaling::LaunchConfiguration	AutoScalingGroupCfnProvisioner
 AWS::AutoScaling::LifecycleHook	AutoScalingLifecycleHookCfnProvisioner
 AWS::AutoScaling::ScalingPolicy	AutoScalingScalingPolicyCfnProvisioner
 AWS::Backup::BackupVault	BackupVaultCfnProvisioner
@@ -101,6 +107,7 @@ AWS::Lambda::LayerVersion	LEGACY_SWITCH
 AWS::Lambda::MicrovmImage	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::NetworkConnector	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::Permission	LambdaAddressingCfnProvisioner
+AWS::Lambda::Url	LambdaAddressingCfnProvisioner
 AWS::Lambda::Version	LambdaVersionAliasCfnProvisioner
 AWS::Logs::LogGroup	LogsCfnProvisioner
 AWS::Organizations::Account	OrganizationsCfnProvisioner
@@ -116,6 +123,10 @@ AWS::RDS::DBParameterGroup	RdsCfnProvisioner
 AWS::RDS::DBProxy	RdsCfnProvisioner
 AWS::RDS::DBProxyTargetGroup	RdsCfnProvisioner
 AWS::RDS::DBSubnetGroup	RdsCfnProvisioner
+AWS::Redshift::Cluster	RedshiftClusterCfnProvisioner
+AWS::Redshift::ClusterParameterGroup	RedshiftClusterCfnProvisioner
+AWS::Redshift::ClusterSecurityGroup	RedshiftClusterCfnProvisioner
+AWS::Redshift::ClusterSubnetGroup	RedshiftClusterCfnProvisioner
 AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	LEGACY_SWITCH
 AWS::S3::Bucket	S3CfnProvisioner
@@ -127,8 +138,8 @@ AWS::SQS::Queue	SqsCfnProvisioner
 AWS::SQS::QueuePolicy	SqsCfnProvisioner
 AWS::SSM::Parameter	SsmCfnProvisioner
 AWS::Scheduler::ScheduleGroup	SchedulerScheduleGroupCfnProvisioner
-AWS::SecretsManager::Secret	LEGACY_SWITCH
-AWS::SecretsManager::SecretTargetAttachment	LEGACY_SWITCH
+AWS::SecretsManager::Secret	SecretsManagerCfnProvisioner
+AWS::SecretsManager::SecretTargetAttachment	SecretTargetAttachmentCfnProvisioner
 AWS::StepFunctions::StateMachine	LEGACY_SWITCH
 AWS::WAFv2::WebACL	WafV2CfnProvisioner
 Custom::DynamoDBReplica	LEGACY_SWITCH

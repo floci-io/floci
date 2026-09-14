@@ -28,9 +28,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code DeleteApiKey} must therefore stop the value being recognised, otherwise a revoked credential
  * keeps identifying requests.
  *
- * <p>Floci does not implement the {@code apiKeyRequired} gate, so a revoked key produces a request
- * whose {@code identity.apiKey} is null rather than a 403. These tests assert the resolution
- * behaviour that exists today.
+ * <p>This suite's method does not set {@code apiKeyRequired}, so a revoked key produces a request
+ * whose {@code identity.apiKey} is null rather than a 403; enforcement of the gate itself is
+ * covered separately by {@link ApiGatewayApiKeyRequiredIntegrationTest}.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

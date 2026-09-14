@@ -122,6 +122,20 @@ class MemoryDbIntegrationTest {
 
     @Test
     @Order(4)
+    void explicitAuthIsAcceptedWhenAuthIsNotRequired() throws Exception {
+        // open-access clusters never demand AUTH, but a client that sends one anyway
+        // (common with generic Redis clients) must still get +OK and stay usable.
+        try (Socket socket = openSocket(openPort)) {
+            write(socket, respArray("AUTH", "any-password"));
+            assertEquals("+OK\r\n", readLine(socket));
+
+            write(socket, respArray("PING"));
+            assertEquals("+PONG\r\n", readLine(socket));
+        }
+    }
+
+    @Test
+    @Order(5)
     void createPasswordUserAndAcl() {
         // A password user attached to an ACL is how real MemoryDB models auth — the
         // cluster then references that ACL via ACLName.
@@ -145,7 +159,7 @@ class MemoryDbIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void createClusterReferencingAcl() {
         authPort = memorydb("CreateCluster", "{"
                 + "\"ClusterName\":\"" + AUTH_CLUSTER + "\","
@@ -160,14 +174,14 @@ class MemoryDbIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void aclClusterRejectsUnauthenticatedCommand() throws Exception {
         assertEquals("-NOAUTH Authentication required.\r\n",
                 sendCommand(authPort, respArray("PING")));
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void aclUserCredentialsAllowAccess() throws Exception {
         // Exercises end-to-end that the proxy resolves auth through the ACL's user.
         try (Socket socket = openSocket(authPort)) {
@@ -180,14 +194,14 @@ class MemoryDbIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void wrongPasswordRejected() throws Exception {
         assertEquals("-ERR invalid username-password pair or user is disabled.\r\n",
                 sendCommand(authPort, respArray("AUTH", AUTH_USER, "wrong-password")));
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void deleteClusterReleasesProxyPortForReuse() {
         deleteCluster(OPEN_CLUSTER)
             .then()

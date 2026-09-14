@@ -24,12 +24,14 @@ order:
   - AWS::ECS
   - AWS::EKS
   - AWS::RDS
+  - AWS::Redshift
   - AWS::EC2
   - AWS::ElasticLoadBalancingV2
   - AWS::AutoScaling
   - AWS::Route53
   - AWS::ApiGateway
   - AWS::ApiGatewayV2
+  - AWS::AppSync
   - AWS::StepFunctions
   - AWS::CodePipeline
   - AWS::CodeBuild
@@ -79,6 +81,8 @@ type_order:
   AWS::EKS: [Cluster, Nodegroup]
   AWS::RDS:
     [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
+  AWS::Redshift:
+    [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup]
   AWS::EC2:
     [VPC, Subnet, SecurityGroup, SecurityGroupIngress, SecurityGroupEgress, InternetGateway,
      RouteTable, SubnetRouteTableAssociation, Route, NatGateway, EIP, Instance, LaunchTemplate,
@@ -89,6 +93,7 @@ type_order:
   AWS::Route53: [HostedZone, RecordSet]
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping]
   AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment]
+  AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]
   AWS::Cognito: [UserPool, UserPoolClient]
@@ -99,6 +104,7 @@ type_order:
 service_labels:
   AWS::ApiGateway: API Gateway (v1)
   AWS::ApiGatewayV2: API Gateway v2
+  AWS::AppSync: AppSync
   AWS::AutoScaling: Auto Scaling
   AWS::Batch: Batch
   AWS::Backup: Backup
@@ -129,6 +135,7 @@ service_labels:
   AWS::Organizations: Organizations
   AWS::Pipes: Pipes
   AWS::RDS: RDS
+  AWS::Redshift: Redshift
   AWS::Route53: Route 53
   AWS::S3: S3
   AWS::SNS: SNS
@@ -150,6 +157,8 @@ notes:
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
   AWS::RDS::DBInstance: starts a real container
   AWS::RDS::DBCluster: starts a real container
+  AWS::Redshift::ClusterSecurityGroup: accepted; no EC2-Classic security group model
+  AWS::Redshift::Cluster: single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported
   AWS::CDK::Metadata: accepted; no-op
   AWS::IoT::DomainConfiguration: '`ServerCertificates` resolves to a JSON string'
   AWS::IoT::Policy: 'deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached'

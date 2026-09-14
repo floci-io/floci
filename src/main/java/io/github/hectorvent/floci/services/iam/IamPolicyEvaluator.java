@@ -40,6 +40,12 @@ public class IamPolicyEvaluator {
 
     public enum Decision { ALLOW, DENY }
 
+    public enum ResourcePolicyDecision {
+        ALLOW,
+        EXPLICIT_DENY,
+        NEUTRAL
+    }
+
     public enum SimulationDecision {
         ALLOWED("allowed"),
         EXPLICIT_DENY("explicitDeny"),
@@ -89,6 +95,49 @@ public class IamPolicyEvaluator {
         List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
                 ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
 
+        boolean resourceExplicitDeny = anyExplicitDeny(resourceStmts, action, resource, ctx);
+        boolean resourceAllow = anyExplicitAllow(resourceStmts, action, resource, ctx);
+        return evaluateParsed(
+                caller, identityStmts, sessionStmts, boundaryStmts,
+                resourceExplicitDeny, resourceAllow, action, resource, ctx);
+    }
+
+    /**
+     * Evaluates an already principal-filtered resource-policy decision together with the
+     * caller's identity policies and permission ceilings.
+     */
+    public Decision evaluateResolvedResourcePolicy(
+            CallerContext caller,
+            ResourcePolicyDecision resourcePolicyDecision,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
+        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
+        List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
+        List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
+                ? null : parseAll(List.of(caller.sessionPolicyDocument()));
+        List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
+                ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
+        ResourcePolicyDecision resolvedDecision = resourcePolicyDecision == null
+                ? ResourcePolicyDecision.NEUTRAL : resourcePolicyDecision;
+        return evaluateParsed(
+                caller, identityStmts, sessionStmts, boundaryStmts,
+                resolvedDecision == ResourcePolicyDecision.EXPLICIT_DENY,
+                resolvedDecision == ResourcePolicyDecision.ALLOW,
+                action, resource, ctx);
+    }
+
+    private Decision evaluateParsed(
+            CallerContext caller,
+            List<PolicyStatement> identityStmts,
+            List<PolicyStatement> sessionStmts,
+            List<PolicyStatement> boundaryStmts,
+            boolean resourceExplicitDeny,
+            boolean resourceAllow,
+            String action,
+            String resource,
+            Map<String, List<String>> ctx) {
+
         // 0. Service control policies gate everything: the action must be allowed at EVERY
         //    organization level and explicitly denied at none, before identity policies are
         //    even consulted. An empty level means FullAWSAccess semantics and is skipped;
@@ -99,7 +148,7 @@ public class IamPolicyEvaluator {
 
         // 1. Explicit deny in ANY policy → DENY immediately
         if (anyExplicitDeny(identityStmts, action, resource, ctx)
-                || anyExplicitDeny(resourceStmts, action, resource, ctx)
+                || resourceExplicitDeny
                 || (sessionStmts  != null && anyExplicitDeny(sessionStmts,  action, resource, ctx))
                 || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, action, resource, ctx))) {
             return Decision.DENY;
@@ -107,7 +156,6 @@ public class IamPolicyEvaluator {
 
         // 2. Base grant: identity OR resource-based policy must allow
         boolean identityAllow = anyExplicitAllow(identityStmts, action, resource, ctx);
-        boolean resourceAllow = anyExplicitAllow(resourceStmts, action, resource, ctx);
         if (!identityAllow && !resourceAllow) {
             return Decision.DENY;
         }
