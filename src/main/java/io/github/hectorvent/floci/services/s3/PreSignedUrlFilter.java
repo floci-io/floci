@@ -167,7 +167,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             URI requestUri = requestContext.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) instanceof URI uri
                     ? uri
                     : requestContext.getUriInfo().getRequestUri();
-            String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"), requestUri);
+            String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"),
+                    requestContext.getHeaderString("X-Forwarded-Host"), requestUri);
 
             StringBuilder canonicalHeaders = new StringBuilder();
             for (String header : signedHeaders.split(";")) {

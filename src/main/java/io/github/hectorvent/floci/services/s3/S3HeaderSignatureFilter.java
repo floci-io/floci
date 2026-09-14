@@ -184,7 +184,8 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         URI requestUri = ctx.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) instanceof URI uri
                 ? uri
                 : ctx.getUriInfo().getRequestUri();
-        String host = S3VirtualHostFilter.resolveHost(ctx.getHeaderString("Host"), requestUri);
+        String host = S3VirtualHostFilter.resolveHost(ctx.getHeaderString("Host"),
+                ctx.getHeaderString("X-Forwarded-Host"), requestUri);
 
         StringBuilder canonicalHeaders = new StringBuilder();
         for (String name : signedHeaders.split(";")) {

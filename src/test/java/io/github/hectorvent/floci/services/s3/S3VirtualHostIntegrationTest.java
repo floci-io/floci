@@ -327,6 +327,75 @@ class S3VirtualHostIntegrationTest {
 
     @Test
     @Order(21)
+    void putObjectViaVirtualHostWithXForwardedHost() {
+        String hashKey = "30388849b0eaef3dfba3aa83849d28987be6fb7920bdbf3233bdc8e966f73870.json";
+        String content = "{\"asset\":\"cdk-template-data\"}";
+
+        // Simulate request through Traefik/reverse proxy rewriting Host to floci:4566
+        // and forwarding the client's virtual-hosted Host in X-Forwarded-Host
+        given()
+            .header("Host", "floci:4566")
+            .header("X-Forwarded-Host", HOST)
+            .contentType("application/json")
+            .body(content)
+        .when()
+            .put("/" + hashKey)
+        .then()
+            .statusCode(200);
+
+        // Verify object was stored in vhost-bucket
+        given()
+            .header("Host", HOST)
+        .when()
+            .get("/" + hashKey)
+        .then()
+            .statusCode(200)
+            .body(equalTo(content));
+
+        // Verify hashKey was NOT created as a bucket
+        given()
+            .header("Host", "localhost:4566")
+        .when()
+            .head("/" + hashKey)
+        .then()
+            .statusCode(404);
+
+        // Clean up object
+        given().header("Host", HOST).delete("/" + hashKey)
+                .then().statusCode(204);
+    }
+
+    @Test
+    @Order(22)
+    void createMultipartUploadViaVirtualHostWithXForwardedHost() {
+        String key = "multipart-xfh.zip";
+        io.restassured.response.Response response = given()
+            .header("Host", "floci:4566")
+            .header("X-Forwarded-Host", HOST)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260914/us-east-1/s3/aws4_request, Signature=fake")
+            .contentType("application/x-www-form-urlencoded")
+            .queryParam("uploads", "")
+        .when()
+            .post("/" + key)
+        .then()
+            .statusCode(200)
+            .body(containsString("<Bucket>" + BUCKET + "</Bucket>"))
+            .body(containsString("<Key>" + key + "</Key>"))
+            .extract().response();
+
+        String uploadId = response.xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        given()
+            .header("Host", HOST)
+            .queryParam("uploadId", uploadId)
+        .when()
+            .delete("/" + key)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(25)
     void cleanupAndDeleteBucket() {
         given().header("Host", HOST).delete("/hello.txt");
         given().header("Host", HOST).delete("/path/to/nested.json");
