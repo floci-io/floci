@@ -159,9 +159,40 @@ final class S3PublicAccessEvaluator {
 
     private static boolean principalDirectlyMatches(
             JsonNode statement, String principalType, String principalValue) {
-        return statement.hasNonNull("Principal")
-                && principalNodeDirectlyMatches(
-                        statement.path("Principal"), principalType, principalValue);
+        if (!statement.hasNonNull("Principal")) {
+            return false;
+        }
+        JsonNode principal = statement.path("Principal");
+        return principalNodeDirectlyMatches(principal, principalType, principalValue)
+                || ("AWS".equalsIgnoreCase(principalType)
+                && hasPublicPrincipal(principal)
+                && conditionDirectlyMatchesPrincipalArn(
+                        statement.path("Condition"), principalValue));
+    }
+
+    private static boolean conditionDirectlyMatchesPrincipalArn(
+            JsonNode conditions, String principalValue) {
+        if (conditions == null || !conditions.isObject()) {
+            return false;
+        }
+        Iterator<Map.Entry<String, JsonNode>> operators = conditions.fields();
+        while (operators.hasNext()) {
+            Map.Entry<String, JsonNode> operator = operators.next();
+            if (!("StringEquals".equalsIgnoreCase(operator.getKey())
+                    || "ArnEquals".equalsIgnoreCase(operator.getKey()))
+                    || !operator.getValue().isObject()) {
+                continue;
+            }
+            Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
+            while (entries.hasNext()) {
+                Map.Entry<String, JsonNode> entry = entries.next();
+                if ("aws:PrincipalArn".equalsIgnoreCase(entry.getKey())
+                        && conditionValueMatches(entry.getValue(), principalValue, false)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean principalNodeDirectlyMatches(
