@@ -670,8 +670,16 @@ public class CloudFormationService implements ResourceProvider {
             boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
                     "CREATE_IN_PROGRESS".equals(existing.getStatus());
             cs.setExecutionStatus("EXECUTE_IN_PROGRESS");
-            // CloudFormation deletes every other change set on the stack once one of them executes.
-            existing.getChangeSets().values().removeIf(other -> other != cs);
+            if (requireAvailable) {
+                // CloudFormation deletes every other change set on the stack once one of them executes.
+                existing.getChangeSets().values().removeIf(other -> other != cs);
+            } else {
+                for (ChangeSet other : existing.getChangeSets().values()) {
+                    if (other != cs && "AVAILABLE".equals(other.getExecutionStatus())) {
+                        other.setExecutionStatus("OBSOLETE");
+                    }
+                }
+            }
             existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
             existing.setLastUpdatedTime(now());
             addEvent(existing, existing.getStackName(), existing.getStackId(),

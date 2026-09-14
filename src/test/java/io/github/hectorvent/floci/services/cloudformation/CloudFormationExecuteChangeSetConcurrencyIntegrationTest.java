@@ -132,6 +132,23 @@ class CloudFormationExecuteChangeSetConcurrencyIntegrationTest {
         assertThat(rejected.asString(), containsString("execution status of [EXECUTE_"));
     }
 
+    @Test
+    void updateStack_marksPendingChangeSetsObsolete() {
+        String stackName = uniqueStackName("obsolete");
+        createStack(stackName, topicTemplate("Base"));
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+        createChangeSet(stackName, "pending", "UPDATE", twoTopicTemplate("Base", "TopicA")).then().statusCode(200);
+
+        updateStack(stackName, twoTopicTemplate("Base", "TopicB"));
+        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+
+        assertEquals("OBSOLETE", describeChangeSetExecutionStatus(stackName, "pending"));
+        Response rejected = executeChangeSet(stackName, "pending");
+        rejected.then().statusCode(400).body(containsString("<Code>InvalidChangeSetStatus</Code>"));
+        assertThat(rejected.asString(), containsString("execution status of [OBSOLETE]"));
+        assertEquals(0, countTopicsWithPrefix(stackName + "-TopicA-"));
+    }
+
     private String uniqueStackName(String prefix) {
         String name = "cfn-execute-" + prefix + "-" + Long.toString(System.nanoTime(), 36);
         stacksToDelete.add(name);
@@ -172,6 +189,18 @@ class CloudFormationExecuteChangeSetConcurrencyIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static void updateStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
         .when()
