@@ -10,10 +10,11 @@ import java.util.List;
 /**
  * A stored partition index, as returned by {@code GetPartitionIndexes}.
  *
- * <p>{@code IndexStatus} is always {@code ACTIVE} here. Real Glue creates an index asynchronously
- * and reports {@code CREATING} until the backfill finishes, but an emulator that settles
- * immediately keeps tests free of polling and lets a client that waits for {@code ACTIVE} (the
- * Terraform provider does) complete on the first read.
+ * <p>{@code IndexStatus} follows the real lifecycle, advanced by reads rather than by time: an
+ * index is stored {@code CREATING} and becomes {@code ACTIVE} on the next
+ * {@code GetPartitionIndexes}; a deleted one is stored {@code DELETING} and disappears on that
+ * same read. Real Glue backfills asynchronously, so a client that polls for {@code ACTIVE} (the
+ * Terraform provider does) sees the transition it expects, without the emulator needing a clock.
  */
 @RegisterForReflection
 @JsonInclude(JsonInclude.Include.NON_NULL)

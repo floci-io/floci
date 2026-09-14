@@ -448,9 +448,9 @@ public class GlueService {
     /**
      * Registers a partition index on a table.
      *
-     * <p>The index is stored {@code ACTIVE} straight away. Real Glue creates one asynchronously and
-     * reports {@code CREATING} while it backfills, but settling immediately keeps the emulator
-     * deterministic and lets a client that polls for {@code ACTIVE} finish on its first read.
+     * <p>The index is stored {@code CREATING}, as real Glue reports it while the backfill runs. It
+     * settles to {@code ACTIVE} on the next {@code GetPartitionIndexes}, so a client that polls
+     * sees the transition without the emulator depending on elapsed time.
      */
     public void createPartitionIndex(String databaseName, String tableName, PartitionIndex index) {
         Table table = getTable(databaseName, tableName);
