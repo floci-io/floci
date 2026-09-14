@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -153,6 +154,61 @@ class CodeDeployServiceTest {
         Deployment deployment = awaitTerminal(clockedService, deploymentId, Duration.ofSeconds(5));
 
         assertEquals("Succeeded", deployment.getStatus());
+    }
+
+    @Test
+    void hookWithoutTimeoutIsSentWithTheAppSpecDefaultOfOneHour() {
+        service.registerOnPremisesInstance(REGION, "instance-1", "arn:aws:sts::000000000000:session/s",
+                "arn:aws:iam::000000000000:user/u");
+        when(ssmCommandService.isInstanceRegistered("instance-1", REGION)).thenReturn(true);
+        when(ssmCommandService.sendCommandToInstance(eq("instance-1"), anyString(), any(), eq(3600), eq(REGION)))
+                .thenReturn("cmd-default");
+        when(ssmCommandService.getCommandInvocationStatus("cmd-default", "instance-1", REGION))
+                .thenReturn("Success");
+
+        String deploymentId = createServerDeployment(service, "app-default-timeout", "group-default-timeout", """
+                os: linux
+                hooks:
+                  ApplicationStart:
+                    - location: scripts/start_server.sh
+                """);
+
+        Deployment deployment = awaitTerminal(deploymentId, Duration.ofSeconds(5));
+
+        assertEquals("Succeeded", deployment.getStatus());
+        verify(ssmCommandService).sendCommandToInstance(eq("instance-1"), anyString(), any(), eq(3600), eq(REGION));
+    }
+
+    @Test
+    void invalidHookTimeoutFailsBeforeInstallWithoutRunningAnyScript() {
+        service.registerOnPremisesInstance(REGION, "instance-1", "arn:aws:sts::000000000000:session/s",
+                "arn:aws:iam::000000000000:user/u");
+        when(ssmCommandService.isInstanceRegistered("instance-1", REGION)).thenReturn(true);
+
+        int index = 0;
+        for (String timeout : List.of("0", "-5", "abc", "30s", "\"\"")) {
+            String suffix = "invalid-timeout-" + index++;
+            String deploymentId = createServerDeployment(service, "app-" + suffix, "group-" + suffix, """
+                    os: linux
+                    hooks:
+                      ApplicationStart:
+                        - location: scripts/start_server.sh
+                          timeout: %s
+                    """.formatted(timeout));
+
+            Deployment deployment = awaitTerminal(deploymentId, Duration.ofSeconds(5));
+
+            assertEquals("Failed", deployment.getStatus(), "timeout " + timeout);
+            Map<String, Object> event = instanceTargetEvent(deploymentId, "instance-1", "BeforeInstall");
+            assertEquals("Failed", event.get("status"), "timeout " + timeout);
+            Map<String, String> diagnostics = diagnosticsOf(event);
+            assertEquals("UnknownError", diagnostics.get("errorCode"), "timeout " + timeout);
+            assertEquals("The deployment failed because an invalid timeout value was provided for a script in "
+                    + "the application specification file. Make corrections in the hooks section of the "
+                    + "AppSpec file, and then try again.", diagnostics.get("message"), "timeout " + timeout);
+            assertFalse(hasLifecycleEvent(deploymentId, "instance-1", "ApplicationStart"), "timeout " + timeout);
+        }
+        verify(ssmCommandService, never()).sendCommandToInstance(anyString(), anyString(), any(), anyInt(), anyString());
     }
 
     // ---- Lambda platform hooks ----------------------------------------------------------
@@ -325,15 +381,19 @@ class CodeDeployServiceTest {
 
     private String createServerDeployment(CodeDeployService target, String appName, String groupName,
                                           int timeoutSeconds) {
-        target.createApplication(REGION, appName, "Server", null);
-        target.createDeploymentGroup(REGION, appName, groupName, "CodeDeployDefault.AllAtOnce", ROLE_ARN, null);
-        String appSpec = """
+        return createServerDeployment(target, appName, groupName, """
                 os: linux
                 hooks:
                   ApplicationStart:
                     - location: scripts/start_server.sh
                       timeout: %d
-                """.formatted(timeoutSeconds);
+                """.formatted(timeoutSeconds));
+    }
+
+    private String createServerDeployment(CodeDeployService target, String appName, String groupName,
+                                          String appSpec) {
+        target.createApplication(REGION, appName, "Server", null);
+        target.createDeploymentGroup(REGION, appName, groupName, "CodeDeployDefault.AllAtOnce", ROLE_ARN, null);
         Map<String, Object> revision = Map.of("revisionType", "AppSpecContent",
                 "appSpecContent", Map.of("content", appSpec));
         return target.createDeployment(REGION, appName, groupName, null, revision, "server hook test");
@@ -397,6 +457,14 @@ class CodeDeployServiceTest {
 
     private boolean isTerminal(String status) {
         return "Succeeded".equals(status) || "Failed".equals(status) || "Stopped".equals(status);
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean hasLifecycleEvent(String deploymentId, String targetId, String eventName) {
+        Map<String, Object> target = service.batchGetDeploymentTargets(REGION, deploymentId, List.of(targetId)).get(0);
+        Map<String, Object> instanceTarget = (Map<String, Object>) target.get("instanceTarget");
+        List<Map<String, Object>> events = (List<Map<String, Object>>) instanceTarget.get("lifecycleEvents");
+        return events.stream().anyMatch(e -> eventName.equals(e.get("lifecycleEventName")));
     }
 
     @SuppressWarnings("unchecked")

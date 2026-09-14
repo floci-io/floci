@@ -49,6 +49,12 @@ public class CodeDeployService {
 
     private static final Logger LOG = Logger.getLogger(CodeDeployService.class);
 
+    /** The AppSpec hooks reference default when a script declares no {@code timeout}. */
+    static final int DEFAULT_HOOK_TIMEOUT_SECONDS = 3600;
+    static final String INVALID_HOOK_TIMEOUT_MESSAGE = "The deployment failed because an invalid timeout value "
+            + "was provided for a script in the application specification file. Make corrections in the hooks "
+            + "section of the AppSpec file, and then try again.";
+
     // Lambda/ECS validation hooks must call PutLifecycleEventHookExecutionStatus within one hour.
     private static final Duration DEFAULT_HOOK_CALLBACK_TIMEOUT = Duration.ofHours(1);
     private static final Duration STOP_POLL_INTERVAL = Duration.ofMillis(200);
@@ -916,6 +922,19 @@ public class CodeDeployService {
                 continue;
             }
 
+            // BeforeInstall is the first event for which the agent parses the new revision's
+            // AppSpec (ApplicationStop runs the previous revision's). An invalid hook timeout
+            // anywhere in the file fails that parse, and so the event, even when BeforeInstall
+            // itself has no hooks.
+            if ("BeforeInstall".equals(eventName)) {
+                String appSpecError = hookTimeoutValidationError(appSpec);
+                if (appSpecError != null) {
+                    finishLifecycleEvent(event, "Failed", "UnknownError", appSpecError);
+                    updateTargetStatus(targetMap, "Failed");
+                    return false;
+                }
+            }
+
             if (hookSteps == null || hookSteps.isEmpty()) {
                 finishLifecycleEvent(event, "Skipped");
                 continue;
@@ -937,7 +956,7 @@ public class CodeDeployService {
                                                Map<String, Object> event) throws InterruptedException {
         for (Map<String, Object> step : hookSteps) {
             String location = (String) step.get("location");
-            int timeout = toInt(step.get("timeout"), 300);
+            int timeout = toInt(step.get("timeout"), DEFAULT_HOOK_TIMEOUT_SECONDS);
             String runas = (String) step.getOrDefault("runas", "root");
 
             if (location == null) {
@@ -1030,7 +1049,10 @@ public class CodeDeployService {
                         steps.forEach(s -> {
                             Map<String, Object> step = new java.util.LinkedHashMap<>();
                             if (s.has("location")) { step.put("location", s.get("location").asText()); }
-                            if (s.has("timeout")) { step.put("timeout", s.get("timeout").asInt(300)); }
+                            if (s.hasNonNull("timeout")) {
+                                JsonNode timeout = s.get("timeout");
+                                step.put("timeout", timeout.isIntegralNumber() ? timeout.asInt() : timeout.asText());
+                            }
                             if (s.has("runas")) { step.put("runas", s.get("runas").asText("root")); }
                             stepList.add(step);
                         });
@@ -1792,6 +1814,36 @@ public class CodeDeployService {
     private String generateDeploymentId() {
         String hex = UUID.randomUUID().toString().replace("-", "").substring(0, 9).toUpperCase();
         return "d-" + hex;
+    }
+
+    /**
+     * The check the CodeDeploy agent applies to every hook script's {@code timeout} when it
+     * parses an AppSpec: absent means one hour, and anything that is not a positive integer
+     * fails the parse. Returns the agent's message for the first offending script, or
+     * {@code null} when every timeout is acceptable.
+     */
+    private static String hookTimeoutValidationError(ServerAppSpecInfo appSpec) {
+        if (appSpec == null || appSpec.hooks == null) {
+            return null;
+        }
+        for (List<Map<String, Object>> steps : appSpec.hooks.values()) {
+            for (Map<String, Object> step : steps) {
+                if (step.containsKey("timeout") && !isPositiveInteger(step.get("timeout"))) {
+                    return INVALID_HOOK_TIMEOUT_MESSAGE;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isPositiveInteger(Object value) {
+        if (value instanceof Number n) {
+            return n.longValue() > 0 && n.longValue() == n.intValue();
+        }
+        if (value instanceof String text && text.matches("[0-9]{1,9}")) {
+            return Integer.parseInt(text) > 0;
+        }
+        return false;
     }
 
     private int toInt(Object val, int def) {
