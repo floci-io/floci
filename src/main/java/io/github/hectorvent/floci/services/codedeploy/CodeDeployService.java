@@ -915,7 +915,7 @@ public class CodeDeployService {
                                                Map<String, Object> event) throws InterruptedException {
         for (Map<String, Object> step : hookSteps) {
             String location = (String) step.get("location");
-            int timeout = toInt(step.get("timeout"), 300);
+            int timeout = toInt(step.get("timeout"), 3600);
             String runas = (String) step.getOrDefault("runas", "root");
 
             if (location == null) {
