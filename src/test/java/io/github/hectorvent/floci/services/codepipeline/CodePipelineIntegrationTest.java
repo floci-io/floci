@@ -329,6 +329,222 @@ class CodePipelineIntegrationTest {
     }
 
     @Test
+    void s3SourcePollingStartsExactlyOneExecutionForARevisionChange() throws Exception {
+        createBucket("codepipeline-poll-source");
+        createBucket("codepipeline-poll-destination");
+        putObject("codepipeline-poll-source", "source.zip", "baseline artifact");
+
+        String pipelineName = "s3-source-polling-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-poll-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-poll-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        Thread.sleep(1200);
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(0));
+
+        putObject("codepipeline-poll-source", "source.zip", "changed artifact");
+
+        Response executions = waitForPipelineExecutionCount(pipelineName, 1);
+        String executionId = executions.jsonPath().getString("pipelineExecutionSummaries[0].pipelineExecutionId");
+        waitForExecution(pipelineName, executionId, "Succeeded");
+
+        post("GetPipelineExecution", """
+                {"pipelineName": "%s", "pipelineExecutionId": "%s"}
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecution.trigger.triggerType", equalTo("PollForSourceChanges"))
+                .body("pipelineExecution.trigger.triggerDetail",
+                        equalTo("s3://codepipeline-poll-source/source.zip"));
+
+        given()
+                .get("/codepipeline-poll-destination/deployed.zip")
+        .then()
+                .statusCode(200)
+                .body(equalTo("changed artifact"));
+
+        Thread.sleep(1200);
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(1));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void s3SourcePollingStartsWhenPreviouslyMissingObjectAppears() throws Exception {
+        createBucket("codepipeline-poll-missing-source");
+        createBucket("codepipeline-poll-missing-destination");
+
+        String pipelineName = "s3-source-polling-missing-object";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-poll-missing-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-poll-missing-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        Thread.sleep(700);
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(0));
+
+        putObject("codepipeline-poll-missing-source", "source.zip", "first available artifact");
+
+        Response executions = waitForPipelineExecutionCount(pipelineName, 1);
+        String executionId = executions.jsonPath().getString("pipelineExecutionSummaries[0].pipelineExecutionId");
+        waitForExecution(pipelineName, executionId, "Succeeded");
+        post("GetPipelineExecution", """
+                {"pipelineName": "%s", "pipelineExecutionId": "%s"}
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecution.trigger.triggerType", equalTo("PollForSourceChanges"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void s3SourcePollingDisabledDoesNotStartExecution() throws Exception {
+        createBucket("codepipeline-poll-disabled-source");
+        putObject("codepipeline-poll-disabled-source", "source.zip", "baseline artifact");
+
+        String pipelineName = "s3-source-polling-disabled";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-poll-disabled-source",
+                            "S3ObjectKey": "source.zip",
+                            "PollForSourceChanges": "false"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "PlaceholderAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "unused-codepipeline-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        putObject("codepipeline-poll-disabled-source", "source.zip", "changed artifact");
+        Thread.sleep(1200);
+
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(0));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
     void listPipelineExecutionsValidatesFilterAndMaxResults() {
         String pipelineName = "list-executions-validation-pipeline";
         post("CreatePipeline", pipeline(pipelineName, """
@@ -1232,6 +1448,21 @@ class CodePipelineIntegrationTest {
             Thread.sleep(50);
         } while (Instant.now().isBefore(deadline));
         throw new AssertionError("Custom action job was not created");
+    }
+
+    private Response waitForPipelineExecutionCount(String pipelineName, int expectedCount) throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
+        Response response;
+        do {
+            response = post("ListPipelineExecutions", """
+                    {"pipelineName": "%s"}
+                    """.formatted(pipelineName));
+            if (response.jsonPath().getList("pipelineExecutionSummaries").size() == expectedCount) {
+                return response;
+            }
+            Thread.sleep(50);
+        } while (Instant.now().isBefore(deadline));
+        throw new AssertionError("Pipeline execution count did not reach " + expectedCount);
     }
 
     private void waitForExecution(String pipelineName, String executionId, String expected) throws Exception {

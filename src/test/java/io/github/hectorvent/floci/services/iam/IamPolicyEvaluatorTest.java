@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
@@ -78,6 +79,99 @@ class IamPolicyEvaluatorTest {
         assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
                 caller,
                 ResourcePolicyDecision.EXPLICIT_DENY,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void crossAccountIdentityAllowRequiresResourceAllow() {
+        CallerContext caller = CallerContext.of(List.of(ALLOW_ALL));
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.NEUTRAL,
+                ResourceAccountRelationship.CROSS_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void crossAccountResourceAllowRequiresIdentityAllow() {
+        CallerContext caller = CallerContext.of(List.of());
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW,
+                ResourceAccountRelationship.CROSS_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void crossAccountAccessAllowsWhenIdentityAndResourcePoliciesAllow() {
+        CallerContext caller = CallerContext.of(List.of(ALLOW_ALL));
+
+        assertEquals(Decision.ALLOW, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW,
+                ResourceAccountRelationship.CROSS_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void sameAccountDirectUserGrantBypassesBoundaryImplicitDeny() {
+        CallerContext caller = new CallerContext(
+                List.of(),
+                null,
+                """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:*","Resource":"*"}
+                ]}""");
+
+        assertEquals(Decision.ALLOW, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                ResourceAccountRelationship.SAME_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void sameAccountWildcardGrantRemainsLimitedByBoundary() {
+        CallerContext caller = new CallerContext(
+                List.of(),
+                null,
+                """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:*","Resource":"*"}
+                ]}""");
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW,
+                ResourceAccountRelationship.SAME_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void sameAccountDirectUserGrantDoesNotBypassBoundaryExplicitDeny() {
+        CallerContext caller = new CallerContext(
+                List.of(),
+                null,
+                DENY_S3);
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                ResourceAccountRelationship.SAME_ACCOUNT,
                 "s3:GetObject",
                 "arn:aws:s3:::bucket/key",
                 null));

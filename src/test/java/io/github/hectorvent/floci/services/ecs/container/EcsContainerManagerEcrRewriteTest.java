@@ -48,7 +48,7 @@ import static org.mockito.Mockito.when;
 class EcsContainerManagerEcrRewriteTest {
 
     private static final String ECR_IMAGE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1";
-    private static final String REWRITTEN_IMAGE = "123456789012.dkr.ecr.us-east-1.localhost:5100/backend-user:1";
+    private static final String REWRITTEN_IMAGE = "123456789012.dkr.ecr.us-east-1.localhost:4566/backend-user:1";
 
     private ContainerBuilder containerBuilder;
     private ContainerLifecycleManager lifecycleManager;
