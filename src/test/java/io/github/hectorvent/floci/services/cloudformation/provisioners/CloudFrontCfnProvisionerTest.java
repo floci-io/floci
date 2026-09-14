@@ -7,6 +7,9 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
+import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
+import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
@@ -43,6 +46,7 @@ class CloudFrontCfnProvisionerTest {
     private static final String CACHE_POLICY = "AWS::CloudFront::CachePolicy";
     private static final String ORIGIN_REQUEST_POLICY = "AWS::CloudFront::OriginRequestPolicy";
     private static final String ORIGIN_ACCESS_CONTROL = "AWS::CloudFront::OriginAccessControl";
+    private static final String DISTRIBUTION = "AWS::CloudFront::Distribution";
     private static final String REGION = "us-east-1";
     private static final String ID = "5cc3b908-e619-4b99-88e5-2cf7f45965bd";
     private static final String ETAG = "E2QWRUHAPOMQZL";
@@ -96,9 +100,94 @@ class CloudFrontCfnProvisionerTest {
     }
 
     @Test
-    void servesTheFourConfigTypes() {
-        assertEquals(Set.of(RESPONSE_HEADERS_POLICY, CACHE_POLICY, ORIGIN_REQUEST_POLICY, ORIGIN_ACCESS_CONTROL),
-                provisioner.resourceTypes());
+    void servesTheDistributionAndItsFourConfigTypes() {
+        assertEquals(Set.of(DISTRIBUTION, RESPONSE_HEADERS_POLICY, CACHE_POLICY, ORIGIN_REQUEST_POLICY,
+                ORIGIN_ACCESS_CONTROL), provisioner.resourceTypes());
+    }
+
+    /**
+     * The distribution helpers read every scalar through {@code engine.resolve}, which the shared
+     * {@link #ctx()} leaves unstubbed because the config types only need {@code resolveNode}.
+     */
+    private ProvisionContext distributionCtx(String priorPhysicalId) {
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolve(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            return node == null || node.isMissingNode() || node.isNull() ? "" : node.asText();
+        });
+        return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
+    }
+
+    private static Distribution distribution(String id, String domainName) {
+        Distribution d = new Distribution();
+        d.setId(id);
+        d.setDomainName(domainName);
+        d.setArn("arn:aws:cloudfront::000000000000:distribution/" + id);
+        d.setEtag(ETAG);
+        return d;
+    }
+
+    @Test
+    void createsDistributionAndExposesTheSchemaAttributes() throws Exception {
+        when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION);
+
+        provisioner.provision(r, json("""
+                {"DistributionConfig": {
+                   "Enabled": true,
+                   "Comment": "site",
+                   "Origins": [{"Id": "o1", "DomainName": "b.s3.amazonaws.com"}],
+                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
+                }}
+                """), distributionCtx(null));
+
+        // Ref is the distribution id; Id and DomainName are the schema's read-only properties.
+        assertEquals("E1DIST", r.getPhysicalId());
+        assertEquals("E1DIST", r.getAttributes().get("Id"));
+        assertEquals("d111.cloudfront.net", r.getAttributes().get("DomainName"));
+        assertEquals("arn:aws:cloudfront::000000000000:distribution/E1DIST", r.getAttributes().get("Arn"));
+
+        ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
+        verify(cloudFront).createDistribution(sent.capture(), any());
+        DistributionConfig config = sent.getValue().getConfig();
+        assertTrue(config.isEnabled());
+        assertEquals("site", config.getComment());
+        // Defaults the monolith applied and that must survive the move.
+        assertEquals("http2", config.getHttpVersion());
+        assertEquals("PriceClass_All", config.getPriceClass());
+        Origin origin = config.getOrigins().getFirst();
+        assertEquals("o1", origin.getId());
+        assertEquals("b.s3.amazonaws.com", origin.getDomainName());
+        // No CustomOriginConfig means an S3 origin.
+        assertNull(origin.getCustomOriginConfig());
+        assertEquals("redirect-to-https", config.getDefaultCacheBehavior().getViewerProtocolPolicy());
+    }
+
+    @Test
+    void updatesTheDistributionInPlaceUnderThePriorId() throws Exception {
+        // provision() re-runs on every UpdateStack. The prior id comes from the context, not from
+        // the resource, because provision assigns the new id as it runs.
+        when(cloudFront.getDistribution("E1DIST")).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        when(cloudFront.updateDistribution(eq("E1DIST"), eq(ETAG), any()))
+                .thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION, "E1DIST", Map.of());
+
+        provisioner.provision(r, json("""
+                {"DistributionConfig": {"Enabled": false, "Comment": "paused"}}
+                """), distributionCtx("E1DIST"));
+
+        verify(cloudFront).updateDistribution(eq("E1DIST"), eq(ETAG), any());
+        verify(cloudFront, never()).createDistribution(any(), any());
+        assertEquals("E1DIST", r.getPhysicalId());
+    }
+
+    @Test
+    void deletesTheDistributionThroughTheStackLevelRemove() {
+        provisioner.delete(DISTRIBUTION, "E1DIST", REGION);
+        // removeDistribution skips the disable and If-Match guards deleteDistribution enforces,
+        // because the stack owns the lifecycle.
+        verify(cloudFront).removeDistribution("E1DIST");
     }
 
     @Test

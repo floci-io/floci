@@ -676,7 +676,6 @@ final class CfnProvisionerFixture {
                     kinesisService,
                     cloudWatchMetricsService,
                     firehoseService,
-                    cloudFrontService,
                     resourceRegistry,
                     dynamicReferences,
                     config);
