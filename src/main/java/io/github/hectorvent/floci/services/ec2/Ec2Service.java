@@ -3309,7 +3309,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return inst;
     }
 
-    private static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
+    static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
         if (options == null) {
             return;
         }
@@ -3334,7 +3334,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         + String.join(", ", allowed) + ".", 400);
     }
 
-    private static void validateCreditSpecification(String cpuCredits) {
+    static void validateCreditSpecification(String cpuCredits) {
         if (cpuCredits == null || "standard".equals(cpuCredits) || "unlimited".equals(cpuCredits)) {
             return;
         }

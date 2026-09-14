@@ -19,6 +19,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class Ec2RunInstancesDryRunTest {
     @Test
+    @DisplayName("Invalid RunInstances counts retain their validation error with DryRun enabled")
+    void invalidDryRunReturnsValidationError() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            Ec2Exception error = assertThrows(Ec2Exception.class, () -> ec2.runInstances(r ->
+                    r.imageId("ami-0abcdef1234567890").instanceType(InstanceType.T3_MICRO)
+                            .minCount(0).maxCount(1).dryRun(true)));
+            assertThat(error.statusCode()).isEqualTo(400);
+            assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
+        }
+    }
+
+    @Test
     @DisplayName("RunInstances dry run returns DryRunOperation without reserving an instance or client token")
     void dryRunHasNoLaunchSideEffects() {
         String marker = UUID.randomUUID().toString();

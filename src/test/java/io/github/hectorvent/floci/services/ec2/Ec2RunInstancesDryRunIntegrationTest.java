@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.UUID;
 
@@ -12,6 +14,27 @@ import static org.hamcrest.Matchers.emptyOrNullString;
 @QuarkusTest
 class Ec2RunInstancesDryRunIntegrationTest {
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
+
+    @ParameterizedTest
+    @CsvSource({"true,MinCount,invalid", "false,MinCount,invalid",
+            "true,MinCount,0", "false,MinCount,0", "true,MaxCount,-1", "false,MaxCount,-1",
+            "true,MinCount,2", "false,MinCount,2", "true,UserData,%%%", "false,UserData,%%%",
+            "true,MetadataOptions.HttpTokens,invalid", "false,MetadataOptions.HttpTokens,invalid",
+            "true,CreditSpecification.CpuCredits,invalid", "false,CreditSpecification.CpuCredits,invalid"})
+    void invalidLaunchInputKeepsItsValidationError(boolean dryRun, String parameter, String value) {
+        given().header("Authorization", AUTH).formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
+                .formParam("DryRun", dryRun).formParam(parameter, value)
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    void dryRunWithoutAnImageReturnsMissingParameter() {
+        given().header("Authorization", AUTH).formParam("Action", "RunInstances")
+                .formParam("DryRun", true).post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
 
     @Test
     void dryRunReturnsEc2ErrorWithoutCreatingAnInstanceOrConsumingClientToken() {
