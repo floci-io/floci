@@ -1106,6 +1106,75 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithItemBatcher_capsABatchAtTheChildInputCeiling() throws Exception {
+        createBucket("map-inputs-large");
+        StringBuilder dataset = new StringBuilder("[");
+        for (int i = 0; i < 40; i++) {
+            if (i > 0) {
+                dataset.append(",");
+            }
+            dataset.append("{\"pad\":\"").append("x".repeat(10_000)).append("\"}");
+        }
+        dataset.append("]");
+        putObject("map-inputs-large", "large.json", dataset.toString());
+
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON"
+                                },
+                                "Arguments": {
+                                    "Bucket": "map-inputs-large",
+                                    "Key": "large.json"
+                                }
+                            },
+                            "ItemBatcher": {
+                                "MaxItemsPerBatch": 100
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Count",
+                                "States": {
+                                    "Count": {
+                                        "Type": "Pass",
+                                        "Output": "{% { 'n': $count($states.input.Items) } %}",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-item-batcher-ceiling", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode batches = new ObjectMapper().readTree(output);
+
+        // 40 items of about 10 KB each exceed 256 KiB, so MaxItemsPerBatch 100 cannot be the only limit.
+        assertTrue(batches.size() > 1, "the ceiling must split the run: " + batches.size() + " batches");
+        int counted = 0;
+        for (JsonNode batch : batches) {
+            int size = batch.path("n").asInt();
+            assertTrue(size * 10_000 < 256 * 1024, "batch of " + size + " items exceeds the ceiling");
+            counted += size;
+        }
+        assertEquals(40, counted);
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_objectIteratesKeyValuePairs() throws Exception {
         createBucket("map-inputs-object");
         putObject("map-inputs-object", "workers.json", """

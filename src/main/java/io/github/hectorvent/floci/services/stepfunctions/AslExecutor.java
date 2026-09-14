@@ -112,6 +112,9 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class AslExecutor {
 
+    /** AWS starts no child execution with an input over 256 KiB, batched or not. */
+    private static final int MAX_BATCH_INPUT_BYTES = 256 * 1024;
+
     private enum MapItemsSource {
         DEFAULT,
         ITEM_READER_ARRAY,
@@ -2596,7 +2599,9 @@ public class AslExecutor {
 
     /**
      * Groups the items into batches of {@code {"BatchInput": ..., "Items": [...]}}, closing a batch on
-     * MaxItemsPerBatch or MaxInputBytesPerBatch. With neither limit set every item lands in one batch.
+     * MaxItemsPerBatch, on MaxInputBytesPerBatch, or on the 256 KiB child-input ceiling AWS applies
+     * whether or not a byte limit is declared. The size measured is the serialized child payload,
+     * envelope and BatchInput included, not the items alone.
      */
     private List<JsonNode> buildItemBatches(JsonNode stateDef, JsonNode items, ResolvedMapItems resolvedItems,
                                             JsonNode itemTransform, JsonNode mapInput, boolean jsonata,
@@ -2613,9 +2618,14 @@ public class AslExecutor {
                     : resolveParameters(batcher.get("BatchInput"), mapInput, context);
         }
 
+        int byteCeiling = maxBytesPerBatch > 0
+                ? Math.min(maxBytesPerBatch, MAX_BATCH_INPUT_BYTES)
+                : MAX_BATCH_INPUT_BYTES;
+        int envelopeBytes = serializedBytes(newBatch(batchInput, objectMapper.createArrayNode()));
+
         List<JsonNode> batches = new ArrayList<>();
         ArrayNode current = objectMapper.createArrayNode();
-        int currentBytes = 0;
+        int currentBytes = envelopeBytes;
         for (int i = 0; i < items.size(); i++) {
             JsonNode item = items.get(i);
             JsonNode childItem = item;
@@ -2623,13 +2633,15 @@ public class AslExecutor {
                 childItem = resolveParameters(itemTransform, mapInput,
                         mapItemContext(context, resolvedItems, item, i));
             }
-            int itemBytes = childItem.toString().getBytes(StandardCharsets.UTF_8).length;
+            // The separator this item adds once it is not the first element of the array.
+            int itemBytes = serializedBytes(childItem) + (current.size() > 0 ? 1 : 0);
             boolean itemsFull = maxItemsPerBatch > 0 && current.size() >= maxItemsPerBatch;
-            boolean bytesFull = maxBytesPerBatch > 0 && currentBytes + itemBytes > maxBytesPerBatch;
+            boolean bytesFull = currentBytes + itemBytes > byteCeiling;
             if (current.size() > 0 && (itemsFull || bytesFull)) {
                 batches.add(newBatch(batchInput, current));
                 current = objectMapper.createArrayNode();
-                currentBytes = 0;
+                currentBytes = envelopeBytes;
+                itemBytes = serializedBytes(childItem);
             }
             current.add(childItem);
             currentBytes += itemBytes;
@@ -2638,6 +2650,10 @@ public class AslExecutor {
             batches.add(newBatch(batchInput, current));
         }
         return batches;
+    }
+
+    private int serializedBytes(JsonNode node) {
+        return node.toString().getBytes(StandardCharsets.UTF_8).length;
     }
 
     private JsonNode newBatch(JsonNode batchInput, ArrayNode batchItems) {

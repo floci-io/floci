@@ -125,9 +125,11 @@ iterations.
 is `{"BatchInput": ..., "Items": [...]}`, with `BatchInput` present only when the state declares it.
 `ItemSelector` still runs per item, before the items are grouped.
 
-A batch closes on `MaxItemsPerBatch` or `MaxInputBytesPerBatch`. Either may be given as a `...Path`
-field, or as an expression in a JSONata state machine. With neither limit set, every item lands in
-one batch.
+A batch closes on `MaxItemsPerBatch`, on `MaxInputBytesPerBatch`, or on the 256 KiB child-input
+ceiling AWS applies whether or not a byte limit is declared. Either limit may be given as a
+`...Path` field, or as an expression in a JSONata state machine. With neither declared, items fill
+one batch up to that ceiling. The size measured is the serialized child payload, envelope and
+`BatchInput` included, not the items alone.
 
 `MaxConcurrency` then bounds concurrent batches, and the Map result has one entry per batch rather
 than per item. `DescribeMapRun` reports items under `itemCounts` and batches under
