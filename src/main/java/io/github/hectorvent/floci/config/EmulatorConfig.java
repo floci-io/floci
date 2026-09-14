@@ -322,6 +322,7 @@ public interface EmulatorConfig {
 
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
+        SageMakerStorageConfig sagemaker();
     }
 
     interface ApsStorageConfig {
@@ -597,7 +598,15 @@ public interface EmulatorConfig {
         @WithDefault("5000")
         long flushIntervalMs();
     }
+
     interface EfsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface SageMakerStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -713,6 +722,7 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        SageMakerServiceConfig sagemaker();
         LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
@@ -1086,6 +1096,13 @@ public interface EmulatorConfig {
 
         @WithDefault("immediate")
         String runnerMode();
+
+        Optional<String> dockerNetwork();
+    }
+
+    interface SageMakerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
 
         Optional<String> dockerNetwork();
     }
