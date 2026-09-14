@@ -2365,8 +2365,8 @@ public class AslExecutor {
         int childCount = batches == null ? itemCount : batches.size();
         JsonNode[] childInputsByIndex = hasResultWriter ? new JsonNode[childCount] : null;
         long[][] childTimingsByIndex = hasResultWriter ? new long[childCount][] : null;
-        int requestedConcurrency = resolveMapMaxConcurrency(
-                stateDef, mapInput, jsonata, context, variables);
+        int requestedConcurrency = resolveMapIntegerField(
+                stateDef, "MaxConcurrency", 0, mapInput, jsonata, context, variables);
         int effectiveConcurrency = effectiveMapConcurrency(
                 childCount, requestedConcurrency, distributed);
 
@@ -2506,29 +2506,35 @@ public class AslExecutor {
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
-    private int resolveMapMaxConcurrency(JsonNode stateDef, JsonNode mapInput, boolean jsonata,
-                                         JsonNode context, ObjectNode variables) {
+    /**
+     * Resolves an integer Map field from its literal, {@code <field>Path} or JSONata expression form,
+     * as MaxConcurrency and the ItemBatcher limits all take. An absent field is 0. {@code minimum} is
+     * the smallest accepted value, which is what separates MaxConcurrency, where 0 means the service
+     * ceiling, from a batch limit, where it is meaningless.
+     */
+    private int resolveMapIntegerField(JsonNode container, String field, int minimum, JsonNode mapInput,
+                                       boolean jsonata, JsonNode context, ObjectNode variables) {
         JsonNode value;
         boolean jsonataExpression = false;
-        if (stateDef.has("MaxConcurrencyPath")) {
-            value = resolvePath(stateDef.get("MaxConcurrencyPath").asText(), mapInput);
-        } else if (stateDef.has("MaxConcurrency")) {
-            value = stateDef.get("MaxConcurrency");
+        if (container.has(field + "Path")) {
+            value = resolvePath(container.get(field + "Path").asText(), mapInput);
+        } else if (container.has(field)) {
+            value = container.get(field);
             if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
                 jsonataExpression = true;
                 JsonNode statesVar = buildStatesVar(mapInput, null, context);
-                value = jsonataEvaluator.evaluateField(value.asText(), "MaxConcurrency", statesVar, variables);
+                value = jsonataEvaluator.evaluateField(value.asText(), field, statesVar, variables);
             }
         } else {
             return 0;
         }
 
-        if (!value.isIntegralNumber() || value.bigIntegerValue().signum() < 0) {
+        if (!value.isIntegralNumber() || value.bigIntegerValue().compareTo(BigInteger.valueOf(minimum)) < 0) {
             throw new FailStateException(
                     jsonataExpression ? "States.QueryEvaluationError" : "States.Runtime",
-                    "MaxConcurrency must resolve to a non-negative integer", "MaxConcurrency");
+                    field + " must resolve to an integer of " + minimum + " or more", field);
         }
-        return value.bigIntegerValue().compareTo(java.math.BigInteger.valueOf(Integer.MAX_VALUE)) > 0
+        return value.bigIntegerValue().compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0
                 ? Integer.MAX_VALUE
                 : value.intValue();
     }
@@ -2607,8 +2613,10 @@ public class AslExecutor {
                                             JsonNode itemTransform, JsonNode mapInput, boolean jsonata,
                                             JsonNode context, ObjectNode variables) throws Exception {
         JsonNode batcher = stateDef.get("ItemBatcher");
-        int maxItemsPerBatch = resolveBatcherLimit(batcher, "MaxItemsPerBatch", mapInput, jsonata, context, variables);
-        int maxBytesPerBatch = resolveBatcherLimit(batcher, "MaxInputBytesPerBatch", mapInput, jsonata, context, variables);
+        int maxItemsPerBatch = resolveMapIntegerField(
+                batcher, "MaxItemsPerBatch", 1, mapInput, jsonata, context, variables);
+        int maxBytesPerBatch = resolveMapIntegerField(
+                batcher, "MaxInputBytesPerBatch", 1, mapInput, jsonata, context, variables);
 
         JsonNode batchInput = null;
         if (batcher.has("BatchInput")) {
@@ -2673,30 +2681,6 @@ public class AslExecutor {
         return batch;
     }
 
-    private int resolveBatcherLimit(JsonNode batcher, String field, JsonNode mapInput, boolean jsonata,
-                                    JsonNode context, ObjectNode variables) {
-        JsonNode value;
-        boolean jsonataExpression = false;
-        if (batcher.has(field + "Path")) {
-            value = resolvePath(batcher.get(field + "Path").asText(), mapInput);
-        } else if (batcher.has(field)) {
-            value = batcher.get(field);
-            if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
-                jsonataExpression = true;
-                JsonNode statesVar = buildStatesVar(mapInput, null, context);
-                value = jsonataEvaluator.evaluateField(value.asText(), field, statesVar, variables);
-            }
-        } else {
-            return 0;
-        }
-
-        if (!value.isIntegralNumber() || value.intValue() <= 0) {
-            throw new FailStateException(
-                    jsonataExpression ? "States.QueryEvaluationError" : "States.Runtime",
-                    field + " must resolve to a positive integer", field);
-        }
-        return value.intValue();
-    }
 
     /**
      * Emulates a Distributed Map state's {@code ResultWriter}
