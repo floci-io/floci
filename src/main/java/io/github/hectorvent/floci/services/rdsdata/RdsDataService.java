@@ -6,10 +6,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
-import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -243,7 +244,7 @@ public class RdsDataService implements Resettable {
     private ObjectNode executeOnConnection(Connection connection, DatabaseEngine engine, String sql,
                                            Map<String, JsonNode> parameters, boolean includeMetadata)
             throws SQLException {
-        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
+        ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
         try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
             RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
             return buildResponse(statement, statement.execute(), includeMetadata, engine);
@@ -274,7 +275,7 @@ public class RdsDataService implements Resettable {
         if (parameterSets.isEmpty()) {
             return batchResponse(updateResults);
         }
-        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
+        ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
         try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
             rejectStatementReturningRows(statement, parsed.sql());
             if (returnsGeneratedKeys(engine)) {
@@ -429,6 +430,7 @@ public class RdsDataService implements Resettable {
         if (hasResultSet) {
             try (ResultSet rs = statement.getResultSet()) {
                 ResultSetMetaData meta = rs.getMetaData();
+                rejectUnsupportedResultTypes(meta, engine);
                 if (includeMetadata) {
                     response.set("columnMetadata", RdsDataColumnMetadata.toColumnMetadata(objectMapper, meta));
                 }
@@ -463,6 +465,28 @@ public class RdsDataService implements Resettable {
         } catch (SQLException e) {
             LOG.debugv("Could not read generated keys for RDS Data API statement: {0}", e.getMessage());
             return objectMapper.createArrayNode();
+        }
+    }
+
+    /**
+     * Aurora PostgreSQL answers a result set holding one of these column types with
+     * UnsupportedResultException (checked 2026-09-13). Casting the column to text is the
+     * documented way to read it.
+     */
+    private static final Set<String> UNSUPPORTED_POSTGRES_RESULT_TYPES = Set.of(
+            "point", "interval", "money", "box", "circle", "line", "lseg", "path", "polygon");
+
+    static void rejectUnsupportedResultTypes(ResultSetMetaData meta, DatabaseEngine engine) throws SQLException {
+        if (engine != DatabaseEngine.POSTGRES) {
+            return;
+        }
+        for (int i = 1; i <= meta.getColumnCount(); i++) {
+            String typeName = meta.getColumnTypeName(i);
+            if (typeName != null && UNSUPPORTED_POSTGRES_RESULT_TYPES.contains(typeName.toLowerCase(Locale.ROOT))) {
+                throw new AwsException("UnsupportedResultException",
+                        "The result contains the unsupported data type " + typeName.toUpperCase(Locale.ROOT) + ".",
+                        400);
+            }
         }
     }
 

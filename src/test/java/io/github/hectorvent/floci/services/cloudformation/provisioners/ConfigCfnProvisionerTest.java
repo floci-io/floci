@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.configservice.AwsConfigService;
@@ -14,10 +15,17 @@ import java.util.HashMap;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ConfigCfnProvisionerTest {
@@ -104,12 +112,62 @@ class ConfigCfnProvisionerTest {
     }
 
     @Test
-    void deleteIsIdempotent() {
-        when(config.describeConfigRules("us-east-1", List.of())).thenReturn(List.of());
+    void configRuleWithoutSourceFailsBeforeCallingConfig() {
+        ObjectNode props = mapper.createObjectNode().put("ConfigRuleName", "tenant-isolation");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(), props, context()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals("AWS::Config::ConfigRule requires Source", failure.getMessage());
+        verifyNoInteractions(config);
+    }
+
+    @Test
+    void scopeWithoutComplianceResourceTypesLeavesThemUnset() {
+        ObjectNode props = mapper.createObjectNode().put("ConfigRuleName", "tagged-only");
+        props.set("Scope", mapper.createObjectNode().put("TagKey", "env").put("TagValue", "prod"));
+        props.set("Source", mapper.createObjectNode().put("Owner", "AWS")
+                .put("SourceIdentifier", "REQUIRED_TAGS"));
+        ConfigRule stored = new ConfigRule("tagged-only", "arn:rule", "config-rule-789",
+                null, null, null, null, null, "ACTIVE", null, List.of());
+        when(config.putConfigRule(eq("us-east-1"), any())).thenReturn(stored);
+
+        provisioner.provision(resource(), props, context());
+
+        ArgumentCaptor<ConfigRule> desired = ArgumentCaptor.forClass(ConfigRule.class);
+        verify(config).putConfigRule(eq("us-east-1"), desired.capture());
+        assertEquals("env", desired.getValue().scope().tagKey());
+        assertNull(desired.getValue().scope().complianceResourceTypes());
+    }
+
+    @Test
+    void deleteRemovesRuleByNameWithoutListingEveryRule() {
+        provisioner.delete("AWS::Config::ConfigRule", "tenant-isolation", "us-east-1");
+
+        verify(config).deleteConfigRule("us-east-1", "tenant-isolation");
+        verify(config, never()).describeConfigRules(anyString(), anyList());
+    }
+
+    @Test
+    void deleteToleratesRuleAlreadyGone() {
+        doThrow(new AwsException("NoSuchConfigRuleException", "missing", 400))
+                .when(config).deleteConfigRule("us-east-1", "missing");
 
         provisioner.delete("AWS::Config::ConfigRule", "missing", "us-east-1");
 
-        verify(config).describeConfigRules("us-east-1", List.of());
+        verify(config).deleteConfigRule("us-east-1", "missing");
+    }
+
+    @Test
+    void deletePropagatesRealFailure() {
+        doThrow(new AwsException("ResourceInUseException", "remediation attached", 400))
+                .when(config).deleteConfigRule("us-east-1", "in-use");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.delete("AWS::Config::ConfigRule", "in-use", "us-east-1"));
+
+        assertEquals("ResourceInUseException", failure.getErrorCode());
     }
 
     private ProvisionContext context() {

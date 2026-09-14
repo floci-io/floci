@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ssm.model;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -36,6 +37,8 @@ public class Parameter {
     @JsonProperty("DataType")
     private String dataType = "text";
 
+    @JsonProperty("Tags")
+    @JsonAlias({"tags", "Tags"})
     private Map<String, String> tags = new HashMap<>();
 
     public Parameter() {}

@@ -58,6 +58,7 @@ import org.jboss.logging.Logger;
 
 import javax.crypto.Cipher;
 import javax.crypto.Mac;
+import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
@@ -101,6 +102,9 @@ public class KmsService implements ResourceProvider {
     private final StorageBackend<String, KmsGrant> grantStore;
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
+    // Guards the check-generate-put sequence in ensureBackingKeyMaterial so two concurrent
+    // first uses of the same legacy key cannot each mint a different backing key.
+    private final Object backingKeyMaterialLock = new Object();
 
     @Inject
     public KmsService(StorageFactory storageFactory, RegionResolver regionResolver) {
@@ -228,7 +232,7 @@ public class KmsService implements ResourceProvider {
                     new SecureRandom().nextBytes(material);
                     key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
                 }
-                case SYMMETRIC -> {/* // Use existing mock behavior for symmetric keys */}
+                case SYMMETRIC -> generateBackingKey(key);
                 case RSA -> {
                     KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
                     int size = Integer.parseInt(spec.name().substring(4));
@@ -279,6 +283,86 @@ public class KmsService implements ResourceProvider {
             }
         } catch (NoSuchAlgorithmException | InvalidAlgorithmParameterException e) {
             throw new AwsException("InternalFailure", "Failed to generate key material: " + e.getMessage(), 500);
+        }
+    }
+
+    /**
+     * Mints a new AES-256 backing key for the AES-GCM ciphertext envelope and makes it the
+     * current one, keeping any earlier backing keys in the map so ciphertext produced under
+     * them keeps decrypting (AWS KMS never discards prior backing keys either).
+     */
+    private void generateBackingKey(KmsKey key) {
+        byte[] material = new byte[AES_KEY_BYTES];
+        SECURE_RANDOM.nextBytes(material);
+        String backingKeyId = UUID.randomUUID().toString();
+        if (key.getBackingKeys() == null) {
+            key.setBackingKeys(new HashMap<>());
+        }
+        key.getBackingKeys().put(backingKeyId, Base64.getEncoder().encodeToString(material));
+        key.setCurrentBackingKeyId(backingKeyId);
+    }
+
+    /**
+     * Self-healing for keys persisted before the AES-GCM envelope existed: their JSON has no
+     * {@code backingKeys}/{@code currentBackingKeyId}, so the field defaults to an empty map on
+     * load (existing {@code @JsonIgnoreProperties(ignoreUnknown = true)} already tolerates the
+     * missing field). Material is generated lazily on first use and persisted immediately,
+     * mirroring how {@link #expireImportedKeyMaterialIfDue} self-heals imported-key state.
+     *
+     * <p>Double-checked: the cheap unsynchronized check below lets an already-healed key (the
+     * overwhelming majority of calls, once a key has been used once) return without taking the
+     * lock. Only a key that still needs healing pays for entering the {@code synchronized}
+     * block, where the key is re-read from {@code keyStore} and re-checked before generating,
+     * so that if two callers race to heal the same legacy key concurrently, only one backing key
+     * is ever minted and every caller ends up with (and returns) the same persisted instance.
+     * Without this, two concurrent first uses could each generate a different backing key and
+     * each {@code put} their own copy, leaving one of the two backing keys, and any ciphertext
+     * encrypted under it, unreachable from the persisted key.
+     *
+     * @return the key instance to use for this call: either {@code key} unchanged, or the
+     *     re-read, healed instance that was just persisted.
+     */
+    private KmsKey ensureBackingKeyMaterial(KmsKey key, String region) {
+        if (KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec() || KmsKeyUsage.ENCRYPT_DECRYPT != key.getKeyUsage()) {
+            return key;
+        }
+        if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
+            if (!hasBackingKeyMaterialSafely(key) && key.getPrivateKeyEncoded() != null) {
+                synchronized (backingKeyMaterialLock) {
+                    if (!hasBackingKeyMaterial(key)) {
+                        byte[] material = decodeBackingMaterial(key.getPrivateKeyEncoded());
+                        String materialId = key.getKeyMaterialId() == null
+                                ? keyMaterialId(key.getKeyId(), material) : key.getKeyMaterialId();
+                        installImportedBackingKey(key, materialId, material);
+                        keyStore.put(region + "::" + key.getKeyId(), key);
+                    }
+                }
+            }
+            return key;
+        }
+        if (hasBackingKeyMaterialSafely(key)) {
+            return key;
+        }
+        synchronized (backingKeyMaterialLock) {
+            KmsKey current = keyStore.get(region + "::" + key.getKeyId()).orElse(key);
+            if (hasBackingKeyMaterial(current)) {
+                return current;
+            }
+            generateBackingKey(current);
+            keyStore.put(region + "::" + current.getKeyId(), current);
+            LOG.infov("Generated backing key material for legacy KMS key: {0} in {1}", current.getKeyId(), region);
+            return current;
+        }
+    }
+
+    private static boolean hasBackingKeyMaterial(KmsKey key) {
+        return key.getCurrentBackingKeyId() != null && key.getBackingKeys() != null
+                && key.getBackingKeys().containsKey(key.getCurrentBackingKeyId());
+    }
+
+    private boolean hasBackingKeyMaterialSafely(KmsKey key) {
+        synchronized (backingKeyMaterialLock) {
+            return hasBackingKeyMaterial(key);
         }
     }
 
@@ -749,19 +833,24 @@ public class KmsService implements ResourceProvider {
 
     private static final int ON_DEMAND_ROTATION_LIMIT = 25;
     public String rotateKeyOnDemand(String keyId, String region) {
-        KmsKey key = resolveKey(keyId, region);
-        if (!key.isEnabled()) {
-            throw new AwsException("DisabledException",
-                    "KMS key " + key.getKeyId() + " is disabled.", 400);
+        synchronized (backingKeyMaterialLock) {
+            KmsKey key = resolveKey(keyId, region);
+            if (!key.isEnabled()) {
+                throw new AwsException("DisabledException",
+                        "KMS key " + key.getKeyId() + " is disabled.", 400);
+            }
+            validateRotationSupported(key);
+            if (key.getOnDemandRotationCount() >= ON_DEMAND_ROTATION_LIMIT) {
+                throw new AwsException("LimitExceededException",
+                        "On-demand rotation quota for KMS key " + key.getKeyId() + " is exceeded.", 400);
+            }
+            key.setOnDemandRotationCount(key.getOnDemandRotationCount() + 1);
+            // AWS keeps prior backing keys after rotation so ciphertext encrypted under them keeps
+            // decrypting; generateBackingKey adds a new entry rather than replacing the map.
+            generateBackingKey(key);
+            keyStore.put(region + "::" + key.getKeyId(), key);
+            return key.getKeyId();
         }
-        validateRotationSupported(key);
-        if (key.getOnDemandRotationCount() >= ON_DEMAND_ROTATION_LIMIT) {
-            throw new AwsException("LimitExceededException",
-                    "On-demand rotation quota for KMS key " + key.getKeyId() + " is exceeded.", 400);
-        }
-        key.setOnDemandRotationCount(key.getOnDemandRotationCount() + 1);
-        keyStore.put(region + "::" + key.getKeyId(), key);
-        return key.getKeyId();
     }
 
     private void validateRotationSupported(KmsKey key) {
@@ -832,6 +921,9 @@ public class KmsService implements ResourceProvider {
         requireSameMaterialAsFirstImport(key, keyMaterialId);
 
         key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
+        if (KmsKeySpec.SYMMETRIC_DEFAULT == key.getKeySpec()) {
+            installImportedBackingKey(key, keyMaterialId, material);
+        }
         key.setKeyMaterialId(keyMaterialId);
         key.setExpirationModel(effectiveExpirationModel);
         key.setValidTo(KEY_MATERIAL_EXPIRES.equals(effectiveExpirationModel) ? validTo : 0L);
@@ -843,6 +935,20 @@ public class KmsService implements ResourceProvider {
         LOG.infov("Imported key material into KMS key {0} in {1} ({2})",
                 key.getKeyId(), region, effectiveExpirationModel);
         return key;
+    }
+
+    /**
+     * Makes the imported material the backing key of the ciphertext envelope. Its id is the
+     * {@code keyMaterialId}, which is derived from the material itself, so re-importing the same
+     * material after a delete or expiry reinstates the id that earlier ciphertext names.
+     */
+    private void installImportedBackingKey(KmsKey key, String keyMaterialId, byte[] material) {
+        synchronized (backingKeyMaterialLock) {
+            Map<String, String> backingKeys = new HashMap<>();
+            backingKeys.put(keyMaterialId, Base64.getEncoder().encodeToString(material));
+            key.setBackingKeys(backingKeys);
+            key.setCurrentBackingKeyId(keyMaterialId);
+        }
     }
 
     /**
@@ -883,16 +989,20 @@ public class KmsService implements ResourceProvider {
      * Drops the material but keeps {@code keyMaterialId}: KMS still refuses different material on
      * a later re-import, so what the key was originally given has to outlive the material itself.
      */
-    private static void clearImportedKeyMaterial(KmsKey key) {
-        key.setPrivateKeyEncoded(null);
-        key.setExpirationModel(null);
-        key.setValidTo(0);
-        key.setImportParameters(null);
-        if (PENDING_DELETION.equals(key.getKeyState())) {
-            return;
+    private void clearImportedKeyMaterial(KmsKey key) {
+        synchronized (backingKeyMaterialLock) {
+            key.setPrivateKeyEncoded(null);
+            key.setBackingKeys(new HashMap<>());
+            key.setCurrentBackingKeyId(null);
+            key.setExpirationModel(null);
+            key.setValidTo(0);
+            key.setImportParameters(null);
+            if (PENDING_DELETION.equals(key.getKeyState())) {
+                return;
+            }
+            key.setEnabled(false);
+            key.setKeyState(PENDING_IMPORT);
         }
-        key.setEnabled(false);
-        key.setKeyState(PENDING_IMPORT);
     }
 
     private String newImportToken() {
@@ -1132,13 +1242,29 @@ public class KmsService implements ResourceProvider {
 
     // ──────────────────────────── Crypto Ops (Mocks) ────────────────────────────
 
-    // v2 blob: kms:v2:<keyId>:<nonceHex>:<contextFingerprintHex>:<base64(plaintext)>
-    // Nonce makes Encrypt non-deterministic; contextFingerprint binds EncryptionContext as AAD.
-    // Legacy v1 (kms:<keyId>:<base64>) still accepted on Decrypt for persistent-store back-compat.
+    // v3 envelope (current): magic "KMS3" + version byte + length-prefixed keyId +
+    // length-prefixed backingKeyId + 12-byte GCM IV + AES-256-GCM(ciphertext || 16-byte tag).
+    // AAD = every byte up to and including the IV, plus the EncryptionContext fingerprint, so
+    // decrypting with the wrong key, the wrong backing key version, or the wrong context, and
+    // any bit flip anywhere in the blob, all fail the GCM tag check the same way.
+    //
+    // v2 blob (legacy, decrypt-only): kms:v2:<keyId>:<nonceHex>:<contextFingerprintHex>:
+    // <base64(plaintext)>. This never provided real encryption: the "nonce" and context
+    // fingerprint were not bound to anything, so the payload was recoverable plaintext and any
+    // ciphertext with a syntactically valid shape "decrypted". Kept read-only so blobs persisted
+    // before this fix keep decrypting; Encrypt never produces this format again.
+    //
+    // v1 blob (legacy, decrypt-only): kms:<keyId>:<base64(plaintext)>. No nonce, no context
+    // binding at all. Decrypts only when the caller supplies an empty/null context.
+    private static final byte[] ENVELOPE_MAGIC_V3 = {0x4B, 0x4D, 0x53, 0x33}; // "KMS3"
+    private static final byte ENVELOPE_VERSION_V3 = 1;
+    private static final String AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding";
+    private static final int GCM_IV_BYTES = 12;
+    private static final int GCM_TAG_BITS = 128;
+    private static final int AES_KEY_BYTES = 32;
     private static final String BLOB_PREFIX_V2 = "kms:v2:";
     private static final String BLOB_PREFIX_V1 = "kms:";
     private static final int SHA_512_DIGEST_BYTES = 64;
-    private static final int NONCE_BYTES = 8;
     private static final int MIN_MAC_MESSAGE_BYTES = 1;
     private static final int MAX_MAC_MESSAGE_BYTES = 4096;
     private static final int MIN_ENCRYPT_PLAINTEXT_BYTES = 1;
@@ -1176,16 +1302,8 @@ public class KmsService implements ResourceProvider {
             return new EncryptResult(ciphertext, kmsKey.getArn(), algorithm.getAlgName());
         }
 
-        byte[] nonceBytes = new byte[NONCE_BYTES];
-        SECURE_RANDOM.nextBytes(nonceBytes);
-        String nonceHex = HexFormat.of().formatHex(nonceBytes);
-
-        String blob = BLOB_PREFIX_V2
-                + kmsKey.getKeyId() + ":"
-                + nonceHex + ":"
-                + contextFingerprint(encryptionContext) + ":"
-                + Base64.getEncoder().encodeToString(plaintext);
-        return new EncryptResult(blob.getBytes(StandardCharsets.UTF_8), kmsKey.getArn(), algorithm.getAlgName());
+        byte[] envelope = encryptEnvelope(kmsKey, plaintext, encryptionContext);
+        return new EncryptResult(envelope, kmsKey.getArn(), algorithm.getAlgName());
     }
 
     public byte[] decrypt(byte[] ciphertext, String region) {
@@ -1193,6 +1311,11 @@ public class KmsService implements ResourceProvider {
     }
 
     public byte[] decrypt(byte[] ciphertext, Map<String, String> encryptionContext, String region) {
+        if (isEnvelopeV3(ciphertext)) {
+            EnvelopeV3 envelope = parseEnvelopeV3(ciphertext);
+            KmsKey key = resolveEnvelopeKey(envelope.keyId(), region);
+            return decryptEnvelopeV3(envelope, key, encryptionContext);
+        }
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
             throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
@@ -1202,7 +1325,8 @@ public class KmsService implements ResourceProvider {
 
     public String decryptToKeyArn(byte[] ciphertext, String region) {
         try {
-            return resolveKey(parseBlob(ciphertext).keyId, region).getArn();
+            String keyId = isEnvelopeV3(ciphertext) ? parseEnvelopeV3(ciphertext).keyId() : parseBlob(ciphertext).keyId;
+            return resolveKey(keyId, region).getArn();
         } catch (AwsException e) {
             return null;
         }
@@ -1241,6 +1365,31 @@ public class KmsService implements ResourceProvider {
             rejectEncryptionContextForAsymmetricKey(encryptionContext);
             byte[] plaintext = rsaOaep(Cipher.DECRYPT_MODE, requestKey, algorithm, ciphertext);
             return new DecryptResult(plaintext, requestKey.getArn(), algorithm.getAlgName());
+        }
+
+        if (isEnvelopeV3(ciphertext)) {
+            EnvelopeV3 envelope = parseEnvelopeV3(ciphertext);
+            KmsKey key = resolveEnvelopeKey(envelope.keyId(), region);
+            // A key whose imported material was deleted or expired no longer holds the backing
+            // key this blob names; answer with the key's state, as AWS does, not "invalid ciphertext".
+            requireImportedKeyMaterial(key, "Decrypt");
+            byte[] plaintext = decryptEnvelopeV3(envelope, key, encryptionContext);
+
+            if (requestKeyId != null && !requestKeyId.isBlank()) {
+                KmsKey requestKey = resolveKey(requestKeyId, region);
+                if (!requestKey.getKeyId().equals(key.getKeyId())) {
+                    throw new AwsException(
+                            "IncorrectKeyException",
+                            "The request was rejected because the specified KMS key cannot decrypt the data.",
+                            400
+                    );
+                }
+                validateKeyIsUsableForCryptoOperations(requestKey);
+                return new DecryptResult(plaintext, requestKey.getArn(), algorithm.getAlgName());
+            }
+
+            validateKeyIsUsableForCryptoOperations(key);
+            return new DecryptResult(plaintext, key.getArn(), algorithm.getAlgName());
         }
 
         // With the defaulted SYMMETRIC_DEFAULT algorithm, real KMS parses the ciphertext
@@ -1287,6 +1436,165 @@ public class KmsService implements ResourceProvider {
     public record GenerateMacResult(byte[] mac, String keyArn) {}
 
     public record VerifyMacResult(String keyArn) {}
+
+    /**
+     * A parsed v3 envelope. {@code aadHeader} is every byte of the blob up to and including the
+     * IV (magic, version, keyId, backingKeyId, IV): the whole header is authenticated, not just
+     * checked for equality, so a tampered key id or backing key id fails the GCM tag check
+     * instead of silently decrypting under the wrong material.
+     */
+    private record EnvelopeV3(String keyId, String backingKeyId, byte[] aadHeader, byte[] iv, byte[] ciphertextAndTag) {}
+
+    private static boolean isEnvelopeV3(byte[] ciphertext) {
+        if (ciphertext == null || ciphertext.length < ENVELOPE_MAGIC_V3.length) {
+            return false;
+        }
+        for (int i = 0; i < ENVELOPE_MAGIC_V3.length; i++) {
+            if (ciphertext[i] != ENVELOPE_MAGIC_V3[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Any malformed header (bad length prefixes, truncation, unknown version) is a bad ciphertext, never a server fault. */
+    private static EnvelopeV3 parseEnvelopeV3(byte[] blob) {
+        try {
+            ByteBuffer buffer = ByteBuffer.wrap(blob);
+            byte[] magic = new byte[ENVELOPE_MAGIC_V3.length];
+            buffer.get(magic);
+            byte version = buffer.get();
+            if (version != ENVELOPE_VERSION_V3) {
+                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            }
+            byte[] keyIdBytes = new byte[buffer.getShort() & 0xFFFF];
+            buffer.get(keyIdBytes);
+            byte[] backingKeyIdBytes = new byte[buffer.getShort() & 0xFFFF];
+            buffer.get(backingKeyIdBytes);
+            int headerLength = buffer.position();
+            byte[] iv = new byte[GCM_IV_BYTES];
+            buffer.get(iv);
+            byte[] ciphertextAndTag = new byte[buffer.remaining()];
+            buffer.get(ciphertextAndTag);
+            if (ciphertextAndTag.length == 0) {
+                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            }
+            byte[] aadHeader = Arrays.copyOfRange(blob, 0, headerLength + GCM_IV_BYTES);
+            return new EnvelopeV3(new String(keyIdBytes, StandardCharsets.UTF_8),
+                    new String(backingKeyIdBytes, StandardCharsets.UTF_8), aadHeader, iv, ciphertextAndTag);
+        } catch (AwsException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        }
+    }
+
+    private static byte[] buildEnvelopeHeaderAndIv(String keyId, String backingKeyId, byte[] iv) {
+        byte[] keyIdBytes = keyId.getBytes(StandardCharsets.UTF_8);
+        byte[] backingKeyIdBytes = backingKeyId.getBytes(StandardCharsets.UTF_8);
+        ByteBuffer buffer = ByteBuffer.allocate(ENVELOPE_MAGIC_V3.length + 1
+                + 2 + keyIdBytes.length + 2 + backingKeyIdBytes.length + iv.length);
+        buffer.put(ENVELOPE_MAGIC_V3);
+        buffer.put(ENVELOPE_VERSION_V3);
+        buffer.putShort((short) keyIdBytes.length);
+        buffer.put(keyIdBytes);
+        buffer.putShort((short) backingKeyIdBytes.length);
+        buffer.put(backingKeyIdBytes);
+        buffer.put(iv);
+        return buffer.array();
+    }
+
+    /**
+     * Builds a v3 envelope: AES-256-GCM under the key's current backing key, with the header
+     * (key id + backing key id + IV) and the EncryptionContext fingerprint as AAD.
+     */
+    private byte[] encryptEnvelope(KmsKey key, byte[] plaintext, Map<String, String> encryptionContext) {
+        String backingKeyId;
+        byte[] dek;
+        synchronized (backingKeyMaterialLock) {
+            backingKeyId = key.getCurrentBackingKeyId();
+            String materialB64 = key.getBackingKeys() == null ? null : key.getBackingKeys().get(backingKeyId);
+            if (materialB64 == null) {
+                throw new AwsException("KMSInvalidStateException",
+                        "The specified KMS key has no backing key material.", 400);
+            }
+            dek = decodeBackingMaterial(materialB64);
+        }
+        byte[] iv = new byte[GCM_IV_BYTES];
+        SECURE_RANDOM.nextBytes(iv);
+        byte[] headerAndIv = buildEnvelopeHeaderAndIv(key.getKeyId(), backingKeyId, iv);
+        try {
+            Cipher cipher = aesGcmCipher(Cipher.ENCRYPT_MODE, dek, iv,
+                    headerAndIv, contextFingerprint(encryptionContext).getBytes(StandardCharsets.UTF_8));
+            byte[] ciphertextAndTag = cipher.doFinal(plaintext);
+            byte[] blob = new byte[headerAndIv.length + ciphertextAndTag.length];
+            System.arraycopy(headerAndIv, 0, blob, 0, headerAndIv.length);
+            System.arraycopy(ciphertextAndTag, 0, blob, headerAndIv.length, ciphertextAndTag.length);
+            return blob;
+        } catch (GeneralSecurityException e) {
+            throw new AwsException("InternalFailure", "Failed to encrypt: " + e.getMessage(), 500);
+        }
+    }
+
+    /**
+     * Resolves the key named in a v3 envelope header. A lookup failure here can only mean the
+     * header was tampered with (this codebase never deletes keys from the store), so it is
+     * reported the same way as any other broken envelope: InvalidCiphertextException, never a
+     * NotFoundException that would tell an attacker their tampering hit a real key id or not.
+     */
+    private KmsKey resolveEnvelopeKey(String keyId, String region) {
+        try {
+            return resolveKey(keyId, region);
+        } catch (AwsException e) {
+            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        }
+    }
+
+    /**
+     * Decrypts a v3 envelope's ciphertext under the given key's backing key material. Does not
+     * check the key's enabled/pending-deletion state: callers decide whether and when to run
+     * {@link #validateKeyIsUsableForCryptoOperations}, matching the legacy behavior where
+     * {@link #decrypt} never checked key state but {@link #decryptAndResolveKey} always did.
+     */
+    private byte[] decryptEnvelopeV3(EnvelopeV3 envelope, KmsKey key, Map<String, String> encryptionContext) {
+        String materialB64;
+        synchronized (backingKeyMaterialLock) {
+            materialB64 = key.getBackingKeys() == null ? null : key.getBackingKeys().get(envelope.backingKeyId());
+        }
+        if (materialB64 == null) {
+            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        }
+        byte[] dek = decodeBackingMaterial(materialB64);
+        try {
+            Cipher cipher = aesGcmCipher(Cipher.DECRYPT_MODE, dek, envelope.iv(),
+                    envelope.aadHeader(), contextFingerprint(encryptionContext).getBytes(StandardCharsets.UTF_8));
+            return cipher.doFinal(envelope.ciphertextAndTag());
+        } catch (GeneralSecurityException e) {
+            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        }
+    }
+
+    private static Cipher aesGcmCipher(int mode, byte[] key, byte[] iv, byte[]... aad)
+            throws GeneralSecurityException {
+        Cipher cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION);
+        cipher.init(mode, new SecretKeySpec(key, "AES"), new GCMParameterSpec(GCM_TAG_BITS, iv));
+        for (byte[] part : aad) {
+            cipher.updateAAD(part);
+        }
+        return cipher;
+    }
+
+    private static byte[] decodeBackingMaterial(String materialB64) {
+        try {
+            byte[] material = Base64.getDecoder().decode(materialB64);
+            if (material.length != AES_KEY_BYTES) {
+                throw new IllegalArgumentException("invalid AES backing key length");
+            }
+            return material;
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        }
+    }
 
     private record ParsedBlob(String keyId, String nonce, String contextFingerprint, String payload) {}
 
@@ -2022,7 +2330,9 @@ public class KmsService implements ResourceProvider {
         // Key id
         KmsKey key = keyStore.get(region + "::" + id)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 404));
-        return expireImportedKeyMaterialIfDue(key, region);
+        key = expireImportedKeyMaterialIfDue(key, region);
+        key = ensureBackingKeyMaterial(key, region);
+        return key;
     }
 
     private static void validateKeyIsUsableForCryptoOperations(KmsKey key) {

@@ -66,6 +66,192 @@ class SqsServiceTest {
     }
 
     @Test
+    void getQueueAttributes_defaultsMatchAws() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("defaults-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("1048576", attrs.get("MaximumMessageSize"),
+                "MaximumMessageSize must default to the AWS value of 1048576 bytes");
+        assertEquals("true", attrs.get("SqsManagedSseEnabled"),
+                "A queue without a KMS key reports SSE-SQS enabled");
+        assertEquals("30", attrs.get("VisibilityTimeout"));
+        assertEquals("345600", attrs.get("MessageRetentionPeriod"));
+        assertEquals("0", attrs.get("DelaySeconds"));
+        assertEquals("0", attrs.get("ReceiveMessageWaitTimeSeconds"));
+        assertNotNull(attrs.get("QueueArn"));
+        assertNotNull(attrs.get("CreatedTimestamp"));
+        assertNotNull(attrs.get("LastModifiedTimestamp"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessages"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessagesDelayed"));
+        assertFalse(attrs.containsKey("Policy"), "Policy is only returned once set");
+        assertFalse(attrs.containsKey("RedrivePolicy"), "RedrivePolicy is only returned once set");
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseDisabledWhenKmsKeyIsSet() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-queue", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("false", attrs.get("SqsManagedSseEnabled"),
+                "A KMS master key takes over from SSE-SQS");
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseDisabledWhenQueueIsCreatedWithAKmsKey() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-at-create-queue",
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+
+        assertEquals("false",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region)
+                        .get("SqsManagedSseEnabled"));
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseReturnsToTheDefaultWhenTheKmsKeyIsCleared() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-cleared-queue",
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+        assertEquals("false",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region)
+                        .get("SqsManagedSseEnabled"));
+
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("KmsMasterKeyId", ""), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertFalse(attrs.containsKey("KmsMasterKeyId"), "An empty value clears the attribute");
+        assertEquals("true", attrs.get("SqsManagedSseEnabled"),
+                "Nothing derived from the KMS key may outlive it");
+    }
+
+    @Test
+    void getQueueAttributes_explicitSqsManagedSseFalseSurvivesAnUnrelatedUpdate() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sse-off-queue",
+                Map.of("SqsManagedSseEnabled", "false"), region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("DelaySeconds", "5"), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("false", attrs.get("SqsManagedSseEnabled"),
+                "A value the user set is intent, not derived state, and has to survive");
+        assertEquals("5", attrs.get("DelaySeconds"));
+    }
+
+    @Test
+    void getQueueAttributes_selectsSqsManagedSseEnabledByName() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sse-named-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("SqsManagedSseEnabled"), region);
+        assertEquals(Map.of("SqsManagedSseEnabled", "true"), attrs);
+    }
+
+    @Test
+    void createQueue_rejectsMaximumMessageSizeOutsideAwsRange() {
+        for (String invalid : List.of("1048577", "1023", "0", "-1", "abc")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> sqsService.createQueue("range-queue-" + invalid,
+                            Map.of("MaximumMessageSize", invalid), "eu-west-1"),
+                    "MaximumMessageSize " + invalid + " must be rejected");
+            assertEquals("InvalidAttributeValue", ex.getErrorCode());
+            assertTrue(ex.getMessage().contains("MaximumMessageSize"), ex.getMessage());
+        }
+    }
+
+    @Test
+    void createQueue_acceptsMaximumMessageSizeRangeBounds() {
+        String region = "eu-west-1";
+        for (String valid : List.of("1024", "1048576")) {
+            Queue queue = sqsService.createQueue("bounds-queue-" + valid,
+                    Map.of("MaximumMessageSize", valid), region);
+            assertEquals(valid,
+                    sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                            .get("MaximumMessageSize"));
+        }
+    }
+
+    @Test
+    void createQueue_acceptsTheAwsCeilingWhenTheConfiguredMaximumIsLower() {
+        String region = "eu-west-1";
+        var service = new SqsService(new InMemoryStorage<>(), 30, 131072, BASE_URL, clock);
+
+        Queue defaulted = service.createQueue("lowered-config-default-queue", null, region);
+        assertEquals("131072",
+                service.getQueueAttributes(defaulted.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "The configured maximum is what a new queue defaults to");
+
+        Queue raised = service.createQueue("lowered-config-raised-queue",
+                Map.of("MaximumMessageSize", "1048576"), region);
+        assertEquals("1048576",
+                service.getQueueAttributes(raised.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "Lowering the configured maximum moves the default, not the ceiling AWS accepts");
+        assertDoesNotThrow(
+                () -> service.sendMessage(raised.getQueueUrl(), "x".repeat(1_000_000), 0, region),
+                "The accepted ceiling and the enforced ceiling have to agree");
+    }
+
+    @Test
+    void getQueueAttributes_clampsAStoredMaximumMessageSizeAboveTheCeiling() {
+        String region = "us-east-1";
+        var store = new InMemoryStorage<String, Queue>();
+        var service = new SqsService(store, 30, 1048576, BASE_URL, clock);
+        Queue queue = service.createQueue("legacy-size-queue", null, region);
+
+        // A queue persisted by a build that allowed 2 MB, which no validation path can produce.
+        String storageKey = store.keys().iterator().next();
+        Queue stored = store.get(storageKey).orElseThrow();
+        stored.getAttributes().put("MaximumMessageSize", "2097152");
+        store.put(storageKey, stored);
+
+        assertEquals("1048576",
+                service.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "A stored value above the ceiling must be reported as the size actually enforced");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.sendMessage(queue.getQueueUrl(), "x".repeat(1_200_000), 0, region),
+                "The reported size and the enforced size have to agree");
+        assertTrue(ex.getMessage().contains("1048576"), ex.getMessage());
+    }
+
+    @Test
+    void setQueueAttributes_rejectsMaximumMessageSizeOutsideAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("set-range-queue", null, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.setQueueAttributes(queue.getQueueUrl(),
+                        Map.of("MaximumMessageSize", "1048577"), region));
+        assertEquals("InvalidAttributeValue", ex.getErrorCode());
+        assertEquals("1048576",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "A rejected SetQueueAttributes must leave the stored value untouched");
+    }
+
+    @Test
+    void setQueueAttributes_acceptsMaximumMessageSizeWithinAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("set-valid-range-queue", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("MaximumMessageSize", "2048"), region);
+
+        assertEquals("2048",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), "x".repeat(3000), 0, region));
+        assertTrue(ex.getMessage().contains("2048"), ex.getMessage());
+    }
+
+    @Test
     void createQueueWithTags_tagsReturnedByListQueueTags() {
         // Regression test for https://github.com/floci-io/floci/issues/699
         // Tags supplied at CreateQueue time must be visible via ListQueueTags.

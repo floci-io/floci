@@ -16,6 +16,11 @@
 | `PublishStateMachineVersion` | - |
 | `ListStateMachineVersions` | - |
 | `DeleteStateMachineVersion` | - |
+| `CreateStateMachineAlias` | - |
+| `DescribeStateMachineAlias` | - |
+| `ListStateMachineAliases` | - |
+| `UpdateStateMachineAlias` | - |
+| `DeleteStateMachineAlias` | - |
 | `ValidateStateMachineDefinition` | Validate an ASL definition without creating a state machine |
 | `StartExecution` | Start a new execution |
 | `StartSyncExecution` | - |

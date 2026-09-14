@@ -20,6 +20,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -71,6 +72,19 @@ public class Ec2MetadataServer {
         if (containerIp != null && instance != null) {
             containerIpToInstance.remove(containerIp, instance);
         }
+    }
+
+    /** Reconcile every Docker attachment without retaining stale addresses after restart. */
+    void reconcileContainerAddresses(Set<String> addresses, Instance instance) {
+        for (String address : addresses) {
+            registerContainer(address, instance.getInstanceId(), instance);
+        }
+        containerIpToInstance.entrySet().removeIf(entry ->
+                entry.getValue() == instance && !addresses.contains(entry.getKey()));
+    }
+
+    void unregisterInstance(Instance instance) {
+        containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
     }
 
     Optional<Instance> registeredContainer(String containerIp) {

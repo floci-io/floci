@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
@@ -22,6 +23,7 @@ import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -31,6 +33,8 @@ import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -39,6 +43,9 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -1269,6 +1276,272 @@ class RdsCfnProvisionerTest {
                 anyBoolean(), any(), any(), any(), anyBoolean(), any());
         verify(rdsService).modifyDbCluster("mycluster", "secret", false,
                 null, null, null, "us-east-1");
+    }
+
+    private static final String PRIOR_CLUSTER = "my-stack-cluster-0123456789ab";
+
+    /** RdsService hands back a cluster named after whatever id the provisioner asked to create. */
+    private void createDbClusterEchoesRequestedId() {
+        org.mockito.stubbing.Answer<DbCluster> echo = invocation -> {
+            DbCluster created = mock(DbCluster.class);
+            doReturn(invocation.getArgument(0)).when(created).getDbClusterIdentifier();
+            return created;
+        };
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any())).thenAnswer(echo);
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any())).thenAnswer(echo);
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean())).thenAnswer(echo);
+    }
+
+    /** The unnamed cluster a previous CreateStack left on file under a generated physical id. */
+    private DbCluster priorUnnamedCluster(String engineMode, boolean storageEncrypted) {
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getEngineMode()).thenReturn(engineMode);
+        when(existing.isStorageEncrypted()).thenReturn(storageEncrypted);
+        when(rdsService.getDbCluster(PRIOR_CLUSTER)).thenReturn(existing);
+        return existing;
+    }
+
+    private StackResource updateUnnamedCluster(String json) {
+        return provisionExisting("Cluster", "AWS::RDS::DBCluster", json, "us-east-1", PRIOR_CLUSTER,
+                Map.of("DBClusterIdentifier", PRIOR_CLUSTER, "Endpoint.Address", "prior.rds.local"));
+    }
+
+    @Test
+    void updateStackReplacesDbClusterWhenEngineModeChangesAndDeletesThePriorOneOnlyAfterCommit() {
+        // EngineMode is a createOnlyProperty of AWS::RDS::DBCluster. CloudFormation replacement
+        // creates the new cluster under a distinct physical id while the prior cluster stays
+        // untouched, and removes the prior one only in the post-commit cleanup.
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","MasterUsername":"admin","MasterUserPassword":"secret",
+                 "EngineMode":"serverless"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        String replacement = r.getPhysicalId();
+        assertNotEquals(PRIOR_CLUSTER, replacement);
+        assertTrue(replacement.startsWith("my-stack-cluster-"), replacement);
+        assertEquals(replacement, r.getAttributes().get("DBClusterIdentifier"));
+        verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null,
+                "admin", "secret", null, false, null, null, null, false, "us-east-1",
+                null, null, null, false, null, "serverless", false);
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+
+        // The engine announces and runs the cleanup after the stack update has committed.
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        assertTrue(cleanup.applicable());
+        assertTrue(cleanup.complete());
+        InOrder inOrder = inOrder(rdsService);
+        inOrder.verify(rdsService).createDbCluster(eq(replacement), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
+        inOrder.verify(rdsService).deleteDbCluster(PRIOR_CLUSTER, "us-east-1");
+        verify(rdsService, never()).deleteDbCluster(replacement, "us-east-1");
+        provisioner.clearUpdate(r);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void updateStackReplacesDbClusterWhenStorageEncryptedChanges() {
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","StorageEncrypted":true}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        String replacement = r.getPhysicalId();
+        assertNotEquals(PRIOR_CLUSTER, replacement);
+        verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null,
+                null, null, null, false, null, null, null, false, "us-east-1",
+                null, null, null, false, null, null, true);
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+    }
+
+    @Test
+    void failedDbClusterReplacementLeavesThePriorClusterIntact() {
+        // The replacement is created before anything is removed, so a create that fails leaves
+        // the prior cluster standing and the resource still naming it; the engine then restores
+        // the committed resource and nothing is owed to the cleanup.
+        priorUnnamedCluster("provisioned", false);
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
+                .thenThrow(new AwsException("InvalidParameterCombination",
+                        "The engine mode serverless is not supported for aurora-postgresql 16.3.", 400));
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","EngineVersion":"16.3","EngineMode":"serverless"}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("engine mode serverless is not supported"));
+        assertEquals(PRIOR_CLUSTER, r.getPhysicalId(), "the resource still names the prior cluster");
+        assertEquals(PRIOR_CLUSTER, r.getAttributes().get("DBClusterIdentifier"));
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        assertFalse(provisioner.hasReplacementUpdate(r), "nothing is owed to the cleanup");
+        assertFalse(provisioner.rollbackUpdate(r), "there is no replacement to undo");
+    }
+
+    @Test
+    void failedLaterUpdateRollsBackDbClusterReplacementToThePriorCluster() {
+        // A later resource failing the stack update rolls the replacement back: the resource names
+        // the prior cluster again, with the attributes it had, and only the replacement is deleted.
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","EngineMode":"serverless"}
+                """);
+        String replacement = r.getPhysicalId();
+        assertNotEquals(PRIOR_CLUSTER, replacement);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(PRIOR_CLUSTER, r.getPhysicalId());
+        assertEquals(PRIOR_CLUSTER, r.getAttributes().get("DBClusterIdentifier"));
+        assertEquals("prior.rds.local", r.getAttributes().get("Endpoint.Address"));
+        verify(rdsService).deleteDbCluster(replacement, "us-east-1");
+        verify(rdsService, never()).deleteDbCluster(PRIOR_CLUSTER, "us-east-1");
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void dbClusterCleanupKeepsThePriorClusterOwedWhileInstancesAreStillAttached() {
+        // RDS refuses to delete a cluster with members. The replacement stands regardless; the
+        // prior cluster stays owed a delete for the engine's retries, the next committed update
+        // or the stack delete, instead of the replacement being blocked on it.
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+        doThrow(new AwsException("InvalidDBClusterStateFault",
+                "DB cluster " + PRIOR_CLUSTER + " still has DB instances.", 400))
+                .when(rdsService).deleteDbCluster(PRIOR_CLUSTER, "us-east-1");
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","EngineMode":"serverless"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        assertNotEquals(PRIOR_CLUSTER, r.getPhysicalId());
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        assertTrue(cleanup.applicable());
+        assertFalse(cleanup.complete());
+        assertEquals(PRIOR_CLUSTER, cleanup.previousPhysicalId());
+        assertEquals(1, cleanup.attempts());
+        assertTrue(cleanup.failureReason().contains("still has DB instances"));
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r), "still owed");
+    }
+
+    @Test
+    void dbClusterCleanupTreatsAnAlreadyGoneClusterAsDeleted() {
+        doThrow(new AwsException("DBClusterNotFoundFault", "DB cluster gone not found.", 404))
+                .when(rdsService).deleteDbCluster("gone", "us-east-1");
+
+        assertDoesNotThrow(() -> provisioner.delete("AWS::RDS::DBCluster", "gone", "us-east-1"));
+        verify(rdsService).deleteDbCluster("gone", "us-east-1");
+    }
+
+    @Test
+    void customNamedDbClusterRefusesCreateOnlyPropertyChangeAndKeepsTheCluster() {
+        // A cluster the template names explicitly has no distinct physical id to move to, which is
+        // the update CloudFormation refuses for a custom-named resource.
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getEngineMode()).thenReturn("provisioned");
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "EngineMode":"serverless"}
+                """, "mycluster");
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains(
+                "custom-named resource requires replacing. Rename mycluster and update the stack again."));
+        assertEquals("mycluster", r.getPhysicalId());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
+    }
+
+    @Test
+    void renamedDbClusterIsCreatedFirstAndThePriorOneDeletedOnlyAfterCommit() {
+        // DBClusterIdentifier is createOnly too: a rename is the same replacement lifecycle, not an
+        // eager delete of the prior cluster right after the create.
+        createDbClusterEchoesRequestedId();
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"renamed","Engine":"aurora-postgresql"}
+                """, "mycluster");
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        assertEquals("renamed", r.getPhysicalId());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("mycluster", provisioner.updateCleanupPhysicalId(r));
+        provisioner.completeUpdate(r);
+        verify(rdsService).deleteDbCluster("mycluster", "us-east-1");
+    }
+
+    @Test
+    void updateStackKeepsExistingDbClusterWhenCreateOnlyPropertiesUnchanged() {
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getEngineMode()).thenReturn("serverless");
+        when(existing.isStorageEncrypted()).thenReturn(true);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUserPassword":"rotated",
+                 "EngineMode":"serverless","StorageEncrypted":true}
+                """, "mycluster");
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
+        verify(rdsService).modifyDbCluster("mycluster", "rotated", false,
+                null, null, null, "us-east-1");
+    }
+
+    @Test
+    void updateStackTreatsMissingEngineModeAsProvisionedInsteadOfReplacing() {
+        // A cluster persisted before EngineMode was tracked reports no mode; a template that names
+        // the RDS default explicitly describes the same cluster and must not replace it.
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getEngineMode()).thenReturn(null);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "EngineMode":"provisioned","StorageEncrypted":false}
+                """, "mycluster");
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, "us-east-1");
     }
 
     @Test

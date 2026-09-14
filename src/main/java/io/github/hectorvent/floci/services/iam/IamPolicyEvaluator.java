@@ -40,6 +40,18 @@ public class IamPolicyEvaluator {
 
     public enum Decision { ALLOW, DENY }
 
+    public enum ResourcePolicyDecision {
+        ALLOW,
+        ALLOW_DIRECT_IAM_USER,
+        EXPLICIT_DENY,
+        NEUTRAL
+    }
+
+    public enum ResourceAccountRelationship {
+        SAME_ACCOUNT,
+        CROSS_ACCOUNT
+    }
+
     public enum SimulationDecision {
         ALLOWED("allowed"),
         EXPLICIT_DENY("explicitDeny"),
@@ -89,6 +101,78 @@ public class IamPolicyEvaluator {
         List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
                 ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
 
+        boolean resourceExplicitDeny = anyExplicitDeny(resourceStmts, action, resource, ctx);
+        boolean resourceAllow = anyExplicitAllow(resourceStmts, action, resource, ctx);
+        return evaluateParsed(
+                caller, identityStmts, sessionStmts, boundaryStmts,
+                resourceExplicitDeny, resourceAllow, false,
+                ResourceAccountRelationship.SAME_ACCOUNT, action, resource, ctx);
+    }
+
+    /**
+     * Evaluates an already principal-filtered resource-policy decision together with the
+     * caller's identity policies and permission ceilings.
+     */
+    public Decision evaluateResolvedResourcePolicy(
+            CallerContext caller,
+            ResourcePolicyDecision resourcePolicyDecision,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
+        return evaluateResolvedResourcePolicy(
+                caller,
+                resourcePolicyDecision,
+                ResourceAccountRelationship.SAME_ACCOUNT,
+                action,
+                resource,
+                conditionCtx);
+    }
+
+    /**
+     * Evaluates a principal-filtered resource policy with the caller/resource account relationship.
+     * Cross-account access requires both identity and resource policy allows. A same-account resource
+     * policy that directly names an IAM user ARN is not limited by an implicit permissions-boundary
+     * deny, although every explicit deny still wins.
+     */
+    public Decision evaluateResolvedResourcePolicy(
+            CallerContext caller,
+            ResourcePolicyDecision resourcePolicyDecision,
+            ResourceAccountRelationship accountRelationship,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
+        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
+        List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
+        List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
+                ? null : parseAll(List.of(caller.sessionPolicyDocument()));
+        List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
+                ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
+        ResourcePolicyDecision resolvedDecision = resourcePolicyDecision == null
+                ? ResourcePolicyDecision.NEUTRAL : resourcePolicyDecision;
+        return evaluateParsed(
+                caller, identityStmts, sessionStmts, boundaryStmts,
+                resolvedDecision == ResourcePolicyDecision.EXPLICIT_DENY,
+                resolvedDecision == ResourcePolicyDecision.ALLOW
+                        || resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                accountRelationship == null
+                        ? ResourceAccountRelationship.CROSS_ACCOUNT : accountRelationship,
+                action, resource, ctx);
+    }
+
+    private Decision evaluateParsed(
+            CallerContext caller,
+            List<PolicyStatement> identityStmts,
+            List<PolicyStatement> sessionStmts,
+            List<PolicyStatement> boundaryStmts,
+            boolean resourceExplicitDeny,
+            boolean resourceAllow,
+            boolean directIamUserResourceAllow,
+            ResourceAccountRelationship accountRelationship,
+            String action,
+            String resource,
+            Map<String, List<String>> ctx) {
+
         // 0. Service control policies gate everything: the action must be allowed at EVERY
         //    organization level and explicitly denied at none, before identity policies are
         //    even consulted. An empty level means FullAWSAccess semantics and is skipped;
@@ -99,16 +183,20 @@ public class IamPolicyEvaluator {
 
         // 1. Explicit deny in ANY policy → DENY immediately
         if (anyExplicitDeny(identityStmts, action, resource, ctx)
-                || anyExplicitDeny(resourceStmts, action, resource, ctx)
+                || resourceExplicitDeny
                 || (sessionStmts  != null && anyExplicitDeny(sessionStmts,  action, resource, ctx))
                 || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, action, resource, ctx))) {
             return Decision.DENY;
         }
 
-        // 2. Base grant: identity OR resource-based policy must allow
+        // 2. Base grant: same-account access needs either policy family; cross-account access
+        //    needs both the caller's identity policy and the resource owner's policy.
         boolean identityAllow = anyExplicitAllow(identityStmts, action, resource, ctx);
-        boolean resourceAllow = anyExplicitAllow(resourceStmts, action, resource, ctx);
-        if (!identityAllow && !resourceAllow) {
+        if (accountRelationship == ResourceAccountRelationship.CROSS_ACCOUNT) {
+            if (!identityAllow || !resourceAllow) {
+                return Decision.DENY;
+            }
+        } else if (!identityAllow && !resourceAllow) {
             return Decision.DENY;
         }
 
@@ -117,8 +205,13 @@ public class IamPolicyEvaluator {
             return Decision.DENY;
         }
 
-        // 4. Permission boundary (if present) must also allow (caps maximum permissions)
-        if (boundaryStmts != null && !anyExplicitAllow(boundaryStmts, action, resource, ctx)) {
+        // 4. A same-account resource policy that names an IAM user ARN grants directly to that
+        //    user. Its boundary's implicit deny does not cap the grant; explicit denies were
+        //    already handled above. Other grants remain limited by the boundary intersection.
+        boolean directSameAccountUserGrant = directIamUserResourceAllow
+                && accountRelationship == ResourceAccountRelationship.SAME_ACCOUNT;
+        if (!directSameAccountUserGrant && boundaryStmts != null
+                && !anyExplicitAllow(boundaryStmts, action, resource, ctx)) {
             return Decision.DENY;
         }
 

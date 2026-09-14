@@ -49,30 +49,77 @@ public class RegistryHttpClient {
         }
     }
 
-    /** Lists all repository names known to the backing registry. */
+    /**
+     * Lists all repository names known to the backing registry, following the
+     * {@code Link} header pagination that {@code GET /v2/_catalog} uses
+     * (registry:2 caps each page at 100 entries by default).
+     */
     public List<String> catalog() throws IOException, InterruptedException {
-        HttpResponse<String> resp = http.send(
-                HttpRequest.newBuilder(URI.create(baseUrl + "/v2/_catalog"))
-                        .timeout(Duration.ofSeconds(10))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() != 200) {
-            LOG.warnv("Registry catalog returned {0}: {1}", resp.statusCode(), resp.body());
-            return Collections.emptyList();
+        try {
+            return catalogStrict();
+        } catch (IOException e) {
+            LOG.warnv("Registry catalog returned error: {0}", e.getMessage());
+            return List.of();
         }
-        JsonNode root = MAPPER.readTree(resp.body());
-        JsonNode repos = root.get("repositories");
-        if (repos == null || !repos.isArray()) {
-            return Collections.emptyList();
-        }
+    }
+
+    /**
+     * Strict catalog: throws on any non-200 so callers can distinguish
+     * &quot;no repos&quot; from &quot;registry failure&quot;.
+     */
+    public List<String> catalogStrict() throws IOException, InterruptedException {
         List<String> out = new ArrayList<>();
-        repos.forEach(n -> out.add(n.asText()));
+        String url = baseUrl + "/v2/_catalog";
+        for (int page = 0; page < 10_000 && url != null; page++) {
+            HttpResponse<String> resp = http.send(
+                    HttpRequest.newBuilder(URI.create(url))
+                            .timeout(Duration.ofSeconds(10))
+                            .GET()
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                throw new IOException("Registry catalog returned " + resp.statusCode() + ": " + resp.body());
+            }
+            JsonNode root = MAPPER.readTree(resp.body());
+            JsonNode repos = root.get("repositories");
+            if (repos != null && repos.isArray()) {
+                repos.forEach(n -> out.add(n.asText()));
+            }
+            url = nextCatalogPage(resp.headers().firstValue("Link").orElse(null));
+        }
         return out;
+    }
+
+    /** Extracts {@code </v2/_catalog?n=..&last=..>} from a registry Link header. */
+    private String nextCatalogPage(String link) {
+        if (link == null || link.isBlank()) {
+            return null;
+        }
+        int start = link.indexOf('<');
+        int end = link.indexOf('>');
+        if (start < 0 || end <= start) {
+            return null;
+        }
+        String target = link.substring(start + 1, end);
+        return target.startsWith("/") ? baseUrl + target : target;
     }
 
     /** Lists tags for a repository. Returns an empty list if the repo is not yet known to the registry. */
     public List<String> listTags(String name) throws IOException, InterruptedException {
+        try {
+            return listTagsStrict(name);
+        } catch (IOException e) {
+            LOG.warnv("Registry tags/list returned error: {0}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Lists tags, throwing on registry errors so callers can distinguish
+     * &quot;no tags&quot; from &quot;registry failure&quot;. 404 still returns
+     * empty; any other non-200 or malformed 200 throws {@link IOException}.
+     */
+    public List<String> listTagsStrict(String name) throws IOException, InterruptedException {
         HttpResponse<String> resp = http.send(
                 HttpRequest.newBuilder(URI.create(baseUrl + "/v2/" + name + "/tags/list"))
                         .timeout(Duration.ofSeconds(10))
@@ -83,13 +130,15 @@ public class RegistryHttpClient {
             return Collections.emptyList();
         }
         if (resp.statusCode() != 200) {
-            LOG.warnv("Registry tags/list returned {0}: {1}", resp.statusCode(), resp.body());
-            return Collections.emptyList();
+            throw new IOException("Registry tags/list returned " + resp.statusCode() + ": " + resp.body());
         }
         JsonNode root = MAPPER.readTree(resp.body());
         JsonNode tags = root.get("tags");
-        if (tags == null || tags.isNull() || !tags.isArray()) {
+        if (tags == null || tags.isNull()) {
             return Collections.emptyList();
+        }
+        if (!tags.isArray()) {
+            throw new IOException("Registry tags/list returned non-array tags: " + resp.body());
         }
         List<String> out = new ArrayList<>();
         tags.forEach(n -> out.add(n.asText()));
@@ -102,6 +151,20 @@ public class RegistryHttpClient {
      */
     public String headManifestDigest(String name, String reference, List<String> acceptedMediaTypes)
             throws IOException, InterruptedException {
+        try {
+            return headManifestDigestStrict(name, reference, acceptedMediaTypes);
+        } catch (IOException e) {
+            LOG.warnv("Registry HEAD manifest {0}/{1} returned error: {2}", name, reference, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Strict HEAD: throws on registry error or missing digest so force-delete
+     * can abort instead of silently skipping a tag. 404 still returns null.
+     */
+    public String headManifestDigestStrict(String name, String reference, List<String> acceptedMediaTypes)
+            throws IOException, InterruptedException {
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(baseUrl + "/v2/" + name + "/manifests/" + reference))
                 .timeout(Duration.ofSeconds(10))
                 .method("HEAD", HttpRequest.BodyPublishers.noBody());
@@ -111,10 +174,13 @@ public class RegistryHttpClient {
             return null;
         }
         if (resp.statusCode() >= 400) {
-            LOG.warnv("Registry HEAD manifest {0}/{1} returned {2}", name, reference, resp.statusCode());
-            return null;
+            throw new IOException("Registry HEAD manifest " + name + "/" + reference + " returned " + resp.statusCode());
         }
-        return resp.headers().firstValue("Docker-Content-Digest").orElse(null);
+        String digest = resp.headers().firstValue("Docker-Content-Digest").orElse(null);
+        if (digest == null || digest.isBlank()) {
+            throw new IOException("Registry HEAD manifest " + name + "/" + reference + " missing Docker-Content-Digest");
+        }
+        return digest;
     }
 
     /** Result of {@link #getManifest}: digest, body, and content media type. */

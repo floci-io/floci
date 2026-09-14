@@ -147,12 +147,9 @@ class CodeDeployServerIntegrationTest {
     @Test
     @Order(9)
     void createServerDeployment() {
+        // on-prem-test-1 is not SSM-registered, so this AppSpec declares no hooks to run.
         String appSpec = """
                 os: linux
-                hooks:
-                  ApplicationStart:
-                    - location: scripts/start_server.sh
-                      timeout: 30
                 """;
 
         String escapedAppSpec = appSpec.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
@@ -231,6 +228,105 @@ class CodeDeployServerIntegrationTest {
 
     @Test
     @Order(13)
+    void serverDeploymentWithUnreachableHookScriptFailsClosed() {
+        given()
+                .contentType(CT)
+                .header("X-Amz-Target", "CodeDeploy_20141006.CreateApplication")
+                .body("{\"applicationName\":\"server-test-app-hook\",\"computePlatform\":\"Server\"}")
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .contentType(CT)
+                .header("X-Amz-Target", "CodeDeploy_20141006.CreateDeploymentGroup")
+                .body("""
+                        {
+                          "applicationName": "server-test-app-hook",
+                          "deploymentGroupName": "server-test-group-hook",
+                          "deploymentConfigName": "CodeDeployDefault.AllAtOnce",
+                          "serviceRoleArn": "arn:aws:iam::000000000000:role/CodeDeployRole",
+                          "onPremisesInstanceTagFilters": [{"Key": "Env", "Value": "test", "Type": "KEY_AND_VALUE"}]
+                        }
+                        """)
+                .when().post("/")
+                .then().statusCode(200);
+
+        String appSpec = """
+                os: linux
+                hooks:
+                  ApplicationStart:
+                    - location: scripts/start_server.sh
+                      timeout: 30
+                """;
+        String escapedAppSpec = appSpec.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+
+        String hookDeploymentId = given()
+                .contentType(CT)
+                .header("X-Amz-Target", "CodeDeploy_20141006.CreateDeployment")
+                .body("""
+                        {
+                          "applicationName": "server-test-app-hook",
+                          "deploymentGroupName": "server-test-group-hook",
+                          "description": "Test server deployment with unreachable hook",
+                          "revision": {
+                            "revisionType": "AppSpecContent",
+                            "appSpecContent": {
+                              "content": "%s"
+                            }
+                          }
+                        }
+                        """.formatted(escapedAppSpec))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("deploymentId", notNullValue())
+                .extract().jsonPath().getString("deploymentId");
+
+        String status = "Queued";
+        for (int i = 0; i < 50 && !"Succeeded".equals(status) && !"Failed".equals(status); i++) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+            status = given()
+                    .contentType(CT)
+                    .header("X-Amz-Target", "CodeDeploy_20141006.GetDeployment")
+                    .body("{\"deploymentId\":\"" + hookDeploymentId + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract().jsonPath().getString("deploymentInfo.status");
+        }
+        Assertions.assertEquals("Failed", status, "Deployment with an unreachable hook script must fail closed");
+
+        given()
+                .contentType(CT)
+                .header("X-Amz-Target", "CodeDeploy_20141006.GetDeployment")
+                .body("{\"deploymentId\":\"" + hookDeploymentId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("deploymentInfo.errorInformation.code", equalTo("HEALTH_CONSTRAINTS"));
+
+        given()
+                .contentType(CT)
+                .header("X-Amz-Target", "CodeDeploy_20141006.BatchGetDeploymentTargets")
+                .body("""
+                        {
+                          "deploymentId": "%s",
+                          "targetIds": ["on-prem-test-1"]
+                        }
+                        """.formatted(hookDeploymentId))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("deploymentTargets[0].instanceTarget.status", equalTo("Failed"))
+                .body("deploymentTargets[0].instanceTarget.lifecycleEvents.find { it.lifecycleEventName == 'ApplicationStart' }.status",
+                        equalTo("Failed"))
+                .body("deploymentTargets[0].instanceTarget.lifecycleEvents.find { it.lifecycleEventName == 'ApplicationStart' }.diagnostics.errorCode",
+                        equalTo("UnknownError"));
+    }
+
+    @Test
+    @Order(14)
     void deregisterOnPremisesInstance() {
         given()
                 .contentType(CT)
@@ -249,7 +345,7 @@ class CodeDeployServerIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void listOnPremisesInstancesDeregistered() {
         given()
                 .contentType(CT)

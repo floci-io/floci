@@ -28,6 +28,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +38,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -44,6 +48,10 @@ import java.util.stream.Collectors;
 public class CodeDeployService {
 
     private static final Logger LOG = Logger.getLogger(CodeDeployService.class);
+
+    // Lambda/ECS validation hooks must call PutLifecycleEventHookExecutionStatus within one hour.
+    private static final Duration DEFAULT_HOOK_CALLBACK_TIMEOUT = Duration.ofHours(1);
+    private static final Duration STOP_POLL_INTERVAL = Duration.ofMillis(200);
 
     private final LambdaService lambdaService;
     private final EcsService ecsService;
@@ -54,12 +62,22 @@ public class CodeDeployService {
     private final ObjectMapper yamlMapper;
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
+    private final Duration hookCallbackTimeout;
+    private final Clock clock;
 
     @Inject
     public CodeDeployService(LambdaService lambdaService, EcsService ecsService,
                              ElbV2Service elbV2Service, SsmCommandService ssmCommandService,
                              Ec2Service ec2Service, ObjectMapper mapper, RegionResolver regionResolver,
                              StorageFactory storageFactory) {
+        this(lambdaService, ecsService, elbV2Service, ssmCommandService, ec2Service, mapper,
+                regionResolver, storageFactory, DEFAULT_HOOK_CALLBACK_TIMEOUT, Clock.systemUTC());
+    }
+
+    CodeDeployService(LambdaService lambdaService, EcsService ecsService,
+                      ElbV2Service elbV2Service, SsmCommandService ssmCommandService,
+                      Ec2Service ec2Service, ObjectMapper mapper, RegionResolver regionResolver,
+                      StorageFactory storageFactory, Duration hookCallbackTimeout, Clock clock) {
         this.lambdaService = lambdaService;
         this.ecsService = ecsService;
         this.elbV2Service = elbV2Service;
@@ -69,6 +87,8 @@ public class CodeDeployService {
         this.yamlMapper = new ObjectMapper(new YAMLFactory());
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
+        this.hookCallbackTimeout = hookCallbackTimeout;
+        this.clock = clock;
     }
 
     // ---- Durable (persisted) ----
@@ -845,8 +865,10 @@ public class CodeDeployService {
 
             if (anyFailed) {
                 deployment.setStatus("Failed");
-                deployment.setErrorInformation(Map.of("code", "DeploymentFailed",
-                        "message", "One or more instances failed deployment"));
+                deployment.setErrorInformation(Map.of("code", "HEALTH_CONSTRAINTS",
+                        "message", "The overall deployment failed because too many individual instances failed "
+                                + "deployment, too few healthy instances are available for deployment, or some "
+                                + "instances in your deployment group are experiencing problems."));
             } else {
                 deployment.setStatus("Succeeded");
             }
@@ -915,7 +937,7 @@ public class CodeDeployService {
                                                Map<String, Object> event) throws InterruptedException {
         for (Map<String, Object> step : hookSteps) {
             String location = (String) step.get("location");
-            int timeout = toInt(step.get("timeout"), 300);
+            int timeout = toInt(step.get("timeout"), 3600);
             String runas = (String) step.getOrDefault("runas", "root");
 
             if (location == null) {
@@ -925,8 +947,12 @@ public class CodeDeployService {
             // Check if instance is registered with SSM
             boolean hasSsm = ssmCommandService.isInstanceRegistered(instanceId, region);
             if (!hasSsm) {
-                LOG.debugv("Instance {0} not in SSM, marking hook {1} as Succeeded", instanceId, location);
-                continue;
+                LOG.warnv("Instance {0} is not registered with SSM; cannot run hook script {1}",
+                        instanceId, location);
+                finishLifecycleEvent(event, "Failed", "UnknownError",
+                        "CodeDeploy agent was not able to receive the lifecycle event. Check the CodeDeploy agent "
+                                + "logs on your host and make sure the agent is running and can connect to the CodeDeploy server.");
+                return false;
             }
 
             try {
@@ -938,21 +964,31 @@ public class CodeDeployService {
                         instanceId, "AWS-RunShellScript", Map.of("commands", List.of(script)),
                         timeout, region);
 
-                // Poll until done (max timeout seconds, capped at 30s for emulator)
-                long deadline = System.currentTimeMillis() + Math.min(timeout * 1000L, 30_000L);
+                long deadline = clock.millis() + timeout * 1000L;
                 String invocationStatus = "InProgress";
-                while (System.currentTimeMillis() < deadline && "InProgress".equals(invocationStatus)) {
+                while (clock.millis() < deadline && "InProgress".equals(invocationStatus)) {
                     Thread.sleep(500);
                     invocationStatus = ssmCommandService.getCommandInvocationStatus(commandId, instanceId, region);
                 }
 
-                if (!"Success".equals(invocationStatus) && !"InProgress".equals(invocationStatus)) {
-                    finishLifecycleEvent(event, "Failed");
+                if ("InProgress".equals(invocationStatus)) {
+                    LOG.warnv("Hook script {0} on instance {1} did not finish within {2}s",
+                            location, instanceId, timeout);
+                    finishLifecycleEvent(event, "Failed", "ScriptTimedOut",
+                            "Script at specified location: " + location + " failed to complete in " + timeout + " seconds");
+                    return false;
+                }
+                if (!"Success".equals(invocationStatus)) {
+                    finishLifecycleEvent(event, "Failed", "ScriptFailed",
+                            "Script at specified location: " + location + " failed with SSM command status "
+                                    + invocationStatus);
                     return false;
                 }
             } catch (Exception e) {
-                LOG.debugv("SSM execution failed for {0} on {1}: {2}", location, instanceId, e.getMessage());
-                // Graceful degradation: if SSM fails, treat as succeeded
+                LOG.warnv(e, "SSM execution failed for {0} on {1}: {2}", location, instanceId, e.getMessage());
+                finishLifecycleEvent(event, "Failed", "UnknownError",
+                        "Failed to execute script " + location + ": " + e.getMessage());
+                return false;
             }
         }
         finishLifecycleEvent(event, "Succeeded");
@@ -994,7 +1030,14 @@ public class CodeDeployService {
                         steps.forEach(s -> {
                             Map<String, Object> step = new java.util.LinkedHashMap<>();
                             if (s.has("location")) { step.put("location", s.get("location").asText()); }
-                            if (s.has("timeout")) { step.put("timeout", s.get("timeout").asInt(300)); }
+                            if (s.hasNonNull("timeout")) {
+                                JsonNode value = s.get("timeout");
+                                int timeout = value.asInt(0);
+                                if ((!value.isNumber() && !value.isTextual()) || timeout <= 0) {
+                                    throw new IllegalArgumentException("Invalid script timeout");
+                                }
+                                step.put("timeout", timeout);
+                            }
                             if (s.has("runas")) { step.put("runas", s.get("runas").asText("root")); }
                             stepList.add(step);
                         });
@@ -1301,8 +1344,9 @@ public class CodeDeployService {
             if (appSpec.beforeInstall != null) {
                 boolean ok = invokeHook(region, deployment, appSpec.beforeInstall,
                         "BeforeInstall", ecsTargetMap, stopFlag);
+                if (stopFlag.get()) { finishEcsStopped(deployment, ecsTargetMap); return; }
                 if (!ok) {
-                    finishEcsFailed(deployment, ecsTargetMap, "BeforeInstallHookFailed",
+                    finishEcsFailed(deployment, ecsTargetMap, "HOOK_EXECUTION_FAILURE",
                             "Hook function reported failure: BeforeInstall");
                     return;
                 }
@@ -1328,8 +1372,9 @@ public class CodeDeployService {
             if (appSpec.afterInstall != null) {
                 boolean ok = invokeHook(region, deployment, appSpec.afterInstall,
                         "AfterInstall", ecsTargetMap, stopFlag);
+                if (stopFlag.get()) { finishEcsStopped(deployment, ecsTargetMap); return; }
                 if (!ok) {
-                    finishEcsFailed(deployment, ecsTargetMap, "AfterInstallHookFailed",
+                    finishEcsFailed(deployment, ecsTargetMap, "HOOK_EXECUTION_FAILURE",
                             "Hook function reported failure: AfterInstall");
                     return;
                 }
@@ -1340,8 +1385,9 @@ public class CodeDeployService {
             if (appSpec.beforeAllowTraffic != null) {
                 boolean ok = invokeHook(region, deployment, appSpec.beforeAllowTraffic,
                         "BeforeAllowTraffic", ecsTargetMap, stopFlag);
+                if (stopFlag.get()) { finishEcsStopped(deployment, ecsTargetMap); return; }
                 if (!ok) {
-                    finishEcsFailed(deployment, ecsTargetMap, "BeforeAllowTrafficHookFailed",
+                    finishEcsFailed(deployment, ecsTargetMap, "HOOK_EXECUTION_FAILURE",
                             "Hook function reported failure: BeforeAllowTraffic");
                     return;
                 }
@@ -1363,8 +1409,9 @@ public class CodeDeployService {
             if (appSpec.afterAllowTraffic != null) {
                 boolean ok = invokeHook(region, deployment, appSpec.afterAllowTraffic,
                         "AfterAllowTraffic", ecsTargetMap, stopFlag);
+                if (stopFlag.get()) { finishEcsStopped(deployment, ecsTargetMap); return; }
                 if (!ok) {
-                    finishEcsFailed(deployment, ecsTargetMap, "AfterAllowTrafficHookFailed",
+                    finishEcsFailed(deployment, ecsTargetMap, "HOOK_EXECUTION_FAILURE",
                             "Hook function reported failure: AfterAllowTraffic");
                     return;
                 }
@@ -1542,7 +1589,8 @@ public class CodeDeployService {
             if (appSpec.beforeAllowTraffic != null) {
                 boolean ok = invokeHook(region, deployment, appSpec.beforeAllowTraffic,
                         "BeforeAllowTraffic", lambdaTargetMap, stopFlag);
-                if (!ok) { finishFailed(deployment, lambdaTargetMap, "BeforeAllowTrafficHookFailed",
+                if (stopFlag.get()) { finishStopped(deployment, lambdaTargetMap); return; }
+                if (!ok) { finishFailed(deployment, lambdaTargetMap, "HOOK_EXECUTION_FAILURE",
                         "Hook function reported failure: BeforeAllowTraffic"); return; }
             }
 
@@ -1555,7 +1603,8 @@ public class CodeDeployService {
             if (appSpec.afterAllowTraffic != null) {
                 boolean ok = invokeHook(region, deployment, appSpec.afterAllowTraffic,
                         "AfterAllowTraffic", lambdaTargetMap, stopFlag);
-                if (!ok) { finishFailed(deployment, lambdaTargetMap, "AfterAllowTrafficHookFailed",
+                if (stopFlag.get()) { finishStopped(deployment, lambdaTargetMap); return; }
+                if (!ok) { finishFailed(deployment, lambdaTargetMap, "HOOK_EXECUTION_FAILURE",
                         "Hook function reported failure: AfterAllowTraffic"); return; }
             }
 
@@ -1644,26 +1693,59 @@ public class CodeDeployService {
             String payload = "{\"DeploymentId\":\"" + deployment.getDeploymentId()
                     + "\",\"LifecycleEventHookExecutionId\":\"" + executionId + "\"}";
 
+            String failureMessage = null;
             try {
                 InvokeResult result = lambdaService.invoke(region, hookFunctionName,
                         payload.getBytes(), InvocationType.RequestResponse);
-                if (!future.isDone()) {
-                    // Lambda didn't call PutLifecycleEventHookExecutionStatus; decide from invocation result
-                    future.complete(result.getFunctionError() == null ? "Succeeded" : "Failed");
+                if (result.getFunctionError() != null && !future.isDone()) {
+                    failureMessage = "Lambda function " + hookFunctionName
+                            + " returned a function error: " + result.getFunctionError();
+                    future.complete("Failed");
                 }
             } catch (Exception e) {
-                LOG.debugv("Hook Lambda {0} not invokable: {1}", hookFunctionName, e.getMessage());
-                future.complete("Succeeded");
+                LOG.warnv(e, "Hook Lambda {0} for lifecycle event {1} could not be invoked: {2}",
+                        hookFunctionName, lifecycleEventName, e.getMessage());
+                failureMessage = "Lambda function " + hookFunctionName + " could not be invoked: " + e.getMessage();
+                if (!future.isDone()) {
+                    future.complete("Failed");
+                }
             }
 
-            String status = "Succeeded";
-            try {
-                status = future.get(30, TimeUnit.SECONDS);
-            } catch (Exception e) {
-                status = "Succeeded";
+            String status = null;
+            long deadlineNanos = System.nanoTime() + hookCallbackTimeout.toNanos();
+            while (status == null) {
+                if (stopFlag.get()) {
+                    finishLifecycleEvent(event, "Skipped");
+                    return false;
+                }
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    LOG.warnv("Hook {0} for lifecycle event {1} did not call PutLifecycleEventHookExecutionStatus within {2}",
+                            hookFunctionName, lifecycleEventName, hookCallbackTimeout);
+                    status = "Failed";
+                    failureMessage = "Lambda function " + hookFunctionName
+                            + " did not call PutLifecycleEventHookExecutionStatus within "
+                            + hookCallbackTimeout.toSeconds() + " seconds";
+                    break;
+                }
+                long sliceNanos = Math.min(remainingNanos, STOP_POLL_INTERVAL.toNanos());
+                try {
+                    status = future.get(sliceNanos, TimeUnit.NANOSECONDS);
+                } catch (TimeoutException e) {
+                    continue;
+                } catch (ExecutionException e) {
+                    throw new IllegalStateException(e);
+                }
             }
 
-            finishLifecycleEvent(event, status);
+            if ("Failed".equals(status)) {
+                finishLifecycleEvent(event, "Failed", "UnknownError",
+                        failureMessage != null ? failureMessage
+                                : "Lambda function " + hookFunctionName + " reported that lifecycle event "
+                                        + lifecycleEventName + " failed");
+            } else {
+                finishLifecycleEvent(event, status);
+            }
             return "Succeeded".equals(status);
         } finally {
             hookFutures.remove(executionId);
@@ -1687,6 +1769,12 @@ public class CodeDeployService {
     private void finishLifecycleEvent(Map<String, Object> event, String status) {
         event.put("endTime", Instant.now().toEpochMilli() / 1000.0);
         event.put("status", status);
+    }
+
+    private void finishLifecycleEvent(Map<String, Object> event, String status,
+                                       String diagnosticsErrorCode, String diagnosticsMessage) {
+        finishLifecycleEvent(event, status);
+        event.put("diagnostics", Map.of("errorCode", diagnosticsErrorCode, "message", diagnosticsMessage));
     }
 
     private void updateTargetStatus(Map<String, Object> lambdaTargetMap, String status) {

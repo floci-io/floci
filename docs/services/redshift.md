@@ -42,6 +42,35 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
 
+## CloudFormation
+
+Floci provisions these resource types:
+
+- `AWS::Redshift::Cluster`
+- `AWS::Redshift::ClusterParameterGroup`
+- `AWS::Redshift::ClusterSubnetGroup`
+- `AWS::Redshift::ClusterSecurityGroup`
+
+### Cluster Provisioning and References
+
+For `AWS::Redshift::Cluster`:
+
+- `Ref` returns the cluster identifier.
+- `Fn::GetAtt` exposes `Endpoint.Address`, `Endpoint.Port`, and `ClusterNamespaceArn` (synthesised, stable).
+
+Replacement occurs if `ClusterIdentifier`, `DBName`, `MasterUsername`, or `ClusterSubnetGroupName` changes. Other properties (such as `NodeType`, `MasterUserPassword`, `ClusterParameterGroupName`, and `VpcSecurityGroupIds`) update in place.
+
+For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyClusterParameterGroup` on both create and update. `Description` and `ParameterGroupFamily` are replacement properties, matching AWS: changing either creates a new parameter group instead of reusing the prior one.
+
+### Gaps and Limitations
+
+- `Port` is ignored: Floci assigns the dynamic host proxy port returned in `Endpoint.Port`.
+- `DBName` other than `dev` is ignored: the emulated PostgreSQL container database is always `dev`.
+- `NumberOfNodes` is not stored on cluster create: every emulated cluster is backed by a single PostgreSQL container.
+- `ManageMasterPassword` is rejected: set `MasterUserPassword` instead.
+- `SnapshotIdentifier` is ignored: a fresh cluster is created instead of restoring from a snapshot.
+- `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -52,6 +81,9 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BASE_PORT` | `7100` | Lowest host port the per-cluster auth proxies bind |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_MAX_PORT` | `7199` | Highest host port the per-cluster auth proxies bind |
 | `FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST` | _(unset)_ | Hostname advertised in `DescribeClusters`; unset resolves from the Docker host |
+| `FLOCI_SERVICES_REDSHIFT_PROXY_HANDSHAKE_TIMEOUT_MILLIS` | `10000` | Max time a client has to complete the startup/auth handshake before the proxy drops it |
+| `FLOCI_SERVICES_REDSHIFT_PROXY_BACKEND_CONNECT_TIMEOUT_MILLIS` | `5000` | Max time the proxy waits for the backend TCP connect |
+| `FLOCI_SERVICES_REDSHIFT_PROXY_MAX_CONNECTIONS` | `100` | Max concurrent connections per proxy before new ones are refused |
 
 Redshift needs the Docker socket so it can launch PostgreSQL containers. Each cluster's container is published on a dynamically assigned host port, returned by `DescribeClusters`.
 

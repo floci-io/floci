@@ -115,6 +115,7 @@ public class ContainerBuilder {
         private String workingDir;
         private Long memoryBytes;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
+        private final List<Integer> loopbackPortBindings = new ArrayList<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
         private String networkMode;
         private final List<Mount> mounts = new ArrayList<>();
@@ -215,6 +216,19 @@ public class ContainerBuilder {
          */
         public Builder withPortBinding(int containerPort, int hostPort) {
             this.portBindings.put(containerPort, hostPort);
+            this.exposedPorts.add(containerPort);
+            return this;
+        }
+
+        /**
+         * Publishes a container port to the host loopback interface only.
+         *
+         * <p>Use this for implementation backends reached through Floci's public data plane,
+         * not for customer-facing service endpoints.
+         */
+        public Builder withLoopbackPortBinding(int containerPort, int hostPort) {
+            this.portBindings.put(containerPort, hostPort);
+            this.loopbackPortBindings.add(containerPort);
             this.exposedPorts.add(containerPort);
             return this;
         }
@@ -440,6 +454,7 @@ public class ContainerBuilder {
                     entrypoint != null ? List.copyOf(entrypoint) : null,
                     memoryBytes,
                     Map.copyOf(portBindings),
+                    List.copyOf(loopbackPortBindings),
                     List.copyOf(exposedPorts),
                     networkMode,
                     List.copyOf(mounts),

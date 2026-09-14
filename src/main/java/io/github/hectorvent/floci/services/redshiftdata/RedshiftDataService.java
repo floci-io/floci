@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -13,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -82,16 +84,35 @@ public class RedshiftDataService implements Resettable {
         stored.updatedAt = Instant.now();
     }
 
+    /**
+     * Redshift has no line, json or jsonb type and fails a statement that produces one with
+     * exactly these messages (checked on a real cluster 2026-09-13).
+     */
+    private static final Map<String, String> RESULT_TYPE_ERRORS = Map.of(
+            "line", "ERROR: type \"line\" not yet implemented",
+            "json", "ERROR: type \"json\" does not exist",
+            "jsonb", "ERROR: type \"jsonb\" does not exist");
+
+    static void rejectResultTypesRedshiftLacks(ResultSetMetaData meta) throws SQLException {
+        for (int i = 1; i <= meta.getColumnCount(); i++) {
+            String error = RESULT_TYPE_ERRORS.get(meta.getColumnTypeName(i));
+            if (error != null) {
+                throw new SQLException(error);
+            }
+        }
+    }
+
     private void runOnConnection(RedshiftDataStatementStore.StoredStatement stored,
                                  Connection connection, String sql, Map<String, String> parameters)
             throws SQLException {
-        RedshiftDataSqlParameters.ParsedSql parsed = RedshiftDataSqlParameters.parse(sql);
+        ParsedSql parsed = RedshiftDataSqlParameters.parse(sql);
         long t0 = System.nanoTime();
         try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
             RedshiftDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
             boolean hasResultSet = statement.execute();
             if (hasResultSet) {
                 try (ResultSet rs = statement.getResultSet()) {
+                    rejectResultTypesRedshiftLacks(rs.getMetaData());
                     stored.columnMetadata = RedshiftDataColumnMetadata.toColumnMetadata(objectMapper, rs.getMetaData());
                     stored.rows = RedshiftDataFieldMapper.rows(objectMapper, rs);
                     stored.hasResultSet = true;

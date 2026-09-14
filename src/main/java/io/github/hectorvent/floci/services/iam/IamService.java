@@ -2185,6 +2185,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return Optional.empty();
             }
             String roleArn = session.getRoleArn();
+            if (roleArn == null) {
+                return Optional.empty();
+            }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
             return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString());

@@ -23,9 +23,6 @@ import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
-import io.github.hectorvent.floci.services.ses.model.ReceiptFilter;
-import io.github.hectorvent.floci.services.ses.model.ReceiptRule;
-import io.github.hectorvent.floci.services.ses.model.ReceiptRuleSet;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TopicPreference;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
@@ -92,8 +89,6 @@ public class SesService {
     // Identity (sending authorization) policy storage, extracted to SesPolicyService.
     // The facade keeps the identity-existence check and delegates the rest.
     private final SesPolicyService policyService;
-    // Receipt-rule-set domain, extracted to its own service. The facade delegates.
-    private final SesReceiptRuleService receiptRuleService;
     // Custom verification email templates: storage extracted to SesCvetService. The
     // facade keeps the identity-dependent validation and the send path; the service owns the store.
     private final SesCvetService cvetService;
@@ -110,8 +105,8 @@ public class SesService {
     private final RegionResolver regionResolver;
 
     @Inject
-    public SesService(SesIdentityService identityService, SesReceiptRuleService receiptRuleService,
-                       SesAccountService accountService, SesCvetService cvetService,
+    public SesService(SesIdentityService identityService, SesAccountService accountService,
+                       SesCvetService cvetService,
                        SesPolicyService policyService, SesContactService contactService,
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
@@ -128,7 +123,6 @@ public class SesService {
         this.dedicatedIpService = dedicatedIpService;
         this.contactService = contactService;
         this.policyService = policyService;
-        this.receiptRuleService = receiptRuleService;
         this.cvetService = cvetService;
         this.tenantService = tenantService;
         this.smtpRelay = smtpRelay;
@@ -147,7 +141,6 @@ public class SesService {
                SesDedicatedIpService dedicatedIpService,
                SesContactService contactService,
                SesPolicyService policyService,
-               SesReceiptRuleService receiptRuleService,
                SesCvetService cvetService,
                SesTenantService tenantService,
                SmtpRelay smtpRelay) {
@@ -160,7 +153,6 @@ public class SesService {
         this.dedicatedIpService = dedicatedIpService;
         this.contactService = contactService;
         this.policyService = policyService;
-        this.receiptRuleService = receiptRuleService;
         this.cvetService = cvetService;
         this.tenantService = tenantService;
         this.smtpRelay = smtpRelay;
@@ -1158,81 +1150,6 @@ public class SesService {
             default -> "Email template <" + ref.name() + "> does not exist";
         };
         throw new AwsException("NotFoundException", message, 404);
-    }
-
-
-    // ──────────────────────── Receipt rule sets (inbound) ────────────────────────
-    //
-    // Receipt rule sets live in SesReceiptRuleService; this facade
-    // just forwards, keeping the v1 SesQueryHandler call sites unchanged.
-
-    public ReceiptRuleSet createReceiptRuleSet(String name, String region) {
-        return receiptRuleService.createReceiptRuleSet(name, region);
-    }
-
-    public ReceiptRuleSet describeReceiptRuleSet(String name, String region) {
-        return receiptRuleService.describeReceiptRuleSet(name, region);
-    }
-
-    public List<ReceiptRuleSet> listReceiptRuleSets(String region) {
-        return receiptRuleService.listReceiptRuleSets(region);
-    }
-
-    public void deleteReceiptRuleSet(String name, String region) {
-        receiptRuleService.deleteReceiptRuleSet(name, region);
-    }
-
-    public void setActiveReceiptRuleSet(String name, String region) {
-        receiptRuleService.setActiveReceiptRuleSet(name, region);
-    }
-
-    public ReceiptRuleSet describeActiveReceiptRuleSet(String region) {
-        return receiptRuleService.describeActiveReceiptRuleSet(region);
-    }
-
-    public void reorderReceiptRuleSet(String ruleSetName, List<String> ruleNames, String region) {
-        receiptRuleService.reorderReceiptRuleSet(ruleSetName, ruleNames, region);
-    }
-
-    public ReceiptRuleSet cloneReceiptRuleSet(String ruleSetName, String originalRuleSetName, String region) {
-        return receiptRuleService.cloneReceiptRuleSet(ruleSetName, originalRuleSetName, region);
-    }
-
-    // The bounce-sender check needs identity state; the rule domain receives it as a predicate
-    // bound here, keeping SesIdentityService out of its constructor surface.
-
-    public void createReceiptRule(String ruleSetName, ReceiptRule rule, String after, String region) {
-        receiptRuleService.createReceiptRule(ruleSetName, rule, after, region,
-                sender -> identityService.isVerifiedSender(sender, region));
-    }
-
-    public ReceiptRule describeReceiptRule(String ruleSetName, String ruleName, String region) {
-        return receiptRuleService.describeReceiptRule(ruleSetName, ruleName, region);
-    }
-
-    public void updateReceiptRule(String ruleSetName, ReceiptRule rule, String region) {
-        receiptRuleService.updateReceiptRule(ruleSetName, rule, region,
-                sender -> identityService.isVerifiedSender(sender, region));
-    }
-
-    public void deleteReceiptRule(String ruleSetName, String ruleName, String region) {
-        receiptRuleService.deleteReceiptRule(ruleSetName, ruleName, region);
-    }
-
-    public void setReceiptRulePosition(String ruleSetName, String ruleName, String after, String region) {
-        receiptRuleService.setReceiptRulePosition(ruleSetName, ruleName, after, region);
-    }
-
-    public void createReceiptFilter(ReceiptFilter filter, String region) {
-        receiptRuleService.createReceiptFilter(filter, region);
-    }
-
-    public List<ReceiptFilter> listReceiptFilters(String region) {
-        return receiptRuleService.listReceiptFilters(region);
-    }
-
-    public void deleteReceiptFilter(String filterName, String region) {
-        receiptRuleService.deleteReceiptFilter(filterName, region);
     }
 
     // ──────────────────────── Dedicated IP Pools ────────────────────────

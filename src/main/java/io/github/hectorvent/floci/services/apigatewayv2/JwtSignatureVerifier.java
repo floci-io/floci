@@ -60,8 +60,12 @@ public class JwtSignatureVerifier {
                 .build());
     }
 
-    /** Package-private for tests: injects a client pointed at a local fixture server. */
-    JwtSignatureVerifier(ObjectMapper objectMapper, HttpClient httpClient) {
+    /**
+     * Injects a caller-supplied client, so tests (including {@code OidcAuthValidatorTest} in the
+     * AppSync auth package, which points it at a local fixture server) don't have to reach the
+     * real network to exercise verification.
+     */
+    public JwtSignatureVerifier(ObjectMapper objectMapper, HttpClient httpClient) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
     }

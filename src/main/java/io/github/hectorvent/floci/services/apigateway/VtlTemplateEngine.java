@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.vtl.VtlUtilFunctions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -28,12 +28,10 @@ import org.apache.velocity.util.introspection.TypeConversionHandlerImpl;
 import org.apache.velocity.util.introspection.UberspectImpl;
 
 import java.io.StringWriter;
-import java.net.URLDecoder;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.util.AbstractMap;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Evaluates AWS API Gateway VTL (Velocity Template Language) mapping templates.
@@ -44,6 +42,7 @@ import java.util.Map;
 @ApplicationScoped
 @RegisterForReflection(targets = {
         VtlTemplateEngine.InputVariable.class,
+        VtlTemplateEngine.ParameterMap.class,
         VtlTemplateEngine.UtilVariable.class,
         VtlTemplateEngine.ResponseOverride.class,
         UberspectImpl.class,
@@ -131,6 +130,10 @@ public class VtlTemplateEngine {
         identity.put("sourceIp", "127.0.0.1");
         map.put("identity", identity);
 
+        if (ctx.authorizer() != null) {
+            map.put("authorizer", ctx.authorizer());
+        }
+
         map.put("responseOverride", responseOverride);
 
         return map;
@@ -181,7 +184,8 @@ public class VtlTemplateEngine {
             String resourcePath,
             String requestId,
             String accountId,
-            Map<String, String> stageVariables
+            Map<String, String> stageVariables,
+            Map<String, Object> authorizer
     ) {}
 
     /**
@@ -235,13 +239,13 @@ public class VtlTemplateEngine {
             }
         }
 
-        /** Searches all parameter types for the given name (querystring, path, header). */
+        /** Searches all parameter types for the given name (path, querystring, header). */
         public String params(String paramName) {
-            if (ctx.queryParams() != null && ctx.queryParams().containsKey(paramName)) {
-                return ctx.queryParams().get(paramName);
-            }
             if (ctx.pathParams() != null && ctx.pathParams().containsKey(paramName)) {
                 return ctx.pathParams().get(paramName);
+            }
+            if (ctx.queryParams() != null && ctx.queryParams().containsKey(paramName)) {
+                return ctx.queryParams().get(paramName);
             }
             if (ctx.headers() != null && ctx.headers().containsKey(paramName)) {
                 return ctx.headers().get(paramName);
@@ -252,9 +256,9 @@ public class VtlTemplateEngine {
         /** Returns request parameters organized by type. */
         public Map<String, Map<String, String>> params() {
             Map<String, Map<String, String>> params = new HashMap<>();
-            params.put("querystring", ctx.queryParams() != null ? ctx.queryParams() : Map.of());
-            params.put("path", ctx.pathParams() != null ? ctx.pathParams() : Map.of());
-            params.put("header", ctx.headers() != null ? ctx.headers() : Map.of());
+            params.put("querystring", new ParameterMap(ctx.queryParams()));
+            params.put("path", new ParameterMap(ctx.pathParams()));
+            params.put("header", new ParameterMap(ctx.headers()));
             return params;
         }
 
@@ -289,6 +293,31 @@ public class VtlTemplateEngine {
         }
     }
 
+    /** Reflection-safe map exposed to Velocity templates in native images. */
+    public static class ParameterMap extends AbstractMap<String, String> {
+
+        private final Map<String, String> values;
+
+        public ParameterMap(Map<String, String> values) {
+            this.values = values != null ? values : Map.of();
+        }
+
+        @Override
+        public String get(Object key) {
+            return values.get(key);
+        }
+
+        @Override
+        public Set<String> keySet() {
+            return values.keySet();
+        }
+
+        @Override
+        public Set<Entry<String, String>> entrySet() {
+            return values.entrySet();
+        }
+    }
+
     /**
      * The {@code $util} variable available in API Gateway VTL templates.
      */
@@ -303,68 +332,34 @@ public class VtlTemplateEngine {
         /**
          * Escapes a string using EcmaScript/JavaScript string rules.
          * Matches AWS API Gateway behavior (Apache Commons Lang escapeEcmaScript).
-         * Escapes: backslash, double/single quotes, forward slash, control chars,
-         * and non-ASCII characters (outside 0x20-0x7E) as unicode escape sequences.
          */
         public String escapeJavaScript(String s) {
-            if (s == null) return "";
-            StringBuilder sb = new StringBuilder(s.length() + 16);
-            for (int i = 0; i < s.length(); i++) {
-                char c = s.charAt(i);
-                switch (c) {
-                    case '\\' -> sb.append("\\\\");
-                    case '"' -> sb.append("\\\"");
-                    case '\'' -> sb.append("\\'");
-                    case '/' -> sb.append("\\/");
-                    case '\b' -> sb.append("\\b");
-                    case '\t' -> sb.append("\\t");
-                    case '\n' -> sb.append("\\n");
-                    case '\f' -> sb.append("\\f");
-                    case '\r' -> sb.append("\\r");
-                    default -> {
-                        if (c < 0x20 || c > 0x7E) {
-                            sb.append("\\u").append(String.format("%04x", (int) c));
-                        } else {
-                            sb.append(c);
-                        }
-                    }
-                }
-            }
-            return sb.toString();
+            return VtlUtilFunctions.escapeJavaScript(s);
         }
 
         /** URL-encodes a string. */
         public String urlEncode(String s) {
-            if (s == null) return "";
-            return URLEncoder.encode(s, StandardCharsets.UTF_8);
+            return VtlUtilFunctions.urlEncode(s);
         }
 
         /** URL-decodes a string. */
         public String urlDecode(String s) {
-            if (s == null) return "";
-            return URLDecoder.decode(s, StandardCharsets.UTF_8);
+            return VtlUtilFunctions.urlDecode(s);
         }
 
         /** Base64-encodes a string. */
         public String base64Encode(String s) {
-            if (s == null) return "";
-            return Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
+            return VtlUtilFunctions.base64Encode(s);
         }
 
         /** Base64-decodes a string. */
         public String base64Decode(String s) {
-            if (s == null) return "";
-            return new String(Base64.getDecoder().decode(s), StandardCharsets.UTF_8);
+            return VtlUtilFunctions.base64Decode(s);
         }
 
         /** Parses a JSON string into a Map/List structure navigable in VTL. */
         public Object parseJson(String s) {
-            if (s == null || s.isEmpty()) return Map.of();
-            try {
-                return objectMapper.readValue(s, Object.class);
-            } catch (JsonProcessingException e) {
-                return Map.of();
-            }
+            return VtlUtilFunctions.parseJson(objectMapper, s);
         }
     }
 }

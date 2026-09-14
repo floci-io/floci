@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -45,7 +48,8 @@ class EcsJsonHandlerRuntimePlatformLogConfigurationTest {
                     return td;
                 });
 
-        handler = new EcsJsonHandler(service, objectMapper);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        handler = new EcsJsonHandler(service, objectMapper, new HostVolumePolicy(config));
     }
 
     @Test
