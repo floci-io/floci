@@ -4,7 +4,13 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.*;
 
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.Matchers.*;
 
@@ -753,5 +759,96 @@ class SqsIntegrationTest {
                 .formParam("QueueUrl", rangeQueueUrl)
             .when().post("/");
         }
+    }
+
+    @Test
+    void getQueueAttributesAllReturnsTheAwsAttributeSetForAStandardQueue() {
+        String attrQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-attribute-defaults-queue")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            Map<String, String> attributes = allQueueAttributes(attrQueueUrl);
+
+            assertEquals("1048576", attributes.get("MaximumMessageSize"),
+                    "MaximumMessageSize must default to the AWS value of 1048576 bytes");
+            assertEquals("true", attributes.get("SqsManagedSseEnabled"),
+                    "A queue without a KMS key reports SSE-SQS enabled");
+            assertEquals("30", attributes.get("VisibilityTimeout"));
+            assertEquals("345600", attributes.get("MessageRetentionPeriod"));
+            assertEquals("0", attributes.get("DelaySeconds"));
+            assertEquals("0", attributes.get("ReceiveMessageWaitTimeSeconds"));
+            assertTrue(attributes.containsKey("QueueArn"));
+            assertTrue(attributes.containsKey("CreatedTimestamp"));
+            assertTrue(attributes.containsKey("LastModifiedTimestamp"));
+            assertTrue(attributes.containsKey("ApproximateNumberOfMessages"));
+            assertTrue(attributes.containsKey("ApproximateNumberOfMessagesNotVisible"));
+            assertTrue(attributes.containsKey("ApproximateNumberOfMessagesDelayed"));
+            assertFalse(attributes.containsKey("Policy"),
+                    "Policy is only returned once set");
+            assertFalse(attributes.containsKey("RedrivePolicy"),
+                    "RedrivePolicy is only returned once set");
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", attrQueueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void setQueueAttributesRejectsMaximumMessageSizeAboveTheAwsLimit() {
+        String limitQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-max-message-size-range-queue")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SetQueueAttributes")
+                .formParam("QueueUrl", limitQueueUrl)
+                .formParam("Attribute.1.Name", "MaximumMessageSize")
+                .formParam("Attribute.1.Value", "1048577")
+            .when().post("/").then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidAttributeValue</Code>"));
+
+            assertEquals("1048576", allQueueAttributes(limitQueueUrl).get("MaximumMessageSize"),
+                    "A rejected SetQueueAttributes must leave the stored value untouched");
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", limitQueueUrl)
+            .when().post("/");
+        }
+    }
+
+    private static Map<String, String> allQueueAttributes(String url) {
+        var xml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", url)
+            .formParam("AttributeName.1", "All")
+        .when().post("/").then()
+            .statusCode(200)
+            .extract().xmlPath();
+
+        List<String> names = xml.getList(
+                "GetQueueAttributesResponse.GetQueueAttributesResult.Attribute.Name", String.class);
+        List<String> values = xml.getList(
+                "GetQueueAttributesResponse.GetQueueAttributesResult.Attribute.Value", String.class);
+        Map<String, String> attributes = new LinkedHashMap<>();
+        for (int i = 0; i < names.size(); i++) {
+            attributes.put(names.get(i), values.get(i));
+        }
+        return attributes;
     }
 }
