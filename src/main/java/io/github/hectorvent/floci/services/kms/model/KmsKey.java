@@ -30,6 +30,14 @@ public class KmsKey {
     private String privateKeyEncoded;
     private String publicKeyEncoded;
     private int onDemandRotationCount;
+    // Backing keys for the AES-GCM ciphertext envelope (symmetric CMKs only): backing key id
+    // -> Base64(32 random bytes). Rotation adds a new entry and switches currentBackingKeyId
+    // rather than replacing the map, so blobs encrypted under a prior backing key keep
+    // decrypting, matching AWS KMS's own behavior of retaining prior backing keys. Keys
+    // persisted before this field existed load with an empty map (Jackson leaves the default),
+    // and KmsService lazily generates material for them on first use.
+    private Map<String, String> backingKeys = new HashMap<>();
+    private String currentBackingKeyId;
 
     public KmsKey() {
         this.creationDate = Instant.now().getEpochSecond();
@@ -96,4 +104,10 @@ public class KmsKey {
 
     public int getOnDemandRotationCount() { return onDemandRotationCount; }
     public void setOnDemandRotationCount(int onDemandRotationCount) { this.onDemandRotationCount = onDemandRotationCount; }
+
+    public Map<String, String> getBackingKeys() { return backingKeys; }
+    public void setBackingKeys(Map<String, String> backingKeys) { this.backingKeys = backingKeys; }
+
+    public String getCurrentBackingKeyId() { return currentBackingKeyId; }
+    public void setCurrentBackingKeyId(String currentBackingKeyId) { this.currentBackingKeyId = currentBackingKeyId; }
 }

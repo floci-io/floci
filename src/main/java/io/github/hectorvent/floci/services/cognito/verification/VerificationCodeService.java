@@ -86,9 +86,15 @@ public final class VerificationCodeService {
     }
 
     /**
-     * Validate a code. On success, marks it consumed and removes it. On any
-     * failure, throws {@link VerificationCodeException} with the specific
-     * {@link VerificationCodeException.Kind}.
+     * Validate a code. On success, marks it consumed. For the attribute-verification
+     * purposes, retains the tombstone until it expires or a new code replaces it, so a
+     * reused code answers {@code EXPIRED} rather than {@code NOT_FOUND}, validated against
+     * a real Cognito pool for {@code VerifyUserAttribute} (see CognitoServiceTest /
+     * CognitoAttributeVerificationIntegrationTest). {@link VerificationCode.Purpose#SIGNUP_CONFIRMATION}
+     * and {@link VerificationCode.Purpose#PASSWORD_RESET} keep the original delete-on-consume
+     * behavior instead, since that reuse case was never validated against real Cognito for
+     * {@code ConfirmSignUp} or {@code ConfirmForgotPassword}. On any failure, throws
+     * {@link VerificationCodeException} with the specific {@link VerificationCodeException.Kind}.
      *
      * <p>Note: not thread-safe under concurrent {@code consume()} of the same
      * (poolId, username, purpose) key — two racing wrong-code calls may
@@ -101,13 +107,13 @@ public final class VerificationCodeService {
         VerificationCode vc = store.get(key).orElseThrow(() -> new VerificationCodeException(
             VerificationCodeException.Kind.NOT_FOUND,
             "Invalid verification code provided, please try again"));
-        if (vc.isConsumed()) {
-            throw new VerificationCodeException(
-                VerificationCodeException.Kind.NOT_FOUND,
-                "Invalid verification code provided, please try again");
-        }
         if (vc.isExpired(clock.instant())) {
             store.delete(key);
+            throw new VerificationCodeException(
+                VerificationCodeException.Kind.EXPIRED,
+                "Invalid code provided, please request a code again");
+        }
+        if (vc.isConsumed()) {
             throw new VerificationCodeException(
                 VerificationCodeException.Kind.EXPIRED,
                 "Invalid code provided, please request a code again");
@@ -136,7 +142,16 @@ public final class VerificationCodeService {
         }
 
         vc.markConsumed();
-        store.delete(key);
+        if (retainsConsumedTombstone(purpose)) {
+            store.put(key, vc);
+        } else {
+            store.delete(key);
+        }
+    }
+
+    private boolean retainsConsumedTombstone(VerificationCode.Purpose purpose) {
+        return purpose == VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION
+            || purpose == VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION;
     }
 
     /** Remove any active code for the (pool, user, purpose). Idempotent. */

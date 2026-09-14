@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
@@ -161,7 +162,8 @@ class Ec2ContainerManagerTest {
                 mock(Ec2PortForwardManager.class),
                 mock(RegionResolver.class),
                 mock(ContainerNetworkReachability.class),
-                mock(VpcNetworkManager.class));
+                mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class));
 
         Instance instance = new Instance();
         instance.setInstanceId("i-restored");
@@ -347,7 +349,8 @@ class Ec2ContainerManagerTest {
                 mock(Ec2PortForwardManager.class),
                 mock(RegionResolver.class),
                 mock(ContainerNetworkReachability.class),
-                mock(VpcNetworkManager.class));
+                mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class));
     }
 
     /** A container on both its VPC network and the default bridge, which is what launch leaves. */
@@ -612,7 +615,8 @@ class Ec2ContainerManagerTest {
                 mock(Ec2PortForwardManager.class),
                 mock(RegionResolver.class),
                 reachability,
-                mock(VpcNetworkManager.class));
+                mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class));
     }
 
     @Test
@@ -793,6 +797,22 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void metadataProxyInstallCommandLetsDnfReplaceCurlMinimalWithCurl() {
+        // public.ecr.aws/amazonlinux/amazonlinux:2023 -- the fallback image AmiImageResolver
+        // uses for any unrecognized AMI ID -- ships curl-minimal by default. Without
+        // --allowerasing, "dnf install -y iproute socat curl ca-certificates" fails the whole
+        // transaction on a curl/curl-minimal conflict (they both provide /usr/bin/curl), so
+        // iproute and socat never install either, even though neither of them conflicts with
+        // anything. Reproduced against the real image: dnf reported dozens of
+        // "package curl-minimal-... conflicts with curl provided by curl-..." lines and the
+        // instance was left with no link-local IMDS endpoint.
+        String script = Ec2ContainerManager.metadataProxyInstallCommand()[2];
+
+        assertTrue(script.contains("dnf install -y --allowerasing iproute socat curl ca-certificates"),
+                script);
+    }
+
+    @Test
     void metadataProxyStartCommandBindsAwsLinkLocalMetadataAddress() {
         String[] command = Ec2ContainerManager.metadataProxyStartCommand("floci", 9169);
 
@@ -818,6 +838,31 @@ class Ec2ContainerManagerTest {
                         "us-west-2",
                         "http://floci:4566",
                         "http://floci:9169"));
+    }
+
+    @Test
+    void launchPointsTheInstanceSdkAtTheSharedContainerEndpointAndKeepsImdsOnTheHostAddress() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.13");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        Instance instance = instance("i-endpoint");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.builder).withEnv(List.of(
+                "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://floci:9169",
+                "AWS_ENDPOINT_URL=http://localhost.floci.io:4680",
+                "AWS_DEFAULT_REGION=us-west-2",
+                "AWS_REGION=us-west-2",
+                "AWS_ACCESS_KEY_ID=test",
+                "AWS_SECRET_ACCESS_KEY=test",
+                "AWS_SESSION_TOKEN=test-session-token"));
     }
 
     @Test
@@ -1322,6 +1367,8 @@ class Ec2ContainerManagerTest {
 
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.resolve()).thenReturn("floci");
+        ContainerReachableEndpoint reachableEndpoint = mock(ContainerReachableEndpoint.class);
+        when(reachableEndpoint.baseUrl()).thenReturn("http://localhost.floci.io:4680");
         PortAllocator portAllocator = mock(PortAllocator.class);
         when(portAllocator.allocate(anyInt(), anyInt())).thenReturn(2201);
 
@@ -1356,7 +1403,8 @@ class Ec2ContainerManagerTest {
                         portForwardManager,
                         regionResolver,
                         mock(ContainerNetworkReachability.class),
-                        vpcNetworkManager)
+                        vpcNetworkManager,
+                        reachableEndpoint)
                 : new Ec2ContainerManager(
                         containerBuilder,
                         lifecycleManager,
@@ -1371,6 +1419,7 @@ class Ec2ContainerManagerTest {
                         regionResolver,
                         mock(ContainerNetworkReachability.class),
                         vpcNetworkManager,
+                        reachableEndpoint,
                         executor,
                         userDataTimeout);
         return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,

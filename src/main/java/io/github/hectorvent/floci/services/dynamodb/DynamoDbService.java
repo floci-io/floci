@@ -1909,8 +1909,15 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
+    record ExpiredTableScan(String rawKey, String accountId, String storageKey, String region,
+                             TableDefinition table, List<String> itemKeys) {}
+
     void deleteExpiredItems() {
-        int totalDeleted = 0;
+        deleteScannedItems(scanExpiredItems());
+    }
+
+    List<ExpiredTableScan> scanExpiredItems() {
+        List<ExpiredTableScan> scans = new ArrayList<>();
         // Runs with no request scope and must sweep every account's tables, not just the
         // default one — scanAllAccountsRaw()'s key matches itemsByTable's directly.
         Map<String, TableDefinition> allTables;
@@ -1927,7 +1934,9 @@ public class DynamoDbService implements ResourceProvider {
                 continue;
             }
             var items = itemsByTable.get(rawKey);
-            if (items == null) continue;
+            if (items == null) {
+                continue;
+            }
 
             List<String> expiredKeys = items.entrySet().stream()
                     .filter(e -> isExpired(e.getValue(), table))
@@ -1940,21 +1949,46 @@ public class DynamoDbService implements ResourceProvider {
             String accountId = slash >= 0 ? rawKey.substring(0, slash) : null;
             String storageKey = slash >= 0 ? rawKey.substring(slash + 1) : rawKey;
             String region = storageKey.split("::", 2)[0];
-            for (String itemKey : expiredKeys) {
-                JsonNode removed = items.remove(itemKey);
-                if (removed != null) {
-                    if (streamService != null) {
-                        streamService.captureEvent(table.getTableName(), "REMOVE", removed, null, table, region);
+            scans.add(new ExpiredTableScan(rawKey, accountId, storageKey, region, table, expiredKeys));
+        }
+        return scans;
+    }
+
+    void deleteScannedItems(List<ExpiredTableScan> scans) {
+        int totalDeleted = 0;
+        for (ExpiredTableScan scan : scans) {
+            ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scan.rawKey());
+            if (items == null) {
+                continue;
+            }
+
+            int deletedForTable = 0;
+            for (String itemKey : scan.itemKeys()) {
+                JsonNode removed = withScopedItemLock(scan.rawKey(), itemKey, () -> {
+                    JsonNode current = items.get(itemKey);
+                    if (current == null || !isExpired(current, scan.table())) {
+                        return null;
                     }
-                    if (kinesisForwarder != null) {
-                        // Out of request scope here: pass the table owner's account explicitly so the CDC
-                        // record lands in the owner's stream, not the default account's same-named stream.
-                        kinesisForwarder.forward("REMOVE", removed, null, table, region, accountId);
-                    }
+                    return items.remove(itemKey);
+                });
+                if (removed == null) {
+                    continue;
+                }
+                deletedForTable++;
+                if (streamService != null) {
+                    streamService.captureEvent(scan.table().getTableName(), "REMOVE", removed, null,
+                            scan.table(), scan.region());
+                }
+                if (kinesisForwarder != null) {
+                    // Out of request scope here: pass the table owner's account explicitly so the CDC
+                    // record lands in the owner's stream, not the default account's same-named stream.
+                    kinesisForwarder.forward("REMOVE", removed, null, scan.table(), scan.region(), scan.accountId());
                 }
             }
-            persistItemsForAccount(accountId, storageKey, items);
-            totalDeleted += expiredKeys.size();
+            if (deletedForTable > 0) {
+                persistItemsForAccount(scan.accountId(), scan.storageKey(), items);
+                totalDeleted += deletedForTable;
+            }
         }
         if (totalDeleted > 0) {
             LOG.infov("TTL sweeper removed {0} expired items", totalDeleted);
@@ -3071,8 +3105,13 @@ public class DynamoDbService implements ResourceProvider {
     }
 
     private ReentrantLock lockFor(String storageKey, String itemKey) {
+        return lockForScopedKey(scopedItemsKey(storageKey), itemKey);
+    }
+
+    // The sweeper has no request scope, so it locks with the raw account-scoped key instead of scopedItemsKey.
+    private ReentrantLock lockForScopedKey(String scopedKey, String itemKey) {
         return itemLocks
-                .computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentHashMap<>())
+                .computeIfAbsent(scopedKey, k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(itemKey, k -> new ReentrantLock());
     }
 
@@ -3088,6 +3127,16 @@ public class DynamoDbService implements ResourceProvider {
 
     private <T> T withItemLock(String storageKey, String itemKey, Supplier<T> body) {
         ReentrantLock lock = lockFor(storageKey, itemKey);
+        lock.lock();
+        try {
+            return body.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private <T> T withScopedItemLock(String scopedKey, String itemKey, Supplier<T> body) {
+        ReentrantLock lock = lockForScopedKey(scopedKey, itemKey);
         lock.lock();
         try {
             return body.get();

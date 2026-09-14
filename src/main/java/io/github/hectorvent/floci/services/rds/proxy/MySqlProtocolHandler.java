@@ -79,7 +79,14 @@ public class MySqlProtocolHandler {
                                   String masterUsername, String masterPassword,
                                   boolean iamEnabled, RdsSigV4Validator sigV4,
                                   RdsProxyTlsCertificates tlsCertificates,
-                                  PasswordValidator passwordValidator) throws IOException {
+                                  PasswordValidator passwordValidator,
+                                  int handshakeTimeoutMillis) throws IOException {
+
+        client.setSoTimeout(handshakeTimeoutMillis);
+        // The backend accepted the TCP connection but may never answer (or answer only
+        // partially); bound every blocking backend read during the handshake so a silent
+        // backend cannot pin this handler thread and its connection permit forever.
+        backend.setSoTimeout(handshakeTimeoutMillis);
 
         InputStream backendIn = backend.getInputStream();
         OutputStream backendOut = backend.getOutputStream();
@@ -130,6 +137,9 @@ public class MySqlProtocolHandler {
                 return;
             }
             client = sslSocket;
+            // upgradeToTls wraps the socket in a new SSLSocket; re-apply the handshake timeout
+            // since it is not guaranteed to be inherited from the underlying socket.
+            client.setSoTimeout(handshakeTimeoutMillis);
             clientIn = sslSocket.getInputStream();
             clientOut = sslSocket.getOutputStream();
 
@@ -206,6 +216,9 @@ public class MySqlProtocolHandler {
             return;
         }
 
+        // Authenticated: clear the handshake deadline so a long-lived idle session is never killed.
+        client.setSoTimeout(0);
+        backend.setSoTimeout(0);
         bridge(client, backend);
     }
 

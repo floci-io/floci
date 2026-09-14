@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
@@ -24,13 +25,26 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class RedshiftProxyManagerTest {
 
     private RedshiftProxyManager newManager() {
         return new RedshiftProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class),
-                mock(S3Service.class));
+                mock(S3Service.class), testConfig());
+    }
+
+    private static EmulatorConfig testConfig() {
+        EmulatorConfig.RedshiftServiceConfig redshiftConfig = mock(EmulatorConfig.RedshiftServiceConfig.class);
+        when(redshiftConfig.proxyHandshakeTimeoutMillis()).thenReturn(5000);
+        when(redshiftConfig.proxyBackendConnectTimeoutMillis()).thenReturn(5000);
+        when(redshiftConfig.proxyMaxConnections()).thenReturn(100);
+        EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
+        when(servicesConfig.redshift()).thenReturn(redshiftConfig);
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        return config;
     }
 
     private static void start(RedshiftProxyManager manager, String key, int proxyPort) {

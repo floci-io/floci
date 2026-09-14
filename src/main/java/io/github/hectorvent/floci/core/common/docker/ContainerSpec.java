@@ -18,6 +18,7 @@ import java.util.Map;
  * @param entrypoint Entrypoint to use (overrides image ENTRYPOINT)
  * @param memoryBytes Memory limit in bytes (null = no limit)
  * @param portBindings Map of container port to host port (0 = dynamic allocation)
+ * @param loopbackPortBindings Container ports whose host bindings accept loopback traffic only
  * @param exposedPorts Ports to expose (required for port bindings)
  * @param networkMode Docker network name or mode (null = default bridge)
  * @param mounts Volume mounts (named volumes, bind mounts, tmpfs)
@@ -40,6 +41,7 @@ public record ContainerSpec(
         List<String> entrypoint,
         Long memoryBytes,
         Map<Integer, Integer> portBindings,
+        List<Integer> loopbackPortBindings,
         List<Integer> exposedPorts,
         String networkMode,
         List<Mount> mounts,
@@ -59,7 +61,35 @@ public record ContainerSpec(
      * All other fields will be null or empty lists.
      */
     public ContainerSpec(String image) {
-        this(image, null, List.of(), null, null, null, Map.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
+        this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
+    }
+
+    /**
+     * Backward-compatible constructor that defaults {@code loopbackPortBindings} to empty.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, List.of(), exposedPorts, networkMode, mounts, binds, extraHosts, labels, logConfig, privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd);
     }
 
     /**
