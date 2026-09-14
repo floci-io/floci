@@ -399,7 +399,7 @@ class VtlTemplateEngineTest {
     void inputParams_shorthand_preservesAnEmptyPathValue() {
         VtlTemplateEngine.VtlContext context = new VtlTemplateEngine.VtlContext(
                 "{}", Map.of("id", "header-id"), Map.of("id", "query-id"), Map.of("id", ""),
-                "prod", "GET", "/items/{id}", "req-123", "000000000000", Map.of());
+                "prod", "GET", "/items/{id}", "req-123", "000000000000", Map.of(), Map.of());
 
         assertEquals("", engine.evaluate("$input.params('id')", context).body());
     }
@@ -409,7 +409,7 @@ class VtlTemplateEngineTest {
         VtlTemplateEngine.VtlContext context = new VtlTemplateEngine.VtlContext(
                 "{}", Map.of("id", "header-id", "empty", "header-empty", "headerOnly", "header-value"),
                 Map.of("id", "query-id", "empty", ""), null,
-                "prod", "GET", "/items", "req-123", "000000000000", Map.of());
+                "prod", "GET", "/items", "req-123", "000000000000", Map.of(), Map.of());
 
         assertEquals("query-id||header-value|", engine.evaluate(
                 "$input.params('id')|$input.params('empty')|$input.params('headerOnly')|$input.params('missing')",
