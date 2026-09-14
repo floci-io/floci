@@ -1363,7 +1363,12 @@ public class Ec2QueryHandler {
                 .start("DescribeInstanceAttributeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("instanceId", instanceId);
-        if ("instanceType".equals(attribute)) {
+        if ("userData".equals(attribute)) {
+            String userData = inst.getUserData();
+            String encoded = userData == null ? null
+                    : Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8));
+            xml.start("userData").elem("value", encoded).end("userData");
+        } else if ("instanceType".equals(attribute)) {
             xml.start("instanceType").elem("value", inst.getInstanceType()).end("instanceType");
         } else if ("sourceDestCheck".equals(attribute)) {
             xml.start("sourceDestCheck").elem("value", String.valueOf(inst.isSourceDestCheck())).end("sourceDestCheck");
