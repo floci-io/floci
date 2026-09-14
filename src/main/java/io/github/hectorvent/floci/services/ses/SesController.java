@@ -86,13 +86,16 @@ public class SesController {
     private static final Logger LOG = Logger.getLogger(SesController.class);
 
     private final SesService sesService;
+    // The bulk send resolves a stored template's content before handing the entries to the facade.
+    private final SesTemplateService templateService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public SesController(SesService sesService, RegionResolver regionResolver,
-                           ObjectMapper objectMapper) {
+    public SesController(SesService sesService, SesTemplateService templateService,
+                         RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.sesService = sesService;
+        this.templateService = templateService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -665,7 +668,7 @@ public class SesController {
                         ? templateName
                         : SesTemplateService.templateNameFromArn(templateArn);
                 gateTemplateName = resolvedName;
-                EmailTemplate stored = sesService.getTemplate(resolvedName, region);
+                EmailTemplate stored = templateService.getTemplate(resolvedName, region);
                 subject = stored.getSubject();
                 text = stored.getTextPart();
                 html = stored.getHtmlPart();
@@ -736,8 +739,6 @@ public class SesController {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
-
-    // ──────────────────────────── Templates ────────────────────────────
 
     // ──────────────── Custom verification email templates ────────────────
 
@@ -1152,125 +1153,6 @@ public class SesController {
             attrs.put("SuppressionScope", tenant.suppressionAttributes().suppressionScope());
         }
         return node;
-    }
-
-    @POST
-    @Path("/templates")
-    public Response createEmailTemplate(@Context HttpHeaders headers, String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode request = objectMapper.readTree(body);
-            String templateName = request.path("TemplateName").asText(null);
-            if (templateName == null || templateName.isBlank()) {
-                throw new AwsException("BadRequestException", "TemplateName is required.", 400);
-            }
-            EmailTemplate template = parseTemplateContent(templateName, request.path("TemplateContent"));
-            List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
-            if (parsedTags != null) {
-                template.setTags(parsedTags);
-            }
-            sesService.createTemplate(template, region);
-            LOG.infov("SES V2 CreateEmailTemplate: {0}", templateName);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
-    }
-
-    @GET
-    @Path("/templates")
-    public Response listEmailTemplates(@Context HttpHeaders headers) {
-        String region = regionResolver.resolveRegion(headers);
-        List<EmailTemplate> templates = sesService.listTemplates(region);
-        ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode items = result.putArray("TemplatesMetadata");
-        for (EmailTemplate t : templates) {
-            ObjectNode item = objectMapper.createObjectNode();
-            item.put("TemplateName", t.getTemplateName());
-            if (t.getCreatedTimestamp() != null) {
-                item.put("CreatedTimestamp", t.getCreatedTimestamp().getEpochSecond());
-            }
-            items.add(item);
-        }
-        return Response.ok(result).build();
-    }
-
-    @GET
-    @Path("/templates/{templateName}")
-    public Response getEmailTemplate(@Context HttpHeaders headers,
-                                      @PathParam("templateName") String templateName) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            EmailTemplate template = sesService.getTemplate(templateName, region);
-            return Response.ok(buildTemplateResponse(template)).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        }
-    }
-
-    @PUT
-    @Path("/templates/{templateName}")
-    public Response updateEmailTemplate(@Context HttpHeaders headers,
-                                         @PathParam("templateName") String templateName,
-                                         String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode request = objectMapper.readTree(body);
-            EmailTemplate template = parseTemplateContent(templateName, request.path("TemplateContent"));
-            sesService.updateTemplate(template, region);
-            LOG.infov("SES V2 UpdateEmailTemplate: {0}", templateName);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
-    }
-
-    @DELETE
-    @Path("/templates/{templateName}")
-    public Response deleteEmailTemplate(@Context HttpHeaders headers,
-                                         @PathParam("templateName") String templateName) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            sesService.deleteTemplate(templateName, region);
-            LOG.infov("SES V2 DeleteEmailTemplate: {0}", templateName);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        }
-    }
-
-    @POST
-    @Path("/templates/{templateName}/render")
-    public Response testRenderEmailTemplate(@Context HttpHeaders headers,
-                                             @PathParam("templateName") String templateName,
-                                             String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            if (body == null || body.isBlank()) {
-                throw new AwsException("BadRequestException", "Request body is required.", 400);
-            }
-            JsonNode request = objectMapper.readTree(body);
-            requireJsonObject(request);
-            JsonNode templateDataNode = request.path("TemplateData");
-            if (!templateDataNode.isMissingNode() && !templateDataNode.isNull()
-                    && !templateDataNode.isTextual()) {
-                throw new AwsException("BadRequestException",
-                        "TemplateData must be a JSON-encoded string.", 400);
-            }
-            String templateDataRaw = templateDataNode.asText("");
-            String rendered = sesService.renderTestTemplate(templateName, templateDataRaw, region);
-            ObjectNode result = objectMapper.createObjectNode();
-            result.put("RenderedTemplate", rendered);
-            return Response.ok(result).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
     }
 
     // ──────────────────────── Configuration Sets ───────────────────────
@@ -2731,36 +2613,6 @@ public class SesController {
         all.addAll(cc);
         all.addAll(bcc);
         return all;
-    }
-
-    private EmailTemplate parseTemplateContent(String templateName, JsonNode content) {
-        String subject = content.path("Subject").asText(null);
-        String text = content.path("Text").asText(null);
-        String html = content.path("Html").asText(null);
-        return new EmailTemplate(templateName, subject, text, html);
-    }
-
-    private ObjectNode buildTemplateResponse(EmailTemplate template) {
-        ObjectNode result = objectMapper.createObjectNode();
-        result.put("TemplateName", template.getTemplateName());
-        ObjectNode content = result.putObject("TemplateContent");
-        if (template.getSubject() != null) {
-            content.put("Subject", template.getSubject());
-        }
-        if (template.getTextPart() != null) {
-            content.put("Text", template.getTextPart());
-        }
-        if (template.getHtmlPart() != null) {
-            content.put("Html", template.getHtmlPart());
-        }
-        ArrayNode tags = result.putArray("Tags");
-        for (Tag t : template.getTags()) {
-            ObjectNode tagNode = objectMapper.createObjectNode();
-            tagNode.put("Key", t.key());
-            tagNode.put("Value", t.value());
-            tags.add(tagNode);
-        }
-        return result;
     }
 
     private JsonNode parseTemplateData(JsonNode parent, String fieldName) {

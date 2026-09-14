@@ -706,28 +706,13 @@ public class SesService {
 
     // ──────────────────────────── Templates ────────────────────────────
 
-    // Email templates live in SesTemplateService; the facade forwards. The templated-send path below
-    // reads them back through getTemplate, and ARN-dispatched tagging through find/save.
-
-    public EmailTemplate createTemplate(EmailTemplate template, String region) {
-        return templateService.createTemplate(template, region);
-    }
-
-    public EmailTemplate getTemplate(String templateName, String region) {
-        return templateService.getTemplate(templateName, region);
-    }
-
-    public EmailTemplate updateTemplate(EmailTemplate template, String region) {
-        return templateService.updateTemplate(template, region);
-    }
+    // Email templates live in SesTemplateService, which the v2 controller and the v1 handler call
+    // directly; only the delete stays here for the tenant-association guard. The templated-send
+    // path below reads templates through the service, and ARN-dispatched tagging through find/save.
 
     public void deleteTemplate(String templateName, String region) {
         tenantService.deleteBackingResource(SesTenantService.RESOURCE_TYPE_TEMPLATE, templateName,
                 region, () -> templateService.deleteTemplate(templateName, region));
-    }
-
-    public List<EmailTemplate> listTemplates(String region) {
-        return templateService.listTemplates(region);
     }
 
     // ──────────── Custom verification email templates (v1 + v2 shared store) ────────────
@@ -1736,15 +1721,11 @@ public class SesService {
                                      String configurationSetName, List<MessageTag> emailTags,
                                      List<MessageHeader> additionalHeaders,
                                      ListManagementOptions listManagement, String region) {
-        EmailTemplate template = getTemplate(templateName, region);
+        EmailTemplate template = templateService.getTemplate(templateName, region);
         return sendInlineTemplatedEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, returnPath, template.getSubject(), template.getTextPart(),
                 template.getHtmlPart(), templateData,
                 configurationSetName, emailTags, additionalHeaders, listManagement, region);
-    }
-
-    public String renderTestTemplate(String templateName, String templateDataRaw, String region) {
-        return templateService.renderTestTemplate(templateName, templateDataRaw, region);
     }
 
     /**
