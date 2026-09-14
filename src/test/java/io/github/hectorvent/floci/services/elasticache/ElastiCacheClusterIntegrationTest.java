@@ -155,6 +155,21 @@ class ElastiCacheClusterIntegrationTest {
 
     @Test
     @Order(5)
+    void explicitAuthIsAcceptedWhenAuthIsNotRequired() throws Exception {
+        // This group has no AuthToken, so the proxy never demands AUTH. A client that
+        // sends one anyway (common with generic Redis clients) must still get +OK and
+        // stay usable, rather than being rejected or treated as a protocol error.
+        try (Socket socket = openSocket(configurationEndpointPort)) {
+            write(socket, respArray("AUTH", "any-password"));
+            assertEquals("+OK\r\n", readLine(socket));
+
+            write(socket, respArray("PING"));
+            assertEquals("+PONG\r\n", readLine(socket));
+        }
+    }
+
+    @Test
+    @Order(6)
     void movedRedirectPointsAtTheOtherShardsProxyPort() throws Exception {
         try (Socket socket = openSocket(configurationEndpointPort)) {
             write(socket, respArray("SET", "bar", "first-shard-value"));
@@ -178,7 +193,7 @@ class ElastiCacheClusterIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void deleteClusterModeReplicationGroup() {
         given()
             .formParam("Action", "DeleteReplicationGroup")

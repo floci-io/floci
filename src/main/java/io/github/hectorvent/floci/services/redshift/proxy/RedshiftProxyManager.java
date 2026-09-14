@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
@@ -26,6 +27,7 @@ public class RedshiftProxyManager {
     private final RdsSigV4Validator sigV4Validator;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final S3Service s3Service;
+    private final EmulatorConfig config;
     private final ConcurrentHashMap<String, RedshiftAuthProxy> proxies = new ConcurrentHashMap<>();
     /**
      * Proxies whose listener could not be closed during a failed start or replace. The
@@ -37,10 +39,11 @@ public class RedshiftProxyManager {
 
     @Inject
     public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
-                                S3Service s3Service) {
+                                S3Service s3Service, EmulatorConfig config) {
         this.sigV4Validator = sigV4Validator;
         this.tlsCertificates = tlsCertificates;
         this.s3Service = s3Service;
+        this.config = config;
     }
 
     public synchronized void startProxy(String relayKey, int proxyPort,
@@ -52,9 +55,12 @@ public class RedshiftProxyManager {
         // Make sure the self-signed proxy certificate covers the host clients will connect to,
         // so sslmode=prefer/require handshakes succeed.
         tlsCertificates.ensureHost(advertisedHost);
+        EmulatorConfig.RedshiftServiceConfig redshiftConfig = config.services().redshift();
         RedshiftAuthProxy proxy = new RedshiftAuthProxy(
                 relayKey, backendHost, backendPort, masterUsername, masterPassword, dbName,
-                sigV4Validator, tlsCertificates, passwordValidator, s3Service);
+                sigV4Validator, tlsCertificates, passwordValidator, s3Service,
+                redshiftConfig.proxyHandshakeTimeoutMillis(), redshiftConfig.proxyBackendConnectTimeoutMillis(),
+                redshiftConfig.proxyMaxConnections());
         try {
             proxy.start(proxyPort);
         } catch (IOException | RuntimeException e) {

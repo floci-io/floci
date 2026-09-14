@@ -30,6 +30,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * CDI producer for the DockerClient singleton bean.
@@ -100,7 +101,24 @@ public class DockerClientProducer {
      * validated against the context's CA, matching what the Docker CLI itself does for such
      * a context.
      */
-    record ResolvedDockerConnection(String host, Optional<Path> tlsCertPath, boolean skipTlsVerify) {
+    public record ResolvedDockerConnection(String host, Optional<Path> tlsCertPath, boolean skipTlsVerify) {
+    }
+
+    /**
+     * Resolves the Docker endpoint this process connects to, from {@code floci.docker.*} and the
+     * process environment ({@code DOCKER_HOST}, {@code DOCKER_CONFIG}, {@code DOCKER_CONTEXT}).
+     * This is the single resolution behind the {@link DockerClient} bean; anything that needs to
+     * know where the daemon lives, such as the ECS host-volume policy protecting the daemon
+     * socket, must derive it from here rather than re-implement part of the precedence.
+     *
+     * @param environment lookup for the standard Docker variables; {@code System::getenv} in
+     *     production, a map lookup in tests
+     */
+    public static ResolvedDockerConnection resolveDockerConnection(
+            EmulatorConfig.DockerConfig docker, Function<String, String> environment) {
+        Path dockerConfigDir = resolveDockerConfigDir(docker.dockerConfigPath(), environment.apply("DOCKER_CONFIG"));
+        return resolveDockerConnection(docker.dockerHost(), environment.apply("DOCKER_HOST"), isWindows(),
+                dockerConfigDir, environment.apply("DOCKER_CONTEXT"));
     }
 
     /**
@@ -381,11 +399,7 @@ public class DockerClientProducer {
     @Produces
     @ApplicationScoped
     public DockerClient dockerClient() {
-        Path dockerConfigDir =
-                resolveDockerConfigDir(config.docker().dockerConfigPath(), System.getenv("DOCKER_CONFIG"));
-        ResolvedDockerConnection connection = resolveDockerConnection(
-                config.docker().dockerHost(), System.getenv("DOCKER_HOST"), isWindows(),
-                dockerConfigDir, System.getenv("DOCKER_CONTEXT"));
+        ResolvedDockerConnection connection = resolveDockerConnection(config.docker(), System::getenv);
         String dockerHost = connection.host();
         LOG.infov("Creating DockerClient for host: {0}", dockerHost);
 

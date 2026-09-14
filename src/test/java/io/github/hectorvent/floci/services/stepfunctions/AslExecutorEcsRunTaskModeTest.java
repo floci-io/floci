@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -57,7 +59,8 @@ class AslExecutorEcsRunTaskModeTest {
     void setUp() {
         ecsService = mock(EcsService.class);
         // A real handler so parseNetworkConfiguration / parseContainerOverrides actually run.
-        EcsJsonHandler ecsJsonHandler = new EcsJsonHandler(ecsService, objectMapper);
+        EcsJsonHandler ecsJsonHandler = new EcsJsonHandler(ecsService, objectMapper,
+                new HostVolumePolicy(mock(EmulatorConfig.class, RETURNS_DEEP_STUBS)));
 
         executor = new AslExecutor(
                 mock(LambdaExecutorService.class),

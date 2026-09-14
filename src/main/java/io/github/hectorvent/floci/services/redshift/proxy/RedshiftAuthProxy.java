@@ -12,6 +12,7 @@ import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.Semaphore;
 
 /**
  * TCP auth proxy for a single Redshift cluster's backing PostgreSQL container.
@@ -34,6 +35,9 @@ public class RedshiftAuthProxy {
     private final RdsProxyTlsCertificates tlsCertificates;
     private final PasswordValidator passwordValidator;
     private final S3Service s3Service;
+    private final int handshakeTimeoutMillis;
+    private final int backendConnectTimeoutMillis;
+    private final Semaphore connectionPermits;
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -42,7 +46,9 @@ public class RedshiftAuthProxy {
                              String masterUsername, String masterPassword, String dbName,
                              RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
                              PasswordValidator passwordValidator,
-                             S3Service s3Service) {
+                             S3Service s3Service,
+                             int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                             int maxConnections) {
         this.clusterKey = clusterKey;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -53,6 +59,9 @@ public class RedshiftAuthProxy {
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
         this.s3Service = s3Service;
+        this.handshakeTimeoutMillis = handshakeTimeoutMillis;
+        this.backendConnectTimeoutMillis = backendConnectTimeoutMillis;
+        this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
     }
 
     public void start(int proxyPort) throws IOException {
@@ -125,8 +134,20 @@ public class RedshiftAuthProxy {
         while (running) {
             try {
                 Socket client = serverSocket.accept();
+                if (!connectionPermits.tryAcquire()) {
+                    LOG.warnv("Refusing Redshift connection for cluster {0}: connection limit reached",
+                            clusterKey);
+                    closeQuietly(client);
+                    continue;
+                }
                 Thread.ofVirtual().name("redshift-proxy-conn-" + clusterKey)
-                        .start(() -> handleConnection(client));
+                        .start(() -> {
+                            try {
+                                handleConnection(client);
+                            } finally {
+                                connectionPermits.release();
+                            }
+                        });
             } catch (IOException e) {
                 if (running) {
                     LOG.warnv("Accept error for Redshift cluster {0}: {1}", clusterKey, e.getMessage());
@@ -136,35 +157,46 @@ public class RedshiftAuthProxy {
     }
 
     private void handleConnection(Socket client) {
-        Socket backend = null;
+        PostgresProtocolHandler.AuthenticatedSession session = null;
         try {
             client.setTcpNoDelay(true);
-            backend = new Socket(backendHost, backendPort);
-            backend.setTcpNoDelay(true);
+            PostgresProtocolHandler.BackendConnector connector = () -> {
+                Socket backendSocket = new Socket();
+                backendSocket.connect(new InetSocketAddress(backendHost, backendPort),
+                        backendConnectTimeoutMillis);
+                backendSocket.setTcpNoDelay(true);
+                return backendSocket;
+            };
             // iamEnabled = false: the SigV4 branch inside authenticate is never taken.
-            PostgresProtocolHandler.AuthenticatedSession session =
-                    PostgresProtocolHandler.authenticate(
-                            client, backend, masterUsername, masterPassword, dbName,
-                            false, sigV4, tlsCertificates, passwordValidator);
+            session = PostgresProtocolHandler.authenticate(
+                            client, connector, masterUsername, masterPassword, dbName,
+                            false, sigV4, tlsCertificates, passwordValidator,
+                            handshakeTimeoutMillis);
             if (session != null) {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
-                new RedshiftInterceptingBridge(session.client(), backend, s3Service).run();
+                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
         } finally {
-            // authenticate's success path returns the client to bridge; every other path
-            // (early return on a bare probe, auth failure, thrown IOException) can leave the
-            // backend connection to Postgres open. Closing here is idempotent.
+            // authenticate's success path hands both sockets to the bridge, which closes both
+            // itself; every other path (early return on a bare probe, auth failure, thrown
+            // IOException) never had a backend connection to begin with. Closing here is
+            // idempotent, and also covers a RuntimeException thrown between authenticate()
+            // returning a session and the bridge finishing its own cleanup, which would
+            // otherwise leak session.backend().
             closeQuietly(client);
-            if (backend != null) {
-                closeQuietly(backend);
+            if (session != null) {
+                closeQuietly(session.backend());
             }
         }
     }
 
     private static void closeQuietly(Socket s) {
+        if (s == null) {
+            return;
+        }
         try {
             s.close();
         } catch (IOException e) {
