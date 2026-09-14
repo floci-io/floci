@@ -357,6 +357,7 @@ class Route53ChangeResourceRecordSetsIntegrationTest {
                 """;
         return Stream.of(
                 Arguments.of("AliasAndResourceRecords", alias + records, "more than one"),
+                Arguments.of("AliasAndTtl", alias + ttl, "more than one"),
                 Arguments.of("TtlOnly", ttl, "none"),
                 Arguments.of("ResourceRecordsOnly", records, "none"));
     }

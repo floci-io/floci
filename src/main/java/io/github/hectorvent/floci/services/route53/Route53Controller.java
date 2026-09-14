@@ -899,7 +899,7 @@ public class Route53Controller {
         boolean hasAlias = rrs.getAliasTarget() != null;
         boolean hasTtl = rrs.getTtl() != null;
         String found;
-        if (hasAlias && hasRecords) {
+        if (hasAlias && (hasTtl || hasRecords)) {
             found = "more than one";
         } else if (!hasAlias && !(hasTtl && hasRecords)) {
             found = "none";
