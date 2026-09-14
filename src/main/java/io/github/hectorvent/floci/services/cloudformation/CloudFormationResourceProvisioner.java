@@ -34,11 +34,6 @@ import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
-import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
-import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
-import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
-import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
-import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
@@ -178,8 +173,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::ApiGatewayV2::Integration",
             "AWS::ApiGatewayV2::Route",
             "AWS::ApiGatewayV2::Stage",
-            "AWS::AutoScaling::AutoScalingGroup",
-            "AWS::AutoScaling::LaunchConfiguration",
             "AWS::CloudFormation::CustomResource",
             "AWS::CloudFront::Distribution",
             "AWS::DynamoDB::GlobalTable",
@@ -221,7 +214,6 @@ public class CloudFormationResourceProvisioner {
     private final StepFunctionsService stepFunctionsService;
     private final Ec2Service ec2Service;
     private final EksService eksService;
-    private final AutoScalingService autoScalingService;
     private final CloudFrontService cloudFrontService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
@@ -249,7 +241,6 @@ public class CloudFormationResourceProvisioner {
                                              CloudWatchLogsService logsService,
                                              KinesisService kinesisService,
                                              CloudWatchMetricsService cloudWatchMetricsService,
-                                             AutoScalingService autoScalingService,
                                              FirehoseService firehoseService,
                                              CloudFrontService cloudFrontService,
                                              CloudFormationResourceRegistry resourceRegistry,
@@ -269,7 +260,6 @@ public class CloudFormationResourceProvisioner {
         this.stepFunctionsService = stepFunctionsService;
         this.ec2Service = ec2Service;
         this.eksService = eksService;
-        this.autoScalingService = autoScalingService;
         this.cloudFrontService = cloudFrontService;
         this.resourceRegistry = resourceRegistry;
         this.dynamicReferences = dynamicReferences;
@@ -357,10 +347,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
-                case "AWS::AutoScaling::LaunchConfiguration" ->
-                        provisionLaunchConfiguration(resource, properties, engine, region, stackName);
-                case "AWS::AutoScaling::AutoScalingGroup" ->
-                        provisionAutoScalingGroup(resource, properties, engine, region, stackName);
                 case "AWS::CloudFront::Distribution" ->
                         provisionCloudFrontDistribution(resource, properties, engine);
                 default -> {
@@ -587,10 +573,6 @@ public class CloudFormationResourceProvisioner {
             case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
             case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
-            case "AWS::AutoScaling::LaunchConfiguration" ->
-                    autoScalingService.deleteLaunchConfiguration(region, physicalId);
-            case "AWS::AutoScaling::AutoScalingGroup" ->
-                    autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
             case "AWS::CloudFront::Distribution" -> cloudFrontService.removeDistribution(physicalId);
             // Warn for the same reason the create path does: the delete reports success over a
             // type nothing here removes, and at debug that is invisible at the default log level.
@@ -721,227 +703,11 @@ public class CloudFormationResourceProvisioner {
 
     // ── Auto Scaling ────────────────────────────────────────────────────────────
 
-    private void provisionLaunchConfiguration(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                              String region, String stackName) {
-        String explicitName = resolveOptional(props, "LaunchConfigurationName", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String name;
-        if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
-        } else if (priorPhysicalId != null) {
-            name = priorPhysicalId;
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
 
-        // Launch configurations have no update API on real AWS at all (any property change replaces
-        // the resource), so provision() being re-invoked on every UpdateStack means a same-named one
-        // already on file must be left alone rather than re-created (createLaunchConfiguration throws
-        // AlreadyExists).
-        LaunchConfiguration lc = sameNameExistingResource(priorPhysicalId, name,
-                n -> requireLaunchConfiguration(region, n));
-        if (lc == null) {
-            String associatePublicIp = resolveOptional(props, "AssociatePublicIpAddress", engine);
-            lc = autoScalingService.createLaunchConfiguration(region, name,
-                    resolveOptional(props, "InstanceId", engine),
-                    resolveOptional(props, "ImageId", engine),
-                    resolveOptional(props, "InstanceType", engine),
-                    resolveOptional(props, "KeyName", engine),
-                    resolveStringList(props, "SecurityGroups", engine),
-                    resolveOptional(props, "UserData", engine),
-                    resolveOptional(props, "IamInstanceProfile", engine),
-                    // Absent in the template means the subnet default applies, so
-                    // it stays null rather than collapsing to false.
-                    associatePublicIp == null || associatePublicIp.isBlank()
-                            ? null
-                            : Boolean.parseBoolean(associatePublicIp));
-            deleteRenamedResource(priorPhysicalId, name, n -> autoScalingService.deleteLaunchConfiguration(region, n),
-                    "launch configuration");
-        }
-        // Ref returns the launch configuration name.
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
-    }
 
-    private LaunchConfiguration requireLaunchConfiguration(String region, String name) {
-        List<LaunchConfiguration> found = autoScalingService.describeLaunchConfigurations(region, List.of(name));
-        if (found.isEmpty()) {
-            throw new AwsException("ValidationError", "Launch configuration '" + name + "' not found.", 400);
-        }
-        return found.getFirst();
-    }
 
-    private void provisionAutoScalingGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                           String region, String stackName) {
-        String explicitName = resolveOptional(props, "AutoScalingGroupName", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String name;
-        if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
-        } else if (priorPhysicalId != null) {
-            name = priorPhysicalId;
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
-        String launchConfigName = resolveOptional(props, "LaunchConfigurationName", engine);
-        String launchTemplateId = null;
-        String launchTemplateName = null;
-        String launchTemplateVersion = null;
-        if (props != null && props.has("LaunchTemplate")) {
-            JsonNode lt = props.get("LaunchTemplate");
-            // Id and name are distinct lookup keys in Auto Scaling: passing an lt- id in the name slot
-            // never matches a stored template.
-            launchTemplateId = engine.resolve(lt.path("LaunchTemplateId"));
-            launchTemplateName = engine.resolve(lt.path("LaunchTemplateName"));
-            launchTemplateVersion = engine.resolve(lt.path("Version"));
-        }
-        MixedInstancesPolicy mixedInstancesPolicy = resolveMixedInstancesPolicy(props, engine);
-        int minSize = parseIntProp(props, "MinSize", engine, 0);
-        int maxSize = parseIntProp(props, "MaxSize", engine, 0);
-        int desiredCapacity = parseIntProp(props, "DesiredCapacity", engine, 0);
-        int cooldown = parseIntProp(props, "Cooldown", engine, 0);
-        List<String> availabilityZones = resolveStringList(props, "AvailabilityZones", engine);
-        List<String> subnetIds = resolveStringList(props, "VPCZoneIdentifier", engine);
-        String healthCheckType = resolveOptional(props, "HealthCheckType", engine);
-        int healthCheckGracePeriod = parseIntProp(props, "HealthCheckGracePeriod", engine, 0);
-        List<String> terminationPolicies = resolveStringList(props, "TerminationPolicies", engine);
 
-        // provision() re-runs on every UpdateStack, so a same-named group already on file must be
-        // reconciled via UpdateAutoScalingGroup instead of re-created (createAutoScalingGroup throws
-        // AlreadyExists). TargetGroupARNs/LoadBalancerNames/Tags aren't reconciled here: they need
-        // their own attach/detach and tagging APIs that updateAutoScalingGroup doesn't cover.
-        AutoScalingGroup existing = sameNameExistingResource(priorPhysicalId, name,
-                n -> requireAutoScalingGroup(region, n));
-        AutoScalingGroup asg;
-        if (existing != null) {
-            autoScalingService.updateAutoScalingGroup(region, name,
-                    blankToNull(launchConfigName),
-                    blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
-                    mixedInstancesPolicy, minSize, maxSize, desiredCapacity, cooldown,
-                    availabilityZones, subnetIds, healthCheckType, healthCheckGracePeriod, terminationPolicies,
-                    AsgOptionalFields.none());
-            asg = requireAutoScalingGroup(region, name);
-        } else {
-            asg = autoScalingService.createAutoScalingGroup(region, name,
-                    blankToNull(launchConfigName),
-                    blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
-                    mixedInstancesPolicy, minSize, maxSize, desiredCapacity, cooldown,
-                    availabilityZones, subnetIds,
-                    resolveStringList(props, "TargetGroupARNs", engine),
-                    resolveStringList(props, "LoadBalancerNames", engine),
-                    healthCheckType, healthCheckGracePeriod, terminationPolicies,
-                    resolveAsgTags(props, engine),
-                    resolveAsgTagPropagation(props, engine),
-                    AsgOptionalFields.none());
-            deleteRenamedResource(priorPhysicalId, name, n -> autoScalingService.deleteAutoScalingGroup(region, n, true),
-                    "Auto Scaling group");
-        }
-        // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
-    }
 
-    private AutoScalingGroup requireAutoScalingGroup(String region, String name) {
-        List<AutoScalingGroup> found = autoScalingService.describeAutoScalingGroups(region, List.of(name));
-        if (found.isEmpty()) {
-            throw new AwsException("ValidationError", "Auto Scaling group '" + name + "' not found.", 400);
-        }
-        return found.getFirst();
-    }
-
-    /**
-     * Builds the {@code MixedInstancesPolicy} of an Auto Scaling group from template properties, in the
-     * same shape the Query API parser produces. Returns {@code null} when the property is absent, so
-     * that the group falls back to its {@code LaunchTemplate} or {@code LaunchConfigurationName}.
-     */
-    private MixedInstancesPolicy resolveMixedInstancesPolicy(JsonNode props,
-                                                             CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("MixedInstancesPolicy") || props.get("MixedInstancesPolicy").isNull()) {
-            return null;
-        }
-        JsonNode policyNode = props.get("MixedInstancesPolicy");
-        MixedInstancesPolicy policy = new MixedInstancesPolicy();
-
-        JsonNode launchTemplateNode = policyNode.path("LaunchTemplate");
-        if (launchTemplateNode.isObject()) {
-            MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
-            JsonNode specNode = launchTemplateNode.path("LaunchTemplateSpecification");
-            if (specNode.isObject()) {
-                var specification = new MixedInstancesPolicy.LaunchTemplateSpecification();
-                specification.setLaunchTemplateId(blankToNull(engine.resolve(specNode.path("LaunchTemplateId"))));
-                specification.setLaunchTemplateName(blankToNull(engine.resolve(specNode.path("LaunchTemplateName"))));
-                specification.setVersion(blankToNull(engine.resolve(specNode.path("Version"))));
-                launchTemplate.setLaunchTemplateSpecification(specification);
-            }
-            for (JsonNode overrideNode : launchTemplateNode.path("Overrides")) {
-                String instanceType = engine.resolve(overrideNode.path("InstanceType"));
-                if (instanceType != null && !instanceType.isBlank()) {
-                    var override = new MixedInstancesPolicy.LaunchTemplateOverride();
-                    override.setInstanceType(instanceType);
-                    launchTemplate.getOverrides().add(override);
-                }
-            }
-            policy.setLaunchTemplate(launchTemplate);
-        }
-
-        JsonNode distributionNode = policyNode.path("InstancesDistribution");
-        if (distributionNode.isObject()) {
-            var distribution = new MixedInstancesPolicy.InstancesDistribution();
-            distribution.setOnDemandBaseCapacity(parseOptionalInt("OnDemandBaseCapacity",
-                    engine.resolve(distributionNode.path("OnDemandBaseCapacity"))));
-            distribution.setOnDemandPercentageAboveBaseCapacity(
-                    parseOptionalInt("OnDemandPercentageAboveBaseCapacity",
-                            engine.resolve(distributionNode.path("OnDemandPercentageAboveBaseCapacity"))));
-            distribution.setSpotAllocationStrategy(
-                    blankToNull(engine.resolve(distributionNode.path("SpotAllocationStrategy"))));
-            policy.setInstancesDistribution(distribution);
-        }
-        return policy;
-    }
-
-    /**
-     * Reads an optional integer property. A value that is present but not a number is a template
-     * error, and AWS rejects it rather than treating it as absent.
-     */
-    private Integer parseOptionalInt(String field, String value) {
-        if (value == null || value.isBlank()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(value.trim());
-        } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError",
-                    "Value of property " + field + " must be an integer.", 400);
-        }
-    }
-
-    private Map<String, String> resolveAsgTags(JsonNode props, CloudFormationTemplateEngine engine) {
-        Map<String, String> tags = new LinkedHashMap<>();
-        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
-        if (tagsNode != null && tagsNode.isArray()) {
-            for (JsonNode tag : tagsNode) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    tags.put(key, engine.resolve(tag.path("Value")));
-                }
-            }
-        }
-        return tags;
-    }
-
-    private Map<String, Boolean> resolveAsgTagPropagation(JsonNode props, CloudFormationTemplateEngine engine) {
-        Map<String, Boolean> propagation = new LinkedHashMap<>();
-        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
-        if (tagsNode != null && tagsNode.isArray()) {
-            for (JsonNode tag : tagsNode) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    propagation.put(key, Boolean.parseBoolean(engine.resolve(tag.path("PropagateAtLaunch"))));
-                }
-            }
-        }
-        return propagation;
-    }
 
     private List<String> resolveStringList(JsonNode props, String field, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(field)) {
@@ -1161,58 +927,6 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    /**
-     * Looks up {@code name} via {@code lookup} when this is an update re-invocation for the same
-     * physical resource (i.e. {@code priorPhysicalId} is set and unchanged), returning {@code null}
-     * either when this is a fresh create, a rename (handled as a replacement by the caller), or the
-     * resource is missing on the backend despite the stack still remembering a physical id (e.g. it
-     * was deleted out of band; the caller then falls back to creating it fresh).
-     */
-    private <T> T sameNameExistingResource(String priorPhysicalId, String name, java.util.function.Function<String, T> lookup) {
-        if (priorPhysicalId == null || !priorPhysicalId.equals(name)) {
-            return null;
-        }
-        try {
-            return lookup.apply(name);
-        } catch (AwsException notFound) {
-            // Expected when the resource was deleted out of band since the prior update; the
-            // caller falls back to creating it fresh under the same name.
-            LOG.debugv(notFound, "No existing {0} found on file, falling back to create", name);
-            return null;
-        }
-    }
-
-    /**
-     * Best-effort cleanup of the previous physical resource after a rename forced a fresh create
-     * under the new name (mirrors provisionLogGroup's create-new-then-delete-old handling). Failures
-     * are logged, not thrown: the new resource was already created successfully, so surfacing a
-     * delete failure here would report the update as failed despite the stack now being in a usable
-     * (if slightly leaky) state.
-     */
-    private void deleteRenamedResource(String priorPhysicalId, String newName, java.util.function.Consumer<String> delete,
-                                       String resourceKind) {
-        if (priorPhysicalId == null || priorPhysicalId.equals(newName)) {
-            return;
-        }
-        try {
-            delete.accept(priorPhysicalId);
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Failed to delete renamed {0} {1} after replacement by {2}",
-                    resourceKind, priorPhysicalId, newName);
-        }
-    }
-
-    private int parseIntProp(JsonNode props, String name, CloudFormationTemplateEngine engine, int fallback) {
-        String value = resolveOptional(props, name, engine);
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
-    }
 
     // ── EKS ─────────────────────────────────────────────────────────────────────
 

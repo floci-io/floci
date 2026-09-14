@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayApiKeyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayUsagePlanCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayDomainCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
@@ -284,6 +285,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new ApiGatewayDomainCfnProvisioner(apiGatewayService));
             }
             if (autoScalingService != null) {
+                discovered.add(new AutoScalingGroupCfnProvisioner(autoScalingService));
                 discovered.add(new AutoScalingLifecycleHookCfnProvisioner(autoScalingService));
                 discovered.add(new AutoScalingScalingPolicyCfnProvisioner(autoScalingService));
             }
@@ -673,7 +675,6 @@ final class CfnProvisionerFixture {
                     logsService,
                     kinesisService,
                     cloudWatchMetricsService,
-                    autoScalingService,
                     firehoseService,
                     cloudFrontService,
                     resourceRegistry,
