@@ -60,7 +60,7 @@ The port (`4566`), credentials (`test` / `test`), and AWS SDK configuration are 
 | `PERSISTENCE=1` | `FLOCI_STORAGE_MODE=persistent` | Enable disk persistence |
 | `PERSIST_STATE=1` | `FLOCI_STORAGE_MODE=persistent` | Alias for `PERSISTENCE` — same effect |
 | `EDGE_PORT` | `FLOCI_PORT` | Bind port override |
-| `GATEWAY_LISTEN` | `QUARKUS_HTTP_HOST` | Bind address override |
+| `GATEWAY_LISTEN` | `QUARKUS_HTTP_HOST` | Bind address override. Also sets `FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true`, since LocalStack needs no opt-in for a non-loopback address |
 | `LS_LOG` / `DEBUG=1` | `QUARKUS_LOG_LEVEL` | Log verbosity |
 | `DOCKER_HOST` | `FLOCI_DOCKER_DOCKER_HOST` | Docker daemon socket path or TCP address |
 | `LAMBDA_DOCKER_NETWORK` | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | Network for Lambda containers |

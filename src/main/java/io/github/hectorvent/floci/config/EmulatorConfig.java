@@ -209,6 +209,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean corsAllowPrivateNetwork();
+
+        /**
+         * Whether Floci may listen outside loopback (127.0.0.0/8, ::1, localhost), through
+         * {@code quarkus.http.host} or the TLS proxy that uses it. Anyone who can reach such an
+         * address can call Floci's APIs, so startup fails unless this is set; see
+         * {@link NetworkExposureGuard}.
+         */
+        @WithDefault("false")
+        boolean allowUnsafeNetworkExposure();
     }
 
     interface StorageConfig {

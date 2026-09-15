@@ -76,6 +76,18 @@ assert_eq "GATEWAY_LISTEN sets QUARKUS_HTTP_HOST" \
     "0.0.0.0" \
     "$(_run QUARKUS_HTTP_HOST GATEWAY_LISTEN=0.0.0.0)"
 
+assert_eq "GATEWAY_LISTEN allows a non-loopback address" \
+    "true" \
+    "$(_run FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE GATEWAY_LISTEN=0.0.0.0)"
+
+assert_eq "FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE wins over GATEWAY_LISTEN" \
+    "false" \
+    "$(_run FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE GATEWAY_LISTEN=0.0.0.0 FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=false)"
+
+assert_eq "no GATEWAY_LISTEN leaves network exposure unallowed" \
+    "" \
+    "$(_run FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE)"
+
 # --- LOG LEVEL ---
 assert_eq "LS_LOG sets QUARKUS_LOG_LEVEL" \
     "WARN" \

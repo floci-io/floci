@@ -112,7 +112,7 @@ class IotMqttWebSocketProxyIntegrationTest {
         when(config.tls()).thenReturn(tls);
         when(tls.enabled()).thenReturn(true);
         when(tls.awsHttpsPort()).thenReturn(0);
-        proxy = new TlsProxyServer(vertx, config, testHttpPort, testSslPort);
+        proxy = new TlsProxyServer(vertx, config, "127.0.0.1", testHttpPort, testSslPort);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (true) {
             try (Socket probe = new Socket("127.0.0.1", publicPort)) {
