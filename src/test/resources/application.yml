@@ -2,6 +2,9 @@ quarkus:
   http:
     port: 0
     test-port: 0
+    # Integration signatures use localhost as the public test authority. Keep the test listener
+    # explicit so the production loopback default does not change the signed host.
+    host: 0.0.0.0
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
   # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
@@ -96,8 +99,9 @@ floci:
     extra-cors-allowed-headers: ${EXTRA_CORS_ALLOWED_HEADERS:}
     extra-cors-expose-headers: ${EXTRA_CORS_EXPOSE_HEADERS:}
     disable-cors-headers: false
-    # FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE; tests listen on loopback, so none needs it.
-    allow-unsafe-network-exposure: false
+    # The test listener binds all interfaces so Quarkus keeps localhost as its test authority.
+    # This is test-only; production keeps the loopback default.
+    allow-unsafe-network-exposure: true
 
   init-hooks:
     shell-executable: /bin/sh
