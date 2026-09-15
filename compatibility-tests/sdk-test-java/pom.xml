@@ -522,6 +522,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>bcmpricingcalculator</artifactId>
         </dependency>
+        <!-- Timestream for InfluxDB client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>timestreaminfluxdb</artifactId>
+        </dependency>
         <!-- SSO credential support (needed for FLOCI_TARGET=aws with SSO profiles) -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

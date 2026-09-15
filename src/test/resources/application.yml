@@ -347,6 +347,9 @@ floci:
       emit-mode: off
     bcm-pricing-calculator:
       enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: true
     bcm-data-exports:
       enabled: true
       emit-mode: off

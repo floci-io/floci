@@ -77,6 +77,8 @@ class EmulatorLifecycleTest {
     @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
     @Mock private io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager flinkContainerManager;
     @Mock private RdsService rdsService;
+    @Mock private io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService timestreamInfluxDbService;
+    @Mock private EmulatorConfig.TimestreamInfluxDbServiceConfig timestreamInfluxDbServiceConfig;
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private io.github.hectorvent.floci.services.elb.ElbClassicService elbClassicService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
@@ -107,6 +109,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elastiCacheServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elb()).thenReturn(elbServiceConfig);
         Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.timestreamInfluxdb()).thenReturn(timestreamInfluxDbServiceConfig);
+        Mockito.lenient().when(timestreamInfluxDbServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(config.tls()).thenReturn(tlsConfig);
         Mockito.lenient().when(tlsConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.port()).thenReturn(4566);
@@ -118,7 +122,8 @@ class EmulatorLifecycleTest {
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, flinkContainerManager, rdsService, elbV2Service, elbClassicService,
+                rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
+                elbV2Service, elbClassicService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, containerTeardowns, persistentPathValidator);
