@@ -1133,6 +1133,9 @@ class RdsServiceTest {
 
         assertEquals("original-password", modified.getMasterPassword());
         assertTrue(modified.isIamDatabaseAuthenticationEnabled());
+        verify(proxyManager).updateIamEnabled(anyString(), eq(true));
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
+        verify(proxyManager, never()).stopProxy(anyString());
     }
 
     @Test
