@@ -1133,6 +1133,25 @@ class RdsServiceTest {
 
         assertEquals("original-password", modified.getMasterPassword());
         assertTrue(modified.isIamDatabaseAuthenticationEnabled());
+        String relayKey = "rds-resource:" + modified.getDbInstanceArn();
+        verify(proxyManager).updateIamEnabled(relayKey, true);
+
+        DbInstance disabled = rdsService.modifyDbInstance("mydb", null, false, null);
+
+        assertFalse(disabled.isIamDatabaseAuthenticationEnabled());
+        verify(proxyManager).updateIamEnabled(relayKey, false);
+        verify(proxyManager, never()).stopProxy(anyString());
+    }
+
+    @Test
+    void modifyDbInstanceUnchangedIamSettingDoesNotTouchProxy() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "original-password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        rdsService.modifyDbInstance("mydb", null, false, null);
+
+        verify(proxyManager, never()).updateIamEnabled(anyString(), anyBoolean());
     }
 
     @Test

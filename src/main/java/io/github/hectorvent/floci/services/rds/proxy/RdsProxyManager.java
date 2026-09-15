@@ -88,6 +88,15 @@ public class RdsProxyManager {
         }
     }
 
+    public synchronized void updateIamEnabled(String instanceId, boolean iamEnabled) {
+        RdsAuthProxy proxy = proxies.get(instanceId);
+        if (proxy != null) {
+            proxy.updateIamEnabled(iamEnabled);
+            LOG.infov("Updated RDS proxy IAM authentication for instance {0}: {1}",
+                    instanceId, String.valueOf(iamEnabled));
+        }
+    }
+
     public synchronized void stopProxy(String instanceId) {
         RdsAuthProxy proxy = proxies.get(instanceId);
         if (proxy != null) {

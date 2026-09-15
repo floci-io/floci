@@ -19,7 +19,7 @@ public class RdsAuthProxy {
     private static final Logger LOG = Logger.getLogger(RdsAuthProxy.class);
 
     private final int backendPort;
-    private final boolean iamEnabled;
+    private volatile boolean iamEnabled;
     private final String instanceId;
     private final String backendHost;
     private final String masterUsername;
@@ -72,6 +72,11 @@ public class RdsAuthProxy {
     /** Swap the master-password snapshot after a rotation; new connections authenticate against it. */
     public void updateMasterPassword(String newPassword) {
         this.masterPassword = newPassword;
+    }
+
+    /** Swap the IAM-auth snapshot after ModifyDBInstance; new connections use the new setting. */
+    public void updateIamEnabled(boolean iamEnabled) {
+        this.iamEnabled = iamEnabled;
     }
 
     public void stop() {

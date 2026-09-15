@@ -103,6 +103,36 @@ class RdsProxyManagerTest {
     }
 
     @Test
+    void updateIamEnabledSwapsTheRunningProxySnapshotWithoutARestart() throws Exception {
+        RdsProxyManager manager = new RdsProxyManager(
+                mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
+        int proxyPort = availablePort();
+        try {
+            start(manager, "proxy", proxyPort);
+
+            manager.updateIamEnabled("proxy", true);
+
+            assertTrue(iamEnabled(registry(manager).get("proxy")));
+            assertPortUnavailable(proxyPort);
+
+            manager.updateIamEnabled("proxy", false);
+
+            assertFalse(iamEnabled(registry(manager).get("proxy")));
+            assertPortUnavailable(proxyPort);
+        } finally {
+            manager.stopAll();
+        }
+    }
+
+    @Test
+    void updateIamEnabledForUnknownInstanceIsANoOp() {
+        RdsProxyManager manager = new RdsProxyManager(
+                mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
+
+        assertDoesNotThrow(() -> manager.updateIamEnabled("missing", true));
+    }
+
+    @Test
     void stopAllReleasesEveryListenerAndIsIdempotent() throws IOException {
         RdsProxyManager manager = new RdsProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class), testConfig());
@@ -204,6 +234,12 @@ class RdsProxyManagerTest {
         Field field = RdsAuthProxy.class.getDeclaredField("masterPassword");
         field.setAccessible(true);
         return (String) field.get(proxy);
+    }
+
+    private static boolean iamEnabled(RdsAuthProxy proxy) throws Exception {
+        Field field = RdsAuthProxy.class.getDeclaredField("iamEnabled");
+        field.setAccessible(true);
+        return field.getBoolean(proxy);
     }
 
     private static void setServerSocket(RdsAuthProxy proxy, ServerSocket socket) throws Exception {
