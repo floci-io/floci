@@ -180,8 +180,13 @@ public final class SigV4RequestValidator {
      * Strips control characters (CR, LF, etc.) from an attacker-controlled value before it is
      * interpolated into a log line, preventing log injection / forged multi-line log entries.
      */
-    private static String sanitizeForLog(String value) {
+    public static String sanitizeForLog(String value) {
         return value == null ? null : value.replaceAll("\\p{Cntrl}", "");
+    }
+
+    /** SigV4 canonical header value normalization: trim, then collapse whitespace runs to one space. */
+    public static String normalizeHeaderValue(String value) {
+        return value == null ? "" : value.trim().replaceAll("\\s+", " ");
     }
 
     /**
@@ -207,6 +212,11 @@ public final class SigV4RequestValidator {
     public static String sha256Hex(String input) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    public static String sha256Hex(byte[] input) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        return hexEncode(digest.digest(input));
     }
 
     public static String hexEncode(byte[] bytes) {
