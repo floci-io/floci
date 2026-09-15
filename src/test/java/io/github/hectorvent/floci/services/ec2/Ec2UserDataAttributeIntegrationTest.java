@@ -5,9 +5,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -16,9 +13,8 @@ class Ec2UserDataAttributeIntegrationTest {
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
 
     @ParameterizedTest
-    @ValueSource(strings = {"#!/bin/sh\necho 'héllo <world> & friends'\n", "YQ==\n", ""})
-    void describesUserDataAsBase64(String userData) {
-        String encoded = Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8));
+    @ValueSource(strings = {"YQ==", "YQ", "/w", "H4sIAAAAAAAC/1NW1E/KzNMvzuBKTc7IV8hIzcnJ5wIAedQ/FxUAAAA=", ""})
+    void describesUserDataAsBase64(String encoded) {
         String id = given().header("Authorization", AUTH).formParam("Action", "RunInstances")
                 .formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
                 .formParam("UserData", encoded).post("/").then().statusCode(200)

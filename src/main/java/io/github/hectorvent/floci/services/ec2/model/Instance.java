@@ -82,6 +82,7 @@ public class Instance {
      */
     private String imdsSourceIp;
     private String userData;
+    private String encodedUserData;
     private int sshHostPort;
     private long terminatedAt;
 
@@ -192,6 +193,8 @@ public class Instance {
     public String getDockerContainerId() { return dockerContainerId; }
     public void setDockerContainerId(String dockerContainerId) { this.dockerContainerId = dockerContainerId; }
 
+    public String getEncodedUserData() { return encodedUserData; }
+    public void setEncodedUserData(String encodedUserData) { this.encodedUserData = encodedUserData; }
     public String getUserData() { return userData; }
     public void setUserData(String userData) { this.userData = userData; }
 

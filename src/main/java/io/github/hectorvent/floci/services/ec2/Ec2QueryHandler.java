@@ -747,7 +747,10 @@ public class Ec2QueryHandler {
             imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
             instanceType = firstNonBlank(instanceType, launchTemplateData.getInstanceType());
             keyName = firstNonBlank(keyName, launchTemplateData.getKeyName());
-            userData = firstNonBlank(userData, launchTemplateData.getUserData());
+            if (userDataEncoded == null || userDataEncoded.isBlank()) {
+                userData = launchTemplateData.getUserData();
+                userDataEncoded = launchTemplateData.getEncodedUserData();
+            }
             iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn,
                     service.iamInstanceProfileArn(launchTemplateData));
             if (sgIds.isEmpty()) {
@@ -764,7 +767,7 @@ public class Ec2QueryHandler {
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
-                creditSpecificationCpuCredits);
+                creditSpecificationCpuCredits, userDataEncoded);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -871,7 +874,7 @@ public class Ec2QueryHandler {
                         null,
                         null,
                         0,
-                        launch.availabilityZone());
+                        launch.availabilityZone(), null, null, launch.encodedUserData());
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
                 results.add(new FleetLaunchResult(instance, launch));
@@ -1026,6 +1029,7 @@ public class Ec2QueryHandler {
                 availabilityZone,
                 template.getKeyName(),
                 template.getUserData(),
+                template.getEncodedUserData(),
                 service.iamInstanceProfileArn(template),
                 template.effectiveSecurityGroupIds(),
                 new ArrayList<>(tags.values()));
@@ -1072,7 +1076,7 @@ public class Ec2QueryHandler {
 
     private record FleetLaunch(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                String instanceType, String imageId, String subnetId, String availabilityZone,
-                               String keyName, String userData, String iamInstanceProfileArn,
+                               String keyName, String userData, String encodedUserData, String iamInstanceProfileArn,
                                List<String> securityGroupIds, List<Tag> instanceTags) {}
 
     private record FleetLaunchKey(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
@@ -1364,10 +1368,7 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("instanceId", instanceId);
         if ("userData".equals(attribute)) {
-            String userData = inst.getUserData();
-            String encoded = userData == null ? null
-                    : Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8));
-            xml.start("userData").elem("value", encoded).end("userData");
+            xml.start("userData").elem("value", inst.getEncodedUserData()).end("userData");
         } else if ("instanceType".equals(attribute)) {
             xml.start("instanceType").elem("value", inst.getInstanceType()).end("instanceType");
         } else if ("sourceDestCheck".equals(attribute)) {
