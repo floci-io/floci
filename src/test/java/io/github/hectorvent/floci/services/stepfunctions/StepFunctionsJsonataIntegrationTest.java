@@ -943,6 +943,401 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithS3JsonlItemReader_readsOneItemPerLine() throws Exception {
+        createBucket("map-inputs-jsonl");
+        putObject("map-inputs-jsonl", "workers.jsonl",
+                "{\"workerId\":\"w1\"}\n{\"workerId\":\"w2\"}\n\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSONL"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-jsonl",
+                                    "Key": "workers.jsonl"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-jsonl-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+    }
+
+    @Test
+    void distributedMapWithS3JsonlItemReader_maxItemsLimitsDataset() throws Exception {
+        createBucket("map-inputs-jsonl-max-items");
+        putObject("map-inputs-jsonl-max-items", "workers.jsonl",
+                "{\"workerId\":\"w1\"}\n{\"workerId\":\"w2\"}\n{\"workerId\":\"w3\"}\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSONL",
+                                    "MaxItems": 2
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-jsonl-max-items",
+                                    "Key": "workers.jsonl"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-jsonl-max-items-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+        assertFalse(output.contains("\"workerId\":\"w3\"") || output.contains("\"workerId\": \"w3\""));
+    }
+
+    @Test
+    void distributedMapWithS3JsonlItemReader_malformedLineFailsWithItemReaderError() throws Exception {
+        createBucket("map-inputs-jsonl-invalid");
+        putObject("map-inputs-jsonl-invalid", "workers.jsonl", "{\"workerId\":\"w1\"}\nnot-json\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSONL"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-jsonl-invalid",
+                                    "Key": "workers.jsonl"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-jsonl-invalid-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+    }
+
+    @Test
+    void distributedMapWithS3CsvItemReader_firstRowSuppliesHeaders() throws Exception {
+        createBucket("map-inputs-csv");
+        putObject("map-inputs-csv", "workers.csv", "workerId,team\nw1,\"alpha,beta\"\nw2,gamma\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv",
+                                    "Key": "workers.csv"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"team\":\"alpha,beta\"") || output.contains("\"team\": \"alpha,beta\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+    }
+
+    @Test
+    void distributedMapWithS3CsvItemReader_givenHeadersReadEveryRow() throws Exception {
+        createBucket("map-inputs-csv-given");
+        putObject("map-inputs-csv-given", "workers.csv", "w1,alpha\nw2,gamma\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV",
+                                    "CSVHeaderLocation": "GIVEN",
+                                    "CSVHeaders": ["workerId", "team"]
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv-given",
+                                    "Key": "workers.csv"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-given-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+    }
+
+    @Test
+    void distributedMapWithS3CsvItemReader_shortRowPadsWithEmptyValues() throws Exception {
+        createBucket("map-inputs-csv-ragged");
+        putObject("map-inputs-csv-ragged", "workers.csv", "workerId,team\nw1\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv-ragged",
+                                    "Key": "workers.csv"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-ragged-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"team\":\"\"") || output.contains("\"team\": \"\""));
+    }
+
+    @Test
+    void distributedMapWithS3CsvItemReader_honoursCsvDelimiter() throws Exception {
+        createBucket("map-inputs-csv-pipe");
+        putObject("map-inputs-csv-pipe", "workers.csv", "workerId|team\nw1|alpha\nw2|gamma\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV",
+                                    "CSVDelimiter": "PIPE"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv-pipe",
+                                    "Key": "workers.csv"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-pipe-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"team\":\"alpha\"") || output.contains("\"team\": \"alpha\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+    }
+
+    @Test
+    void distributedMapWithS3CsvItemReader_keepsNewlinesInsideAQuotedField() throws Exception {
+        createBucket("map-inputs-csv-multiline");
+        putObject("map-inputs-csv-multiline", "workers.csv",
+                "workerId,note\nw1,\"first line\nsecond line\"\nw2,plain\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv-multiline",
+                                    "Key": "workers.csv"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-multiline-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        JsonNode items = new ObjectMapper().readTree(output);
+        assertEquals(2, items.size(), "the quoted line break must not split the record: " + output);
+        assertEquals("first line\nsecond line", items.get(0).path("note").asText());
+        assertEquals("plain", items.get(1).path("note").asText());
+    }
+
+    @Test
     void distributedMapWithItemBatcher_groupsItemsIntoBatchesOfMaxItemsPerBatch() throws Exception {
         String definition = """
                 {
@@ -2566,55 +2961,6 @@ class StepFunctionsJsonataIntegrationTest {
         assertEquals("FAILED", failure.jsonPath().getString("status"));
         assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
         assertTrue(failure.jsonPath().getString("cause").contains("not yet implemented by the emulator"));
-    }
-
-    @Test
-    void distributedMapWithCsvItemReader_failsWithNotImplementedItemReaderError() throws Exception {
-        createBucket("map-inputs-csv");
-        putObject("map-inputs-csv", "workers.csv", "workerId\nw1\n");
-
-        String definition = """
-                {
-                    "StartAt": "ProcessWorkers",
-                    "States": {
-                        "ProcessWorkers": {
-                            "Type": "Map",
-                            "ItemReader": {
-                                "Resource": "arn:aws:states:::s3:getObject",
-                                "ReaderConfig": {
-                                    "InputType": "CSV"
-                                },
-                                "Parameters": {
-                                    "Bucket": "map-inputs-csv",
-                                    "Key": "workers.csv"
-                                }
-                            },
-                            "ItemProcessor": {
-                                "ProcessorConfig": {
-                                    "Mode": "DISTRIBUTED",
-                                    "ExecutionType": "STANDARD"
-                                },
-                                "StartAt": "PassItem",
-                                "States": {
-                                    "PassItem": {
-                                        "Type": "Pass",
-                                        "End": true
-                                    }
-                                }
-                            },
-                            "End": true
-                        }
-                    }
-                }
-                """;
-
-        String smArn = createStateMachine("map-itemreader-s3-csv-test", definition);
-        String execArn = startExecution(smArn, "{}");
-        Response failure = waitForExecutionFailure(execArn);
-
-        assertEquals("FAILED", failure.jsonPath().getString("status"));
-        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
-        assertTrue(failure.jsonPath().getString("cause").contains("InputType CSV is not yet implemented by the emulator"));
     }
 
     @Test

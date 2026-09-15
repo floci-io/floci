@@ -124,6 +124,25 @@ Results remain in input order even when iterations finish out of order. If an it
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
 iterations.
 
+## Distributed Map ItemReader
+
+`ItemReader` reads a dataset from S3 through `arn:aws:states:::s3:getObject`.
+`ReaderConfig.InputType` accepts `JSON`, `JSONL` and `CSV`.
+
+A `JSON` dataset is either an array, or an object whose entries become `Key` and `Value` items,
+and `ReaderConfig.ItemsPointer` selects a node inside it. A `JSONL` dataset is one item per line:
+blank lines are skipped, and `ItemsPointer` does not apply, matching AWS.
+
+A `CSV` dataset takes its field names from the first row, or from `ReaderConfig.CSVHeaders` when
+`CSVHeaderLocation` is `GIVEN`. Every value is a string: a row shorter than the headers pads with
+empty strings, and a longer one drops the surplus. `ReaderConfig.CSVDelimiter` selects `COMMA`,
+`PIPE`, `SEMICOLON`, `SPACE` or `TAB`, and a quoted field may contain the delimiter or a line
+break without ending the record.
+
+`ReaderConfig.MaxItems` truncates any of them. The `MANIFEST` and `PARQUET` input types, and the
+`arn:aws:states:::s3:listObjectsV2` resource, are not implemented yet: they fail the state with
+`States.ItemReaderFailed`.
+
 ## Distributed Map ItemBatcher
 
 `ItemBatcher` hands each child execution a batch of items instead of a single item. The child input

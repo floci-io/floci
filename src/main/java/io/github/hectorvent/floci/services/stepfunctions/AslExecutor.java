@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.XmlParser;
@@ -2942,7 +2943,7 @@ public class AslExecutor {
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
-        if (!"JSON".equals(inputType)) {
+        if (!"JSON".equals(inputType) && !"JSONL".equals(inputType) && !"CSV".equals(inputType)) {
             throw new FailStateException("States.ItemReaderFailed",
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
@@ -2964,6 +2965,14 @@ public class AslExecutor {
 
         try {
             S3Object object = s3Service.getObject(bucket, key);
+            if ("JSONL".equals(inputType)) {
+                return new ResolvedMapItems(applyMaxItems(itemReader, readJsonLines(object.getData())),
+                        MapItemsSource.ITEM_READER_ARRAY);
+            }
+            if ("CSV".equals(inputType)) {
+                return new ResolvedMapItems(applyMaxItems(itemReader, readCsvRows(itemReader, object.getData())),
+                        MapItemsSource.ITEM_READER_ARRAY);
+            }
             JsonNode items = objectMapper.readTree(object.getData());
             items = applyItemsPointer(itemReader, items);
             if (items.isObject()) {
@@ -2983,6 +2992,70 @@ public class AslExecutor {
             throw new FailStateException("States.ItemReaderFailed",
                     e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
         }
+    }
+
+    /**
+     * One item per non-empty line. ReaderConfig.ItemsPointer is JSON only on AWS, so a JSONL
+     * dataset is always the whole file.
+     */
+    private ArrayNode readJsonLines(byte[] data) throws IOException {
+        ArrayNode items = objectMapper.createArrayNode();
+        for (String line : new String(data, StandardCharsets.UTF_8).split("\\R")) {
+            if (!line.isBlank()) {
+                items.add(objectMapper.readTree(line));
+            }
+        }
+        return items;
+    }
+
+    /**
+     * Each data row becomes an object keyed by the headers. A row shorter than the headers pads
+     * with empty strings and a longer one drops the surplus, as on AWS. Every value is a string.
+     */
+    private ArrayNode readCsvRows(JsonNode itemReader, byte[] data) {
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        String headerLocation = readerConfig.path("CSVHeaderLocation").asText("FIRST_ROW");
+        List<List<String>> rows = CsvParser.parseAll(new String(data, StandardCharsets.UTF_8),
+                csvDelimiter(readerConfig.path("CSVDelimiter").asText("COMMA")));
+
+        List<String> headers;
+        int firstDataRow;
+        if ("GIVEN".equals(headerLocation)) {
+            headers = new ArrayList<>();
+            for (JsonNode header : readerConfig.path("CSVHeaders")) {
+                headers.add(header.asText());
+            }
+            firstDataRow = 0;
+        } else if ("FIRST_ROW".equals(headerLocation)) {
+            headers = rows.isEmpty() ? List.of() : rows.get(0);
+            firstDataRow = 1;
+        } else {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader CSVHeaderLocation " + headerLocation + " is not supported");
+        }
+
+        ArrayNode items = objectMapper.createArrayNode();
+        for (int row = firstDataRow; row < rows.size(); row++) {
+            List<String> values = rows.get(row);
+            ObjectNode item = objectMapper.createObjectNode();
+            for (int column = 0; column < headers.size(); column++) {
+                item.put(headers.get(column), column < values.size() ? values.get(column) : "");
+            }
+            items.add(item);
+        }
+        return items;
+    }
+
+    private char csvDelimiter(String delimiter) {
+        return switch (delimiter) {
+            case "COMMA" -> ',';
+            case "PIPE" -> '|';
+            case "SEMICOLON" -> ';';
+            case "SPACE" -> ' ';
+            case "TAB" -> '\t';
+            default -> throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader CSVDelimiter " + delimiter + " is not supported");
+        };
     }
 
     private ArrayNode normalizeObjectItems(JsonNode items) {
