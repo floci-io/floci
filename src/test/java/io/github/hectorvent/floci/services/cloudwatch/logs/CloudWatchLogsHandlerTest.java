@@ -61,7 +61,7 @@ class CloudWatchLogsHandlerTest {
                         new InMemoryStorage<>(), new InMemoryStorage<>(),
                         new RegionResolver(REGION, ACCOUNT), MAPPER),
                 new CloudWatchLogsMetricFilterService(new InMemoryStorage<>(), service,
-                        mock(CloudWatchMetricsService.class)),
+                        mock(CloudWatchMetricsService.class), new RegionResolver(REGION, ACCOUNT)),
                 MAPPER);
 
         service.createLogGroup(GROUP, null, null, REGION);

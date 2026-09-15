@@ -169,7 +169,7 @@ public class CloudWatchLogsService implements ResourceProvider {
                            long queryCompletionDelayMs,
                            LongSupplier clock) {
         this(groupStore, streamStore, eventStore, subscriptionFilterStore, resourcePolicyStore,
-                maxEventsPerQuery, regionResolver, queryCompletionDelayMs, clock, null, null);
+                maxEventsPerQuery, maxStoredEvents, regionResolver, queryCompletionDelayMs, clock, null, null);
     }
 
     CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
@@ -178,6 +178,7 @@ public class CloudWatchLogsService implements ResourceProvider {
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
                            StorageBackend<String, ResourcePolicy> resourcePolicyStore,
                            int maxEventsPerQuery,
+                           int maxStoredEvents,
                            RegionResolver regionResolver,
                            long queryCompletionDelayMs,
                            LongSupplier clock,

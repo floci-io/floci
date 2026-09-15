@@ -66,8 +66,8 @@ public abstract class FilterPattern {
      */
     public abstract boolean declaresField(String reference);
 
-    /** How many {@code %regex%} the pattern holds, for the quota. */
-    int regexCount() {
+    /** How many {@code %regex%} the pattern holds, for the per-pattern and per-log-group quotas. */
+    public int regexCount() {
         return 0;
     }
 }

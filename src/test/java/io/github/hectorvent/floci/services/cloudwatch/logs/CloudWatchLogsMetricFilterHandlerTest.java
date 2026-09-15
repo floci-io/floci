@@ -36,7 +36,8 @@ class CloudWatchLogsMetricFilterHandlerTest {
         handler = new CloudWatchLogsHandler(service,
                 new CloudWatchLogsCrossAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                         new RegionResolver(REGION, "000000000000"), MAPPER),
-                new CloudWatchLogsMetricFilterService(new InMemoryStorage<>(), service, mock(CloudWatchMetricsService.class)),
+                new CloudWatchLogsMetricFilterService(new InMemoryStorage<>(), service,
+                        mock(CloudWatchMetricsService.class), new RegionResolver(REGION, "000000000000")),
                 MAPPER);
         service.createLogGroup(GROUP, null, null, REGION);
     }

@@ -232,7 +232,7 @@ final class SpaceDelimitedPattern extends FilterPattern {
     }
 
     @Override
-    int regexCount() {
+    public int regexCount() {
         return regexes;
     }
 }

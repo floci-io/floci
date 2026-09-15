@@ -39,11 +39,12 @@ class CloudWatchLogsMetricFilterServiceTest {
 
     @BeforeEach
     void setUp() {
+        RegionResolver resolver = new RegionResolver(REGION, "000000000000");
         CloudWatchLogsService logs = new CloudWatchLogsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), 10_000, new RegionResolver(REGION, "000000000000"));
+                new InMemoryStorage<>(), new InMemoryStorage<>(), 10_000, resolver);
         logs.createLogGroup(GROUP, null, null, REGION);
         logs.createLogGroup(OTHER_GROUP, null, null, REGION);
-        service = new CloudWatchLogsMetricFilterService(new InMemoryStorage<>(), logs, mock(CloudWatchMetricsService.class));
+        service = new CloudWatchLogsMetricFilterService(new InMemoryStorage<>(), logs, mock(CloudWatchMetricsService.class), resolver);
     }
 
     private static MetricTransformation transformation(String name, String namespace, String value) {
@@ -416,5 +417,39 @@ class CloudWatchLogsMetricFilterServiceTest {
             tooMany.add("m");
         }
         rejected(() -> service.testMetricFilter("ERROR", tooMany), "InvalidParameterException");
+    }
+
+    /**
+     * AWS allows five filter patterns holding a regular expression per log group. The sixth is
+     * refused, replacing one of the five reuses its slot, and a pattern without a regex never
+     * counts.
+     */
+    @Test
+    void theRegexQuotaOfALogGroup() {
+        for (int i = 0; i < 5; i++) {
+            service.putMetricFilter(filter(GROUP, "r" + i, "%ERROR%", transformation("E", "App", "1")), REGION);
+        }
+        rejected(() -> service.putMetricFilter(filter(GROUP, "r5", "%WARN%", transformation("E", "App", "1")), REGION),
+                "LimitExceededException");
+
+        service.putMetricFilter(filter(GROUP, "r4", "%FATAL%", transformation("E", "App", "1")), REGION);
+        service.putMetricFilter(filter(GROUP, "plain", "ERROR", transformation("E", "App", "1")), REGION);
+        service.putMetricFilter(filter(OTHER_GROUP, "r5", "%WARN%", transformation("E", "App", "1")), REGION);
+    }
+
+    /** The criterion has to parse and to fit the 2000 characters the API allows. */
+    @Test
+    void aFieldSelectionCriterionIsCheckedBeforeItIsStored() {
+        MetricFilter selected = errorCounter(GROUP, "selected");
+        selected.setFieldSelectionCriteria("@aws.region = \"us-east-1\" && @aws.account IN [\"000000000000\"]");
+        assertNotNull(service.putMetricFilter(selected, REGION).getFieldSelectionCriteria());
+
+        MetricFilter unknownField = errorCounter(GROUP, "unknown");
+        unknownField.setFieldSelectionCriteria("@aws.zone = \"us-east-1\"");
+        rejected(() -> service.putMetricFilter(unknownField, REGION), "InvalidParameterException");
+
+        MetricFilter tooLong = errorCounter(GROUP, "long");
+        tooLong.setFieldSelectionCriteria("@aws.region = \"" + "x".repeat(2000) + "\"");
+        rejected(() -> service.putMetricFilter(tooLong, REGION), "InvalidParameterException");
     }
 }

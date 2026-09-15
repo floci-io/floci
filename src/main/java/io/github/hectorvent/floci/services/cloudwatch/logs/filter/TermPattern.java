@@ -91,7 +91,7 @@ final class TermPattern extends FilterPattern {
     }
 
     @Override
-    int regexCount() {
+    public int regexCount() {
         return regexes;
     }
 }

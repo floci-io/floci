@@ -43,12 +43,13 @@ class CloudWatchLogsMetricFilterPublishingTest {
 
     @BeforeEach
     void setUp() {
+        RegionResolver resolver = new RegionResolver(REGION, "000000000000");
         CloudWatchLogsService logs = new CloudWatchLogsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), 10_000, new RegionResolver(REGION, "000000000000"));
+                new InMemoryStorage<>(), new InMemoryStorage<>(), 10_000, resolver);
         logs.createLogGroup(GROUP, null, null, REGION);
         logs.createLogGroup(OTHER_GROUP, null, null, REGION);
         metrics = mock(CloudWatchMetricsService.class);
-        service = new CloudWatchLogsMetricFilterService(new InMemoryStorage<>(), logs, metrics);
+        service = new CloudWatchLogsMetricFilterService(new InMemoryStorage<>(), logs, metrics, resolver);
     }
 
     private static MetricTransformation transformation(String name, String namespace, String value) {
@@ -196,10 +197,11 @@ class CloudWatchLogsMetricFilterPublishingTest {
     @Test
     void aBatchWrittenForAnotherAccountUsesThatAccountsFiltersAndMetrics() {
         AccountAwareStorageBackend<MetricFilter> store = AccountAwareStorageBackend.inMemory("000000000000");
+        RegionResolver resolver = new RegionResolver(REGION, "000000000000");
         CloudWatchLogsService logs = new CloudWatchLogsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), 10_000, new RegionResolver(REGION, "000000000000"));
+                new InMemoryStorage<>(), new InMemoryStorage<>(), 10_000, resolver);
         logs.createLogGroup(GROUP, null, null, REGION);
-        service = new CloudWatchLogsMetricFilterService(store, logs, metrics);
+        service = new CloudWatchLogsMetricFilterService(store, logs, metrics, resolver);
         service.putMetricFilter(filter(GROUP, "errors", "ERROR", transformation("Errors", "Default", "1")), REGION);
         store.putForAccount("111111111111", REGION + "::" + GROUP + "::errors",
                 filter(GROUP, "errors", "ERROR", transformation("Errors", "Other", "1")));
@@ -244,5 +246,70 @@ class CloudWatchLogsMetricFilterPublishingTest {
         service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1", List.of(event(1L, "[ERROR] boom"))));
 
         assertEquals(1, published("Fine").size());
+    }
+
+    /**
+     * The system fields a filter emits become dimensions on the datums it publishes, naming the
+     * account the batch was written for and its Region.
+     */
+    @Test
+    void theEmittedSystemFieldsBecomeDimensions() {
+        MetricFilter filter = errorCounter(GROUP, "errors");
+        filter.setEmitSystemFieldDimensions(List.of("@aws.account", "@aws.region"));
+        service.putMetricFilter(filter, REGION);
+
+        service.onLogEventsIngested(new LogEventsIngested("111111111111", REGION, GROUP, "s1",
+                List.of(event(1_700_000_000_000L, "[ERROR] one"))));
+
+        List<MetricDatum> datums = published("111111111111", "App");
+        assertEquals(1, datums.size());
+        assertEquals(List.of("@aws.account", "@aws.region"),
+                datums.getFirst().getDimensions().stream().map(Dimension::name).toList());
+        assertEquals(List.of("111111111111", REGION),
+                datums.getFirst().getDimensions().stream().map(Dimension::value).toList());
+    }
+
+    /** A batch written without an explicit account carries the caller's own account. */
+    @Test
+    void theAccountDimensionNamesTheCallersOwnAccountWhenTheBatchNamesNone() {
+        MetricFilter filter = errorCounter(GROUP, "errors");
+        filter.setEmitSystemFieldDimensions(List.of("@aws.account"));
+        service.putMetricFilter(filter, REGION);
+
+        service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1",
+                List.of(event(1_700_000_000_000L, "[ERROR] one"))));
+
+        assertEquals("000000000000", published("App").getFirst().getDimensions().getFirst().value());
+    }
+
+    /**
+     * Selection criteria decide from the batch's account and Region whether the filter runs at all,
+     * so a batch they exclude publishes nothing, not even a default value.
+     */
+    @Test
+    void aBatchTheSelectionCriteriaExcludePublishesNothing() {
+        MetricTransformation t = transformation("ErrorCount", "App", "1");
+        t.setDefaultValue(0.0);
+        MetricFilter filter = filter(GROUP, "errors", "ERROR", t);
+        filter.setFieldSelectionCriteria("@aws.account IN [\"222222222222\"]");
+        service.putMetricFilter(filter, REGION);
+
+        service.onLogEventsIngested(new LogEventsIngested("111111111111", REGION, GROUP, "s1",
+                List.of(event(1_700_000_000_000L, "[ERROR] one"))));
+
+        verify(metrics, never()).putMetricDataForAccount(anyString(), anyString(), anyList(), anyString());
+    }
+
+    /** A batch the criteria admit publishes exactly as an unfiltered one does. */
+    @Test
+    void aBatchTheSelectionCriteriaAdmitPublishesAsUsual() {
+        MetricFilter filter = errorCounter(GROUP, "errors");
+        filter.setFieldSelectionCriteria("@aws.account = \"111111111111\" && @aws.region = \"" + REGION + "\"");
+        service.putMetricFilter(filter, REGION);
+
+        service.onLogEventsIngested(new LogEventsIngested("111111111111", REGION, GROUP, "s1",
+                List.of(event(1_700_000_000_000L, "[ERROR] one"))));
+
+        assertEquals(1, published("111111111111", "App").size());
     }
 }

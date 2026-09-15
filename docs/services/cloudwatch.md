@@ -84,7 +84,8 @@ The filter pattern syntax follows the AWS reference:
   allows. Parentheses and characters outside ASCII are rejected, as on AWS.
 - JSON patterns: `{ $.eventType = "UpdateTrail" && $.code >= 400 }`, with `=`, `!=`, `<`, `<=`,
   `>`, `>=`, `IS NULL`, `IS TRUE`, `IS FALSE`, `NOT EXISTS`, `&&`, `||`, parentheses, array indexes,
-  `[*]` and `.*` wildcards, and `$.['a.b']` for a property with a dot in its name.
+  `[*]` and `.*` wildcards, and `$.['a.b']` for a property with a dot in its name. AWS's wildcard
+  quotas apply: one per property selector and three per pattern.
 - Space-delimited patterns: `[ip, ..., status_code = 4*, bytes]`, with named fields, `...` for any
   number of fields, conditions on any field, `w1`/`w2` indicators, and `%regex%` values. Text
   between double quotes or square brackets is one field.
@@ -92,12 +93,23 @@ The filter pattern syntax follows the AWS reference:
 `PutMetricFilter` applies the rules AWS applies: the log group must exist, the pattern must parse,
 at most two regular expressions per pattern, exactly one transformation whose `metricValue` is a
 number or a field the pattern can supply, at most three dimensions, only on JSON or space-delimited
-patterns and not together with a `defaultValue`, and 100 filters per log group. `TestMetricFilter`
-reports matches with the extracted values as AWS does: named fields as `$name`, the others by
-position as `$1`, `$2` and so on.
+patterns and not together with a `defaultValue`, 100 filters per log group, and five filter patterns
+holding a regular expression per log group, counted over the group's metric and subscription
+filters together. `TestMetricFilter` reports matches with the extracted values as AWS does: named
+fields as `$name`, the others by position as `$1`, `$2` and so on.
 
-`applyOnTransformedLogs`, `fieldSelectionCriteria` and `emitSystemFieldDimensions` are stored and
-returned but have no effect: there are no log transformers or centralized log groups locally.
+`fieldSelectionCriteria` selects which batches a filter processes from the system fields
+`@aws.account` and `@aws.region`, with `=`, `!=`, `IN`, `NOT IN` and the `AND` and `OR` the API
+documents, as in `@aws.account IN ["111111111111"]`. Both fields describe the ingested batch rather
+than the individual event, so one evaluation decides the batch. A criterion that does not parse is
+rejected when the filter is stored.
+
+`emitSystemFieldDimensions` adds `@aws.account` and `@aws.region` as dimensions on the values the
+filter publishes. They count toward the same limit of three dimensions AWS applies.
+
+`applyOnTransformedLogs` is stored and returned unchanged. It selects the transformed view of a log
+group that has a log transformer; Floci has no transformers, so there is no view that differs from
+the ingested events, and the Logs API documents no error for setting it without one.
 
 ### Logs Insights {#logs-insights}
 

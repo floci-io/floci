@@ -24,6 +24,9 @@ final class JsonPattern extends FilterPattern {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .readerFor(JsonNode.class);
 
+    /** AWS's quota on wildcard selectors in one filter pattern. */
+    private static final int MAX_WILDCARDS = 3;
+
     private final Condition<JsonNode> condition;
     private final List<JsonSelector> selectors;
     private final int regexes;
@@ -39,14 +42,21 @@ final class JsonPattern extends FilterPattern {
         cursor.expect('{');
         List<JsonSelector> selectors = new ArrayList<>();
         int[] regexes = {0};
-        Condition<JsonNode> condition = Condition.parse(cursor, c -> atom(c, selectors, regexes));
+        int[] wildcards = {0};
+        Condition<JsonNode> condition = Condition.parse(cursor, c -> atom(c, selectors, regexes, wildcards));
+        if (wildcards[0] > MAX_WILDCARDS) {
+            throw new FilterPatternException("Invalid filter pattern: at most " + MAX_WILDCARDS
+                    + " wildcard selectors are allowed in a filter pattern");
+        }
         cursor.expect('}');
         cursor.expectEnd();
         return new JsonPattern(condition, List.copyOf(selectors), regexes[0]);
     }
 
-    private static Condition<JsonNode> atom(PatternCursor cursor, List<JsonSelector> selectors, int[] regexes) {
+    private static Condition<JsonNode> atom(PatternCursor cursor, List<JsonSelector> selectors, int[] regexes,
+                                            int[] wildcards) {
         JsonSelector selector = JsonSelector.read(cursor);
+        wildcards[0] += selector.wildcards();
         if (selectors.stream().noneMatch(s -> s.text().equals(selector.text()))) {
             selectors.add(selector);
         }
@@ -116,7 +126,7 @@ final class JsonPattern extends FilterPattern {
     }
 
     @Override
-    int regexCount() {
+    public int regexCount() {
         return regexes;
     }
 }

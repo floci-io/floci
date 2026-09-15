@@ -212,6 +212,26 @@ class FilterPatternTest {
                 }
                 """;
 
+        /**
+         * AWS allows one wildcard in a property selector and three wildcard selectors in a whole
+         * pattern, the quotas the syntax page states beside its JSON examples.
+         */
+        @Test
+        void theWildcardQuotas() {
+            assertTrue(matches("{ $.* = %111\\.111\\.111\\.1[0-9]{1,2}% }", EVENT),
+                    "the reference example uses one wildcard in the selector");
+            assertTrue(matches("{ $.objectList[*].name = \"a\" }", EVENT));
+            assertEquals(FilterPattern.Kind.JSON, FilterPattern.parse(
+                    "{ $.users[*].id = 2 || $.actions[*] = \"GET\" || $.coordinates[*][0] = 4 }").kind(),
+                    "three wildcard selectors are within the quota");
+            assertThrows(FilterPatternException.class, () -> FilterPattern.parse("{ $.*[*] = \"a\" }"),
+                    "two wildcards in one property selector are more than AWS allows");
+            assertThrows(FilterPatternException.class, () -> FilterPattern.parse(
+                    "{ $.users[*].id = 2 || $.actions[*] = \"GET\" || $.coordinates[*][0] = 4"
+                            + " || $.objectList[*].id = 1 }"),
+                    "four wildcard selectors are more than AWS allows in one pattern");
+        }
+
         @Test
         void theReferenceStringExamples() {
             assertTrue(matches("{ $.eventType = \"UpdateTrail\" }", EVENT));

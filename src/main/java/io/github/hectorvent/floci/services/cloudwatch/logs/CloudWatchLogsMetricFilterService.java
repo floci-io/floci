@@ -2,15 +2,18 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.filter.FilterMatch;
 import io.github.hectorvent.floci.services.cloudwatch.logs.filter.FilterPattern;
 import io.github.hectorvent.floci.services.cloudwatch.logs.filter.FilterPatternException;
+import io.github.hectorvent.floci.services.cloudwatch.logs.filter.SystemFieldSelection;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.MetricFilter;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.MetricTransformation;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
@@ -28,6 +31,13 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.MAX_DIMENSIONS;
+import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.invalid;
+import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.selects;
+import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.validateFieldSelectionCriteria;
+import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.validateSystemFields;
+import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.withSystemDimensions;
+
 /**
  * Metric filters of CloudWatch Logs: the PutMetricFilter, DescribeMetricFilters, DeleteMetricFilter
  * and TestMetricFilter operations, and the part AWS does at ingestion, publishing a metric value for
@@ -42,17 +52,19 @@ public class CloudWatchLogsMetricFilterService {
 
     /** AWS's cap on metric filters per log group. */
     public static final int MAX_FILTERS_PER_LOG_GROUP = 100;
-    /** AWS's cap on dimensions per metric filter. */
-    public static final int MAX_DIMENSIONS = 3;
     private static final int MAX_FILTER_PATTERN_LENGTH = 1024;
     private static final int MAX_METRIC_VALUE_LENGTH = 100;
+    /**
+     * AWS's quota on filter patterns holding a regular expression, counted over a log group's
+     * metric and subscription filters together.
+     */
+    public static final int MAX_REGEX_PATTERNS_PER_LOG_GROUP = 5;
     private static final int MAX_DIMENSION_LENGTH = 255;
     private static final int MAX_TEST_MESSAGES = 50;
     private static final int MAX_DESCRIBE_LIMIT = 50;
     private static final Pattern FILTER_NAME = Pattern.compile("[^:*]{1,512}");
     private static final Pattern METRIC_NAME = Pattern.compile("[^:*$]{1,255}");
     private static final Pattern NUMBER = Pattern.compile("[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?");
-    private static final Set<String> SYSTEM_FIELDS = Set.of("@aws.account", "@aws.region");
     private static final Set<String> UNITS = Set.of("Seconds", "Microseconds", "Milliseconds", "Bytes", "Kilobytes",
             "Megabytes", "Gigabytes", "Terabytes", "Bits", "Kilobits", "Megabits", "Gigabits", "Terabits", "Percent",
             "Count", "Bytes/Second", "Kilobytes/Second", "Megabytes/Second", "Gigabytes/Second", "Terabytes/Second",
@@ -62,19 +74,21 @@ public class CloudWatchLogsMetricFilterService {
     private final StorageBackend<String, MetricFilter> store;
     private final CloudWatchLogsService logsService;
     private final CloudWatchMetricsService metricsService;
+    private final RegionResolver regionResolver;
 
     @Inject
     public CloudWatchLogsMetricFilterService(StorageFactory storageFactory, CloudWatchLogsService logsService,
-                                             CloudWatchMetricsService metricsService) {
+                                             CloudWatchMetricsService metricsService, RegionResolver regionResolver) {
         this(storageFactory.create("cloudwatchlogs", "cwlogs-metric-filters.json",
-                new TypeReference<Map<String, MetricFilter>>() {}), logsService, metricsService);
+                new TypeReference<Map<String, MetricFilter>>() {}), logsService, metricsService, regionResolver);
     }
 
     CloudWatchLogsMetricFilterService(StorageBackend<String, MetricFilter> store, CloudWatchLogsService logsService,
-                                      CloudWatchMetricsService metricsService) {
+                                      CloudWatchMetricsService metricsService, RegionResolver regionResolver) {
         this.store = store;
         this.logsService = logsService;
         this.metricsService = metricsService;
+        this.regionResolver = regionResolver;
     }
 
     /** A page of DescribeMetricFilters. */
@@ -97,6 +111,7 @@ public class CloudWatchLogsMetricFilterService {
         FilterPattern pattern = requirePattern(definition.getFilterPattern());
         MetricTransformation transformation = requireTransformation(definition.getMetricTransformations(), pattern);
         validateSystemFields(definition.getEmitSystemFieldDimensions(), transformation);
+        validateFieldSelectionCriteria(definition.getFieldSelectionCriteria());
 
         String key = key(region, logGroupName, filterName);
         Optional<MetricFilter> existing = store.get(key);
@@ -105,6 +120,7 @@ public class CloudWatchLogsMetricFilterService {
                     "The log group " + logGroupName + " already has the maximum of " + MAX_FILTERS_PER_LOG_GROUP
                             + " metric filters.", 400);
         }
+        validateRegexQuota(logGroupName, filterName, pattern, region);
 
         MetricFilter filter = new MetricFilter();
         filter.setLogGroupName(logGroupName);
@@ -204,20 +220,49 @@ public class CloudWatchLogsMetricFilterService {
         return t;
     }
 
-    private static void validateSystemFields(List<String> systemFields, MetricTransformation t) {
-        if (systemFields == null) {
+    
+    /**
+     * AWS allows five filter patterns holding a regular expression per log group, counted over the
+     * metric and subscription filters together. Replacing a filter does not count the definition it
+     * replaces, and a pattern Floci cannot parse counts as holding none.
+     */
+    private void validateRegexQuota(String logGroupName, String filterName, FilterPattern pattern, String region) {
+        if (pattern.regexCount() == 0) {
             return;
         }
-        for (String field : systemFields) {
-            if (!SYSTEM_FIELDS.contains(field)) {
-                throw invalid("emitSystemFieldDimensions must contain only @aws.account and @aws.region, got '"
-                        + field + "'.");
+        int used = 1;
+        for (MetricFilter other : filtersOf(logGroupName, region)) {
+            if (!filterName.equals(other.getFilterName()) && holdsRegex(other.getFilterPattern())) {
+                used++;
             }
         }
-        int dimensions = t.getDimensions() == null ? 0 : t.getDimensions().size();
-        if (dimensions + systemFields.size() > MAX_DIMENSIONS) {
-            throw invalid("System field dimensions count toward the limit of " + MAX_DIMENSIONS
-                    + " dimensions per metric filter.");
+        for (SubscriptionFilter other : subscriptionFiltersOf(logGroupName, region)) {
+            if (holdsRegex(other.getFilterPattern())) {
+                used++;
+            }
+        }
+        if (used > MAX_REGEX_PATTERNS_PER_LOG_GROUP) {
+            throw new AwsException("LimitExceededException",
+                    "The log group " + logGroupName + " already has the maximum of "
+                            + MAX_REGEX_PATTERNS_PER_LOG_GROUP
+                            + " filter patterns with a regular expression.", 400);
+        }
+    }
+
+    private static boolean holdsRegex(String filterPattern) {
+        try {
+            return FilterPattern.parse(filterPattern).regexCount() > 0;
+        } catch (FilterPatternException unparsable) {
+            return false;
+        }
+    }
+
+    private List<SubscriptionFilter> subscriptionFiltersOf(String logGroupName, String region) {
+        try {
+            return logsService.describeSubscriptionFilters(logGroupName, null, null, 0, region)
+                    .subscriptionFilters();
+        } catch (RuntimeException e) {
+            return List.of();
         }
     }
 
@@ -340,13 +385,20 @@ public class CloudWatchLogsMetricFilterService {
      * event, at the event's timestamp, with the dimensions whose fields the event carries, and the
      * default value once when nothing in the batch matched. The filters and the metrics are those
      * of the account the batch was written for, the caller's own unless the writer named one. A
-     * filter that cannot publish is logged and skipped: AWS never fails an ingestion because of a
-     * metric filter.
+     * filter whose {@code fieldSelectionCriteria} does not select this account and Region skips the
+     * batch entirely, as it does on AWS. A filter that cannot publish is logged and skipped: AWS
+     * never fails an ingestion because of a metric filter.
      */
     void onLogEventsIngested(@Observes LogEventsIngested event) {
+        String account = event.accountId() == null || event.accountId().isBlank()
+                ? regionResolver.getAccountId()
+                : event.accountId();
         for (MetricFilter filter : filtersOf(event.logGroupName(), event.region(), event.accountId())) {
             try {
-                publish(filter, event);
+                if (!selects(filter, account, event.region())) {
+                    continue;
+                }
+                publish(filter, event, account);
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Metric filter {0} on log group {1} could not publish its metric",
                         filter.getFilterName(), event.logGroupName());
@@ -354,7 +406,7 @@ public class CloudWatchLogsMetricFilterService {
         }
     }
 
-    private void publish(MetricFilter filter, LogEventsIngested event) {
+    private void publish(MetricFilter filter, LogEventsIngested event, String account) {
         FilterPattern pattern = FilterPattern.parse(filter.getFilterPattern());
         MetricTransformation t = filter.getMetricTransformations().getFirst();
         Double literal = NUMBER.matcher(t.getMetricValue()).matches() ? Double.parseDouble(t.getMetricValue()) : null;
@@ -374,7 +426,7 @@ public class CloudWatchLogsMetricFilterService {
             if (value == null) {
                 continue;
             }
-            List<Dimension> dimensions = new ArrayList<>();
+            List<Dimension> dimensions = withSystemDimensions(filter, account, event.region(), new ArrayList<>());
             if (t.getDimensions() != null) {
                 t.getDimensions().forEach((name, reference) -> {
                     String dimensionValue = match.value(reference);
@@ -386,13 +438,16 @@ public class CloudWatchLogsMetricFilterService {
             datums.add(datum(t, value, dimensions, logEvent.getTimestamp()));
         }
         if (!matched && t.getDefaultValue() != null) {
-            datums.add(datum(t, t.getDefaultValue(), List.of(), lastTimestamp));
+            datums.add(datum(t, t.getDefaultValue(),
+                    withSystemDimensions(filter, account, event.region(), new ArrayList<>()), lastTimestamp));
         }
         if (!datums.isEmpty()) {
             metricsService.putMetricDataForAccount(event.accountId(), t.getMetricNamespace(), datums, event.region());
         }
     }
 
+    
+    
     private static MetricDatum datum(MetricTransformation t, double value, List<Dimension> dimensions, long timestampMillis) {
         MetricDatum datum = new MetricDatum();
         datum.setMetricName(t.getMetricName());
@@ -437,7 +492,4 @@ public class CloudWatchLogsMetricFilterService {
         return groupPrefix(region, logGroupName) + filterName;
     }
 
-    private static AwsException invalid(String message) {
-        return new AwsException("InvalidParameterException", message, 400);
-    }
 }

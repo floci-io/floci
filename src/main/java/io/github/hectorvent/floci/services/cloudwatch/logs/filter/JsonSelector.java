@@ -15,6 +15,9 @@ final class JsonSelector {
 
     private static final String SELECTOR_END = " \t\r\n=!<>)}&|,";
 
+    /** AWS's quota on wildcards in one property selector. */
+    private static final int MAX_WILDCARDS = 1;
+
     private sealed interface Segment permits Name, Index, Wildcard {}
 
     private record Name(String name) implements Segment {}
@@ -25,10 +28,12 @@ final class JsonSelector {
 
     private final String text;
     private final List<Segment> segments;
+    private final int wildcards;
 
     private JsonSelector(String text, List<Segment> segments) {
         this.text = text;
         this.segments = segments;
+        this.wildcards = (int) segments.stream().filter(Wildcard.class::isInstance).count();
     }
 
     /** Reads the selector at the cursor, which must start with {@code $}. */
@@ -54,7 +59,11 @@ final class JsonSelector {
                 throw cursor.error("unexpected '" + c + "' in a property selector");
             }
         }
-        return new JsonSelector(text.toString(), List.copyOf(segments));
+        JsonSelector selector = new JsonSelector(text.toString(), List.copyOf(segments));
+        if (selector.wildcards() > MAX_WILDCARDS) {
+            throw cursor.error("at most " + MAX_WILDCARDS + " wildcard is allowed in a property selector");
+        }
+        return selector;
     }
 
     /** Parses a whole reference such as {@code $.latency}, or returns null when it is not a selector. */
@@ -129,6 +138,11 @@ final class JsonSelector {
 
     String text() {
         return text;
+    }
+
+    /** How many {@code .*} or {@code [*]} the selector holds, for the quota. */
+    int wildcards() {
+        return wildcards;
     }
 
     /** The nodes the selector points at in {@code root}; empty when the path is absent. */
