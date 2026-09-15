@@ -3132,9 +3132,11 @@ public class AslExecutor {
         String prefix = parameters.path("Prefix").asText(null);
 
         ArrayNode items = objectMapper.createArrayNode();
+        int maxItems = maxItems(itemReader);
         try {
             // MaxItems keeps the first keys in order, so the listing itself is capped.
-            for (S3Object object : s3Service.listObjects(bucket, prefix, null, maxItems(itemReader))) {
+            for (S3Object object : s3Service.listObjects(bucket, prefix, null,
+                    maxItems > 0 ? maxItems : Integer.MAX_VALUE)) {
                 items.add(listObjectsItem(object, jsonata));
             }
         } catch (AwsException e) {
