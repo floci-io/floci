@@ -27,6 +27,8 @@ public class RdsAuthProxy {
     private final String dbName;
     private final DatabaseEngine engine;
     private final RdsSigV4Validator sigV4;
+    private final RdsMysqlBinding mysqlBinding;
+    private final MySqlProtocolHandler.IamUserChecker iamUserChecker;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final MasterPasswordCheck passwordValidator;
     private final int handshakeTimeoutMillis;
@@ -43,6 +45,32 @@ public class RdsAuthProxy {
                         MasterPasswordCheck passwordValidator,
                         int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                         int maxConnections) {
+        this(instanceId, backendHost, backendPort, engine, iamEnabled, masterUsername, masterPassword,
+                dbName, sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                backendConnectTimeoutMillis, maxConnections, null, username -> false);
+    }
+
+    public RdsAuthProxy(String instanceId, String backendHost, int backendPort,
+                        DatabaseEngine engine, boolean iamEnabled,
+                        String masterUsername, String masterPassword, String dbName,
+                        RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
+                        MasterPasswordCheck passwordValidator,
+                        int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                        int maxConnections, RdsMysqlBinding mysqlBinding) {
+        this(instanceId, backendHost, backendPort, engine, iamEnabled, masterUsername, masterPassword,
+                dbName, sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                backendConnectTimeoutMillis, maxConnections, mysqlBinding,
+                username -> mysqlBinding != null);
+    }
+
+    public RdsAuthProxy(String instanceId, String backendHost, int backendPort,
+                        DatabaseEngine engine, boolean iamEnabled,
+                        String masterUsername, String masterPassword, String dbName,
+                        RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
+                        MasterPasswordCheck passwordValidator,
+                        int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                        int maxConnections, RdsMysqlBinding mysqlBinding,
+                        MySqlProtocolHandler.IamUserChecker iamUserChecker) {
         this.instanceId = instanceId;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -52,6 +80,8 @@ public class RdsAuthProxy {
         this.masterPassword = masterPassword;
         this.dbName = dbName;
         this.sigV4 = sigV4;
+        this.mysqlBinding = mysqlBinding;
+        this.iamUserChecker = iamUserChecker;
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
@@ -135,15 +165,16 @@ public class RdsAuthProxy {
                         : PasswordValidator.AuthResult.REJECT;
             };
 
+            PostgresProtocolHandler.BackendConnector connector = () -> {
+                Socket backendSocket = new Socket();
+                backendSocket.connect(new InetSocketAddress(backendHost, backendPort),
+                        backendConnectTimeoutMillis);
+                backendSocket.setTcpNoDelay(true);
+                return backendSocket;
+            };
+
             switch (engine) {
                 case POSTGRES -> {
-                    PostgresProtocolHandler.BackendConnector connector = () -> {
-                        Socket backendSocket = new Socket();
-                        backendSocket.connect(new InetSocketAddress(backendHost, backendPort),
-                                backendConnectTimeoutMillis);
-                        backendSocket.setTcpNoDelay(true);
-                        return backendSocket;
-                    };
                     session = PostgresProtocolHandler.authenticate(
                                     client, connector, masterUsername, masterPassword, dbName,
                                     iamEnabled, sigV4, tlsCertificates, authAdapter,
@@ -153,14 +184,12 @@ public class RdsAuthProxy {
                     }
                 }
                 case MYSQL, MARIADB -> {
-                    backend = new Socket();
-                    backend.connect(new InetSocketAddress(backendHost, backendPort),
-                            backendConnectTimeoutMillis);
-                    backend.setTcpNoDelay(true);
+                    backend = connector.connect();
                     MySqlProtocolHandler.handleAuth(
-                            client, backend, masterUsername, masterPassword,
+                            client, backend, connector, masterUsername, masterPassword,
                             iamEnabled, sigV4, tlsCertificates, authAdapter,
-                            handshakeTimeoutMillis);
+                            handshakeTimeoutMillis,
+                            iamUserChecker, mysqlBinding);
                 }
             }
         } catch (Exception e) {

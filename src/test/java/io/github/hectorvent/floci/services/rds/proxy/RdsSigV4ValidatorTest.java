@@ -192,6 +192,20 @@ class RdsSigV4ValidatorTest {
     }
 
     @Test
+    void validateBindsTokenToPublishedMysqlEndpointAndRegion() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 3307, "admin", "AKIDRDS", "secret-rds",
+                Instant.now().minusSeconds(60), 900);
+
+        assertTrue(validator.validate(token, "admin",
+                new RdsMysqlBinding("db.example.local", 3307, "us-east-1")));
+        assertFalse(validator.validate(token, "admin",
+                new RdsMysqlBinding("db.example.local", 3306, "us-east-1")));
+    }
+
+    @Test
     void validateAcceptsTokenWhenClientUsernameIsNull() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDRDS", "secret-rds");
 
