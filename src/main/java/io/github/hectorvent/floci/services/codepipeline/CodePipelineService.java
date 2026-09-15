@@ -1261,6 +1261,8 @@ public class CodePipelineService {
             }
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
         }
+        state.setStatus(execution.isAbandon() ? "Abandoned" : "Stopped");
+        state.setSummary(execution.isAbandon() ? "Action abandoned." : "Action stopped.");
     }
 
     private void applyExecutionMode(CodePipelineExecution execution) {

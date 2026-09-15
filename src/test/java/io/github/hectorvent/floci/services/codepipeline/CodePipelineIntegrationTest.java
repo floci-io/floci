@@ -852,6 +852,80 @@ class CodePipelineIntegrationTest {
     }
 
     @Test
+    void stoppingCustomActionMarksTheActionStopped() throws Exception {
+        post("CreateCustomActionType", """
+                {
+                    "category": "Build",
+                    "provider": "StopAwareWorker",
+                    "version": "1",
+                    "inputArtifactDetails": {"minimumCount": 0, "maximumCount": 0},
+                    "outputArtifactDetails": {"minimumCount": 0, "maximumCount": 0}
+                }
+                """)
+                .then()
+                .statusCode(200);
+
+        String pipelineName = "custom-worker-stop-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Build",
+                    "actions": [{
+                        "name": "WorkerBuild",
+                        "actionTypeId": {
+                            "category": "Build",
+                            "owner": "Custom",
+                            "provider": "StopAwareWorker",
+                            "version": "1"
+                        }
+                    }]
+                },
+                {
+                    "name": "Complete",
+                    "actions": [{
+                        "name": "ManualApproval",
+                        "actionTypeId": {
+                            "category": "Approval",
+                            "owner": "AWS",
+                            "provider": "Manual",
+                            "version": "1"
+                        }
+                    }]
+                }
+                """)).then().statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().extract().path("pipelineExecutionId");
+        waitForJob("StopAwareWorker");
+
+        post("StopPipelineExecution", """
+                {
+                    "pipelineName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "reason": "Verify custom action stop status"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200);
+
+        waitForExecution(pipelineName, executionId, "Stopped");
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.status", equalTo("Stopped"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Stopped"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+        post("DeleteCustomActionType", """
+                {"category": "Build", "provider": "StopAwareWorker", "version": "1"}
+                """).then().statusCode(200);
+    }
+
+    @Test
     void putApprovalResultApprovesAndRejectsManualApprovalActions() throws Exception {
         String pipelineName = "approval-test-pipeline";
         post("CreatePipeline", pipeline(pipelineName, """
@@ -1429,6 +1503,10 @@ class CodePipelineIntegrationTest {
     }
 
     private Response waitForJob() throws Exception {
+        return waitForJob("FlociWorker");
+    }
+
+    private Response waitForJob(String provider) throws Exception {
         Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
         Response response;
         do {
@@ -1437,11 +1515,11 @@ class CodePipelineIntegrationTest {
                         "actionTypeId": {
                             "category": "Build",
                             "owner": "Custom",
-                            "provider": "FlociWorker",
+                            "provider": "%s",
                             "version": "1"
                         }
                     }
-                    """);
+                    """.formatted(provider));
             if (response.jsonPath().getList("jobs").size() == 1) {
                 return response;
             }
