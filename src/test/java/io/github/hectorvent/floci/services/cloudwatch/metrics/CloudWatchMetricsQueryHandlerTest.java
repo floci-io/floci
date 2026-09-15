@@ -8,6 +8,8 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -58,5 +60,40 @@ class CloudWatchMetricsQueryHandlerTest {
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
         verify(metricsService).putMetricAlarm(captor.capture(), anyString());
         assertFalse(captor.getValue().isActionsEnabled());
+    }
+
+    // Terraform's provider speaks the Query protocol to CloudWatch, so this is the path that
+    // decides whether a re-plan reports drift. An alarm created without DatapointsToAlarm must
+    // come back without it. floci-io/floci#3660 is what echoing EvaluationPeriods here costs.
+    @Test
+    void putMetricAlarmLeavesDatapointsToAlarmUnsetWhenOmitted() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("AlarmName", "TestAlarm");
+        params.putSingle("MetricName", "M");
+        params.putSingle("Namespace", "NS");
+        params.putSingle("EvaluationPeriods", "3");
+
+        handler.handle("PutMetricAlarm", params, REGION);
+
+        ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        assertEquals(3, captor.getValue().getEvaluationPeriods());
+        assertNull(captor.getValue().getDatapointsToAlarm());
+    }
+
+    @Test
+    void putMetricAlarmKeepsAnExplicitDatapointsToAlarm() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("AlarmName", "TestAlarm");
+        params.putSingle("MetricName", "M");
+        params.putSingle("Namespace", "NS");
+        params.putSingle("EvaluationPeriods", "3");
+        params.putSingle("DatapointsToAlarm", "2");
+
+        handler.handle("PutMetricAlarm", params, REGION);
+
+        ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
+        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
+        assertEquals(2, captor.getValue().getDatapointsToAlarm());
     }
 }

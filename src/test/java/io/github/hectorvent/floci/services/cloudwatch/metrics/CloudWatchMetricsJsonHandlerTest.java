@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -197,14 +198,16 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals("Count", alarm.get("Unit").asText());
     }
 
-    // PutMetricAlarm stores EvaluationPeriods as the M of an "M out of N" alarm when the
-    // caller omits DatapointsToAlarm, so DescribeAlarms has to echo that same number back.
+    // An alarm the caller never gave an M for reports no DatapointsToAlarm at all. AWS omits the
+    // member in that case, and echoing EvaluationPeriods instead reads as a change to any client
+    // that re-plans against its own configuration, which is what floci-io/floci#3660 hit.
     @Test
-    void describeAlarms_omittedDatapointsToAlarm_echoesEvaluationPeriods() {
+    void describeAlarms_omittedDatapointsToAlarm_reportsNoDatapointsToAlarm() {
         JsonNode alarm = describeFirstAlarm(alarmRequest("DefaultedAlarm"));
 
         assertEquals(3, alarm.get("EvaluationPeriods").asInt());
-        assertEquals(3, alarm.get("DatapointsToAlarm").asInt());
+        assertFalse(alarm.has("DatapointsToAlarm"),
+                "an alarm with no M out of N must not report one");
     }
 
     @Test

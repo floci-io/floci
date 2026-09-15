@@ -45,8 +45,11 @@ public class CloudWatchCfnProvisioner implements CfnResourceProvisioner {
         alarm.setComparisonOperator(ctx.resolveOptional(props, "ComparisonOperator"));
         alarm.setPeriod(parseIntProp(props, "Period", ctx, DEFAULT_PERIOD_SECONDS));
         alarm.setEvaluationPeriods(parseIntProp(props, "EvaluationPeriods", ctx, DEFAULT_EVALUATION_PERIODS));
-        alarm.setDatapointsToAlarm(
-                parseIntProp(props, "DatapointsToAlarm", ctx, alarm.getEvaluationPeriods()));
+        // Left null when the template omits it, for the same reason the request handlers do: an
+        // alarm that never carried an M must not report one back through DescribeAlarms.
+        String datapointsToAlarm = ctx.resolveOptional(props, "DatapointsToAlarm");
+        alarm.setDatapointsToAlarm(datapointsToAlarm == null || datapointsToAlarm.isBlank()
+                ? null : parseIntProp(props, "DatapointsToAlarm", ctx, alarm.getEvaluationPeriods()));
         String threshold = ctx.resolveOptional(props, "Threshold");
         if (threshold != null && !threshold.isBlank()) {
             try {
