@@ -665,6 +665,14 @@ floci:
       staging-bucket: floci-cur-staging
     bcm-pricing-calculator:
       enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: false                                 # FLOCI_SERVICES_TIMESTREAM_INFLUXDB_MOCK: true = metadata only, no Docker
+      default-image: "influxdb:2.7"
+      host-port-base: 8086
+      host-port-max: 8185
+      readiness-timeout-seconds: 120
+      # docker-network: my-network               # Docker network to attach InfluxDB containers to
     bcm-data-exports:
       enabled: true
       emit-mode: synchronous

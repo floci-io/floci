@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerM
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
@@ -84,6 +85,7 @@ public class EmulatorLifecycle {
     private final RabbitMqManager rabbitMqManager;
     private final FlinkContainerManager flinkContainerManager;
     private final RdsService rdsService;
+    private final TimestreamInfluxDbService timestreamInfluxDbService;
     private final ElbV2Service elbV2Service;
     private final ElbClassicService elbClassicService;
     private final InitializationHooksRunner initializationHooksRunner;
@@ -118,6 +120,7 @@ public class EmulatorLifecycle {
                              RabbitMqManager rabbitMqManager,
                              FlinkContainerManager flinkContainerManager,
                              RdsService rdsService,
+                             TimestreamInfluxDbService timestreamInfluxDbService,
                              ElbV2Service elbV2Service,
                              ElbClassicService elbClassicService,
                              InitializationHooksRunner initializationHooksRunner,
@@ -151,6 +154,7 @@ public class EmulatorLifecycle {
         this.rabbitMqManager = rabbitMqManager;
         this.flinkContainerManager = flinkContainerManager;
         this.rdsService = rdsService;
+        this.timestreamInfluxDbService = timestreamInfluxDbService;
         this.elbV2Service = elbV2Service;
         this.elbClassicService = elbClassicService;
         this.initializationHooksRunner = initializationHooksRunner;
@@ -207,6 +211,9 @@ public class EmulatorLifecycle {
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
         rdsService.restorePersistedRuntime();
+        if (config.services().timestreamInfluxdb().enabled()) {
+            timestreamInfluxDbService.restorePersistedRuntime();
+        }
         if (config.services().elasticache().enabled()) {
             elastiCacheService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.warnv("ElastiCache cluster-mode restore failed: {0}", ex.getMessage());

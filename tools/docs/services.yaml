@@ -366,6 +366,10 @@ services:
     doc: docs/services/verifiedpermissions.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/verifiedpermissions/VerifiedPermissionsJsonHandler.java, mode: switch }
+  - service: timestream-influxdb
+    doc: docs/services/timestream-influxdb.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/timestreaminfluxdb/TimestreamInfluxDbJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:

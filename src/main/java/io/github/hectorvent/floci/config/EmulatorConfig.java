@@ -741,6 +741,7 @@ public interface EmulatorConfig {
         BcmDataExportsServiceConfig bcmDataExports();
         OamServiceConfig oam();
         BcmPricingCalculatorServiceConfig bcmPricingCalculator();
+        TimestreamInfluxDbServiceConfig timestreamInfluxdb();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
@@ -2067,6 +2068,34 @@ public interface EmulatorConfig {
     interface BcmPricingCalculatorServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface TimestreamInfluxDbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, DB instances and clusters reach AVAILABLE without a backing InfluxDB container. */
+        @WithDefault("false")
+        boolean mock();
+
+        /** InfluxDB 2.x image backing DB instances. Env: FLOCI_SERVICES_TIMESTREAM_INFLUXDB_DEFAULT_IMAGE */
+        @WithDefault("influxdb:2.7")
+        String defaultImage();
+
+        /** Lowest host port the InfluxDB HTTP listener (container port 8086) is published on. */
+        @WithDefault("8086")
+        int hostPortBase();
+
+        /** Highest host port the InfluxDB HTTP listener is published on. */
+        @WithDefault("8185")
+        int hostPortMax();
+
+        /** Seconds to wait for a started InfluxDB container to answer its health check. */
+        @WithDefault("120")
+        int readinessTimeoutSeconds();
+
+        /** Docker network to attach InfluxDB containers to. Empty uses the default network. */
+        Optional<String> dockerNetwork();
     }
 
     interface BcmDataExportsServiceConfig {
