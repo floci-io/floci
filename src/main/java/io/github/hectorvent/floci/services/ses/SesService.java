@@ -14,7 +14,6 @@ import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfigur
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
@@ -79,7 +78,9 @@ public class SesService {
     // Account suppression attributes + the per-address suppression list (two stores) extracted to
     // SesSuppressionService. The facade delegates; its send filters read via it.
     private final SesSuppressionService suppressionService;
-    // Dedicated IP pools extracted to SesDedicatedIpService. The facade delegates.
+    // Dedicated IP pools and IPs live in SesDedicatedIpService, which the v2 controller calls
+    // directly; the facade only reaches it for the delivery-options pool probe and the
+    // ARN-dispatched tagging.
     private final SesDedicatedIpService dedicatedIpService;
     // Contact lists and contacts (two stores) live in SesContactService, which the v2 controller
     // and the unsubscribe endpoint call directly; the facade only reaches it from the send-path
@@ -888,7 +889,7 @@ public class SesService {
     public ConfigurationSet createConfigurationSet(ConfigurationSet configSet, String region) {
         return configSetService.createConfigurationSet(configSet, region,
                 domain -> isVerifiedDomainIdentity(domain, region),
-                pool -> dedicatedIpPoolExists(pool, region));
+                pool -> dedicatedIpService.dedicatedIpPoolExists(pool, region));
     }
 
     // The option operations live in the service; the facade only supplies the cross-domain probes
@@ -901,7 +902,7 @@ public class SesService {
 
     public void setConfigurationSetDeliveryOptions(String configSetName, DeliveryOptions options, String region) {
         configSetService.setDeliveryOptions(configSetName, options, region,
-                pool -> dedicatedIpPoolExists(pool, region));
+                pool -> dedicatedIpService.dedicatedIpPoolExists(pool, region));
     }
 
     public void setConfigurationSetReputationOptions(String configSetName, boolean metricsEnabled, String region) {
@@ -1136,31 +1137,6 @@ public class SesService {
         throw new AwsException("NotFoundException", message, 404);
     }
 
-    // ──────────────────────── Dedicated IP Pools ────────────────────────
-
-    // Storage lives in SesDedicatedIpService; the facade forwards.
-
-    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, List<Tag> tags,
-                                                 String region) {
-        return dedicatedIpService.createDedicatedIpPool(poolName, scalingMode, tags, region);
-    }
-
-    public DedicatedIpPool getDedicatedIpPool(String poolName, String region) {
-        return dedicatedIpService.getDedicatedIpPool(poolName, region);
-    }
-
-    public boolean dedicatedIpPoolExists(String poolName, String region) {
-        return dedicatedIpService.dedicatedIpPoolExists(poolName, region);
-    }
-
-    public List<String> listDedicatedIpPools(String region) {
-        return dedicatedIpService.listDedicatedIpPools(region);
-    }
-
-    public void deleteDedicatedIpPool(String poolName, String region) {
-        dedicatedIpService.deleteDedicatedIpPool(poolName, region);
-    }
-
     // ──────────────── Identity (sending authorization) policies ────────────────
     // One shared store behind the v1 (PutIdentityPolicy/GetIdentityPolicies/ListIdentityPolicies/
     // DeleteIdentityPolicy) and v2 (Create/Get/Update/DeleteEmailIdentityPolicy) APIs. Verified
@@ -1213,25 +1189,6 @@ public class SesService {
         }
     }
 
-
-
-    // Dedicated IPs (IP-level) and pool scaling live in SesDedicatedIpService; the facade forwards.
-
-    public void getDedicatedIp(String ip, String region) {
-        dedicatedIpService.getDedicatedIp(ip, region);
-    }
-
-    public void putDedicatedIpInPool(String ip, String destinationPoolName, String region) {
-        dedicatedIpService.putDedicatedIpInPool(ip, destinationPoolName, region);
-    }
-
-    public void putDedicatedIpWarmupAttributes(String ip, Integer warmupPercentage, String region) {
-        dedicatedIpService.putDedicatedIpWarmupAttributes(ip, warmupPercentage, region);
-    }
-
-    public void putDedicatedIpPoolScalingAttributes(String poolName, String scalingMode, String region) {
-        dedicatedIpService.putDedicatedIpPoolScalingAttributes(poolName, scalingMode, region);
-    }
 
     // Dedicated-IP auto-warmup is an account-level setting owned by SesAccountService.
 
