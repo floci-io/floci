@@ -207,7 +207,7 @@ public class FlociUiManager {
             this.lastError = null;
             LOG.infov("Started web console sidecar {0} from {1} on host port {2}",
                     name, image, String.valueOf(hostPort));
-            attachLogStream();
+            attachLogStream(false);
         } catch (IllegalStateException e) {
             // replaceIfEndpointDrifted() records its own specific message for a container with an
             // existing sidecar to adopt, but a fresh start (no existing container) reaches this
@@ -746,20 +746,23 @@ public class FlociUiManager {
             this.lastError = null;
             LOG.infov("Adopted existing web console sidecar {0} on host port {1}",
                     containerId, String.valueOf(hostPort));
-            attachLogStream();
+            attachLogStream(true);
         } catch (Exception e) {
             LOG.warnv("Failed to adopt the existing web console sidecar: {0}", e.getMessage());
             this.containerId = null;
         }
     }
 
-    private void attachLogStream() {
+    // An adopted container carries history from before this process; only its new lines are wanted.
+    private void attachLogStream(boolean adopted) {
         closeLogStream();
         String shortId = containerId.length() >= 8 ? containerId.substring(0, 8) : containerId;
         String logGroup = "/floci/ui";
         String logStreamName = logStreamer.generateLogStreamName(shortId);
         String region = regionResolver.getDefaultRegion();
-        this.logStream = logStreamer.attach(containerId, logGroup, logStreamName, region, "floci:ui");
+        this.logStream = adopted
+                ? logStreamer.attachFromNow(containerId, logGroup, logStreamName, region, "floci:ui")
+                : logStreamer.attach(containerId, logGroup, logStreamName, region, "floci:ui");
     }
 
     /** Releases the previous follower, so a restarted sidecar does not leave one behind. */

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.LogContainerCmd;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,6 +15,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
@@ -69,9 +71,27 @@ public class ContainerLogStreamer {
                 null, containerId, logGroup, logStream, region, logPrefix);
     }
 
+    /**
+     * Like {@link #attach}, but only forwards lines the container emits from now on. Use it for a
+     * container that already existed before this process started: following from the beginning
+     * replays its whole history (hours of registry access logs after a busy day) into the console
+     * and CloudWatch Logs, where it evicts the current Lambda logs.
+     */
+    public Closeable attachFromNow(String containerId, String logGroup, String logStream,
+                                   String region, String logPrefix) {
+        return attachForAccount(null, containerId, logGroup, logStream, region, logPrefix, Instant.now());
+    }
+
     public Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix) {
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null);
+    }
+
+    /** {@code since} of null follows the container's complete log history. */
+    Closeable attachForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix, Instant since) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
         // Trim trailing whitespace and drop blank lines, then fan each reassembled line out to the
@@ -86,12 +106,15 @@ public class ContainerLogStreamer {
 
         try {
             LogReassemblyCallback callback = new LogReassemblyCallback(emitter);
-            dockerClient.logContainerCmd(containerId)
+            LogContainerCmd command = dockerClient.logContainerCmd(containerId)
                     .withStdOut(true)
                     .withStdErr(true)
                     .withFollowStream(true)
-                    .withTimestamps(false)
-                    .exec(callback);
+                    .withTimestamps(false);
+            if (since != null) {
+                command = command.withSince((int) since.getEpochSecond());
+            }
+            command.exec(callback);
             return new ContainerLogHandle(callback);
         } catch (Exception e) {
             LOG.warnv("Could not attach log stream for container {0}: {1}", containerId, e.getMessage());
