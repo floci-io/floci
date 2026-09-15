@@ -88,7 +88,7 @@ assert_eq "explicit java command bypasses the fallback" \
 # Quarkus runner jar with the same arguments as the published image CMD.
 if [ ! -e /app/application ]; then
     assert_eq "empty argv falls back to the JVM default command" \
-        "java -jar /app/quarkus-app/quarkus-run.jar -Dquarkus.http.host=0.0.0.0" \
+        "java -Dquarkus.http.host=0.0.0.0 -Dfloci.security.allow-unsafe-network-exposure=true -jar /app/quarkus-app/quarkus-run.jar" \
         "$(PATH="${WORK}/bin:${PATH}" LOCALSTACK_PARITY=false sh "${SCRIPT}")"
 else
     printf '[SKIP] empty argv falls back to the JVM default command (/app/application exists on this host)\n'
@@ -111,7 +111,7 @@ EOF
 fi
 if [ "${NATIVE_TESTABLE}" = 'true' ]; then
     assert_eq "empty argv prefers the native binary when present" \
-        "/app/application -Dquarkus.http.host=0.0.0.0" \
+        "/app/application -Dquarkus.http.host=0.0.0.0 -Dfloci.security.allow-unsafe-network-exposure=true" \
         "$(LOCALSTACK_PARITY=false sh "${SCRIPT}")"
 else
     printf '[SKIP] empty argv prefers the native binary when present (/app not writable)\n'

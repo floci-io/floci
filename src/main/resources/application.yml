@@ -12,18 +12,21 @@ quarkus:
 
   http:
     port: ${floci.port}
-    host: 0.0.0.0
+    # Loopback by default. Any other address (0.0.0.0, a LAN IP) also needs
+    # floci.security.allow-unsafe-network-exposure, or Floci refuses to start.
+    # Env var: QUARKUS_HTTP_HOST=0.0.0.0
+    host: 127.0.0.1
     # Quarkus 3.38 added a Host-header validation filter (DNS-rebinding protection for a dev server)
-    # that it switches on by itself whenever the server is bound to loopback, which Floci does in
-    # TLS mode: Quarkus listens on 127.0.0.1:4510/4511 behind the TCP proxy on 4566, and the proxy
-    # passes the client's Host header through untouched. The filter is an exact-match set with no
+    # that it switches on by itself whenever the server is bound to loopback, which Floci is by
+    # default. In TLS mode Quarkus listens on 127.0.0.1:4510/4511 behind the TCP proxy on 4566, and
+    # the proxy passes the client's Host header through untouched. The filter is an exact-match set with no
     # wildcard support, and with require-localhost it admits only localhost, 127.0.0.1 and [::1].
     # An emulator has to answer under the names it documents and puts in its certificate
     # (localhost.floci.io, *.localhost.floci.io, *.execute-api.localhost.floci.io,
     # host.docker.internal) and under whatever a compose file calls it (FLOCI_HOSTNAME), none of
     # which an exact-match allow-list can express. Disabling the check restores the behaviour of
-    # every release before Quarkus 3.39 and of the non-TLS mode, where Quarkus never enables it;
-    # the access boundary of a local emulator is the IAM and signature enforcement configuration.
+    # every release before Quarkus 3.39; the access boundary of a local emulator is the IAM and
+    # signature enforcement configuration.
     host-validation:
       require-localhost: false
     limits:
@@ -246,6 +249,11 @@ floci:
     # Grant Private Network Access preflights (Access-Control-Allow-Private-Network)
     # so a page on a public/secure origin can reach this loopback backend.
     cors-allow-private-network: false
+    # Allow quarkus.http.host, and the TLS proxy that uses it, to listen outside loopback
+    # (127.0.0.0/8, ::1, localhost). Anyone who can reach that address can call Floci's APIs.
+    # The Docker images set it, since they listen on 0.0.0.0 inside the container.
+    # Env var: FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true
+    allow-unsafe-network-exposure: false
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)

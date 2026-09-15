@@ -96,6 +96,8 @@ floci:
     extra-cors-allowed-headers: ${EXTRA_CORS_ALLOWED_HEADERS:}
     extra-cors-expose-headers: ${EXTRA_CORS_EXPOSE_HEADERS:}
     disable-cors-headers: false
+    # FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE; tests listen on loopback, so none needs it.
+    allow-unsafe-network-exposure: false
 
   init-hooks:
     shell-executable: /bin/sh

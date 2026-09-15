@@ -8,17 +8,25 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -62,25 +70,64 @@ class TlsProxyServerTest {
         when(config.tls()).thenReturn(tls);
         when(tls.enabled()).thenReturn(tlsEnabled);
         when(tls.awsHttpsPort()).thenReturn(awsHttpsPort);
+        when(config.security()).thenReturn(mock(EmulatorConfig.SecurityConfig.class));
         return config;
     }
 
     @Test
     void listenPorts_includesPublicAndAwsHttpsPort() {
-        proxy = new TlsProxyServer(vertx, configWith(false, 4566, 443), 4510, 4511);
+        proxy = new TlsProxyServer(vertx, configWith(false, 4566, 443), "127.0.0.1", 4510, 4511);
         assertEquals(Set.of(4566, 443), proxy.listenPorts());
     }
 
     @Test
     void listenPorts_dropsAwsHttpsPortWhenZero() {
-        proxy = new TlsProxyServer(vertx, configWith(false, 4566, 0), 4510, 4511);
+        proxy = new TlsProxyServer(vertx, configWith(false, 4566, 0), "127.0.0.1", 4510, 4511);
         assertEquals(Set.of(4566), proxy.listenPorts());
     }
 
     @Test
     void listenPorts_dedupesWhenAwsHttpsPortEqualsPublic() {
-        proxy = new TlsProxyServer(vertx, configWith(false, 4566, 4566), 4510, 4511);
+        proxy = new TlsProxyServer(vertx, configWith(false, 4566, 4566), "127.0.0.1", 4510, 4511);
         assertEquals(Set.of(4566), proxy.listenPorts());
+    }
+
+    @Test
+    @Timeout(20)
+    void bindsTheConfiguredHost_notEveryInterface() throws Exception {
+        InetAddress external = nonLoopbackIpv4();
+        assumeTrue(external != null, "needs a non-loopback IPv4 interface");
+        int publicPort = freePort();
+
+        proxy = new TlsProxyServer(vertx, configWith(true, publicPort, 0), "127.0.0.1", 4510, 4511);
+
+        awaitListening(publicPort);
+        assertFalse(accepts(external, publicPort),
+                "a proxy configured for 127.0.0.1 must not be reachable on " + external.getHostAddress());
+    }
+
+    @Test
+    @Timeout(20)
+    void nonLoopbackHostWithoutConsent_refusesToListen() throws Exception {
+        int publicPort = freePort();
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> new TlsProxyServer(vertx, configWith(true, publicPort, 0), "0.0.0.0", 4510, 4511));
+
+        assertTrue(e.getMessage().contains("FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE"), e.getMessage());
+        assertFalse(portAccepts(publicPort), "a refused proxy must not listen");
+    }
+
+    @Test
+    @Timeout(20)
+    void nonLoopbackHostWithConsent_listens() throws Exception {
+        int publicPort = freePort();
+        EmulatorConfig config = configWith(true, publicPort, 0);
+        when(config.security().allowUnsafeNetworkExposure()).thenReturn(true);
+
+        proxy = new TlsProxyServer(vertx, config, "0.0.0.0", 4510, 4511);
+
+        awaitListening(publicPort);
     }
 
     @Test
@@ -93,7 +140,7 @@ class TlsProxyServerTest {
         httpBackend = startMarkerBackend(httpBe, "PLAIN");
         httpsBackend = startMarkerBackend(httpsBe, "TLS");
 
-        proxy = new TlsProxyServer(vertx, configWith(true, publicPort, awsHttpsPort), httpBe, httpsBe);
+        proxy = new TlsProxyServer(vertx, configWith(true, publicPort, awsHttpsPort), "127.0.0.1", httpBe, httpsBe);
 
         // Public port: TLS ClientHello → HTTPS backend; anything else → HTTP backend.
         assertEquals("TLS", roundTrip(publicPort, TLS_HANDSHAKE));
@@ -107,7 +154,7 @@ class TlsProxyServerTest {
     @Timeout(20)
     void tlsDisabled_bindsNothing() throws Exception {
         int publicPort = freePort();
-        proxy = new TlsProxyServer(vertx, configWith(false, publicPort, 443), 4510, 4511);
+        proxy = new TlsProxyServer(vertx, configWith(false, publicPort, 443), "127.0.0.1", 4510, 4511);
         assertFalse(portAccepts(publicPort), "no proxy should listen when TLS is disabled");
     }
 
@@ -160,6 +207,29 @@ class TlsProxyServerTest {
         } catch (IOException e) {
             return false;
         }
+    }
+
+    private static boolean accepts(InetAddress address, int port) {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(address, port), 1000);
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static InetAddress nonLoopbackIpv4() throws SocketException {
+        for (NetworkInterface nic : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+            if (!nic.isUp() || nic.isLoopback()) {
+                continue;
+            }
+            for (InetAddress address : Collections.list(nic.getInetAddresses())) {
+                if (address instanceof Inet4Address) {
+                    return address;
+                }
+            }
+        }
+        return null;
     }
 
     private static void closeBackend(NetServer server) {

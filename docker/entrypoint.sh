@@ -73,11 +73,13 @@ fi
 # ignores its argv entirely, so this keeps drop-in parity.
 # The default matches the CMD of the image variant: native images ship
 # /app/application, JVM images ship /app/quarkus-app/quarkus-run.jar.
+# Both listen on 0.0.0.0 so a published port reaches Floci, which it only
+# accepts with explicit consent. The JVM reads -D options only before -jar.
 if [ $# -eq 0 ]; then
     if [ -x /app/application ]; then
-        set -- /app/application -Dquarkus.http.host=0.0.0.0
+        set -- /app/application -Dquarkus.http.host=0.0.0.0 -Dfloci.security.allow-unsafe-network-exposure=true
     else
-        set -- java -jar /app/quarkus-app/quarkus-run.jar -Dquarkus.http.host=0.0.0.0
+        set -- java -Dquarkus.http.host=0.0.0.0 -Dfloci.security.allow-unsafe-network-exposure=true -jar /app/quarkus-app/quarkus-run.jar
     fi
 fi
 
