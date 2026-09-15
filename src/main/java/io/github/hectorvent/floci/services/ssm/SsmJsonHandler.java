@@ -2,11 +2,14 @@ package io.github.hectorvent.floci.services.ssm;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
 import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
+import io.github.hectorvent.floci.services.ssm.model.ParameterStringFilter;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmAssociation;
@@ -221,23 +224,38 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static final int DESCRIBE_PARAMETERS_MAX_RESULTS = 50;
+
     private Response handleDescribeParameters(JsonNode request, String region) {
-        List<String> nameFilters = new ArrayList<>();
-        JsonNode filters = request.path("ParameterFilters");
-        if (filters.isArray()) {
-            for (JsonNode f : filters) {
-                String key = f.path("Key").asText("");
-                String option = f.path("Option").asText("Equals");
-                if ("Name".equals(key) && "Equals".equals(option)) {
-                    f.path("Values").forEach(v -> nameFilters.add(v.asText()));
-                }
-            }
+        List<ParameterStringFilter> filters = new ArrayList<>();
+        for (JsonNode f : request.path("ParameterFilters")) {
+            filters.add(new ParameterStringFilter(f.path("Key").asText(null),
+                    f.path("Option").asText(null), textValues(f.path("Values"))));
         }
-        List<Parameter> params = ssmService.describeParameters(nameFilters, region);
+        // The deprecated Filters shape has no option; each of its keys matches exactly.
+        for (JsonNode f : request.path("Filters")) {
+            String key = f.path("Key").asText(null);
+            if (!"Name".equals(key) && !"Type".equals(key) && !"KeyId".equals(key)) {
+                throw new AwsException("InvalidFilterKey", "The specified key isn't valid.", 400);
+            }
+            filters.add(new ParameterStringFilter(key, "Equals", textValues(f.path("Values"))));
+        }
+
+        Integer maxResults = request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
+        if (maxResults != null && (maxResults < 1 || maxResults > DESCRIBE_PARAMETERS_MAX_RESULTS)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + maxResults + "' at 'maxResults' failed to "
+                            + "satisfy constraint: Member must have value between 1 and "
+                            + DESCRIBE_PARAMETERS_MAX_RESULTS, 400);
+        }
+        PaginatedResult<Parameter> page = Pagination.paginate(
+                ssmService.describeParameters(filters, region), Parameter::getName,
+                maxResults, request.path("NextToken").asText(null),
+                DESCRIBE_PARAMETERS_MAX_RESULTS, "InvalidNextToken");
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        for (Parameter p : params) {
+        for (Parameter p : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", p.getName());
             node.put("Type", p.getType());
@@ -250,7 +268,16 @@ public class SsmJsonHandler {
             parametersArray.add(node);
         }
         response.set("Parameters", parametersArray);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
+    }
+
+    private static List<String> textValues(JsonNode values) {
+        List<String> result = new ArrayList<>();
+        values.forEach(v -> result.add(v.asText()));
+        return result;
     }
 
     private Response handleDescribePatchBaselines(JsonNode request, String region) {

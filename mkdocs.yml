@@ -212,6 +212,9 @@ nav:
     - Cost and Usage Reports: services/cur.md
     - BCM Pricing Calculator: services/bcm-pricing-calculator.md
     - BCM Data Exports: services/bcm-data-exports.md
+  - Web Console:
+    - Overview: ui/index.md
+    - Console Contract v1: ui/console-contract.md
   - Testcontainers:
     - Overview: testcontainers/index.md
     - Java: testcontainers/java.md

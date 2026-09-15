@@ -2661,6 +2661,9 @@ public class S3Controller {
         if (copy.getSseKmsKeyId() != null) {
             response.header("x-amz-server-side-encryption-aws-kms-key-id", copy.getSseKmsKeyId());
         }
+        if (copy.getVersionId() != null) {
+            response.header("x-amz-version-id", copy.getVersionId());
+        }
         appendSseCustomerHeaders(response, copy);
         return response.build();
     }

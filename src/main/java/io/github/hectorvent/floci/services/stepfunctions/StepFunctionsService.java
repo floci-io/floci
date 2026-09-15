@@ -555,6 +555,13 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             throw new AwsException(
                     "ConflictException", "State machine alias already exists: " + aliasArn, 409);
         }
+        if (stateMachineAliasStore.scan(key -> key.startsWith(stateMachineArn + ":")).size()
+                >= MAX_ALIASES_PER_STATE_MACHINE) {
+            throw new AwsException("ServiceQuotaExceededException",
+                    "The state machine already has the maximum of " + MAX_ALIASES_PER_STATE_MACHINE
+                            + " aliases.",
+                    402);
+        }
 
         StateMachineAlias alias = new StateMachineAlias();
         alias.setStateMachineAliasArn(aliasArn);
@@ -1307,6 +1314,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     private StateMachineVersion addVersion(StateMachine stateMachine, String description) {
+        if (stateMachine.getVersions().size() >= MAX_VERSIONS_PER_STATE_MACHINE) {
+            throw new AwsException("ServiceQuotaExceededException",
+                    "The state machine already has the maximum of " + MAX_VERSIONS_PER_STATE_MACHINE
+                            + " published versions.",
+                    402);
+        }
         int next = stateMachine.getVersionCounter() + 1;
         stateMachine.setVersionCounter(next);
         StateMachineVersion version = new StateMachineVersion(
@@ -1641,6 +1654,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     private static final int MAX_DEFINITION_LENGTH = 1_048_576;
     private static final int MAX_ARN_LENGTH = 256;
     private static final int MAX_VERSION_DESCRIPTION_LENGTH = 256;
+    private static final int MAX_VERSIONS_PER_STATE_MACHINE = 1000;
+    private static final int MAX_ALIASES_PER_STATE_MACHINE = 100;
     private static final String INVALID_STATE_MACHINE_NAME_CHARACTERS =
             "<>[]{}?*\"#%\\^|~`$&,;:/";
     private static final Set<String> STATE_TYPES = Set.of(

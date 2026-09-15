@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
@@ -202,9 +203,9 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         String stringToSign = ALGORITHM + "\n"
                 + amzDate + "\n"
                 + scopeDate + "/" + region + "/" + SIGNING_SERVICE + "/" + TERMINATOR + "\n"
-                + PreSignedUrlFilter.sha256Hex(canonicalRequest);
-        byte[] signingKey = PreSignedUrlFilter.deriveSigningKey(secretKey, scopeDate, region, SIGNING_SERVICE);
-        String expected = PreSignedUrlFilter.hexEncode(PreSignedUrlFilter.hmacSha256(signingKey, stringToSign));
+                + SigV4RequestValidator.sha256Hex(canonicalRequest);
+        byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, scopeDate, region, SIGNING_SERVICE);
+        String expected = SigV4RequestValidator.hexEncode(SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
         return MessageDigest.isEqual(
                 expected.getBytes(StandardCharsets.UTF_8),
                 signature.getBytes(StandardCharsets.UTF_8));
@@ -221,7 +222,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         byte[] body = ctx.getEntityStream() != null ? ctx.getEntityStream().readAllBytes() : new byte[0];
         ctx.setEntityStream(new ByteArrayInputStream(body));
         try {
-            String actual = PreSignedUrlFilter.hexEncode(MessageDigest.getInstance("SHA-256").digest(body));
+            String actual = SigV4RequestValidator.hexEncode(MessageDigest.getInstance("SHA-256").digest(body));
             return MessageDigest.isEqual(
                     actual.getBytes(StandardCharsets.UTF_8),
                     declaredHash.toLowerCase().getBytes(StandardCharsets.UTF_8));

@@ -134,6 +134,11 @@ public class VtlTemplateEngine {
             map.put("authorizer", ctx.authorizer());
         }
 
+        if (ctx.gatewayResponseContext() != null) {
+            // A gateway response sees the full request context plus $context.error.
+            map.putAll(ctx.gatewayResponseContext());
+        }
+
         map.put("responseOverride", responseOverride);
 
         return map;
@@ -172,7 +177,10 @@ public class VtlTemplateEngine {
     // ────────── Context variable classes ──────────
 
     /**
-     * Request context for VTL evaluation.
+     * Request context for VTL evaluation. {@code gatewayResponseContext} is only set while a
+     * gateway response template renders: its entries are merged into {@code $context}, which is
+     * how {@code $context.error} ({@code message}, {@code messageString}, {@code responseType},
+     * {@code validationErrorString}), {@code $context.path} and the other request fields reach it.
      */
     public record VtlContext(
             String body,
@@ -185,8 +193,24 @@ public class VtlTemplateEngine {
             String requestId,
             String accountId,
             Map<String, String> stageVariables,
-            Map<String, Object> authorizer
-    ) {}
+            Map<String, Object> authorizer,
+            Map<String, Object> gatewayResponseContext
+    ) {
+        public VtlContext(String body,
+                          Map<String, String> headers,
+                          Map<String, String> queryParams,
+                          Map<String, String> pathParams,
+                          String stage,
+                          String httpMethod,
+                          String resourcePath,
+                          String requestId,
+                          String accountId,
+                          Map<String, String> stageVariables,
+                          Map<String, Object> authorizer) {
+            this(body, headers, queryParams, pathParams, stage, httpMethod, resourcePath, requestId, accountId,
+                    stageVariables, authorizer, null);
+        }
+    }
 
     /**
      * The {@code $input} variable available in API Gateway VTL templates.

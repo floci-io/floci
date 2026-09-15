@@ -22,6 +22,11 @@ import io.github.hectorvent.floci.services.batch.model.BatchJob;
 import io.github.hectorvent.floci.services.batch.model.BatchJobDefinition;
 import io.github.hectorvent.floci.services.batch.model.BatchJobQueue;
 import io.github.hectorvent.floci.services.batch.model.BatchKeyValue;
+import io.github.hectorvent.floci.services.batch.model.BatchNodeExecution;
+import io.github.hectorvent.floci.services.batch.model.BatchNodeOverrides;
+import io.github.hectorvent.floci.services.batch.model.BatchNodeProperties;
+import io.github.hectorvent.floci.services.batch.model.BatchNodePropertyOverride;
+import io.github.hectorvent.floci.services.batch.model.BatchNodeRangeProperty;
 import io.github.hectorvent.floci.services.batch.model.BatchResourceRequirement;
 import io.github.hectorvent.floci.services.batch.model.BatchRetryStrategy;
 import io.github.hectorvent.floci.services.batch.model.BatchRunResult;
@@ -37,6 +42,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -51,7 +57,9 @@ public class BatchService {
     private static final int FILTERED_MAX_RESULTS = 100;
     private static final int MAX_TAGS = 50;
     private static final Pattern JOB_NAME_PATTERN = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,127}");
-    private static final Set<String> SUPPORTED_JOB_DEFINITION_TYPES = Set.of("container");
+    private static final Set<String> SUPPORTED_JOB_DEFINITION_TYPES = Set.of("container", "multinode");
+    private static final int MIN_ARRAY_SIZE = 2;
+    private static final int MAX_ARRAY_SIZE = 10000;
     private static final Set<String> SUPPORTED_COMPUTE_ENVIRONMENT_TYPES = Set.of("MANAGED", "UNMANAGED");
     private static final Set<String> SUPPORTED_COMPUTE_ENVIRONMENT_STATES = Set.of("ENABLED", "DISABLED");
     private static final Set<String> SUPPORTED_LIST_FILTERS = Set.of(
@@ -329,11 +337,6 @@ public class BatchService {
         String name = requiredText(request, "jobDefinitionName");
         String type = requiredText(request, "type");
         validateJobDefinitionType(type);
-        BatchContainerProperties container = tree(request.path("containerProperties"), BatchContainerProperties.class);
-        if (container == null) {
-            throw client("containerProperties is required for container job definitions");
-        }
-        validateEnvironment(container.getEnvironment());
 
         int revision = nextRevision(name);
         BatchJobDefinition def = new BatchJobDefinition();
@@ -342,7 +345,21 @@ public class BatchService {
         def.setJobDefinitionArn(arn(region, "job-definition/" + name + ":" + revision));
         def.setStatus("ACTIVE");
         def.setType(type);
-        def.setContainerProperties(container);
+        if ("multinode".equals(type)) {
+            if (request.hasNonNull("containerProperties")) {
+                throw client("containerProperties is not supported for multinode job definitions; use nodeProperties");
+            }
+            BatchNodeProperties nodeProperties = tree(request.path("nodeProperties"), BatchNodeProperties.class);
+            validateNodeProperties(nodeProperties);
+            def.setNodeProperties(nodeProperties);
+        } else {
+            BatchContainerProperties container = tree(request.path("containerProperties"), BatchContainerProperties.class);
+            if (container == null) {
+                throw client("containerProperties is required for container job definitions");
+            }
+            validateEnvironment(container.getEnvironment());
+            def.setContainerProperties(container);
+        }
         def.setParameters(stringMap(request.path("parameters")));
         def.setRetryStrategy(tree(request.path("retryStrategy"), BatchRetryStrategy.class));
         validateRetryStrategy(def.getRetryStrategy());
@@ -417,14 +434,163 @@ public class BatchService {
             throw client("Job definition is not ACTIVE: " + def.getJobDefinitionArn());
         }
 
+        Integer arraySize = parseArraySize(request);
+        boolean multiNode = "multinode".equals(def.getType());
+        if (arraySize != null && multiNode) {
+            throw client("Array jobs are not supported for multi-node parallel job definitions");
+        }
+
+        Map<String, String> parameters = new LinkedHashMap<>(def.getParameters());
+        parameters.putAll(stringMap(request.path("parameters")));
+
+        if (multiNode) {
+            return submitMultiNodeJob(request, region, jobName, queue, def, parameters);
+        }
+        if (arraySize != null) {
+            return submitArrayJob(request, region, jobName, queue, def, parameters, arraySize);
+        }
+
+        BatchJob job = buildJob(request, region, jobName, queue, def, parameters, UUID.randomUUID().toString());
+        putJob(job);
+        dispatchRun(job);
+        return submitJobResponse(job);
+    }
+
+    private ObjectNode submitArrayJob(JsonNode request, String region, String jobName, BatchJobQueue queue,
+                                      BatchJobDefinition def, Map<String, String> parameters, int size) {
+        BatchJob parent = new BatchJob();
+        parent.setJobId(UUID.randomUUID().toString());
+        parent.setJobArn(arn(region, "job/" + parent.getJobId()));
+        parent.setJobName(jobName);
+        parent.setJobQueue(queue.getJobQueueArn());
+        parent.setJobQueueName(queue.getJobQueueName());
+        parent.setJobDefinition(def.getJobDefinitionArn());
+        parent.setJobDefinitionName(def.getJobDefinitionName());
+        parent.setJobDefinitionRevision(def.getRevision());
+        parent.setStatus(BatchStatus.SUBMITTED.name());
+        parent.setCreatedAt(now());
+        parent.setParameters(parameters);
+        parent.setArraySize(size);
+        parent.setRetryStrategy(treeOrDefault(request.path("retryStrategy"), def.getRetryStrategy(), BatchRetryStrategy.class));
+        validateRetryStrategy(parent.getRetryStrategy());
+        parent.setTimeout(treeOrDefault(request.path("timeout"), def.getTimeout(), BatchTimeout.class));
+        validateTimeout(parent.getTimeout());
+        parent.setTags(stringMap(request.path("tags")));
+        validateTags(parent.getTags());
+        parent.setRegion(region);
+        parent.setAccountId(regionResolver.getAccountId());
+
+        // Build children outside the lock; write them under one lock so no reader sees a partial array.
+        List<BatchJob> children = new ArrayList<>(size);
+        for (int index = 0; index < size; index++) {
+            BatchJob child = buildJob(request, region, jobName, queue, def, parameters, parent.getJobId() + ":" + index);
+            child.setArrayJobId(parent.getJobId());
+            child.setArrayIndex(index);
+            children.add(child);
+        }
+        synchronized (this) {
+            putJob(parent);
+            for (BatchJob child : children) {
+                putJob(child);
+            }
+        }
+        for (BatchJob child : children) {
+            dispatchRun(child);
+        }
+        return submitJobResponse(parent);
+    }
+
+    private ObjectNode submitMultiNodeJob(JsonNode request, String region, String jobName, BatchJobQueue queue,
+                                          BatchJobDefinition def, Map<String, String> parameters) {
+        if (request.hasNonNull("containerOverrides")) {
+            throw client("containerOverrides is not supported for multi-node parallel jobs; use nodeOverrides");
+        }
+        BatchNodeProperties defNodeProperties = def.getNodeProperties();
+        if (defNodeProperties == null) {
+            throw client("Job definition is missing nodeProperties: " + def.getJobDefinitionArn());
+        }
+        BatchNodeOverrides overrides = tree(request.path("nodeOverrides"), BatchNodeOverrides.class);
+        int numNodes = resolveEffectiveNumNodes(defNodeProperties, overrides);
+        int mainNode = defNodeProperties.getMainNode();
+
+        BatchNodeProperties effective = new BatchNodeProperties();
+        effective.setNumNodes(numNodes);
+        effective.setMainNode(mainNode);
+        effective.setNodeRangeProperties(defNodeProperties.getNodeRangeProperties());
+
+        BatchJob job = new BatchJob();
+        job.setJobId(UUID.randomUUID().toString());
+        job.setJobArn(arn(region, "job/" + job.getJobId()));
+        job.setJobName(jobName);
+        job.setJobQueue(queue.getJobQueueArn());
+        job.setJobQueueName(queue.getJobQueueName());
+        job.setJobDefinition(def.getJobDefinitionArn());
+        job.setJobDefinitionName(def.getJobDefinitionName());
+        job.setJobDefinitionRevision(def.getRevision());
+        job.setStatus(BatchStatus.SUBMITTED.name());
+        job.setCreatedAt(now());
+        job.setParameters(parameters);
+        job.setNodeProperties(effective);
+        job.setRetryStrategy(treeOrDefault(request.path("retryStrategy"), def.getRetryStrategy(), BatchRetryStrategy.class));
+        validateRetryStrategy(job.getRetryStrategy());
+        job.setTimeout(treeOrDefault(request.path("timeout"), def.getTimeout(), BatchTimeout.class));
+        validateTimeout(job.getTimeout());
+        job.setTags(stringMap(request.path("tags")));
+        validateTags(job.getTags());
+        job.setRegion(region);
+        job.setAccountId(regionResolver.getAccountId());
+        job.setNodeExecutions(resolveNodeExecutions(effective, overrides, parameters, mainNode, numNodes));
+
+        putJob(job);
+        if (shouldRunDocker()) {
+            Thread.startVirtualThread(() -> runMultiNodeJob(job.getAccountId(), job.getJobId()));
+        } else {
+            runMultiNodeJob(job.getAccountId(), job.getJobId());
+        }
+        return submitJobResponse(job);
+    }
+
+    private List<BatchNodeExecution> resolveNodeExecutions(BatchNodeProperties nodeProperties,
+                                                            BatchNodeOverrides overrides,
+                                                            Map<String, String> parameters,
+                                                            int mainNode, int numNodes) {
+        List<BatchNodeExecution> executions = new ArrayList<>(numNodes);
+        for (int nodeIndex = 0; nodeIndex < numNodes; nodeIndex++) {
+            BatchContainerProperties nodeContainer = resolveNodeRangeContainer(nodeProperties, nodeIndex, numNodes);
+            if (nodeContainer == null) {
+                throw client("No nodeRangeProperties cover node index " + nodeIndex);
+            }
+            BatchContainerOverrides nodeOverride = resolveNodeOverrideForIndex(overrides, nodeIndex, numNodes);
+            validateEnvironment(nodeOverride != null ? nodeOverride.getEnvironment() : null);
+            List<String> command = nodeOverride != null
+                    && nodeOverride.getCommand() != null && !nodeOverride.getCommand().isEmpty()
+                    ? nodeOverride.getCommand()
+                    : nodeContainer.getCommand();
+            List<BatchResourceRequirement> resourceRequirements = nodeOverride != null
+                    && nodeOverride.getResourceRequirements() != null && !nodeOverride.getResourceRequirements().isEmpty()
+                    ? nodeOverride.getResourceRequirements()
+                    : nodeContainer.getResourceRequirements();
+
+            BatchNodeExecution execution = new BatchNodeExecution();
+            execution.setNodeIndex(nodeIndex);
+            execution.setMainNode(nodeIndex == mainNode);
+            execution.setContainerImage(nodeContainer.getImage());
+            execution.setResolvedCommand(resolveCommand(command, parameters));
+            execution.setResolvedEnvironment(resolveEnvironment(nodeContainer.getEnvironment(),
+                    nodeOverride != null ? nodeOverride.getEnvironment() : null));
+            execution.setResourceRequirements(resourceRequirements);
+            executions.add(execution);
+        }
+        return executions;
+    }
+
+    private BatchJob buildJob(JsonNode request, String region, String jobName, BatchJobQueue queue,
+                              BatchJobDefinition def, Map<String, String> parameters, String jobId) {
         BatchContainerOverrides overrides = tree(request.path("containerOverrides"), BatchContainerOverrides.class);
         if (overrides == null) {
             overrides = new BatchContainerOverrides();
         }
         validateEnvironment(overrides.getEnvironment());
-
-        Map<String, String> parameters = new LinkedHashMap<>(def.getParameters());
-        parameters.putAll(stringMap(request.path("parameters")));
 
         BatchContainerProperties container = def.getContainerProperties() != null
                 ? def.getContainerProperties() : new BatchContainerProperties();
@@ -433,8 +599,8 @@ public class BatchService {
                 : container.getCommand();
 
         BatchJob job = new BatchJob();
-        job.setJobId(UUID.randomUUID().toString());
-        job.setJobArn(arn(region, "job/" + job.getJobId()));
+        job.setJobId(jobId);
+        job.setJobArn(arn(region, "job/" + jobId));
         job.setJobName(jobName);
         job.setJobQueue(queue.getJobQueueArn());
         job.setJobQueueName(queue.getJobQueueName());
@@ -457,18 +623,35 @@ public class BatchService {
         job.setRegion(region);
         job.setAccountId(regionResolver.getAccountId());
         job.setContainerImage(container.getImage());
-        putJob(job);
+        return job;
+    }
+
+    private void dispatchRun(BatchJob job) {
         if (shouldRunDocker()) {
             Thread.startVirtualThread(() -> runJob(job.getAccountId(), job.getJobId()));
         } else {
             runJob(job.getAccountId(), job.getJobId());
         }
+    }
 
+    private ObjectNode submitJobResponse(BatchJob job) {
         ObjectNode out = objectMapper.createObjectNode();
         out.put("jobArn", job.getJobArn());
         out.put("jobId", job.getJobId());
         out.put("jobName", job.getJobName());
         return out;
+    }
+
+    private Integer parseArraySize(JsonNode request) {
+        JsonNode arrayProperties = request.path("arrayProperties");
+        if (!arrayProperties.isObject() || !arrayProperties.hasNonNull("size")) {
+            return null;
+        }
+        int size = arrayProperties.path("size").asInt();
+        if (size < MIN_ARRAY_SIZE || size > MAX_ARRAY_SIZE) {
+            throw client("arrayProperties.size must be between " + MIN_ARRAY_SIZE + " and " + MAX_ARRAY_SIZE);
+        }
+        return size;
     }
 
     public synchronized ObjectNode describeJobs(JsonNode request) {
@@ -489,27 +672,38 @@ public class BatchService {
     }
 
     public synchronized ObjectNode listJobs(JsonNode request) {
-        if (!request.hasNonNull("jobQueue")) {
-            throw client("jobQueue is required");
+        String jobQueueRef = textOrNull(request, "jobQueue");
+        String arrayJobId = textOrNull(request, "arrayJobId");
+        String multiNodeJobId = textOrNull(request, "multiNodeJobId");
+        int selectorCount = (jobQueueRef != null ? 1 : 0) + (arrayJobId != null ? 1 : 0)
+                + (multiNodeJobId != null ? 1 : 0);
+        if (selectorCount != 1) {
+            throw client("Exactly one of jobQueue, arrayJobId, or multiNodeJobId is required");
         }
-        if (request.hasNonNull("arrayJobId") || request.hasNonNull("multiNodeJobId")) {
-            throw client("arrayJobId and multiNodeJobId are not supported");
+        if (arrayJobId != null) {
+            return listArrayChildren(arrayJobId, request);
         }
-        BatchJobQueue queue = resolveJobQueue(requiredText(request, "jobQueue"));
+        if (multiNodeJobId != null) {
+            return listMultiNodeJobNodes(multiNodeJobId);
+        }
+
+        BatchJobQueue queue = resolveJobQueue(jobQueueRef);
         String status = textOrNull(request, "jobStatus");
         ListFilter filter = listFilter(request);
-        String effectiveStatus = filter == null && status == null ? BatchStatus.RUNNING.name() : status;
+        String effectiveStatusFilter = filter == null && status == null ? BatchStatus.RUNNING.name() : status;
         int maxResults = request.hasNonNull("maxResults")
                 ? Math.max(1, Math.min(filter == null ? DEFAULT_MAX_RESULTS : FILTERED_MAX_RESULTS,
                         request.path("maxResults").asInt()))
                 : filter == null ? DEFAULT_MAX_RESULTS : FILTERED_MAX_RESULTS;
         int offset = parseNextToken(textOrNull(request, "nextToken"));
 
+        // A queue-level listing shows one entry per array job (the parent), matching AWS.
         List<BatchJob> jobs = jobStore.scan(k -> true).stream()
                 .filter(job -> queue.getJobQueueArn().equals(job.getJobQueue()))
+                .filter(job -> job.getArrayIndex() == null)
                 .filter(job -> (filter != null && !"SHARE_IDENTIFIER".equals(filter.name()))
-                        || effectiveStatus == null
-                        || effectiveStatus.equals(job.getStatus()))
+                        || effectiveStatusFilter == null
+                        || effectiveStatusFilter.equals(effectiveStatus(job)))
                 .filter(job -> matchesListFilter(job, filter))
                 .sorted(Comparator.comparingLong(BatchJob::getCreatedAt)
                         .reversed()
@@ -529,6 +723,49 @@ public class BatchService {
         return out;
     }
 
+    // Only jobStatus is honored here; AWS's filters parameter doesn't apply to array children.
+    private ObjectNode listArrayChildren(String arrayJobId, JsonNode request) {
+        String status = textOrNull(request, "jobStatus");
+        int maxResults = request.hasNonNull("maxResults")
+                ? Math.max(1, Math.min(FILTERED_MAX_RESULTS, request.path("maxResults").asInt()))
+                : FILTERED_MAX_RESULTS;
+        int offset = parseNextToken(textOrNull(request, "nextToken"));
+
+        List<BatchJob> children = jobStore.scan(k -> true).stream()
+                .filter(job -> arrayJobId.equals(job.getArrayJobId()))
+                .filter(job -> status == null || status.equals(job.getStatus()))
+                .sorted(Comparator.comparingInt(BatchJob::getArrayIndex))
+                .toList();
+
+        ArrayNode summaries = objectMapper.createArrayNode();
+        int end = Math.min(children.size(), offset + maxResults);
+        for (int i = offset; i < end; i++) {
+            summaries.add(jobSummary(children.get(i)));
+        }
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("jobSummaryList", summaries);
+        if (end < children.size()) {
+            out.put("nextToken", String.valueOf(end));
+        }
+        return out;
+    }
+
+    // No pagination: realistic node counts are small, so every node is always returned.
+    private ObjectNode listMultiNodeJobNodes(String jobId) {
+        ArrayNode summaries = objectMapper.createArrayNode();
+        getJob(jobId).ifPresent(job -> {
+            if (job.getNodeProperties() != null) {
+                for (BatchNodeExecution execution : job.getNodeExecutions()) {
+                    summaries.add(nodeJobSummary(job, execution));
+                }
+            }
+        });
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("jobSummaryList", summaries);
+        return out;
+    }
+
+    // Does not forward BatchParameters.ArrayProperties/NodeOverrides: always a plain single job.
     public void submitFromEventBridge(String jobQueueArn, String jobDefinition, String jobName,
                                       Map<String, String> parameters, JsonNode retryStrategy, String region) {
         ObjectNode request = objectMapper.createObjectNode();
@@ -627,6 +864,123 @@ public class BatchService {
             job.setStoppedAt(result.stoppedAt());
             job.setStatus(BatchStatus.FAILED.name());
             job.setStatusReason(result.reason());
+            putJobForAccount(accountId, job);
+            return true;
+        }
+        job.setStatus(BatchStatus.RUNNABLE.name());
+        job.setStatusReason("Attempt failed; retrying");
+        putJobForAccount(accountId, job);
+        return false;
+    }
+
+    private void runMultiNodeJob(String accountId, String jobId) {
+        try {
+            BatchJob job = getJobForAccount(accountId, jobId).orElse(null);
+            if (job == null) {
+                return;
+            }
+            int maxAttempts = maxAttempts(job);
+            for (int attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
+                transition(accountId, jobId, BatchStatus.PENDING, null, false);
+                sleepQuietly();
+                transition(accountId, jobId, BatchStatus.RUNNABLE, null, false);
+                sleepQuietly();
+                transition(accountId, jobId, BatchStatus.STARTING, null, false);
+                sleepQuietly();
+                transition(accountId, jobId, BatchStatus.RUNNING, null, true);
+                BatchJob attemptJob = getJobForAccount(accountId, jobId).orElse(null);
+                if (attemptJob == null) {
+                    return;
+                }
+                List<BatchRunResult> nodeResults = runNodes(attemptJob, attemptNumber);
+                if (finishMultiNodeAttempt(accountId, jobId, nodeResults, attemptNumber >= maxAttempts)) {
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Batch multi-node job {0} failed while running: {1}", jobId, e.getMessage());
+            failJob(accountId, jobId, e.getMessage());
+        }
+    }
+
+    // Nodes run concurrently to completion; not preempted on failure (no cancellation hook).
+    private List<BatchRunResult> runNodes(BatchJob job, int attemptNumber) {
+        List<BatchNodeExecution> executions = job.getNodeExecutions();
+        if (!shouldRunDocker()) {
+            long started = job.getStartedAt() != null ? job.getStartedAt() : now();
+            List<BatchRunResult> results = new ArrayList<>(executions.size());
+            for (int i = 0; i < executions.size(); i++) {
+                sleepQuietly();
+                results.add(new BatchRunResult(0, null,
+                        job.getJobDefinitionName() + "/default/" + job.getJobId() + "/" + i, started, now(), false));
+            }
+            return results;
+        }
+        List<BatchRunResult> results = new ArrayList<>(executions.size());
+        for (int i = 0; i < executions.size(); i++) {
+            results.add(null);
+        }
+        List<Thread> threads = new ArrayList<>(executions.size());
+        for (int i = 0; i < executions.size(); i++) {
+            int nodeIndex = i;
+            threads.add(Thread.startVirtualThread(() -> {
+                BatchRunResult result = dockerRunner.run(job, attemptNumber, executions.get(nodeIndex));
+                synchronized (results) {
+                    results.set(nodeIndex, result);
+                }
+            }));
+        }
+        for (Thread thread : threads) {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        return results;
+    }
+
+    // The main node alone determines the attempt's outcome; a failing child never fails or retries the job.
+    private synchronized boolean finishMultiNodeAttempt(String accountId, String jobId,
+                                                         List<BatchRunResult> nodeResults, boolean finalAttempt) {
+        BatchJob job = getJobForAccount(accountId, jobId).orElse(null);
+        if (job == null) {
+            return true;
+        }
+        List<BatchNodeExecution> executions = job.getNodeExecutions();
+        BatchRunResult mainResult = null;
+        for (int i = 0; i < executions.size(); i++) {
+            BatchRunResult result = nodeResults.get(i);
+            BatchAttemptContainer container = new BatchAttemptContainer();
+            container.setExitCode(result.exitCode());
+            container.setReason(result.reason());
+            container.setLogStreamName(result.logStreamName());
+            executions.get(i).setContainer(container);
+            if (executions.get(i).isMainNode()) {
+                mainResult = result;
+            }
+        }
+        if (mainResult == null) {
+            throw new IllegalStateException("No main node among node executions for job " + jobId);
+        }
+
+        BatchAttempt attempt = new BatchAttempt();
+        attempt.setStartedAt(mainResult.startedAt());
+        attempt.setStoppedAt(mainResult.stoppedAt());
+        attempt.setStatusReason(mainResult.reason());
+        job.getAttempts().add(attempt);
+
+        if (mainResult.exitCode() == 0) {
+            job.setStoppedAt(mainResult.stoppedAt());
+            job.setStatus(BatchStatus.SUCCEEDED.name());
+            job.setStatusReason("Job completed successfully");
+            putJobForAccount(accountId, job);
+            return true;
+        }
+        if (mainResult.timedOut() || finalAttempt) {
+            job.setStoppedAt(mainResult.stoppedAt());
+            job.setStatus(BatchStatus.FAILED.name());
+            job.setStatusReason(mainResult.reason());
             putJobForAccount(accountId, job);
             return true;
         }
@@ -832,7 +1186,7 @@ public class BatchService {
 
     private void validateJobDefinitionType(String type) {
         if (!SUPPORTED_JOB_DEFINITION_TYPES.contains(type)) {
-            throw client("Only container job definitions are supported");
+            throw client("Only container and multinode job definitions are supported");
         }
     }
 
@@ -923,14 +1277,189 @@ public class BatchService {
         }
     }
 
+    private void validateNodeProperties(BatchNodeProperties nodeProperties) {
+        if (nodeProperties == null) {
+            throw client("nodeProperties is required for multinode job definitions");
+        }
+        Integer numNodes = nodeProperties.getNumNodes();
+        Integer mainNode = nodeProperties.getMainNode();
+        if (numNodes == null || numNodes < 1) {
+            throw client("nodeProperties.numNodes must be at least 1");
+        }
+        if (mainNode == null || mainNode < 0 || mainNode >= numNodes) {
+            throw client("nodeProperties.mainNode must be between 0 and numNodes - 1");
+        }
+        List<BatchNodeRangeProperty> ranges = nodeProperties.getNodeRangeProperties();
+        if (ranges == null || ranges.isEmpty()) {
+            throw client("nodeProperties.nodeRangeProperties is required");
+        }
+        boolean[] covered = new boolean[numNodes];
+        for (BatchNodeRangeProperty range : ranges) {
+            int[] bounds = parseTargetNodes(range.getTargetNodes(), numNodes);
+            for (int i = bounds[0]; i <= bounds[1]; i++) {
+                covered[i] = true;
+            }
+            if (range.getContainer() == null || range.getContainer().getImage() == null
+                    || range.getContainer().getImage().isBlank()) {
+                throw client("nodeRangeProperties targeting " + range.getTargetNodes()
+                        + " must specify a container image");
+            }
+            validateEnvironment(range.getContainer().getEnvironment());
+        }
+        for (int i = 0; i < numNodes; i++) {
+            if (!covered[i]) {
+                throw client("nodeRangeProperties must cover every node index from 0 to numNodes - 1; "
+                        + "node " + i + " is not covered");
+            }
+        }
+    }
+
+    // Parses a node range like "0:3", ":3" (start=0), "4:" (end=numNodes-1), or a bare index.
+    private int[] parseTargetNodes(String targetNodes, int numNodes) {
+        if (targetNodes == null || targetNodes.isBlank()) {
+            throw client("targetNodes is required for each node range");
+        }
+        int colon = targetNodes.indexOf(':');
+        int start;
+        int end;
+        try {
+            if (colon < 0) {
+                start = Integer.parseInt(targetNodes.trim());
+                end = start;
+            } else {
+                String startText = targetNodes.substring(0, colon).trim();
+                String endText = targetNodes.substring(colon + 1).trim();
+                start = startText.isEmpty() ? 0 : Integer.parseInt(startText);
+                end = endText.isEmpty() ? numNodes - 1 : Integer.parseInt(endText);
+            }
+        } catch (NumberFormatException e) {
+            throw client("Invalid targetNodes range: " + targetNodes);
+        }
+        if (start < 0 || end < start || end > numNodes - 1) {
+            throw client("targetNodes range out of bounds: " + targetNodes);
+        }
+        return new int[]{start, end};
+    }
+
+    // The last range in submission order that covers the index wins (AWS's "nested ranges override").
+    private BatchContainerProperties resolveNodeRangeContainer(BatchNodeProperties nodeProperties,
+                                                                int nodeIndex, int numNodes) {
+        BatchContainerProperties resolved = null;
+        for (BatchNodeRangeProperty range : nodeProperties.getNodeRangeProperties()) {
+            int[] bounds = parseTargetNodes(range.getTargetNodes(), numNodes);
+            if (nodeIndex >= bounds[0] && nodeIndex <= bounds[1]) {
+                resolved = range.getContainer();
+            }
+        }
+        return resolved;
+    }
+
+    private BatchContainerOverrides resolveNodeOverrideForIndex(BatchNodeOverrides overrides,
+                                                                 int nodeIndex, int numNodes) {
+        if (overrides == null || overrides.getNodePropertyOverrides() == null) {
+            return null;
+        }
+        BatchContainerOverrides resolved = null;
+        for (BatchNodePropertyOverride override : overrides.getNodePropertyOverrides()) {
+            int[] bounds = parseTargetNodes(override.getTargetNodes(), numNodes);
+            if (nodeIndex >= bounds[0] && nodeIndex <= bounds[1]) {
+                resolved = override.getContainerOverrides();
+            }
+        }
+        return resolved;
+    }
+
+    private int resolveEffectiveNumNodes(BatchNodeProperties defNodeProperties, BatchNodeOverrides overrides) {
+        if (overrides == null || overrides.getNumNodes() == null) {
+            return defNodeProperties.getNumNodes();
+        }
+        int overrideNumNodes = overrides.getNumNodes();
+        if (overrideNumNodes < 1) {
+            throw client("nodeOverrides.numNodes must be at least 1");
+        }
+        if (defNodeProperties.getMainNode() >= overrideNumNodes) {
+            throw client("nodeOverrides.numNodes must be greater than the job definition's mainNode index");
+        }
+        boolean hasOpenRange = defNodeProperties.getNodeRangeProperties().stream()
+                .anyMatch(range -> isOpenRangeStartingBefore(range.getTargetNodes(), overrideNumNodes));
+        if (!hasOpenRange) {
+            throw client("nodeOverrides.numNodes requires an open-ended node range "
+                    + "(e.g. \"n:\") in the job definition");
+        }
+        return overrideNumNodes;
+    }
+
+    private boolean isOpenRangeStartingBefore(String targetNodes, int limit) {
+        int colon = targetNodes == null ? -1 : targetNodes.indexOf(':');
+        if (colon < 0 || !targetNodes.substring(colon + 1).trim().isEmpty()) {
+            return false;
+        }
+        String startText = targetNodes.substring(0, colon).trim();
+        try {
+            int start = startText.isEmpty() ? 0 : Integer.parseInt(startText);
+            return start < limit;
+        } catch (NumberFormatException ignored) {
+            return false; // malformed range: already registration-time validated, just not a match here
+        }
+    }
+
     private void rejectUnsupportedSubmitFields(JsonNode request) {
-        if (request.hasNonNull("arrayProperties") || request.hasNonNull("dependsOn")
-                || request.hasNonNull("nodeOverrides") || request.hasNonNull("nodeProperties")) {
-            throw client("Array, dependency, and multi-node jobs are not supported");
+        if (request.hasNonNull("dependsOn")) {
+            throw client("Job dependencies (dependsOn) are not supported");
         }
     }
 
     private ObjectNode jobSummary(BatchJob job) {
+        ObjectNode summary = objectMapper.createObjectNode();
+        summary.put("jobArn", job.getJobArn());
+        summary.put("jobId", job.getJobId());
+        summary.put("jobName", job.getJobName());
+        summary.put("jobDefinition", job.getJobDefinition());
+        summary.put("createdAt", job.getCreatedAt());
+        if (job.getArraySize() != null) {
+            ArrayRollup rollup = arrayRollup(job.getJobId());
+            summary.put("status", rollup.status());
+            if (rollup.startedAt() != null) {
+                summary.put("startedAt", rollup.startedAt());
+            }
+            if (rollup.stoppedAt() != null) {
+                summary.put("stoppedAt", rollup.stoppedAt());
+            }
+            ObjectNode arrayProperties = summary.putObject("arrayProperties");
+            arrayProperties.put("size", job.getArraySize());
+            ObjectNode summaryNode = arrayProperties.putObject("statusSummary");
+            rollup.statusSummary().forEach(summaryNode::put);
+        } else {
+            summary.put("status", job.getStatus());
+            if (job.getStartedAt() != null) {
+                summary.put("startedAt", job.getStartedAt());
+            }
+            if (job.getStoppedAt() != null) {
+                summary.put("stoppedAt", job.getStoppedAt());
+            }
+            if (job.getStatusReason() != null) {
+                summary.put("statusReason", job.getStatusReason());
+            }
+            if (job.getArrayJobId() != null) {
+                summary.putObject("arrayProperties").put("index", job.getArrayIndex());
+            }
+        }
+        if (job.getContainer() != null) {
+            ObjectNode container = objectMapper.createObjectNode();
+            if (job.getContainer().getExitCode() != null) {
+                container.put("exitCode", job.getContainer().getExitCode());
+            }
+            if (job.getContainer().getReason() != null) {
+                container.put("reason", job.getContainer().getReason());
+            }
+            if (!container.isEmpty()) {
+                summary.set("container", container);
+            }
+        }
+        return summary;
+    }
+
+    private ObjectNode nodeJobSummary(BatchJob job, BatchNodeExecution execution) {
         ObjectNode summary = objectMapper.createObjectNode();
         summary.put("jobArn", job.getJobArn());
         summary.put("jobId", job.getJobId());
@@ -947,19 +1476,63 @@ public class BatchService {
         if (job.getStatusReason() != null) {
             summary.put("statusReason", job.getStatusReason());
         }
-        if (job.getContainer() != null) {
+        ObjectNode nodeProperties = summary.putObject("nodeProperties");
+        nodeProperties.put("nodeIndex", execution.getNodeIndex());
+        nodeProperties.put("isMainNode", execution.isMainNode());
+        nodeProperties.put("numNodes", job.getNodeProperties().getNumNodes());
+        if (execution.getContainer() != null) {
             ObjectNode container = objectMapper.createObjectNode();
-            if (job.getContainer().getExitCode() != null) {
-                container.put("exitCode", job.getContainer().getExitCode());
+            if (execution.getContainer().getExitCode() != null) {
+                container.put("exitCode", execution.getContainer().getExitCode());
             }
-            if (job.getContainer().getReason() != null) {
-                container.put("reason", job.getContainer().getReason());
+            if (execution.getContainer().getReason() != null) {
+                container.put("reason", execution.getContainer().getReason());
             }
             if (!container.isEmpty()) {
                 summary.set("container", container);
             }
         }
         return summary;
+    }
+
+    /** {@code status} is the current status; {@code statusSummary} always reflects live children. */
+    private record ArrayRollup(String status, Long startedAt, Long stoppedAt, Map<String, Integer> statusSummary) {
+    }
+
+    private String effectiveStatus(BatchJob job) {
+        return job.getArraySize() != null ? arrayRollup(job.getJobId()).status() : job.getStatus();
+    }
+
+    // Computed live from children on every read, rather than an incrementally updated counter, to avoid races.
+    private ArrayRollup arrayRollup(String parentJobId) {
+        List<BatchJob> children = jobStore.scan(k -> true).stream()
+                .filter(job -> parentJobId.equals(job.getArrayJobId()))
+                .toList();
+        Map<String, Integer> statusSummary = new LinkedHashMap<>();
+        for (BatchJob child : children) {
+            statusSummary.merge(child.getStatus(), 1, Integer::sum);
+        }
+        boolean anyFailed = children.stream().anyMatch(c -> BatchStatus.FAILED.name().equals(c.getStatus()));
+        boolean allSucceeded = !children.isEmpty()
+                && children.stream().allMatch(c -> BatchStatus.SUCCEEDED.name().equals(c.getStatus()));
+        String status;
+        if (anyFailed) {
+            status = BatchStatus.FAILED.name();
+        } else if (allSucceeded) {
+            status = BatchStatus.SUCCEEDED.name();
+        } else if (children.stream().anyMatch(c -> !BatchStatus.SUBMITTED.name().equals(c.getStatus()))) {
+            status = BatchStatus.PENDING.name();
+        } else {
+            status = BatchStatus.SUBMITTED.name();
+        }
+        Long startedAt = children.stream().map(BatchJob::getStartedAt).filter(Objects::nonNull)
+                .min(Long::compare).orElse(null);
+        Long stoppedAt = null;
+        if (BatchStatus.SUCCEEDED.name().equals(status) || BatchStatus.FAILED.name().equals(status)) {
+            stoppedAt = children.stream().map(BatchJob::getStoppedAt).filter(Objects::nonNull)
+                    .max(Long::compare).orElse(null);
+        }
+        return new ArrayRollup(status, startedAt, stoppedAt, statusSummary);
     }
 
     private ObjectNode computeEnvironmentDetail(BatchComputeEnvironment env) {
@@ -1010,6 +1583,9 @@ public class BatchService {
         if (def.getContainerProperties() != null) {
             detail.set("containerProperties", objectMapper.valueToTree(def.getContainerProperties()));
         }
+        if (def.getNodeProperties() != null) {
+            detail.set("nodeProperties", objectMapper.valueToTree(def.getNodeProperties()));
+        }
         if (def.getParameters() != null && !def.getParameters().isEmpty()) {
             detail.set("parameters", objectMapper.valueToTree(def.getParameters()));
         }
@@ -1035,17 +1611,41 @@ public class BatchService {
         detail.put("jobName", job.getJobName());
         detail.put("jobQueue", job.getJobQueue());
         detail.put("jobDefinition", job.getJobDefinition());
-        detail.put("status", job.getStatus());
         detail.put("createdAt", job.getCreatedAt());
-        if (job.getStatusReason() != null) {
-            detail.put("statusReason", job.getStatusReason());
+
+        if (job.getArraySize() != null) {
+            ArrayRollup rollup = arrayRollup(job.getJobId());
+            detail.put("status", rollup.status());
+            if (rollup.startedAt() != null) {
+                detail.put("startedAt", rollup.startedAt());
+            }
+            if (rollup.stoppedAt() != null) {
+                detail.put("stoppedAt", rollup.stoppedAt());
+            }
+            ObjectNode arrayProperties = detail.putObject("arrayProperties");
+            arrayProperties.put("size", job.getArraySize());
+            ObjectNode summaryNode = arrayProperties.putObject("statusSummary");
+            rollup.statusSummary().forEach(summaryNode::put);
+            arrayProperties.put("statusSummaryLastUpdatedAt", now());
+        } else {
+            detail.put("status", job.getStatus());
+            if (job.getStatusReason() != null) {
+                detail.put("statusReason", job.getStatusReason());
+            }
+            if (job.getStartedAt() != null) {
+                detail.put("startedAt", job.getStartedAt());
+            }
+            if (job.getStoppedAt() != null) {
+                detail.put("stoppedAt", job.getStoppedAt());
+            }
+            if (job.getArrayJobId() != null) {
+                detail.putObject("arrayProperties").put("index", job.getArrayIndex());
+            }
         }
-        if (job.getStartedAt() != null) {
-            detail.put("startedAt", job.getStartedAt());
+        if (job.getNodeProperties() != null) {
+            detail.set("nodeProperties", objectMapper.valueToTree(job.getNodeProperties()));
         }
-        if (job.getStoppedAt() != null) {
-            detail.put("stoppedAt", job.getStoppedAt());
-        }
+
         detail.set("parameters", objectMapper.valueToTree(job.getParameters()));
         detail.set("attempts", objectMapper.valueToTree(job.getAttempts()));
         if (job.getRetryStrategy() != null) {
@@ -1058,21 +1658,24 @@ public class BatchService {
             detail.set("tags", objectMapper.valueToTree(job.getTags()));
         }
 
-        ObjectNode container = detail.putObject("container");
-        if (job.getContainerImage() != null) {
-            container.put("image", job.getContainerImage());
-        }
-        container.set("command", objectMapper.valueToTree(job.getResolvedCommand()));
-        container.set("environment", objectMapper.valueToTree(job.getResolvedEnvironment()));
-        if (job.getContainer() != null) {
-            if (job.getContainer().getExitCode() != null) {
-                container.put("exitCode", job.getContainer().getExitCode());
+        // MNP and array-parent jobs have no single container of their own.
+        if (job.getNodeProperties() == null && job.getArraySize() == null) {
+            ObjectNode container = detail.putObject("container");
+            if (job.getContainerImage() != null) {
+                container.put("image", job.getContainerImage());
             }
-            if (job.getContainer().getReason() != null) {
-                container.put("reason", job.getContainer().getReason());
-            }
-            if (job.getContainer().getLogStreamName() != null) {
-                container.put("logStreamName", job.getContainer().getLogStreamName());
+            container.set("command", objectMapper.valueToTree(job.getResolvedCommand()));
+            container.set("environment", objectMapper.valueToTree(job.getResolvedEnvironment()));
+            if (job.getContainer() != null) {
+                if (job.getContainer().getExitCode() != null) {
+                    container.put("exitCode", job.getContainer().getExitCode());
+                }
+                if (job.getContainer().getReason() != null) {
+                    container.put("reason", job.getContainer().getReason());
+                }
+                if (job.getContainer().getLogStreamName() != null) {
+                    container.put("logStreamName", job.getContainer().getLogStreamName());
+                }
             }
         }
         return detail;

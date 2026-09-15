@@ -45,6 +45,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `CreateDBSnapshot` | Create a snapshot of a DB instance |
 | `RestoreDBInstanceFromDBSnapshot` | Create a new DB instance from a snapshot |
 | `DescribeDBSnapshots` | List DB instance snapshots |
+| `DescribeDBSnapshotAttributes` | Return a snapshot's `restore` attribute (accounts authorized to copy/restore it) |
+| `ModifyDBSnapshotAttribute` | Add or remove accounts authorized to copy/restore a snapshot |
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
@@ -73,6 +75,19 @@ Floci uses `04:00-06:00` and `mon:00:00-mon:03:00` (or, when the window given on
 usual default, a 30-minute window starting where the given one ends); a window given on modify is
 checked against the instance's other window. Modifications apply immediately —
 `PendingModifiedValues` is not modeled.
+
+!!! note "DB snapshot tagging and lifecycle"
+
+    `CreateDBSnapshot` accepts `Tags`, and `TagResource`/`UntagResource`/`ListTagsForResource`
+    work against a snapshot's ARN like they do for other tagged resource types.
+    `DescribeDBSnapshotAttributes`/`ModifyDBSnapshotAttribute` are modeled as plain in-memory
+    state (no real cross-account sharing). `DeleteDBSnapshot` is not implemented, so a snapshot
+    persists for the life of the account; Terraform's `aws_db_snapshot` can be created but not
+    destroyed. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
+    the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
+    for that same region. Aurora cluster snapshots and RDS reserved instances aren't modeled at
+    all (`DescribeDBClusterSnapshots` always returns an empty list, and there's no
+    reserved-instance API), so tagging doesn't apply to either.
 
 ## Configuration
 
@@ -167,8 +182,13 @@ services:
     Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
     `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
     matching the RDS API contract.
-    DB proxies currently support `IPV4` for both endpoint and target connections; `IPV6` and `DUAL`
-    endpoint networking require additional listener and Docker-network support.
+    `CreateDBProxy`/`AWS::RDS::DBProxy` accept `EndpointNetworkType` (`IPV4`, `IPV6`, or `DUAL`) and
+    `TargetConnectionNetworkType` (`IPV4` or `IPV6`) and round-trip them like the other proxy
+    settings above; the TCP relay itself still only listens on IPv4, so a non-`IPV4` value is
+    accepted as control-plane metadata rather than making the relay dual-stack. A non-`IPV4` value
+    is rejected with `InvalidParameterValue` unless the proxy's VPC and every subnet in
+    `VpcSubnetIds` already carry an associated IPv6 CIDR block, matching AWS's own network
+    prerequisites for RDS Proxy.
 
 ## Aurora Serverless v2 scaling
 
