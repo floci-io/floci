@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import graphql.introspection.Introspection;
+import graphql.GraphQL;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
@@ -29,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -111,7 +113,7 @@ public class AppSyncExecutionController {
                     return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
                 }
 
-                var graphQLOpt = schemaRegistry.getGraphQL(apiId);
+                Optional<GraphQL> graphQLOpt = schemaRegistry.getGraphQL(apiId);
                 if (graphQLOpt.isEmpty()) {
                     return graphqlError(502, "GraphQLSchemaException",
                             AppSyncErrorFormatter.MSG_NO_SCHEMA);

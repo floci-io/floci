@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -96,7 +97,7 @@ public class DynamoDbDataSourceInvoker implements DataSourceInvoker {
                     "DynamoDB GetItem projection is not yet supported by Floci");
         }
         JsonNode key = objectMapper.valueToTree(requireObject(request, "key"));
-        var denied = roleAuthorizer.authorizeDynamoDb(
+        Optional<FieldError> denied = roleAuthorizer.authorizeDynamoDb(
                 dataSource, "dynamodb:GetItem", tableName, region, context);
         if (denied.isPresent()) {
             return DataSourceResult.error(denied.get());
@@ -133,7 +134,7 @@ public class DynamoDbDataSourceInvoker implements DataSourceInvoker {
             values = exprValues != null ? objectMapper.valueToTree(exprValues) : null;
         }
 
-        var denied = roleAuthorizer.authorizeDynamoDb(
+        Optional<FieldError> denied = roleAuthorizer.authorizeDynamoDb(
                 dataSource, "dynamodb:PutItem", tableName, region, context);
         if (denied.isPresent()) {
             return DataSourceResult.error(denied.get());

@@ -1,7 +1,15 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
 import io.github.hectorvent.floci.services.appsync.graphql.util.AppSyncUtil;
+import io.github.hectorvent.floci.services.appsync.graphql.util.DynamoDbUtil;
+import io.github.hectorvent.floci.services.appsync.graphql.util.ListUtil;
+import io.github.hectorvent.floci.services.appsync.graphql.util.MapUtil;
+import io.github.hectorvent.floci.services.appsync.graphql.util.MathUtil;
+import io.github.hectorvent.floci.services.appsync.graphql.util.StrUtil;
+import io.github.hectorvent.floci.services.appsync.graphql.util.TimeUtil;
+import io.github.hectorvent.floci.services.appsync.graphql.util.TransformUtil;
 import io.github.hectorvent.floci.services.appsync.graphql.util.VtlErrorSignal;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.velocity.VelocityContext;
@@ -12,7 +20,25 @@ import java.io.StringWriter;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Velocity loads the custom {@code #return} directive by class name and resolves every
+ * {@code $util} call reflectively, so those classes must be registered for the native image the
+ * same way {@code VtlTemplateEngine} registers the API Gateway helpers; the JSON reflection
+ * config alone is not applied to them.
+ */
 @ApplicationScoped
+@RegisterForReflection(targets = {
+        ReturnDirective.class,
+        AppSyncVtlContext.class,
+        AppSyncUtil.class,
+        DynamoDbUtil.class,
+        StrUtil.class,
+        TimeUtil.class,
+        MathUtil.class,
+        TransformUtil.class,
+        ListUtil.class,
+        MapUtil.class
+})
 public class AppSyncVtlEngine {
 
     private final VelocityEngine engine;
