@@ -456,9 +456,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         String endpointNetworkType = resolveOptional(props, "EndpointNetworkType", engine);
         String targetConnectionNetworkType = resolveOptional(
                 props, "TargetConnectionNetworkType", engine);
-        validateIpv4DbProxyNetworkType(endpointNetworkType,
+        validateDbProxyNetworkType(endpointNetworkType,
                 "EndpointNetworkType", true, "IPV4, IPV6, or DUAL");
-        validateIpv4DbProxyNetworkType(targetConnectionNetworkType,
+        validateDbProxyNetworkType(targetConnectionNetworkType,
                 "TargetConnectionNetworkType", false, "IPV4 or IPV6");
         boolean requireTls = parseBoolProp(props, "RequireTLS", engine);
         boolean debugLogging = parseBoolProp(props, "DebugLogging", engine);
@@ -480,9 +480,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         var proxy = r.getPhysicalId() == null
                 ? rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth,
                 defaultAuthScheme, roleArn, subnetIds, sgIds, auth, idleClientTimeout,
-                debugLogging, tags, region)
+                debugLogging, tags, region, endpointNetworkType, targetConnectionNetworkType)
                 : updateDbProxy(r, name, engineFamily, defaultAuthScheme, requireTls,
-                idleClientTimeout, debugLogging, roleArn, subnetIds, sgIds, auth, tags, region);
+                idleClientTimeout, debugLogging, roleArn, subnetIds, sgIds, auth, tags, region,
+                endpointNetworkType, targetConnectionNetworkType);
         r.setPhysicalId(proxy.getDbProxyName());              // Ref -> DBProxyName
         r.getAttributes().put("Endpoint", proxy.getEndpoint());   // GetAtt "Endpoint" (bare host)
         r.getAttributes().put("DBProxyArn", proxy.getDbProxyArn());
@@ -495,15 +496,31 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             StackResource resource, String name, String engineFamily, String defaultAuthScheme,
             boolean requireTls, int idleClientTimeout, boolean debugLogging, String roleArn,
             List<String> subnetIds, List<String> securityGroupIds, List<DbProxyAuth> auth,
-            Map<String, String> tags, String region) {
+            Map<String, String> tags, String region, String endpointNetworkType,
+            String targetConnectionNetworkType) {
         var existing = rdsService.getDbProxy(resource.getPhysicalId(), region);
+        // ModifyDBProxy has no EndpointNetworkType/TargetConnectionNetworkType parameters; AWS
+        // documents both as requiring CloudFormation replacement, same as DBProxyName, EngineFamily,
+        // and VpcSubnetIds.
+        String effectiveEndpointNetworkType = endpointNetworkType != null && !endpointNetworkType.isBlank()
+                ? endpointNetworkType.toUpperCase() : "IPV4";
+        String effectiveTargetConnectionNetworkType =
+                targetConnectionNetworkType != null && !targetConnectionNetworkType.isBlank()
+                ? targetConnectionNetworkType.toUpperCase() : "IPV4";
+        String existingEndpointNetworkType = existing.getEndpointNetworkType() != null
+                ? existing.getEndpointNetworkType() : "IPV4";
+        String existingTargetConnectionNetworkType = existing.getTargetConnectionNetworkType() != null
+                ? existing.getTargetConnectionNetworkType() : "IPV4";
         if (!Objects.equals(existing.getDbProxyName(), name)
                 || engineFamily == null
                 || !existing.getEngineFamily().equalsIgnoreCase(engineFamily)
-                || !Set.copyOf(existing.getVpcSubnetIds()).equals(Set.copyOf(subnetIds))) {
+                || !Set.copyOf(existing.getVpcSubnetIds()).equals(Set.copyOf(subnetIds))
+                || !existingEndpointNetworkType.equalsIgnoreCase(effectiveEndpointNetworkType)
+                || !existingTargetConnectionNetworkType.equalsIgnoreCase(effectiveTargetConnectionNetworkType)) {
             throw new AwsException("UnsupportedOperation",
-                    "Changing DBProxyName, EngineFamily, or VpcSubnetIds requires CloudFormation "
-                            + "replacement, which is not yet supported by Floci.", 400);
+                    "Changing DBProxyName, EngineFamily, VpcSubnetIds, EndpointNetworkType, or "
+                            + "TargetConnectionNetworkType requires CloudFormation replacement, "
+                            + "which is not yet supported by Floci.", 400);
         }
         return rdsService.modifyDbProxy(existing.getDbProxyName(), defaultAuthScheme, auth,
                 requireTls, idleClientTimeout, debugLogging, roleArn,
@@ -578,12 +595,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         return auth;
     }
 
-    private void validateIpv4DbProxyNetworkType(
+    private void validateDbProxyNetworkType(
             String value, String propertyName, boolean dualAllowed, String validValues) {
-        if (value == null) {
-            return;
-        }
-        if ("IPV4".equalsIgnoreCase(value)) {
+        if (value == null || "IPV4".equalsIgnoreCase(value)) {
             return;
         }
         boolean supportedAwsValue = "IPV6".equalsIgnoreCase(value)
@@ -592,10 +606,6 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("InvalidParameterValue",
                     propertyName + " must be " + validValues + ".", 400);
         }
-        throw new AwsException("UnsupportedOperation",
-                propertyName + " " + value.toUpperCase()
-                        + " is not supported because Floci currently exposes IPv4 proxy networking only.",
-                400);
     }
 
     private void deleteDbProxySafe(String name, String region) {

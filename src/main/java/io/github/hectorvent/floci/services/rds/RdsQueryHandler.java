@@ -1132,10 +1132,10 @@ public class RdsQueryHandler {
     }
 
     private Response handleCreateDbProxy(MultivaluedMap<String, String> params, String region) {
-        validateIpv4NetworkType(params.getFirst("EndpointNetworkType"),
-                "EndpointNetworkType", true, "IPV4, IPV6, or DUAL");
-        validateIpv4NetworkType(params.getFirst("TargetConnectionNetworkType"),
-                "TargetConnectionNetworkType", false, "IPV4 or IPV6");
+        String endpointNetworkType = params.getFirst("EndpointNetworkType");
+        String targetConnectionNetworkType = params.getFirst("TargetConnectionNetworkType");
+        validateDbProxyNetworkType(endpointNetworkType, "EndpointNetworkType", true, "IPV4, IPV6, or DUAL");
+        validateDbProxyNetworkType(targetConnectionNetworkType, "TargetConnectionNetworkType", false, "IPV4 or IPV6");
         String name = params.getFirst("DBProxyName");
         String engineFamily = params.getFirst("EngineFamily");
         boolean requireTls = "true".equalsIgnoreCase(params.getFirst("RequireTLS"));
@@ -1160,7 +1160,8 @@ public class RdsQueryHandler {
         iamEnabled = iamEnabled || "IAM_AUTH".equalsIgnoreCase(defaultAuthScheme);
         DbProxy proxy = service.createDbProxy(
                 name, engineFamily, requireTls, iamEnabled, defaultAuthScheme, roleArn,
-                subnetIds, sgIds, auth, idleClientTimeout, debugLogging, parseTags(params), region);
+                subnetIds, sgIds, auth, idleClientTimeout, debugLogging, parseTags(params), region,
+                endpointNetworkType, targetConnectionNetworkType);
         String result = new XmlBuilder().start("DBProxy").raw(dbProxyInnerXml(proxy)).end("DBProxy").build();
         return Response.ok(AwsQueryResponse.envelope("CreateDBProxy", AwsNamespaces.RDS, result)).build();
     }
@@ -1348,12 +1349,9 @@ public class RdsQueryHandler {
         return xml.build();
     }
 
-    private static void validateIpv4NetworkType(
+    private static void validateDbProxyNetworkType(
             String value, String parameterName, boolean dualAllowed, String validValues) {
-        if (value == null) {
-            return;
-        }
-        if ("IPV4".equalsIgnoreCase(value)) {
+        if (value == null || "IPV4".equalsIgnoreCase(value)) {
             return;
         }
         boolean supportedAwsValue = "IPV6".equalsIgnoreCase(value)
@@ -1362,10 +1360,6 @@ public class RdsQueryHandler {
             throw new AwsException("InvalidParameterValue",
                     parameterName + " must be " + validValues + ".", 400);
         }
-        throw new AwsException("UnsupportedOperation",
-                parameterName + " " + value.toUpperCase()
-                        + " is not supported because Floci currently exposes IPv4 proxy networking only.",
-                400);
     }
 
     private String dbProxyTargetGroupInnerXml(DbProxyTargetGroup tg) {

@@ -167,8 +167,13 @@ services:
     Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
     `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
     matching the RDS API contract.
-    DB proxies currently support `IPV4` for both endpoint and target connections; `IPV6` and `DUAL`
-    endpoint networking require additional listener and Docker-network support.
+    `CreateDBProxy`/`AWS::RDS::DBProxy` accept `EndpointNetworkType` (`IPV4`, `IPV6`, or `DUAL`) and
+    `TargetConnectionNetworkType` (`IPV4` or `IPV6`) and round-trip them like the other proxy
+    settings above; the TCP relay itself still only listens on IPv4, so a non-`IPV4` value is
+    accepted as control-plane metadata rather than making the relay dual-stack. A non-`IPV4` value
+    is rejected with `InvalidParameterValue` unless the proxy's VPC and every subnet in
+    `VpcSubnetIds` already carry an associated IPv6 CIDR block, matching AWS's own network
+    prerequisites for RDS Proxy.
 
 ## Aurora Serverless v2 scaling
 

@@ -42,6 +42,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -983,13 +984,13 @@ class RdsCfnProvisionerTest {
         when(proxy.getDbProxyArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc");
         when(proxy.getVpcId()).thenReturn("vpc-default");
         when(rdsService.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any()))
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
                 .thenReturn(proxy);
 
         StackResource r = provision("Proxy", "AWS::RDS::DBProxy", """
                 {"DBProxyName":"app-proxy","EngineFamily":"POSTGRESQL","RequireTLS":true,
                  "DebugLogging":true,"IdleClientTimeout":120,"DefaultAuthScheme":"IAM_AUTH",
-                 "EndpointNetworkType":"IPV4","TargetConnectionNetworkType":"IPV4",
+                 "EndpointNetworkType":"DUAL","TargetConnectionNetworkType":"IPV6",
                  "RoleArn":"arn:aws:iam::000000000000:role/proxy",
                  "VpcSubnetIds":["subnet-a","subnet-b"],
                  "Tags":[{"Key":"owner","Value":"platform"}]}
@@ -1004,7 +1005,8 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(true), eq(true),
                 eq("IAM_AUTH"), eq("arn:aws:iam::000000000000:role/proxy"),
                 eq(List.of("subnet-a", "subnet-b")), eq(List.of()), eq(List.of()),
-                eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-east-1"));
+                eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-east-1"),
+                eq("DUAL"), eq("IPV6"));
     }
 
     @Test
@@ -1024,7 +1026,7 @@ class RdsCfnProvisionerTest {
                 "DefaultAuthScheme must be NONE or IAM_AUTH"));
         verify(rdsService, never()).createDbProxy(
                 any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any());
     }
 
     @Test
@@ -1033,7 +1035,7 @@ class RdsCfnProvisionerTest {
         when(proxy.getDbProxyName()).thenReturn("sqlserver-proxy");
         when(rdsService.createDbProxy(
                 any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any()))
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
                 .thenReturn(proxy);
 
         StackResource resource = provision("Proxy", "AWS::RDS::DBProxy", """
@@ -1053,24 +1055,25 @@ class RdsCfnProvisionerTest {
                 eq("sqlserver-proxy"), eq("SQLSERVER"), eq(false), eq(true), eq("NONE"),
                 eq("arn:aws:iam::000000000000:role/proxy"),
                 eq(List.of("subnet-a", "subnet-b")), eq(List.of()), authCaptor.capture(),
-                eq(1800), eq(false), eq(Map.of()), eq("us-east-1"));
+                eq(1800), eq(false), eq(Map.of()), eq("us-east-1"), isNull(), isNull());
         assertEquals("database-user", authCaptor.getValue().getFirst().getUserName());
         assertEquals("ENABLED", authCaptor.getValue().getFirst().getIamAuth());
     }
 
     @Test
-    void rejectsUnsupportedDbProxyNetworkTypesBeforeMutation() {
-        StackResource ipv6 = provision("Proxy", "AWS::RDS::DBProxy", """
+    void rejectsInvalidDbProxyNetworkTypeValueBeforeMutation() {
+        StackResource invalidTarget = provision("Proxy", "AWS::RDS::DBProxy", """
                 {"DBProxyName":"app-proxy","EngineFamily":"POSTGRESQL",
-                 "DefaultAuthScheme":"IAM_AUTH","EndpointNetworkType":"IPV6",
+                 "DefaultAuthScheme":"IAM_AUTH","TargetConnectionNetworkType":"DUAL",
                  "RoleArn":"arn:aws:iam::000000000000:role/proxy",
                  "VpcSubnetIds":["subnet-a","subnet-b"]}
                 """);
 
-        assertEquals("CREATE_FAILED", ipv6.getStatus());
-        assertTrue(ipv6.getStatusReason().contains("IPv4 proxy networking only"));
+        assertEquals("CREATE_FAILED", invalidTarget.getStatus());
+        assertTrue(invalidTarget.getStatusReason().contains("TargetConnectionNetworkType must be"));
         verify(rdsService, never()).createDbProxy(any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(),
+                any(), any());
     }
 
     @Test
@@ -1111,7 +1114,8 @@ class RdsCfnProvisionerTest {
                 eq(90), eq(true), eq("arn:aws:iam::000000000000:role/proxy"),
                 eq(List.of("sg-updated")), eq(Map.of("owner", "platform")), eq("us-west-2"));
         verify(rdsService, never()).createDbProxy(any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(),
+                any(), any());
     }
 
     @Test
@@ -1133,7 +1137,30 @@ class RdsCfnProvisionerTest {
         verify(rdsService, never()).modifyDbProxy(any(), any(), any(), any(), any(), any(),
                 any(), any(), any(), any());
         verify(rdsService, never()).createDbProxy(any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(),
+                any(), any());
+    }
+
+    @Test
+    void changingDbProxyNetworkTypeFailsBeforeMutationSinceModifyDbProxyHasNoSuchParameter() {
+        DbProxy existing = mock(DbProxy.class);
+        when(existing.getDbProxyName()).thenReturn("app-proxy");
+        when(existing.getEngineFamily()).thenReturn("POSTGRESQL");
+        when(existing.getVpcSubnetIds()).thenReturn(List.of("subnet-a", "subnet-b"));
+        when(existing.getEndpointNetworkType()).thenReturn("IPV4");
+        when(existing.getTargetConnectionNetworkType()).thenReturn("IPV4");
+        when(rdsService.getDbProxy("app-proxy", "us-east-1")).thenReturn(existing);
+
+        StackResource resource = provisionExisting("Proxy", "AWS::RDS::DBProxy", """
+                {"DBProxyName":"app-proxy","EngineFamily":"POSTGRESQL","DefaultAuthScheme":"NONE",
+                 "RoleArn":"arn:aws:iam::000000000000:role/proxy",
+                 "VpcSubnetIds":["subnet-a","subnet-b"],"EndpointNetworkType":"DUAL"}
+                """, "us-east-1", "app-proxy", Map.of());
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains("requires CloudFormation replacement"));
+        verify(rdsService, never()).modifyDbProxy(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
     }
 
     @Test
@@ -1591,7 +1618,8 @@ class RdsCfnProvisionerTest {
         when(proxy.getDbProxyName()).thenReturn("my-proxy");
         when(proxy.getDbProxyArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db-proxy:my-proxy");
         when(rdsService.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any())).thenReturn(proxy);
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
+                .thenReturn(proxy);
 
         provision("Proxy", "AWS::RDS::DBProxy", """
                 {"DBProxyName":"my-proxy","EngineFamily":"POSTGRESQL",
@@ -1602,7 +1630,8 @@ class RdsCfnProvisionerTest {
 
         ArgumentCaptor<List<String>> subnets = ArgumentCaptor.forClass(List.class);
         verify(rdsService).createDbProxy(eq("my-proxy"), eq("POSTGRESQL"), anyBoolean(), anyBoolean(),
-                any(), any(), subnets.capture(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                any(), any(), subnets.capture(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(),
+                isNull(), isNull());
         assertEquals(List.of("subnet-a", "subnet-b"), subnets.getValue());
     }
 }

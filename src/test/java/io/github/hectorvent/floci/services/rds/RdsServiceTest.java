@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
@@ -3190,6 +3192,74 @@ class RdsServiceTest {
                         List.of("subnet-vpc-a", "subnet-vpc-b"),
                         List.of(), PROXY_AUTH, Map.of()));
         assertEquals("InvalidSubnet", mixedVpc.getErrorCode());
+    }
+
+    @Test
+    void createDbProxyRejectsIpv6NetworkTypeWhenVpcHasNoIpv6CidrBlock() {
+        // PROXY_SUBNET_IDS resolves to vpc-default, which the default ec2Service stub gives no
+        // IPv6 CIDR block association, matching real AWS's IPv4-only VPC rejection.
+        AwsException endpointRejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("ipv4-only-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", "DUAL", null));
+        assertEquals("InvalidParameterValue", endpointRejected.getErrorCode());
+        assertTrue(endpointRejected.getMessage().contains("IPv6 CIDR block"));
+
+        AwsException targetRejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("ipv4-only-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", null, "IPV6"));
+        assertEquals("InvalidParameterValue", targetRejected.getErrorCode());
+        assertTrue(rdsService.listDbProxies(null).isEmpty());
+    }
+
+    @Test
+    void createDbProxyAcceptsIpv6NetworkTypeWhenVpcHasIpv6CidrBlock() {
+        List<String> dualStackSubnetIds = List.of("subnet-dualstack-a", "subnet-dualstack-b");
+        Subnet subnetA = subnet("subnet-dualstack-a", "vpc-dualstack", "us-east-1a");
+        subnetA.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("subnet-cidr-assoc-a", "2600:1f18:1::/64", null));
+        Subnet subnetB = subnet("subnet-dualstack-b", "vpc-dualstack", "us-east-1b");
+        subnetB.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("subnet-cidr-assoc-b", "2600:1f18:2::/64", null));
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(dualStackSubnetIds), eq(Map.of())))
+                .thenReturn(List.of(subnetA, subnetB));
+        Vpc dualStackVpc = new Vpc();
+        dualStackVpc.setVpcId("vpc-dualstack");
+        dualStackVpc.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-test", "2600:1f18::/56", "us-east-1"));
+        when(ec2Service.describeVpcs(eq("us-east-1"), eq(List.of("vpc-dualstack")), eq(Map.of())))
+                .thenReturn(List.of(dualStackVpc));
+
+        DbProxy proxy = rdsService.createDbProxy("dualstack-proxy", "POSTGRESQL", true, false, "NONE",
+                PROXY_ROLE_ARN, dualStackSubnetIds, List.of(), PROXY_AUTH,
+                1800, false, Map.of(), "us-east-1", "DUAL", "IPV6");
+
+        assertEquals("DUAL", proxy.getEndpointNetworkType());
+        assertEquals("IPV6", proxy.getTargetConnectionNetworkType());
+    }
+
+    @Test
+    void createDbProxyRejectsIpv6NetworkTypeWhenSubnetsHaveNoIpv6CidrBlock() {
+        List<String> mixedSubnetIds = List.of("subnet-mixed-a", "subnet-mixed-b");
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(mixedSubnetIds), eq(Map.of())))
+                .thenReturn(List.of(
+                        subnet("subnet-mixed-a", "vpc-mixed", "us-east-1a"),
+                        subnet("subnet-mixed-b", "vpc-mixed", "us-east-1b")));
+        Vpc dualStackVpc = new Vpc();
+        dualStackVpc.setVpcId("vpc-mixed");
+        dualStackVpc.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-mixed", "2600:1f18::/56", "us-east-1"));
+        when(ec2Service.describeVpcs(eq("us-east-1"), eq(List.of("vpc-mixed")), eq(Map.of())))
+                .thenReturn(List.of(dualStackVpc));
+
+        AwsException rejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("mixed-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, mixedSubnetIds, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", "DUAL", null));
+        assertEquals("InvalidParameterValue", rejected.getErrorCode());
+        assertTrue(rejected.getMessage().contains("VpcSubnetIds"));
+        assertTrue(rdsService.listDbProxies(null).isEmpty());
     }
 
     @Test

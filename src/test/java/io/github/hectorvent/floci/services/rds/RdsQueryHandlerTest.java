@@ -1267,7 +1267,8 @@ class RdsQueryHandlerTest {
         when(service.createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(true), eq(true),
                 eq("IAM_AUTH"), eq("arn:aws:iam::000000000000:role/proxy"),
                 anyList(), anyList(), anyList(),
-                eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-west-2")))
+                eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-west-2"),
+                eq("IPV4"), eq("IPV4")))
                 .thenReturn(proxy);
 
         MultivaluedMap<String, String> p = params();
@@ -1313,7 +1314,8 @@ class RdsQueryHandlerTest {
                 eq("IAM_AUTH"), eq("arn:aws:iam::000000000000:role/proxy"),
                 anyList(), anyList(), argThat(auth -> auth.size() == 1
                         && "database-user".equals(auth.getFirst().getUserName())),
-                eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-west-2"));
+                eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-west-2"),
+                eq("IPV4"), eq("IPV4"));
     }
 
     @Test
@@ -1335,7 +1337,7 @@ class RdsQueryHandlerTest {
                 argThat(auth -> auth.size() == 1
                         && "ENABLED".equals(auth.getFirst().getIamAuth())
                         && "database-user".equals(auth.getFirst().getUserName())),
-                eq(1800), eq(false), eq(Map.of()), eq("us-west-2")))
+                eq(1800), eq(false), eq(Map.of()), eq("us-west-2"), isNull(), isNull()))
                 .thenReturn(proxy);
 
         MultivaluedMap<String, String> p = params();
@@ -1361,19 +1363,12 @@ class RdsQueryHandlerTest {
                 argThat(auth -> auth.size() == 1
                         && "ENABLED".equals(auth.getFirst().getIamAuth())
                         && "database-user".equals(auth.getFirst().getUserName())),
-                eq(1800), eq(false), eq(Map.of()), eq("us-west-2"));
+                eq(1800), eq(false), eq(Map.of()), eq("us-west-2"), isNull(), isNull());
     }
 
     @Test
-    void createDbProxyRejectsUnsupportedOrInvalidNetworkTypesBeforeCallingService() {
-        MultivaluedMap<String, String> ipv6 = params();
-        ipv6.add("EndpointNetworkType", "IPV6");
-
-        Response ipv6Response = handler.handle("CreateDBProxy", ipv6, "us-west-2");
-
-        assertEquals(400, ipv6Response.getStatus());
-        assertTrue(((String) ipv6Response.getEntity()).contains("UnsupportedOperation"));
-
+    void createDbProxyRejectsInvalidNetworkTypeValuesBeforeCallingService() {
+        // TargetConnectionNetworkType has no DUAL value on real AWS (only EndpointNetworkType does).
         MultivaluedMap<String, String> invalidTargetType = params();
         invalidTargetType.add("TargetConnectionNetworkType", "DUAL");
 
@@ -1382,7 +1377,49 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, invalidResponse.getStatus());
         assertTrue(((String) invalidResponse.getEntity()).contains("InvalidParameterValue"));
+
+        MultivaluedMap<String, String> bogus = params();
+        bogus.add("EndpointNetworkType", "BOGUS");
+
+        Response bogusResponse = handler.handle("CreateDBProxy", bogus, "us-west-2");
+
+        assertEquals(400, bogusResponse.getStatus());
+        assertTrue(((String) bogusResponse.getEntity()).contains("InvalidParameterValue"));
         verifyNoInteractions(service);
+    }
+
+    @Test
+    void createDbProxyAcceptsIpv6AndDualNetworkTypes() {
+        DbProxy proxy = new DbProxy();
+        proxy.setDbProxyName("app-proxy");
+        proxy.setEngineFamily("POSTGRESQL");
+        proxy.setEndpointHost("app-proxy.host");
+        proxy.setEndpointNetworkType("DUAL");
+        proxy.setTargetConnectionNetworkType("IPV6");
+        when(service.createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(false), eq(false),
+                isNull(), eq("arn:aws:iam::000000000000:role/proxy"),
+                anyList(), anyList(), anyList(),
+                eq(1800), eq(false), eq(Map.of()), eq("us-west-2"),
+                eq("DUAL"), eq("IPV6")))
+                .thenReturn(proxy);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBProxyName", "app-proxy");
+        p.add("EngineFamily", "POSTGRESQL");
+        p.add("EndpointNetworkType", "DUAL");
+        p.add("TargetConnectionNetworkType", "IPV6");
+        p.add("RoleArn", "arn:aws:iam::000000000000:role/proxy");
+        p.add("VpcSubnetIds.member.1", "subnet-a");
+        p.add("VpcSubnetIds.member.2", "subnet-b");
+        p.add("Auth.member.1.AuthScheme", "SECRETS");
+        p.add("Auth.member.1.SecretArn", "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf");
+
+        Response response = handler.handle("CreateDBProxy", p, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<EndpointNetworkType>DUAL</EndpointNetworkType>"));
+        assertTrue(body.contains("<TargetConnectionNetworkType>IPV6</TargetConnectionNetworkType>"));
     }
 
     @Test

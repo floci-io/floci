@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
@@ -2410,17 +2411,33 @@ public class RdsService implements Resettable, ResourceProvider {
                 vpcSubnetIds, vpcSecurityGroupIds, auth, idleClientTimeout, debugLogging, tags, region);
     }
 
+    public DbProxy createDbProxy(String dbProxyName, String engineFamily, boolean requireTls,
+                                 boolean iamAuth, String defaultAuthScheme, String roleArn,
+                                 List<String> vpcSubnetIds,
+                                 List<String> vpcSecurityGroupIds, List<DbProxyAuth> auth,
+                                 int idleClientTimeout, boolean debugLogging,
+                                 Map<String, String> tags, String region) {
+        return createDbProxy(dbProxyName, engineFamily, requireTls, iamAuth, defaultAuthScheme, roleArn,
+                vpcSubnetIds, vpcSecurityGroupIds, auth, idleClientTimeout, debugLogging, tags, region,
+                null, null);
+    }
+
     public synchronized DbProxy createDbProxy(String dbProxyName, String engineFamily, boolean requireTls,
                                                boolean iamAuth, String defaultAuthScheme, String roleArn,
                                                List<String> vpcSubnetIds,
                                                List<String> vpcSecurityGroupIds, List<DbProxyAuth> auth,
                                                int idleClientTimeout, boolean debugLogging,
-                                               Map<String, String> tags, String region) {
+                                               Map<String, String> tags, String region,
+                                               String endpointNetworkType, String targetConnectionNetworkType) {
         String effectiveDefaultAuthScheme = normalizeDefaultAuthScheme(defaultAuthScheme);
         validateDbProxyCreate(dbProxyName, engineFamily, roleArn, vpcSubnetIds, auth,
                 effectiveDefaultAuthScheme, idleClientTimeout);
         String effectiveRegion = effectiveRegion(region);
         String vpcId = resolveDbProxyVpc(vpcSubnetIds, effectiveRegion);
+        if (requiresIpv6VpcCidrBlock(endpointNetworkType, targetConnectionNetworkType)) {
+            validateVpcHasIpv6CidrBlock(vpcId, effectiveRegion);
+            validateSubnetsHaveIpv6CidrBlock(vpcSubnetIds, effectiveRegion);
+        }
         String proxyKey = dbProxyKey(effectiveRegion, dbProxyName);
         String accountId = currentAccountId();
         if (findDbProxy(dbProxyName, effectiveRegion).isPresent()
@@ -2448,6 +2465,12 @@ public class RdsService implements Resettable, ResourceProvider {
         proxy.setAuth(auth);
         proxy.setIdleClientTimeout(idleClientTimeout);
         proxy.setDebugLogging(debugLogging);
+        if (endpointNetworkType != null && !endpointNetworkType.isBlank()) {
+            proxy.setEndpointNetworkType(endpointNetworkType.toUpperCase());
+        }
+        if (targetConnectionNetworkType != null && !targetConnectionNetworkType.isBlank()) {
+            proxy.setTargetConnectionNetworkType(targetConnectionNetworkType.toUpperCase());
+        }
         proxy.setTags(tags);
         proxy.setProxyPort(proxyPort);
         proxy.setEndpointHost(mock ? "localhost" : proxyEndpointHost());
@@ -5892,6 +5915,39 @@ public class RdsService implements Resettable, ResourceProvider {
                     "VpcSubnetIds must span at least two Availability Zones.", 400);
         }
         return vpcIds.iterator().next();
+    }
+
+    private boolean requiresIpv6VpcCidrBlock(String endpointNetworkType, String targetConnectionNetworkType) {
+        return "IPV6".equalsIgnoreCase(endpointNetworkType) || "DUAL".equalsIgnoreCase(endpointNetworkType)
+                || "IPV6".equalsIgnoreCase(targetConnectionNetworkType);
+    }
+
+    private void validateVpcHasIpv6CidrBlock(String vpcId, String region) {
+        List<Vpc> vpcs = ec2Service.describeVpcs(region, List.of(vpcId), Map.of());
+        boolean hasIpv6 = !vpcs.isEmpty() && vpcs.get(0).getIpv6CidrBlockAssociationSet().stream()
+                .anyMatch(assoc -> "associated".equalsIgnoreCase(assoc.getIpv6CidrBlockState()));
+        if (!hasIpv6) {
+            throw new AwsException("InvalidParameterValue",
+                    "EndpointNetworkType/TargetConnectionNetworkType of IPV6 or DUAL requires VPC "
+                            + vpcId + " to have an associated IPv6 CIDR block.", 400);
+        }
+    }
+
+    // AWS requires every selected subnet, not just the VPC, to carry an associated IPv6 CIDR block
+    // for an IPV6/DUAL proxy endpoint: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy-network-prereqs.html
+    private void validateSubnetsHaveIpv6CidrBlock(List<String> subnetIds, String region) {
+        List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
+        List<String> missing = subnets.stream()
+                .filter(subnet -> subnet.getIpv6CidrBlockAssociationSet().stream()
+                        .noneMatch(assoc -> "associated".equalsIgnoreCase(assoc.getIpv6CidrBlockState())))
+                .map(Subnet::getSubnetId)
+                .toList();
+        if (!missing.isEmpty()) {
+            throw new AwsException("InvalidParameterValue",
+                    "EndpointNetworkType/TargetConnectionNetworkType of IPV6 or DUAL requires every "
+                            + "VpcSubnetIds entry to have an associated IPv6 CIDR block; missing on "
+                            + missing + ".", 400);
+        }
     }
 
     private DbSubnetGroup buildSubnetGroup(String name, String description, List<String> subnetIds, String region) {
