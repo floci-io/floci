@@ -49,8 +49,7 @@ public class CognitoOidcClient {
         form.put("code", code);
         form.put("redirect_uri", redirectUri);
 
-        HttpRequest request = HttpRequest.newBuilder(URI.create(tokenEndpoint))
-                .timeout(REQUEST_TIMEOUT)
+        HttpRequest request = requestBuilder(tokenEndpoint, provider.getProviderName(), "token")
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(formEncode(form)))
@@ -64,8 +63,7 @@ public class CognitoOidcClient {
             throw new AwsException("NotAuthorizedException", "Identity provider did not return an access token", 400);
         }
 
-        HttpRequest request = HttpRequest.newBuilder(URI.create(claimsEndpoint))
-                .timeout(REQUEST_TIMEOUT)
+        HttpRequest request = requestBuilder(claimsEndpoint, provider.getProviderName(), "claims")
                 .header("Accept", "application/json")
                 .header("Authorization", "Bearer " + accessToken)
                 .GET()
@@ -100,6 +98,15 @@ public class CognitoOidcClient {
                     + " does not have a " + endpointName + " endpoint configured", 400);
         }
         return endpoint;
+    }
+
+    private HttpRequest.Builder requestBuilder(String endpoint, String providerName, String endpointName) {
+        try {
+            return HttpRequest.newBuilder(URI.create(endpoint)).timeout(REQUEST_TIMEOUT);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterException", "Identity provider " + providerName
+                    + " has an invalid " + endpointName + " endpoint", 400);
+        }
     }
 
     private String requiredProviderDetail(IdentityProvider provider, String detailName) {

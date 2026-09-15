@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationCode;
+import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationTransaction;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
@@ -38,6 +39,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -56,6 +58,7 @@ class CognitoFederationServiceTest {
     private final AtomicReference<Request> claimsRequest = new AtomicReference<>();
     private volatile int tokenStatus;
     private volatile String tokenResponse;
+    private volatile int claimsStatus;
     private volatile String claimsResponse;
 
     @BeforeEach
@@ -87,6 +90,7 @@ class CognitoFederationServiceTest {
         pool = cognitoService.createUserPool(Map.of("PoolName", "FederationPool"), "us-east-1");
         tokenStatus = 200;
         tokenResponse = "{\"access_token\":\"provider-access-token\"}";
+        claimsStatus = 200;
         claimsResponse = "{\"sub\":\"provider-subject\",\"iss\":\"https://issuer.example.test\","
                 + "\"email\":\"alice@example.test\",\"name\":\"Alice Provider\"}";
     }
@@ -108,6 +112,40 @@ class CognitoFederationServiceTest {
                 List.of("openid"), "nonce-value", "ExampleOidc"));
 
         assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void beginAuthorizationRejectsNonOidcProviderBeforeStoringState() {
+        createProvider("ExampleGoogle", "Google", Map.of(
+                "client_id", "provider-client",
+                "authorize_url", "https://provider.example.test/authorize",
+                "token_url", endpoint("/token"),
+                "attributes_url", endpoint("/userinfo")), Map.of());
+
+        AwsException exception = assertThrows(AwsException.class, () -> federationService.beginAuthorization(
+                pool.getId(), "cognito-client", "https://application.example.test/callback",
+                List.of("openid"), "nonce-value", "ExampleGoogle"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertNull(tokenRequest.get());
+        assertNull(claimsRequest.get());
+    }
+
+    @Test
+    void completeAuthorizationRejectsNonOidcProvider() {
+        createProvider("ExampleGoogle", "Google", Map.of(
+                "client_id", "provider-client",
+                "authorize_url", "https://provider.example.test/authorize",
+                "token_url", endpoint("/token"),
+                "attributes_url", endpoint("/userinfo")), Map.of());
+        String state = putTransaction("ExampleGoogle");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> federationService.completeAuthorization(state, "provider-code"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertNull(tokenRequest.get());
+        assertNull(claimsRequest.get());
     }
 
     @Test
@@ -139,10 +177,38 @@ class CognitoFederationServiceTest {
     }
 
     @Test
+    void completeAuthorizationConvertsInvalidTokenEndpointUriToAwsException() {
+        createProvider(Map.of(
+                "client_id", "provider-client",
+                "authorize_url", "https://provider.example.test/authorize",
+                "token_url", "http://[invalid",
+                "attributes_url", endpoint("/userinfo")), Map.of());
+        String state = beginAuthorization();
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> federationService.completeAuthorization(state, "provider-code"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
     void completeAuthorizationRejectsFailedTokenExchange() {
         createDefaultProvider();
         tokenStatus = 400;
         tokenResponse = "{\"error\":\"invalid_grant\"}";
+        String state = beginAuthorization();
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> federationService.completeAuthorization(state, "provider-code"));
+
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    void completeAuthorizationRejectsFailedClaimsRequest() {
+        createDefaultProvider();
+        claimsStatus = 503;
+        claimsResponse = "{\"error\":\"temporarily_unavailable\"}";
         String state = beginAuthorization();
 
         AwsException exception = assertThrows(AwsException.class,
@@ -246,8 +312,8 @@ class CognitoFederationServiceTest {
         assertTrue(identity.path("dateCreated").asLong() > 0L);
     }
 
-    private void createDefaultProvider() {
-        createProvider(Map.of(
+    private IdentityProvider createDefaultProvider() {
+        return createProvider(Map.of(
                 "client_id", "provider-client",
                 "client_secret", "provider-secret",
                 "authorize_url", "https://provider.example.test/authorize",
@@ -256,8 +322,13 @@ class CognitoFederationServiceTest {
                 Map.of("email", "email", "name", "name"));
     }
 
-    private void createProvider(Map<String, String> details, Map<String, String> attributeMapping) {
-        cognitoService.createIdentityProvider(pool.getId(), "ExampleOidc", "OIDC", details,
+    private IdentityProvider createProvider(Map<String, String> details, Map<String, String> attributeMapping) {
+        return createProvider("ExampleOidc", "OIDC", details, attributeMapping);
+    }
+
+    private IdentityProvider createProvider(String providerName, String providerType, Map<String, String> details,
+                                            Map<String, String> attributeMapping) {
+        return cognitoService.createIdentityProvider(pool.getId(), providerName, providerType, details,
                 attributeMapping, List.of());
     }
 
@@ -271,6 +342,12 @@ class CognitoFederationServiceTest {
                 pool.getId(), "cognito-client", "https://application.example.test/callback",
                 List.of("openid"), "nonce-value", "ExampleOidc");
         return queryValue(redirect, "state");
+    }
+
+    private String putTransaction(String providerName) {
+        return stateStore.putTransaction(new CognitoAuthorizationTransaction(
+                pool.getId(), "cognito-client", "https://application.example.test/callback",
+                List.of("openid"), "nonce-value", providerName, CLOCK.instant().plusSeconds(60)));
     }
 
     private String endpoint(String path) {
@@ -288,7 +365,7 @@ class CognitoFederationServiceTest {
         claimsRequest.set(new Request(exchange.getRequestMethod(),
                 new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8),
                 exchange.getRequestHeaders().getFirst("Authorization")));
-        writeResponse(exchange, 200, claimsResponse);
+        writeResponse(exchange, claimsStatus, claimsResponse);
     }
 
     private void writeResponse(HttpExchange exchange, int status, String response) throws IOException {

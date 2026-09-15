@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -23,6 +24,7 @@ public class CognitoFederationService {
 
     private static final Duration TRANSACTION_LIFETIME = Duration.ofMinutes(5);
     private static final Duration AUTHORIZATION_CODE_LIFETIME = Duration.ofMinutes(5);
+    private static final String OIDC_PROVIDER_TYPE = "OIDC";
 
     private final CognitoService cognitoService;
     private final CognitoFederationStateStore stateStore;
@@ -41,8 +43,10 @@ public class CognitoFederationService {
     public String beginAuthorization(String userPoolId, String clientId, String redirectUri, List<String> scopes,
                                      String nonce, String providerName) {
         IdentityProvider provider = cognitoService.describeIdentityProvider(userPoolId, providerName);
+        requireOidcProvider(provider);
         String authorizeEndpoint = requiredProviderDetail(provider, "authorize_url", "authorize endpoint");
         String providerClientId = requiredProviderDetail(provider, "client_id", "client_id");
+        validateAuthorizeEndpoint(authorizeEndpoint, provider.getProviderName());
         Instant expiresAt = clock.instant().plus(TRANSACTION_LIFETIME);
         CognitoAuthorizationTransaction transaction = new CognitoAuthorizationTransaction(
                 userPoolId, clientId, redirectUri, scopes, nonce, providerName, expiresAt);
@@ -65,6 +69,7 @@ public class CognitoFederationService {
                 .orElseThrow(() -> new AwsException("InvalidParameterException", "Invalid federation state", 400));
         IdentityProvider provider = cognitoService.describeIdentityProvider(
                 transaction.userPoolId(), transaction.providerName());
+        requireOidcProvider(provider);
         JsonNode tokenResponse = oidcClient.exchangeCode(provider, providerCode, transaction.redirectUri());
         String accessToken = requiredText(tokenResponse, "access_token", "access token");
         JsonNode claims = oidcClient.fetchClaims(provider, accessToken);
@@ -118,6 +123,25 @@ public class CognitoFederationService {
                     + " does not have a " + description + " configured", 400);
         }
         return value;
+    }
+
+    private void requireOidcProvider(IdentityProvider provider) {
+        if (!OIDC_PROVIDER_TYPE.equals(provider.getProviderType())) {
+            throw new AwsException("InvalidParameterException", "Identity provider " + provider.getProviderName()
+                    + " must have ProviderType OIDC", 400);
+        }
+    }
+
+    private void validateAuthorizeEndpoint(String endpoint, String providerName) {
+        try {
+            URI uri = URI.create(endpoint);
+            if (!uri.isAbsolute()) {
+                throw new IllegalArgumentException("URI must be absolute");
+            }
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterException", "Identity provider " + providerName
+                    + " has an invalid authorize endpoint", 400);
+        }
     }
 
     private String appendQuery(String endpoint, Map<String, String> parameters) {
