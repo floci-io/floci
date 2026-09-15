@@ -30,6 +30,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -400,7 +401,31 @@ public class RdsQueryHandler {
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("CopyTagsToSnapshot")));
+                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                optionalInt(params.getFirst("MonitoringInterval")),
+                params.getFirst("MonitoringRoleArn"),
+                optionalBoolean(params.getFirst("EnablePerformanceInsights")),
+                optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
+                params.getFirst("EngineLifecycleSupport"),
+                cloudwatchLogsExports(params),
+                optionalInt(params.getFirst("MaxAllocatedStorage")));
+    }
+
+    /**
+     * The request member is EnableCloudwatchLogsExports and the response member is
+     * EnabledCloudwatchLogsExports, so the two names never line up on the wire. An absent list is
+     * null (leave it alone) rather than empty (clear it).
+     */
+    private static List<String> cloudwatchLogsExports(MultivaluedMap<String, String> params) {
+        List<String> types = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String type = params.getFirst("EnableCloudwatchLogsExports.member." + i);
+            if (type == null) {
+                break;
+            }
+            types.add(type);
+        }
+        return types.isEmpty() ? null : types;
     }
 
     private static Boolean optionalBoolean(String value) {
@@ -1528,7 +1553,24 @@ public class RdsQueryHandler {
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
-           .elem("DBInstanceArn", i.getDbInstanceArn());
+           .elem("DBInstanceArn", i.getDbInstanceArn())
+           .elem("MonitoringInterval", i.getMonitoringInterval())
+           .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled())
+           .elem("EngineLifecycleSupport", i.getEngineLifecycleSupport());
+        if (i.getMonitoringRoleArn() != null && !i.getMonitoringRoleArn().isBlank()) {
+            xml.elem("MonitoringRoleArn", i.getMonitoringRoleArn());
+        }
+        if (i.isPerformanceInsightsEnabled()) {
+            xml.elem("PerformanceInsightsRetentionPeriod", i.getPerformanceInsightsRetentionPeriod());
+        }
+        if (i.getMaxAllocatedStorage() != null) {
+            xml.elem("MaxAllocatedStorage", i.getMaxAllocatedStorage());
+        }
+        if (i.getEnabledCloudwatchLogsExports() != null && !i.getEnabledCloudwatchLogsExports().isEmpty()) {
+            xml.start("EnabledCloudwatchLogsExports");
+            i.getEnabledCloudwatchLogsExports().forEach(t -> xml.elem("member", t));
+            xml.end("EnabledCloudwatchLogsExports");
+        }
         if (i.getKmsKeyId() != null && !i.getKmsKeyId().isBlank()) {
             xml.elem("KmsKeyId", i.getKmsKeyId());
         }

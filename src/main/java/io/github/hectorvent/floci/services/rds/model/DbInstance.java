@@ -45,6 +45,17 @@ public class DbInstance {
     private String preferredMaintenanceWindow;
     private boolean copyTagsToSnapshot;
     private boolean publiclyAccessible;
+    /** MonitoringInterval documents 0 as its default. */
+    private int monitoringInterval;
+    private String monitoringRoleArn;
+    private boolean performanceInsightsEnabled;
+    /** PerformanceInsightsRetentionPeriod documents 7 days as its default. */
+    private int performanceInsightsRetentionPeriod = 7;
+    /** EngineLifecycleSupport documents open-source-rds-extended-support as its default. */
+    private String engineLifecycleSupport = DbInstanceSettings.ENGINE_LIFECYCLE_SUPPORT_ENABLED;
+    private List<String> enabledCloudwatchLogsExports = new ArrayList<>();
+    /** Absent unless storage autoscaling is on, which is how AWS reports it. */
+    private Integer maxAllocatedStorage;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
     private String dbiResourceId;
     private String dbInstanceArn;
@@ -228,4 +239,35 @@ public class DbInstance {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public int getMonitoringInterval() { return monitoringInterval; }
+    public void setMonitoringInterval(int monitoringInterval) { this.monitoringInterval = monitoringInterval; }
+
+    public String getMonitoringRoleArn() { return monitoringRoleArn; }
+    public void setMonitoringRoleArn(String monitoringRoleArn) { this.monitoringRoleArn = monitoringRoleArn; }
+
+    public boolean isPerformanceInsightsEnabled() { return performanceInsightsEnabled; }
+    public void setPerformanceInsightsEnabled(boolean performanceInsightsEnabled) {
+        this.performanceInsightsEnabled = performanceInsightsEnabled;
+    }
+
+    public int getPerformanceInsightsRetentionPeriod() { return performanceInsightsRetentionPeriod; }
+    public void setPerformanceInsightsRetentionPeriod(int performanceInsightsRetentionPeriod) {
+        this.performanceInsightsRetentionPeriod = performanceInsightsRetentionPeriod;
+    }
+
+    public String getEngineLifecycleSupport() { return engineLifecycleSupport; }
+    public void setEngineLifecycleSupport(String engineLifecycleSupport) {
+        this.engineLifecycleSupport = engineLifecycleSupport;
+    }
+
+    public List<String> getEnabledCloudwatchLogsExports() { return enabledCloudwatchLogsExports; }
+    public void setEnabledCloudwatchLogsExports(List<String> enabledCloudwatchLogsExports) {
+        this.enabledCloudwatchLogsExports = enabledCloudwatchLogsExports;
+    }
+
+    public Integer getMaxAllocatedStorage() { return maxAllocatedStorage; }
+    public void setMaxAllocatedStorage(Integer maxAllocatedStorage) {
+        this.maxAllocatedStorage = maxAllocatedStorage;
+    }
 }
