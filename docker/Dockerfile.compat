@@ -98,6 +98,10 @@ FROM tools
 ARG VERSION
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+# The compatibility image can be built on top of an older native image during
+# CI. An environment variable is ignored by older binaries and enables the
+# network guard in images that support it.
+ENV FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true
 
 COPY --from=native --chown=1001:root /app/ /app/
 VOLUME /app/data
@@ -112,6 +116,6 @@ HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD ["/usr/local/bin/healthch
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # A published port needs 0.0.0.0 inside the container, which Floci only accepts with explicit consent.
-CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0", "-Dfloci.security.allow-unsafe-network-exposure=true"]
+CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]
 
 USER 1001
