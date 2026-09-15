@@ -388,19 +388,28 @@ public class RdsQueryHandler {
         return instanceSettings(params, true);
     }
 
-    /**
-     * ModifyDBInstance has no StorageEncrypted or KmsKeyId in its request shape — encryption is
-     * fixed at create — so a modify reads only the backup settings and the windows.
-     */
+    /** ModifyDBInstance cannot change encryption, but can change the remaining instance settings. */
     private static DbInstanceSettings instanceSettings(MultivaluedMap<String, String> params,
                                                        boolean includeEncryption) {
+        String enableLogTypes = includeEncryption
+                ? "EnableCloudwatchLogsExports"
+                : "CloudwatchLogsExportConfiguration.EnableLogTypes";
         return new DbInstanceSettings(
                 includeEncryption ? optionalBoolean(params.getFirst("StorageEncrypted")) : null,
                 includeEncryption ? params.getFirst("KmsKeyId") : null,
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("CopyTagsToSnapshot")));
+                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                optionalInt(params.getFirst("MonitoringInterval")),
+                params.getFirst("MonitoringRoleArn"),
+                optionalBoolean(params.getFirst("EnablePerformanceInsights")),
+                optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
+                params.getFirst("EngineLifecycleSupport"),
+                optionalInt(params.getFirst("MaxAllocatedStorage")),
+                optionalMemberList(params, enableLogTypes),
+                includeEncryption ? null : optionalMemberList(params,
+                        "CloudwatchLogsExportConfiguration.DisableLogTypes"));
     }
 
     private static Boolean optionalBoolean(String value) {
@@ -1523,6 +1532,8 @@ public class RdsQueryHandler {
            .elem("BackupRetentionPeriod", i.getBackupRetentionPeriod())
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
+           .elem("MonitoringInterval", i.getMonitoringInterval())
+           .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled())
            .raw(vpcSecurityGroupsXml(i))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))
@@ -1532,6 +1543,23 @@ public class RdsQueryHandler {
         if (i.getKmsKeyId() != null && !i.getKmsKeyId().isBlank()) {
             xml.elem("KmsKeyId", i.getKmsKeyId());
         }
+        if (i.getMonitoringRoleArn() != null && !i.getMonitoringRoleArn().isBlank()) {
+            xml.elem("MonitoringRoleArn", i.getMonitoringRoleArn());
+        }
+        if (i.getPerformanceInsightsRetentionPeriod() != null) {
+            xml.elem("PerformanceInsightsRetentionPeriod", i.getPerformanceInsightsRetentionPeriod());
+        }
+        if (i.getEngineLifecycleSupport() != null && !i.getEngineLifecycleSupport().isBlank()) {
+            xml.elem("EngineLifecycleSupport", i.getEngineLifecycleSupport());
+        }
+        if (i.getMaxAllocatedStorage() != null) {
+            xml.elem("MaxAllocatedStorage", i.getMaxAllocatedStorage());
+        }
+        xml.start("EnabledCloudwatchLogsExports");
+        for (String logType : i.getEnabledCloudwatchLogsExports()) {
+            xml.elem("member", logType);
+        }
+        xml.end("EnabledCloudwatchLogsExports");
         if (i.getMasterUserSecretArn() != null && !i.getMasterUserSecretArn().isBlank()) {
             xml.start("MasterUserSecret")
                     .elem("SecretArn", i.getMasterUserSecretArn())
@@ -2011,6 +2039,11 @@ public class RdsQueryHandler {
 
     private static boolean hasMemberKeys(MultivaluedMap<String, String> params, String baseName) {
         return params.keySet().stream().anyMatch(key -> key.matches(memberKeyRegex(baseName)));
+    }
+
+    private static List<String> optionalMemberList(
+            MultivaluedMap<String, String> params, String baseName) {
+        return hasMemberKeys(params, baseName) ? memberList(params, baseName) : null;
     }
 
     private static String memberKeyRegex(String baseName) {
