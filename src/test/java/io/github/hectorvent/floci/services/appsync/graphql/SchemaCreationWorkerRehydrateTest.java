@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.appsync.graphql;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.appsync.graphql.scalars.AppSyncScalarRegistry;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,6 +23,8 @@ import static org.mockito.Mockito.when;
 class SchemaCreationWorkerRehydrateTest {
 
     @Mock
+    SidecarSchemaCompiler schemaCompiler;
+    @Mock
     AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
     @Mock
     AccountAwareStorageBackend<String> schemaStore;
@@ -35,9 +36,9 @@ class SchemaCreationWorkerRehydrateTest {
 
     @BeforeEach
     void setUp() {
-        schemaRegistry = new SchemaRegistry(new AppSyncSchemaParser(new AppSyncScalarRegistry()));
+        schemaRegistry = new SchemaRegistry();
         worker = new SchemaCreationWorker(
-                schemaRegistry, schemaStatusStore, schemaStore, config, new ObjectMapper());
+                schemaRegistry, schemaCompiler, schemaStatusStore, schemaStore, config, new ObjectMapper());
     }
 
     @Test
@@ -47,8 +48,7 @@ class SchemaCreationWorkerRehydrateTest {
 
         worker.rehydrateSchemas();
 
-        assertTrue(schemaRegistry.getSchema("api-1").isPresent());
-        assertTrue(schemaRegistry.getGraphQL("api-1").isPresent());
+        assertTrue(schemaRegistry.getSdl("api-1").isPresent());
     }
 
     @Test
@@ -62,21 +62,27 @@ class SchemaCreationWorkerRehydrateTest {
 
         worker.rehydrateSchemas();
 
-        assertTrue(schemaRegistry.getSchema("default-api").isPresent());
-        assertTrue(schemaRegistry.getSchema("other-acct-api").isPresent());
-        assertTrue(schemaRegistry.getGraphQL("other-acct-api").isPresent());
+        assertTrue(schemaRegistry.getSdl("default-api").isPresent());
+        assertTrue(schemaRegistry.getSdl("other-acct-api").isPresent());
         verify(schemaStore, never()).keys();
         verify(schemaStore, never()).get(anyString());
     }
 
+    /**
+     * Rehydrate doesn't re-validate against the sidecar (see {@link SchemaCreationWorker#rehydrateSchemas}'s
+     * javadoc): a persisted SDL already passed validation once. So unlike the old in-process
+     * registry, a garbage SDL here is still registered as raw text; the old
+     * "skip unparseable SDL" behavior no longer applies.
+     */
     @Test
-    void rehydrateSkipsUnparseableSdl() {
+    void rehydrateDoesNotValidateAgainstTheSidecar() {
         when(schemaStore.scanAllAccountsAsMap())
                 .thenReturn(Map.of("bad-api", "not valid sdl {{{"));
 
         worker.rehydrateSchemas();
 
-        assertTrue(schemaRegistry.getSchema("bad-api").isEmpty());
+        assertTrue(schemaRegistry.getSdl("bad-api").isPresent());
+        verify(schemaCompiler, never()).validate(anyString());
     }
 
     @Test
@@ -85,7 +91,7 @@ class SchemaCreationWorkerRehydrateTest {
 
         worker.rehydrateSchemas();
 
-        assertTrue(schemaRegistry.getSchema("empty").isEmpty());
+        assertTrue(schemaRegistry.getSdl("empty").isEmpty());
         verify(schemaStore, never()).put(anyString(), anyString());
     }
 }

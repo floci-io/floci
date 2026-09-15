@@ -1,10 +1,14 @@
-package io.github.hectorvent.floci.services.appsync.graphql.scalars;
+package io.github.hectorvent.floci.graphql.scalars;
 
-import graphql.schema.GraphQLScalarType;
+import graphql.language.IntValue;
+import graphql.language.StringValue;
+import graphql.schema.CoercingParseLiteralException;
 import graphql.schema.CoercingParseValueException;
 import graphql.schema.CoercingSerializeException;
+import graphql.schema.GraphQLScalarType;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
 import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -31,6 +35,26 @@ class AppSyncScalarsTest {
         assertThat(valid, is("2026-06-04T12:00:00Z"));
 
         assertThrows(CoercingParseValueException.class, () -> AppSyncScalars.AWS_DATE_TIME.getCoercing().parseValue("not-a-date"));
+    }
+
+    @Test
+    void scalar_awsdatetime_parseLiteral_throwsCoercingParseLiteralExceptionNotParseValue() {
+        // graphql-java only catches CoercingParseLiteralException while validating a literal
+        // query argument; parseLiteral() delegating straight to parseValue() used to let
+        // CoercingParseValueException escape uncaught instead, turning a bad literal into an
+        // unhandled server error rather than a GraphQL ValidationError. Fixed via asLiteral().
+        Object valid = AppSyncScalars.AWS_DATE_TIME.getCoercing().parseLiteral(new StringValue("2026-06-04T12:00:00Z"));
+        assertThat(valid, is("2026-06-04T12:00:00Z"));
+
+        assertThrows(CoercingParseLiteralException.class,
+                () -> AppSyncScalars.AWS_DATE_TIME.getCoercing().parseLiteral(new StringValue("not-a-date")));
+    }
+
+    @Test
+    void scalar_awsshort_parseLiteral_outOfRange_throwsCoercingParseLiteralExceptionNotParseValue() {
+        // Same fix, exercised through the numeric (IntValue) delegation path rather than string.
+        assertThrows(CoercingParseLiteralException.class,
+                () -> AppSyncScalars.AWS_SHORT.getCoercing().parseLiteral(new IntValue(BigInteger.valueOf(99999))));
     }
 
     @Test

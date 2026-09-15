@@ -658,6 +658,8 @@ floci:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
+      # graphql-url: http://floci-graphql:8181  # set to skip sidecar container management
+      graphql-image: "floci/floci:latest-graphql"
     s3vectors:
       enabled: true
     s3tables:

@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.graphql.GraphqlSidecarServer;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -25,13 +28,22 @@ class AppSyncIntegrationTest {
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request";
     private static String apiId;
     private static String keyId;
+    private static HttpServer graphqlServer;
 
     @jakarta.inject.Inject
     StorageBackend<String, SchemaCreationStatus> schemaStatusStore;
 
     @BeforeAll
-    static void configureRestAssured() {
+    static void configureRestAssured() throws Exception {
+        // Matches src/test/resources/application.yml's services.appsync.graphql-url.
+        // StartSchemaCreation validates against the sidecar, so this needs to be up.
+        graphqlServer = GraphqlSidecarServer.start(18181);
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @AfterAll
+    static void stopGraphqlSidecar() {
+        graphqlServer.stop(0);
     }
 
     /**

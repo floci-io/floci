@@ -21,7 +21,7 @@ Floci implements the AWS AppSync Management API, providing local emulation of Gr
 
 | Operation | Description |
 |---|---|
-| `StartSchemaCreation` | Start schema creation — validates and parses SDL using graphql-java (invalid SDL returns 400) |
+| `StartSchemaCreation` | Start schema creation: validates and parses SDL via the GraphQL sidecar (invalid SDL returns 400) |
 | `GetSchemaCreationStatus` | Get schema creation status |
 | `GetIntrospectionSchema` | Get the introspection schema |
 
@@ -135,9 +135,34 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 
 ## Schema Registry
 
-`StartSchemaCreation` validates the provided GraphQL SDL using [graphql-java](https://github.com/graphql-java/graphql-java). Invalid schemas are rejected asynchronously (status `FAILED` with details after `PROCESSING`). Valid schemas are registered in an in-memory `SchemaRegistry` and persisted to the schema store.
+Schema parsing and query execution run in the **GraphQL sidecar** (issue #2917), not in Floci's
+own process: [graphql-java](https://github.com/graphql-java/graphql-java) is a ~3.8MB dependency
+used only by AppSync, so keeping it out of Floci's JVM/native image altogether, mirroring the
+Cedar sidecar pattern already used for Verified Permissions, avoids paying that cost in every
+build regardless of whether AppSync is ever used. `GraphqlSidecarManager` lazily starts the
+sidecar container on first use; `floci.services.appsync.graphql-url` points at an already-running
+instance instead (Docker Compose setups) and skips container management entirely.
 
-On emulator startup, after storage load and orphan recovery, Floci **rehydrates** SUCCESS SDLs from the schema store into `SchemaRegistry` so `POST /v1/apis/{apiId}/graphql` works across restarts (memory/persistent/hybrid/wal).
+The sidecar itself carries no AppSync-specific knowledge: no `@aws_auth`, no IAM, no directive
+semantics. `StartSchemaCreation` sends the SDL (with AppSync's directive declarations and the 17
+custom scalar types injected, customers never declare those themselves) to the sidecar's
+`/v1/schema/validate`, which parses and compiles it generically. Invalid schemas are rejected
+asynchronously (status `FAILED` with details after `PROCESSING`), using the sidecar's structured,
+per-problem errors to build the same `codeErrors` shape this API always returned. Valid schemas
+are registered in Floci's own `SchemaRegistry` (now just a raw-SDL cache; nothing is compiled
+in-process) and persisted to the schema store.
+
+At execution time, Floci calls the sidecar's `/v1/plan` to learn which `(type, field)` coordinates
+a query will visit and what directives are on each, computes `@aws_auth`/IAM/Cognito/Lambda
+authorization decisions itself (this AWS-specific logic never runs in the sidecar), and passes any
+denied coordinates to `/v1/execute` as an opaque list; the sidecar nulls those fields out with the
+given error, without ever knowing why.
+
+On emulator startup, after storage load and orphan recovery, Floci **rehydrates** SUCCESS SDLs
+from the schema store into `SchemaRegistry` so `POST /v1/apis/{apiId}/graphql` works across
+restarts (memory/persistent/hybrid/wal), without re-validating against the sidecar, since a
+persisted SDL already passed validation once and restarts shouldn't eagerly start a container that
+might otherwise never be needed.
 
 The following **AWS scalar types** are pre-registered and available in any schema without requiring explicit `scalar` declarations:
 
@@ -176,7 +201,7 @@ The following **AppSync directives** are pre-defined and recognized in schemas:
 
 Unknown directives are rejected during schema registration.
 
-Schema extensions (`extend type Query { ... }`) are supported natively through graphql-java.
+Schema extensions (`extend type Query { ... }`) are supported natively through graphql-java, running in the sidecar.
 
 ## GraphQL execute (data-plane)
 

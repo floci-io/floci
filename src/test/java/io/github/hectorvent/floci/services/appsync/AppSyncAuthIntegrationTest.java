@@ -1,12 +1,15 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.core.common.ResolvedServiceCatalog;
+import io.github.hectorvent.floci.graphql.GraphqlSidecarServer;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncExecutionController;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testutil.AppSyncRequestSigner;
 import io.restassured.RestAssured;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -29,12 +32,21 @@ class AppSyncAuthIntegrationTest {
     private static final String MGMT_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request";
 
+    private static HttpServer graphqlServer;
+
     @Inject
     ResolvedServiceCatalog catalog;
 
     @BeforeAll
-    static void configureRestAssured() {
+    static void configureRestAssured() throws Exception {
+        // Matches src/test/resources/application.yml's services.appsync.graphql-url.
+        graphqlServer = GraphqlSidecarServer.start(18181);
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @AfterAll
+    static void stopGraphqlSidecar() {
+        graphqlServer.stop(0);
     }
 
     @Test

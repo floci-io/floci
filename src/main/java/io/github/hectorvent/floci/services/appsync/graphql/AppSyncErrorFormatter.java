@@ -1,10 +1,5 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
-import graphql.ErrorType;
-import graphql.ExecutionResult;
-import graphql.GraphQLError;
-import graphql.ErrorClassification;
-import graphql.language.SourceLocation;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.ArrayList;
@@ -13,8 +8,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Maps graphql-java {@link ExecutionResult} errors to AWS AppSync wire shapes
- * with top-level {@code errorType}/{@code errorInfo} (not extensions-only).
+ * Maps the GraphQL sidecar's {@code /v1/execute} result (graphql-java's own {@code
+ * ExecutionResult.toSpecification()} shape, already spec-compliant JSON by the time it crosses
+ * the wire) to AWS AppSync's wire shape, with top-level {@code errorType}/{@code errorInfo}
+ * (not extensions-only). No graphql-java types here: this only ever sees plain {@code
+ * Map}/{@code List} JSON, since that's all the sidecar can hand back over HTTP (issue #2917).
  *
  * @see <a href="https://docs.aws.amazon.com/appsync/latest/devguide/built-in-util-js.html">AppSync DG {@code $util.error} ({@code errorType}/{@code errorInfo})</a>
  * @see <a href="https://github.com/graphql/graphql-over-http/issues/81">AppSync HTTP behavior (AppSync team / @robzhu)</a>
@@ -31,16 +29,20 @@ public class AppSyncErrorFormatter {
     public static final String MSG_MISSING_OPERATION_NAME = "Missing operation name.";
     public static final String MSG_NO_SCHEMA = "No schema definition exists.";
 
-    public Map<String, Object> format(ExecutionResult result) {
+    /** {@code sidecarResult} is exactly what {@link io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient#execute} returned. */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> format(Map<String, Object> sidecarResult) {
         Map<String, Object> response = new LinkedHashMap<>();
-        if (result.isDataPresent()) {
-            response.put("data", result.getData());
+        if (sidecarResult.containsKey("data")) {
+            response.put("data", sidecarResult.get("data"));
         }
-        List<GraphQLError> errors = result.getErrors();
-        if (errors != null && !errors.isEmpty()) {
-            List<Map<String, Object>> formatted = new ArrayList<>(errors.size());
-            for (GraphQLError error : errors) {
-                formatted.add(formatError(error));
+        Object errors = sidecarResult.get("errors");
+        if (errors instanceof List<?> list && !list.isEmpty()) {
+            List<Map<String, Object>> formatted = new ArrayList<>(list.size());
+            for (Object error : list) {
+                if (error instanceof Map<?, ?> map) {
+                    formatted.add(formatError((Map<String, Object>) map));
+                }
             }
             response.put("errors", formatted);
         }
@@ -56,48 +58,36 @@ public class AppSyncErrorFormatter {
         return response;
     }
 
-    private Map<String, Object> formatError(GraphQLError error) {
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> formatError(Map<String, Object> error) {
         Map<String, Object> map = new LinkedHashMap<>();
-        map.put("message", error.getMessage());
-        List<SourceLocation> locations = error.getLocations();
-        if (locations != null && !locations.isEmpty()) {
-            List<Map<String, Object>> locationMaps = new ArrayList<>(locations.size());
-            for (SourceLocation location : locations) {
-                Map<String, Object> loc = new LinkedHashMap<>();
-                loc.put("line", location.getLine());
-                loc.put("column", location.getColumn());
-                locationMaps.add(loc);
-            }
-            map.put("locations", locationMaps);
+        map.put("message", error.get("message"));
+        Object locations = error.get("locations");
+        if (locations != null) {
+            map.put("locations", locations);
         }
-        List<Object> path = error.getPath();
-        if (path != null && !path.isEmpty()) {
+        Object path = error.get("path");
+        if (path != null) {
             map.put("path", path);
         }
-        map.put("errorType", toAppSyncErrorType(error.getErrorType()));
+        String classification = null;
+        Object extensions = error.get("extensions");
+        if (extensions instanceof Map<?, ?> extensionsMap) {
+            Object raw = extensionsMap.get("classification");
+            classification = raw == null ? null : String.valueOf(raw);
+        }
+        map.put("errorType", toAppSyncErrorType(classification));
         map.put("errorInfo", null);
         return map;
     }
 
-    static String toAppSyncErrorType(ErrorClassification classification) {
-        if (classification == ErrorType.InvalidSyntax) {
-            return "SyntaxError";
-        }
-        if (classification == ErrorType.ValidationError) {
-            return "ValidationError";
-        }
-        if (classification == ErrorType.OperationNotSupported) {
-            return "OperationNotSupported";
-        }
-        if (classification == ErrorType.DataFetchingException) {
-            return "DataFetchingException";
-        }
+    static String toAppSyncErrorType(String classification) {
         if (classification == null) {
             return "Unknown";
         }
-        if (classification instanceof ErrorType errorType) {
-            return errorType.name();
-        }
-        return classification.toString();
+        // graphql-java's own ErrorType enum names almost all match AppSync's wire names already;
+        // InvalidSyntax is the one AppSync spells differently. Anything else (including a custom
+        // classification like the sidecar's denyFields "Unauthorized") passes through unchanged.
+        return "InvalidSyntax".equals(classification) ? "SyntaxError" : classification;
     }
 }

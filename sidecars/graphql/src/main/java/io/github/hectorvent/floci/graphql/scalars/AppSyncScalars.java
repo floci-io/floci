@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.appsync.graphql.scalars;
+package io.github.hectorvent.floci.graphql.scalars;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,6 +18,7 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Base64;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 public final class AppSyncScalars {
@@ -51,7 +52,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
@@ -77,7 +78,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
@@ -103,7 +104,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
@@ -129,7 +130,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
@@ -155,7 +156,7 @@ public final class AppSyncScalars {
             }
             @Override
             public Long parseLiteral(Object input) {
-                if (input instanceof graphql.language.IntValue iv) return parseValue(iv.getValue().longValue());
+                if (input instanceof graphql.language.IntValue iv) return asLiteral(() -> parseValue(iv.getValue().longValue()));
                 throw new CoercingParseLiteralException("AWSTimestamp must be an integer");
             }
         })
@@ -181,7 +182,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
@@ -207,7 +208,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
@@ -232,7 +233,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
@@ -261,7 +262,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
@@ -355,7 +356,7 @@ public final class AppSyncScalars {
             }
             @Override
             public Integer parseLiteral(Object input) {
-                if (input instanceof graphql.language.IntValue iv) return parseValue(iv.getValue().intValue());
+                if (input instanceof graphql.language.IntValue iv) return asLiteral(() -> parseValue(iv.getValue().intValue()));
                 throw new CoercingParseLiteralException("AWSShort must be an integer");
             }
         })
@@ -405,7 +406,7 @@ public final class AppSyncScalars {
             }
             @Override
             public String parseLiteral(Object input) {
-                if (input instanceof StringValue sv) return parseValue(sv.getValue());
+                if (input instanceof StringValue sv) return asLiteral(() -> parseValue(sv.getValue()));
                 if (input instanceof graphql.language.FloatValue fv) return fv.getValue().toString();
                 if (input instanceof graphql.language.IntValue iv) return iv.getValue().toString();
                 return null;
@@ -434,7 +435,7 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (input instanceof graphql.language.IntValue iv) return iv.getValue().toString();
-                if (input instanceof StringValue sv) return parseValue(sv.getValue());
+                if (input instanceof StringValue sv) return asLiteral(() -> parseValue(sv.getValue()));
                 return null;
             }
         })
@@ -461,10 +462,25 @@ public final class AppSyncScalars {
             @Override
             public String parseLiteral(Object input) {
                 if (!(input instanceof StringValue sv)) return null;
-                return parseValue(sv.getValue());
+                return asLiteral(() -> parseValue(sv.getValue()));
             }
         })
         .build();
+
+    /**
+     * graphql-java only catches {@link CoercingParseLiteralException} while validating a literal
+     * argument value; every parseLiteral() here delegates to parseValue(), which throws {@link
+     * CoercingParseValueException} instead. Uncaught, that escapes the whole request as an
+     * unhandled exception (an HTTP 500) rather than becoming a spec-correct ValidationError.
+     * This wraps the delegation so a bad literal fails the same way a bad variable value does.
+     */
+    private static <T> T asLiteral(Supplier<T> parseValueCall) {
+        try {
+            return parseValueCall.get();
+        } catch (CoercingParseValueException e) {
+            throw new CoercingParseLiteralException(e.getMessage());
+        }
+    }
 
     private AppSyncScalars() {}
 }
