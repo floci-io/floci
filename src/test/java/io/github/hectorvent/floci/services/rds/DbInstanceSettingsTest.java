@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -45,5 +48,25 @@ class DbInstanceSettingsTest {
         }
         assertTrue(DbInstanceSettings.windowsOverlap(
                 DbInstanceSettings.backupWindowAfter("mon:00:00-mon:23:45"), "mon:00:00-mon:23:45"));
+    }
+
+    @Test
+    void applyToPersistsOperationalSettingsAndMergesLogExports() {
+        var instance = new io.github.hectorvent.floci.services.rds.model.DbInstance();
+        instance.setEnabledCloudwatchLogsExports(List.of("error", "slowquery"));
+        var settings = new DbInstanceSettings(null, null, null, null, null, null,
+                60, "arn:aws:iam::123456789012:role/rds-monitoring", true, 93,
+                "open-source-rds-extended-support-disabled", 200,
+                List.of("general", "error"), List.of("slowquery"));
+
+        settings.applyTo(instance);
+
+        assertEquals(60, instance.getMonitoringInterval());
+        assertEquals("arn:aws:iam::123456789012:role/rds-monitoring", instance.getMonitoringRoleArn());
+        assertTrue(instance.isPerformanceInsightsEnabled());
+        assertEquals(93, instance.getPerformanceInsightsRetentionPeriod());
+        assertEquals("open-source-rds-extended-support-disabled", instance.getEngineLifecycleSupport());
+        assertEquals(200, instance.getMaxAllocatedStorage());
+        assertEquals(List.of("error", "general"), instance.getEnabledCloudwatchLogsExports());
     }
 }

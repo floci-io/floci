@@ -6153,10 +6153,16 @@ class RdsServiceTest {
                 20, false, null, null, null, null, false, false, null,
                 Map.of(), List.of(), null, null, true,
                 new DbInstanceSettings(true, "arn:aws:kms:us-east-1:123456789012:key/k1", 7,
-                        "23:30-00:00", "sun:03:08-sun:03:38", false));
+                        "23:30-00:00", "sun:03:08-sun:03:38", false,
+                        60, "arn:aws:iam::123456789012:role/rds-monitoring", true, 93,
+                        "open-source-rds-extended-support-disabled", 200,
+                        List.of("postgresql", "upgrade"), null));
 
         rdsService.modifyDbInstance("mydb", null, null, null, List.of(), null, null, null,
-                new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true));
+                new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true,
+                        15, "arn:aws:iam::123456789012:role/new-monitoring", false, 31,
+                        "open-source-rds-extended-support", 300,
+                        List.of("error"), List.of("upgrade")));
 
         DbInstance stored = rdsService.getDbInstance("mydb");
         assertEquals(3, stored.getBackupRetentionPeriod());
@@ -6165,6 +6171,13 @@ class RdsServiceTest {
         assertTrue(stored.isStorageEncrypted());
         assertEquals("arn:aws:kms:us-east-1:123456789012:key/k1", stored.getKmsKeyId());
         assertEquals("sun:03:08-sun:03:38", stored.getPreferredMaintenanceWindow());
+        assertEquals(15, stored.getMonitoringInterval());
+        assertEquals("arn:aws:iam::123456789012:role/new-monitoring", stored.getMonitoringRoleArn());
+        assertFalse(stored.isPerformanceInsightsEnabled());
+        assertEquals(31, stored.getPerformanceInsightsRetentionPeriod());
+        assertEquals("open-source-rds-extended-support", stored.getEngineLifecycleSupport());
+        assertEquals(300, stored.getMaxAllocatedStorage());
+        assertEquals(List.of("postgresql", "error"), stored.getEnabledCloudwatchLogsExports());
     }
 
     @Test
