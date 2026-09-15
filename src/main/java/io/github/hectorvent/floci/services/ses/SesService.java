@@ -4,9 +4,6 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
-import io.github.hectorvent.floci.services.ses.model.AccountDetails;
-import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
@@ -48,7 +45,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -64,10 +60,9 @@ public class SesService {
     // flows and send-path reads, reaching the store through its find/save.
     private final SesIdentityService identityService;
     // Sent-email records extracted to SesSentEmailService. The send path records finished emails via
-    // it; send-statistics and inspection read back through it.
+    // it; the account and v1 statistics reads go to the service directly, inspection still reads
+    // back through the facade.
     private final SesSentEmailService sentEmailService;
-    // Account-level settings, extracted to its own service. The facade delegates.
-    private final SesAccountService accountService;
     // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
     // reads via it, and ARN-dispatched tagging reads/writes via its find/save.
     private final SesTemplateService templateService;
@@ -106,8 +101,7 @@ public class SesService {
     private final RegionResolver regionResolver;
 
     @Inject
-    public SesService(SesIdentityService identityService, SesAccountService accountService,
-                       SesCvetService cvetService,
+    public SesService(SesIdentityService identityService, SesCvetService cvetService,
                        SesPolicyService policyService, SesContactService contactService,
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
@@ -117,7 +111,6 @@ public class SesService {
                        RegionResolver regionResolver) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
-        this.accountService = accountService;
         this.templateService = templateService;
         this.configSetService = configSetService;
         this.suppressionService = suppressionService;
@@ -135,7 +128,6 @@ public class SesService {
 
     SesService(SesIdentityService identityService,
                SesSentEmailService sentEmailService,
-               SesAccountService accountService,
                SesTemplateService templateService,
                SesConfigurationSetService configSetService,
                SesSuppressionService suppressionService,
@@ -147,7 +139,6 @@ public class SesService {
                SmtpRelay smtpRelay) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
-        this.accountService = accountService;
         this.templateService = templateService;
         this.configSetService = configSetService;
         this.suppressionService = suppressionService;
@@ -546,10 +537,6 @@ public class SesService {
         return events;
     }
 
-    public long getSentEmailCount(String region) {
-        return sentEmailService.countInRegion(region);
-    }
-
     public void setIdentityNotificationTopic(String identityValue, String notificationType,
                                               String snsTopic, String region) {
         identityService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic, region);
@@ -672,33 +659,6 @@ public class SesService {
 
     public void clearEmails() {
         sentEmailService.clear();
-    }
-
-    public boolean isAccountSendingEnabled(String region) {
-        return accountService.isAccountSendingEnabled(region);
-    }
-
-    public void setAccountSendingEnabled(String region, boolean enabled) {
-        accountService.setAccountSendingEnabled(region, enabled);
-    }
-
-    public Optional<AccountDetails> findAccountDetails(String region) {
-        return accountService.findAccountDetails(region);
-    }
-
-    public AccountDetails putAccountDetails(String region, String mailType, String websiteUrl,
-                                            String contactLanguage, String useCaseDescription,
-                                            List<String> additionalContacts, boolean productionAccessEnabled) {
-        return accountService.putAccountDetails(region, mailType, websiteUrl, contactLanguage,
-                useCaseDescription, additionalContacts, productionAccessEnabled);
-    }
-
-    public Optional<AccountVdmAttributes> findAccountVdmAttributes(String region) {
-        return accountService.findAccountVdmAttributes(region);
-    }
-
-    public void putAccountVdmAttributes(String region, AccountVdmAttributes vdm) {
-        accountService.putAccountVdmAttributes(region, vdm);
     }
 
     public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {
@@ -1178,17 +1138,6 @@ public class SesService {
         }
     }
 
-
-    // Dedicated-IP auto-warmup is an account-level setting owned by SesAccountService.
-
-    public boolean isAccountDedicatedIpAutoWarmupEnabled(String region) {
-        return accountService.isDedicatedIpAutoWarmupEnabled(region);
-    }
-
-    public void setAccountDedicatedIpAutoWarmup(String region, boolean enabled) {
-        accountService.setDedicatedIpAutoWarmup(region, enabled);
-    }
-
     public void createConfigurationSetEventDestination(String configSetName, String eventDestinationName,
                                                        EventDestination dest, String region) {
         configSetService.createEventDestination(configSetName, eventDestinationName, dest, region);
@@ -1231,7 +1180,8 @@ public class SesService {
                 return List.copyOf(options.getSuppressedReasons());
             }
         }
-        return List.copyOf(getAccountSuppressionAttributes(region).getSuppressedReasons());
+        return List.copyOf(
+                suppressionService.getAccountSuppressionAttributes(region).getSuppressedReasons());
     }
 
 
@@ -1354,16 +1304,9 @@ public class SesService {
     }
 
     // ──────────────────── Suppression (account attributes + list) ────────────────────
-    // Storage lives in SesSuppressionService; the facade forwards, and its send
+    // Storage lives in SesSuppressionService; the account attributes are read and written by the v2
+    // controller directly, the list operations below keep the tenant routing here, and the send
     // filters (collectSuppressedReasons / resolveSuppressionReason) read entries back through it.
-
-    public AccountSuppressionAttributes getAccountSuppressionAttributes(String region) {
-        return suppressionService.getAccountSuppressionAttributes(region);
-    }
-
-    public void putAccountSuppressionAttributes(String region, List<String> suppressedReasons) {
-        suppressionService.putAccountSuppressionAttributes(region, suppressedReasons);
-    }
 
     // A TenantName routes each suppression-list operation to that tenant's own list (fully separate
     // from the account list on AWS); the reason/address validation still runs first, matching the

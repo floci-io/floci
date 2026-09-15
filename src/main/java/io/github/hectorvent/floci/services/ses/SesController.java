@@ -2,8 +2,6 @@ package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
-import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.DashboardOptions;
 import io.github.hectorvent.floci.services.ses.model.GuardianOptions;
@@ -49,9 +47,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseOptionString;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.parseSendingEnabled;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.parseSuppressedReasons;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readRequiredStringField;
@@ -60,7 +59,6 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObjec
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.unexpectedStartError;
 
 /**
  * REST JSON controller for the AWS SES V2 API.
@@ -82,14 +80,18 @@ public class SesController {
     private final SesService sesService;
     // The bulk send resolves a stored template's content before handing the entries to the facade.
     private final SesTemplateService templateService;
+    // The send endpoints read the account-level sending switch before building the message.
+    private final SesAccountService accountService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public SesController(SesService sesService, SesTemplateService templateService,
-                         RegionResolver regionResolver, ObjectMapper objectMapper) {
+                         SesAccountService accountService, RegionResolver regionResolver,
+                         ObjectMapper objectMapper) {
         this.sesService = sesService;
         this.templateService = templateService;
+        this.accountService = accountService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -471,7 +473,7 @@ public class SesController {
     public Response sendEmail(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (!sesService.isAccountSendingEnabled(region)) {
+            if (!accountService.isAccountSendingEnabled(region)) {
                 throw new AwsException("SendingPausedException",
                         "Account sending is disabled.", 400);
             }
@@ -605,7 +607,7 @@ public class SesController {
     public Response sendBulkEmail(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (!sesService.isAccountSendingEnabled(region)) {
+            if (!accountService.isAccountSendingEnabled(region)) {
                 throw new AwsException("SendingPausedException",
                         "Account sending is disabled.", 400);
             }
@@ -742,7 +744,7 @@ public class SesController {
         String region = regionResolver.resolveRegion(headers);
         String templateName = null;
         try {
-            if (!sesService.isAccountSendingEnabled(region)) {
+            if (!accountService.isAccountSendingEnabled(region)) {
                 throw new AwsException("SendingPausedException",
                         "Account sending is disabled.", 400);
             }
@@ -1507,263 +1509,6 @@ public class SesController {
         }
     }
 
-    // ──────────────────────────── Account ────────────────────────────
-
-    @GET
-    @Path("/account")
-    public Response getAccount(@Context HttpHeaders headers) {
-        String region = regionResolver.resolveRegion(headers);
-        long sentCount = sesService.getSentEmailCount(region);
-        boolean sendingEnabled = sesService.isAccountSendingEnabled(region);
-        AccountSuppressionAttributes suppression = sesService.getAccountSuppressionAttributes(region);
-
-        ObjectNode result = objectMapper.createObjectNode();
-        result.put("DedicatedIpAutoWarmupEnabled", sesService.isAccountDedicatedIpAutoWarmupEnabled(region));
-        result.put("EnforcementStatus", "HEALTHY");
-        result.put("ProductionAccessEnabled", true);
-        result.put("SendingEnabled", sendingEnabled);
-
-        ObjectNode sendQuota = result.putObject("SendQuota");
-        sendQuota.put("Max24HourSend", 200.0);
-        sendQuota.put("MaxSendRate", 1.0);
-        sendQuota.put("SentLast24Hours", (double) sentCount);
-
-        ObjectNode suppressionAttrs = result.putObject("SuppressionAttributes");
-        ArrayNode reasons = suppressionAttrs.putArray("SuppressedReasons");
-        for (String r : suppression.getSuppressedReasons()) {
-            reasons.add(r);
-        }
-
-        // AWS only surfaces VdmAttributes once VDM has been configured for the region (an untouched
-        // region omits the key entirely), and only adds the Dashboard/Guardian sub-attributes while
-        // VdmEnabled is ENABLED.
-        sesService.findAccountVdmAttributes(region).ifPresent(vdm -> {
-            ObjectNode vdmAttrs = result.putObject("VdmAttributes");
-            vdmAttrs.put("VdmEnabled", featureStatus(vdm.vdmEnabled()));
-            if (vdm.vdmEnabled()) {
-                vdmAttrs.putObject("DashboardAttributes")
-                        .put("EngagementMetrics", featureStatus(vdm.engagementMetrics()));
-                vdmAttrs.putObject("GuardianAttributes")
-                        .put("OptimizedSharedDelivery", featureStatus(vdm.optimizedSharedDelivery()));
-            }
-        });
-
-        // Like VdmAttributes, AWS omits Details until PutAccountDetails has run for the region.
-        sesService.findAccountDetails(region).ifPresent(details -> {
-            ObjectNode d = result.putObject("Details");
-            d.put("MailType", details.mailType());
-            d.put("WebsiteURL", details.websiteUrl());
-            if (details.contactLanguage() != null) {
-                d.put("ContactLanguage", details.contactLanguage());
-            }
-            if (details.useCaseDescription() != null) {
-                d.put("UseCaseDescription", details.useCaseDescription());
-            }
-            if (details.additionalContactEmailAddresses() != null
-                    && !details.additionalContactEmailAddresses().isEmpty()) {
-                ArrayNode addrs = d.putArray("AdditionalContactEmailAddresses");
-                details.additionalContactEmailAddresses().forEach(addrs::add);
-            }
-            ObjectNode review = d.putObject("ReviewDetails");
-            review.put("Status", details.reviewStatus());
-            review.put("CaseId", details.caseId());
-        });
-
-        return Response.ok(result).build();
-    }
-
-    private static String featureStatus(boolean enabled) {
-        return enabled ? "ENABLED" : "DISABLED";
-    }
-
-    @PUT
-    @Path("/account/vdm")
-    public Response putAccountVdmAttributes(@Context HttpHeaders headers, String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
-            JsonNode vdm = request.path("VdmAttributes");
-            if (!vdm.isObject()) {
-                throw new AwsException("BadRequestException", "VdmAttributes is required.", 400);
-            }
-            boolean vdmEnabled = parseFeatureStatus(vdm, "VdmEnabled",
-                    "vdmAttributes.vdmEnabled", true);
-            boolean engagement = parseFeatureStatus(
-                    requireObjectOrAbsent(vdm, "DashboardAttributes"), "EngagementMetrics",
-                    "vdmAttributes.dashboardAttributes.engagementMetrics", false);
-            boolean osd = parseFeatureStatus(
-                    requireObjectOrAbsent(vdm, "GuardianAttributes"), "OptimizedSharedDelivery",
-                    "vdmAttributes.guardianAttributes.optimizedSharedDelivery", false);
-            sesService.putAccountVdmAttributes(region,
-                    new AccountVdmAttributes(vdmEnabled, engagement, osd));
-            LOG.infov("SES V2 PutAccountVdmAttributes: enabled={0}, engagement={1}, osd={2}",
-                    vdmEnabled, engagement, osd);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
-    }
-
-    @POST
-    @Path("/account/details")
-    public Response putAccountDetails(@Context HttpHeaders headers, String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
-
-            // Parse every member first (rejecting wrong JSON types as a serialization error, the way
-            // AWS does before validation), then validate the parsed values together so all constraint
-            // violations are aggregated into one response.
-            String mailType = stringMemberOrAbsent(request, "MailType");
-            String websiteUrl = stringMemberOrAbsent(request, "WebsiteURL");
-            String contactLanguage = stringMemberOrAbsent(request, "ContactLanguage");
-            String useCaseDescription = stringMemberOrAbsent(request, "UseCaseDescription");
-
-            List<String> additionalContacts = null;
-            JsonNode contacts = request.path("AdditionalContactEmailAddresses");
-            if (!contacts.isMissingNode() && !contacts.isNull()) {
-                // A typed list member: reject a non-array, and reject non-string elements, rather than
-                // coercing (asText would turn 123 into "123"), matching how AWS rejects type mismatches.
-                if (!contacts.isArray()) {
-                    throw new AwsException("SerializationException", null, 400);
-                }
-                additionalContacts = new ArrayList<>();
-                for (JsonNode node : contacts) {
-                    if (!node.isTextual()) {
-                        throw new AwsException("SerializationException", null, 400);
-                    }
-                    additionalContacts.add(node.textValue());
-                }
-            }
-            JsonNode productionAccess = request.path("ProductionAccessEnabled");
-            if (!productionAccess.isMissingNode() && !productionAccess.isNull() && !productionAccess.isBoolean()) {
-                throw new AwsException("SerializationException", null, 400);
-            }
-            boolean productionAccessEnabled = productionAccess.asBoolean(false);
-
-            // The service owns validation and the synthetic review/case so they can't be bypassed; the
-            // controller only parses the REST JSON and rejects wrong JSON types.
-            sesService.putAccountDetails(region, mailType, websiteUrl, contactLanguage,
-                    useCaseDescription, additionalContacts, productionAccessEnabled);
-            LOG.infov("SES V2 PutAccountDetails: region={0}, mailType={1}", region, mailType);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            // AWS reports a malformed JSON body as a SerializationException, the same error type used
-            // for wrong-typed members above.
-            throw new AwsException("SerializationException", null, 400);
-        }
-    }
-
-    // Parse an AWS FeatureStatus (ENABLED/DISABLED) field. A required member that is absent, or any
-    // value outside the enum, is a Smithy BadRequestException the way AWS returns it; an absent
-    // optional member defaults to DISABLED (false).
-    private static boolean parseFeatureStatus(JsonNode parent, String field, String path, boolean required) {
-        JsonNode node = parent.path(field);
-        if (node.isMissingNode() || node.isNull()) {
-            if (required) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value null at '" + path
-                                + "' failed to satisfy constraint: Member must not be null", 400);
-            }
-            return false;
-        }
-        if (node.isTextual()) {
-            String value = node.asText();
-            if ("ENABLED".equals(value)) {
-                return true;
-            }
-            if ("DISABLED".equals(value)) {
-                return false;
-            }
-        }
-        throw new AwsException("BadRequestException",
-                "1 validation error detected: Value at '" + path
-                        + "' failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]",
-                400);
-    }
-
-    @PUT
-    @Path("/account/dedicated-ips/warmup")
-    public Response putAccountDedicatedIpWarmupAttributes(@Context HttpHeaders headers, String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode request = readOptionBody(objectMapper, body);
-            JsonNode enabledNode = request.path("AutoWarmupEnabled");
-            // AutoWarmupEnabled has a default of false: the SDK omits it when false, so a missing
-            // member is treated as false rather than rejected. A present value goes through the
-            // shared SES v2 boolean coercion (string→true, null/number/container→SerializationException).
-            boolean enabled = enabledNode.isMissingNode() ? false : coerceBoolean(enabledNode);
-            sesService.setAccountDedicatedIpAutoWarmup(region, enabled);
-            LOG.infov("SES V2 PutAccountDedicatedIpWarmupAttributes: {0}", enabled);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        }
-    }
-
-    @PUT
-    @Path("/account/suppression")
-    public Response putAccountSuppressionAttributes(@Context HttpHeaders headers, String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
-            JsonNode reasonsNode = request.path("SuppressedReasons");
-            List<String> reasons = new ArrayList<>();
-            if (!reasonsNode.isMissingNode() && !reasonsNode.isNull()) {
-                if (!reasonsNode.isArray()) {
-                    throw new AwsException("BadRequestException", "SuppressedReasons must be an array.", 400);
-                }
-                for (JsonNode r : reasonsNode) {
-                    if (r.isNull() || !r.isTextual()) {
-                        throw new AwsException("BadRequestException",
-                                "SuppressedReasons entries must be strings.", 400);
-                    }
-                    reasons.add(r.asText());
-                }
-            }
-            sesService.putAccountSuppressionAttributes(region, reasons);
-            LOG.infov("SES V2 PutAccountSuppressionAttributes: {0}", reasons);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
-    }
-
-    @PUT
-    @Path("/account/sending")
-    public Response putAccountSendingAttributes(@Context HttpHeaders headers, String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode request = objectMapper.readTree(body);
-            JsonNode sendingEnabledNode = request.get("SendingEnabled");
-            if (sendingEnabledNode == null || !sendingEnabledNode.isBoolean()) {
-                throw new AwsException("BadRequestException",
-                        "SendingEnabled must be present and must be a boolean", 400);
-            }
-            sesService.setAccountSendingEnabled(region, sendingEnabledNode.booleanValue());
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (Exception e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
-    }
-
     // ──────────────────── Suppression list ───────────────────────────
 
     @PUT
@@ -2069,55 +1814,6 @@ public class SesController {
                     "TemplateData must be a JSON object.", 400);
         }
         return node;
-    }
-
-    /**
-     * Parses a {@code SuppressedReasons} JSON array into a list, validating
-     * structure only; reason values are validated by the service layer.
-     * Structural violations reproduce the AWS deserialization-layer errors
-     * (verified against real AWS SES V2 on 2026-06-13): a non-array node and
-     * non-string scalar / container elements fail with
-     * {@code SerializationException}, while {@code null} elements pass
-     * deserialization and are rejected by the service-layer value validation,
-     * exactly as AWS does. Missing / null yields an empty list for the PUT
-     * path, which AWS treats as an explicit empty override.
-     */
-    private static List<String> parseSuppressedReasons(JsonNode reasonsNode) {
-        List<String> reasons = new ArrayList<>();
-        if (!reasonsNode.isMissingNode() && !reasonsNode.isNull()) {
-            if (!reasonsNode.isArray()) {
-                throw new AwsException("SerializationException", "Expected list or null", 400);
-            }
-            for (JsonNode r : reasonsNode) {
-                if (r.isTextual() || r.isNull()) {
-                    reasons.add(r.asText(null));
-                } else if (r.isNumber()) {
-                    throw new AwsException("SerializationException",
-                            "NUMBER_VALUE can not be converted to a String", 400);
-                } else if (r.isBoolean()) {
-                    throw new AwsException("SerializationException",
-                            (r.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
-                                    + " can not be converted to a String", 400);
-                } else {
-                    throw unexpectedStartError(r);
-                }
-            }
-        }
-        return reasons;
-    }
-
-    /**
-     * Reproduces the AWS deserialization behavior for {@code SendingEnabled}
-     * (verified against real AWS SES V2 on 2026-06-13): a missing member
-     * defaults to {@code false}, any string coerces to {@code true}, and
-     * explicit {@code null} or non-boolean scalars fail with
-     * {@code SerializationException}.
-     */
-    private static boolean parseSendingEnabled(JsonNode enabledNode) {
-        if (enabledNode.isMissingNode()) {
-            return false;
-        }
-        return coerceBoolean(enabledNode);
     }
 
     /**

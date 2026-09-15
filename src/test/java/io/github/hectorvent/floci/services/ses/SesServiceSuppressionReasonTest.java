@@ -25,6 +25,7 @@ class SesServiceSuppressionReasonTest {
     private static final String REGION = "us-east-1";
 
     private SesService service;
+    private SesSuppressionService suppression;
     private InMemoryStorage<String, SuppressedDestination> suppressionStore;
     private InMemoryStorage<String, AccountSuppressionAttributes> accountSuppressionStore;
 
@@ -34,6 +35,7 @@ class SesServiceSuppressionReasonTest {
         suppressionStore = builder.suppressionStore();
         accountSuppressionStore = builder.accountSuppressionStore();
         service = builder.build();
+        suppression = builder.suppressionService();
     }
 
     @Test
@@ -54,7 +56,7 @@ class SesServiceSuppressionReasonTest {
     void onListButReasonNotInAccountSettings_returnsNull() {
         service.putSuppressedDestination(REGION, "complainer@example.com", "COMPLAINT");
         // Narrow the account settings to BOUNCE only.
-        service.putAccountSuppressionAttributes(REGION, List.of("BOUNCE"));
+        suppression.putAccountSuppressionAttributes(REGION, List.of("BOUNCE"));
         assertNull(service.resolveSuppressionReason("complainer@example.com", null, REGION));
     }
 
@@ -62,7 +64,7 @@ class SesServiceSuppressionReasonTest {
     void accountSettingsEmpty_returnsNull() {
         service.putSuppressedDestination(REGION, "bouncer@example.com", "BOUNCE");
         // Disable account-level suppression by passing an empty list.
-        service.putAccountSuppressionAttributes(REGION, new ArrayList<>());
+        suppression.putAccountSuppressionAttributes(REGION, new ArrayList<>());
         assertNull(service.resolveSuppressionReason("bouncer@example.com", null, REGION));
     }
 
