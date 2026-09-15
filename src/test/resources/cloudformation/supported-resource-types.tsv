@@ -140,6 +140,6 @@ AWS::SSM::Parameter	SsmCfnProvisioner
 AWS::Scheduler::ScheduleGroup	SchedulerScheduleGroupCfnProvisioner
 AWS::SecretsManager::Secret	SecretsManagerCfnProvisioner
 AWS::SecretsManager::SecretTargetAttachment	SecretTargetAttachmentCfnProvisioner
-AWS::StepFunctions::StateMachine	LEGACY_SWITCH
+AWS::StepFunctions::StateMachine	StepFunctionsCfnProvisioner
 AWS::WAFv2::WebACL	WafV2CfnProvisioner
 Custom::DynamoDBReplica	LEGACY_SWITCH
