@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -86,12 +87,14 @@ class DynamoDbStreamsEventSourcePollerTest {
     private io.github.hectorvent.floci.services.sqs.SqsService sqsService;
     private io.github.hectorvent.floci.services.sns.SnsService snsService;
     private io.github.hectorvent.floci.services.s3.S3Service s3Service;
+    private final AtomicLong clock = new AtomicLong();
 
     @Inject
     Instance<RequestContext> requestContextInstance;
 
     @BeforeEach
     void setUp() {
+        clock.set(1_800_000_000_000L);
         config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.LambdaServiceConfig lambdaConfig = mock(EmulatorConfig.LambdaServiceConfig.class);
@@ -113,7 +116,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         // the tests drive pollAndInvoke deterministically.
         poller = new DynamoDbStreamsEventSourcePoller(
                 mock(Vertx.class), streamService, executorService, functionStore,
-                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service);
+                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
     }
 
     private EventSourceMapping persistedStreamsEsmWithStaleCheckpoint() {
@@ -187,7 +190,11 @@ class DynamoDbStreamsEventSourcePollerTest {
     private DynamoDbStreamsEventSourcePoller pollerWith(EsmStore store) {
         return new DynamoDbStreamsEventSourcePoller(
                 mock(Vertx.class), streamService, executorService, functionStore,
-                store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service);
+                store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+    }
+
+    private void advancePastRetry(DynamoDbStreamsEventSourcePoller poller) {
+        clock.addAndGet(poller.retryBackoffMs(1));
     }
 
     /**
@@ -319,6 +326,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         p.pollAndInvoke(esm);
         verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        advancePastRetry(p);
         awaitPollCompletedViaSecondFetch(p, esm);
 
         verify(store, never()).saveForAccount(anyString(), any());
@@ -631,6 +639,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
 
         // Second poll: attempt 2 (retry 1, which exceeds maxRetryAttempts=1 -> exhausted!)
+        advancePastRetry(p);
         p.pollAndInvoke(esm);
 
         // Checkpoint advanced to "s1"
@@ -906,6 +915,7 @@ class DynamoDbStreamsEventSourcePollerTest {
             Thread.sleep(25);
         }
 
+        advancePastRetry(p);
         p.pollAndInvoke(esm);
 
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
@@ -965,6 +975,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
 
         // Second poll: attempt 2 (retry 1, which exceeds maxRetryAttempts=1 -> exhausted!)
+        advancePastRetry(p);
         p.pollAndInvoke(esm);
 
         // Checkpoint advanced to "s1"
@@ -1100,6 +1111,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         }
 
         // Second poll: fetches [s2], s2 fails again -> maxRetries=1 exhausts (attempt 2, retry 1)
+        advancePastRetry(p);
         p.pollAndInvoke(esm);
 
         verify(store, timeout(2000).times(2)).saveForAccount(eq(ACCOUNT_ID), any());
@@ -1118,6 +1130,117 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals(1, dlqPayload.path("DDBStreamBatchInfo").path("batchSize").asInt());
 
         verify(executorService, times(2)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void failingBatchIsNotReinvokedUntilItsBackoffElapses() throws Exception {
+        stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
+        InvokeResult error = new InvokeResult();
+        error.setFunctionError("Unhandled");
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(error);
+
+        EventSourceMapping esm = filterEsm();
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        p.pollAndInvoke(esm);
+        awaitPollCompleted(p);
+        p.pollAndInvoke(esm);
+        awaitPollCompleted(p);
+        verify(executorService, times(1)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+
+        advancePastRetry(p);
+        p.pollAndInvoke(esm);
+        verify(executorService, timeout(2000).times(2)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void retryBackoffDoublesFromThePollIntervalAndCapsOut() {
+        assertEquals(2_000, poller.retryBackoffMs(1));
+        assertEquals(4_000, poller.retryBackoffMs(2));
+        assertEquals(DynamoDbStreamsEventSourcePoller.MAX_RETRY_BACKOFF_MS, poller.retryBackoffMs(20));
+    }
+
+    @Test
+    void batchOlderThan24HoursWithUnlimitedMaximumRecordAgeIsRetried() throws Exception {
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRecordAgeInSeconds(-1);
+
+        assertOldBatchIsRetriedWithoutAnAgeCutoff(esm);
+    }
+
+    @Test
+    void batchOlderThan24HoursWithUnsetMaximumRecordAgeIsRetried() throws Exception {
+        EventSourceMapping esm = filterEsm();
+
+        assertOldBatchIsRetriedWithoutAnAgeCutoff(esm);
+    }
+
+    private void assertOldBatchIsRetriedWithoutAnAgeCutoff(EventSourceMapping esm) throws Exception {
+        DynamoDbStreamRecord record = ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}");
+        record.setApproximateCreationDateTime(clock.get() / 1_000 - 86_401);
+        stubTrimHorizon(List.of(record));
+        InvokeResult error = new InvokeResult();
+        error.setFunctionError("Unhandled");
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(error);
+
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination("arn:aws:sqs:us-east-1:000000000000:my-dlq");
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destinationConfig);
+
+        EsmStore store = mock(EsmStore.class);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(store);
+
+        p.pollAndInvoke(esm);
+        awaitPollCompleted(p);
+
+        verify(store, never()).saveForAccount(anyString(), any());
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+
+        advancePastRetry(p);
+        p.pollAndInvoke(esm);
+        verify(executorService, timeout(2000).times(2))
+                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void batchOlderThanMaximumRecordAgeIsDiscardedAndDeliveredToOnFailure() throws Exception {
+        DynamoDbStreamRecord record = ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}");
+        record.setApproximateCreationDateTime(clock.get() / 1_000 - 61);
+        stubTrimHorizon(List.of(record));
+        InvokeResult error = new InvokeResult();
+        error.setFunctionError("Unhandled");
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(error);
+
+        EventSourceMapping esm = filterEsm();
+        esm.setMaximumRecordAgeInSeconds(60);
+        EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
+        onFailure.setDestination("arn:aws:sqs:us-east-1:000000000000:my-dlq");
+        EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
+        destinationConfig.setOnFailure(onFailure);
+        esm.setDestinationConfig(destinationConfig);
+
+        EsmStore store = mock(EsmStore.class);
+        pollerWith(store).pollAndInvoke(esm);
+
+        verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
+        assertEquals("s1", esm.getShardSequenceNumbers().get(DynamoDbStreamService.SHARD_ID));
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(sqsService, timeout(2000)).sendMessage(anyString(), bodyCaptor.capture(), anyInt(), anyString());
+        JsonNode payload = OBJECT_MAPPER.readTree(bodyCaptor.getValue());
+        assertEquals("MaximumRecordAgeExceeded", payload.path("requestContext").path("condition").asText());
+    }
+
+    private void awaitPollCompleted(DynamoDbStreamsEventSourcePoller poller) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 3_000;
+        while (!poller.activePolls.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(25);
+        }
+        assertTrue(poller.activePolls.isEmpty(), "poll did not complete before the test timeout");
     }
 
     private JsonNode readRecords(byte[] payload) {

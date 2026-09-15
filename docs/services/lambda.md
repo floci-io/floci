@@ -753,6 +753,8 @@ aws lambda update-function-code \
 
 Connect Lambda to SQS, Kinesis, or DynamoDB Streams. Self-managed Apache Kafka event source mappings are accepted, validated, persisted, and returned on the wire, but Floci does not run an active Kafka consumer poller:
 
+For DynamoDB Streams mappings, Floci retries failed batches with exponential backoff, honors `MaximumRetryAttempts` and `MaximumRecordAgeInSeconds`, and sends discarded batches to configured SQS or SNS `DestinationConfig.OnFailure` destinations.
+
 ```bash
 # SQS trigger
 QUEUE_ARN=$(aws sqs get-queue-attributes \
