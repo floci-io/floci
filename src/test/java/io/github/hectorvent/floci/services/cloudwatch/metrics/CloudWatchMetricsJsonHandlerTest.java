@@ -159,6 +159,54 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals("2", dimensionCount.get("Value").asText());
     }
 
+    private JsonNode describeFirstAlarm(ObjectNode putAlarmReq) {
+        assertEquals(200, handler.handle("PutMetricAlarm", putAlarmReq, REGION).getStatus());
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.putArray("AlarmNames").add(putAlarmReq.get("AlarmName").asText());
+        Response describeResp = handler.handle("DescribeAlarms", describeReq, REGION);
+        assertEquals(200, describeResp.getStatus());
+        return ((ObjectNode) describeResp.getEntity()).get("MetricAlarms").get(0);
+    }
+
+    private static ObjectNode alarmRequest(String name) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("AlarmName", name);
+        req.put("MetricName", "M");
+        req.put("Namespace", "NS");
+        req.put("Period", 300);
+        req.put("EvaluationPeriods", 3);
+        req.put("Threshold", 1.0);
+        req.put("ComparisonOperator", "GreaterThanThreshold");
+        return req;
+    }
+
+    // The Query/XML handler has always returned DatapointsToAlarm, TreatMissingData and Unit.
+    // The JSON/CBOR builder dropped all three, so a botocore client (which speaks CBOR to
+    // CloudWatch by default) saw them missing from every DescribeAlarms response.
+    @Test
+    void describeAlarms_returnsTheFieldsTheQueryProtocolAlreadyReturns() {
+        ObjectNode req = alarmRequest("FullAlarm");
+        req.put("DatapointsToAlarm", 2);
+        req.put("TreatMissingData", "breaching");
+        req.put("Unit", "Count");
+
+        JsonNode alarm = describeFirstAlarm(req);
+
+        assertEquals(2, alarm.get("DatapointsToAlarm").asInt());
+        assertEquals("breaching", alarm.get("TreatMissingData").asText());
+        assertEquals("Count", alarm.get("Unit").asText());
+    }
+
+    // PutMetricAlarm stores EvaluationPeriods as the M of an "M out of N" alarm when the
+    // caller omits DatapointsToAlarm, so DescribeAlarms has to echo that same number back.
+    @Test
+    void describeAlarms_omittedDatapointsToAlarm_echoesEvaluationPeriods() {
+        JsonNode alarm = describeFirstAlarm(alarmRequest("DefaultedAlarm"));
+
+        assertEquals(3, alarm.get("EvaluationPeriods").asInt());
+        assertEquals(3, alarm.get("DatapointsToAlarm").asInt());
+    }
+
     @Test
     void getMetricStatistics_decimalEpochStartEndTime_filtersOutOfRangeDatapoints() {
         putMetric("NS", "M", "type", "current", 100.0, EPOCH_NOW);
