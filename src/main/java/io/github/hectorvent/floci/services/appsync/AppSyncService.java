@@ -165,8 +165,7 @@ public class AppSyncService {
     public Optional<GraphqlApi> findGraphqlApiAnyAccount(String apiId) {
         return apiStore.scanAllAccountEntries(apiId::equals).stream()
                 .map(AccountAwareStorageBackend.AccountEntry::value)
-                .findFirst()
-                .map(this::refreshGraphqlApiUris);
+                .findFirst();
     }
 
     public Page<GraphqlApi> listGraphqlApis(Integer maxResults, String nextToken) {

@@ -119,7 +119,8 @@ public class AuthMiddleware {
             AuthRequestInfo info
     ) {
         return new AppSyncAuthContext(
-                identity, authType, authenticationType, deniedFields, api, accessKeyId, info.region(), info.accountId());
+                identity, authType, authenticationType, deniedFields, api, accessKeyId,
+                info.apiRegion(), info.apiAccountId());
     }
 
     static Set<AuthenticationType> configuredModes(GraphqlApi api) {

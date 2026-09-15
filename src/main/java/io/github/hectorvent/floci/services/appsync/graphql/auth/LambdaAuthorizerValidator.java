@@ -65,7 +65,7 @@ public class LambdaAuthorizerValidator {
         event.put("authorizationToken", authorizationToken);
         Map<String, Object> requestContext = new LinkedHashMap<>();
         requestContext.put("apiId", apiId);
-        requestContext.put("accountId", info.accountId());
+        requestContext.put("accountId", info.apiAccountId());
         requestContext.put("requestId", info.requestId());
         requestContext.put("queryString", info.query());
         requestContext.put("operationName", info.operationName());
@@ -77,7 +77,7 @@ public class LambdaAuthorizerValidator {
         try {
             byte[] payload = objectMapper.writeValueAsBytes(event);
             invokeResult = CompletableFuture.supplyAsync(() -> lambdaService.invoke(
-                            info.region(), uri, payload, InvocationType.RequestResponse))
+                            info.apiRegion(), uri, payload, InvocationType.RequestResponse))
                     .orTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     .join();
         } catch (Exception e) {

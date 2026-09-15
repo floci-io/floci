@@ -85,21 +85,28 @@ public class AppSyncExecutionController {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
             }
 
-            GraphqlApi api = appSyncService.findGraphqlApiAnyAccount(apiId).orElse(null);
-            if (api == null) {
+            GraphqlApi discoveredApi = appSyncService.findGraphqlApiAnyAccount(apiId).orElse(null);
+            if (discoveredApi == null) {
                 return graphqlError(404, "NotFoundException", "GraphQL API not found: " + apiId);
             }
 
             String previousAccount = requestContext.getAccountId();
             String previousRegion = requestContext.getRegion();
+            String callerAccount = previousAccount != null ? previousAccount : "000000000000";
+            String apiAccount = AwsArnUtils.accountOrDefault(discoveredApi.getArn(), callerAccount);
+            String apiRegion = AwsArnUtils.regionOrDefault(discoveredApi.getArn(),
+                    previousRegion != null ? previousRegion : "us-east-1");
             try {
-                requestContext.setAccountId(AwsArnUtils.accountOrDefault(api.getArn(), previousAccount));
-                requestContext.setRegion(AwsArnUtils.regionOrDefault(api.getArn(), previousRegion));
+                requestContext.setAccountId(apiAccount);
+                requestContext.setRegion(apiRegion);
+                // Refresh dynamic endpoint URIs only after entering the API owner's namespace.
+                GraphqlApi api = appSyncService.getGraphqlApi(apiId);
 
                 AppSyncAuthContext authContext;
                 try {
                     authContext = authMiddleware.authenticate(
-                            headerMap(headers), api, authRequestInfo(parsed, headers, body));
+                            headerMap(headers), api,
+                            authRequestInfo(parsed, headers, body, apiAccount, apiRegion, callerAccount));
                 } catch (AppSyncTransportException e) {
                     return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
                 }
@@ -209,9 +216,8 @@ public class AppSyncExecutionController {
         return map;
     }
 
-    private AuthRequestInfo authRequestInfo(ParsedRequest parsed, HttpHeaders headers, String rawBody) {
-        String accountId = requestContext.getAccountId() != null ? requestContext.getAccountId() : "000000000000";
-        String region = requestContext.getRegion() != null ? requestContext.getRegion() : "us-east-1";
+    private AuthRequestInfo authRequestInfo(ParsedRequest parsed, HttpHeaders headers, String rawBody,
+                                            String apiAccount, String apiRegion, String callerAccount) {
         String requestId = headers.getHeaderString("x-amzn-RequestId");
         if (requestId == null || requestId.isBlank()) {
             requestId = UUID.randomUUID().toString();
@@ -222,8 +228,9 @@ public class AppSyncExecutionController {
                 parsed.variables() == null ? Map.of() : parsed.variables(),
                 sourceIp(headers),
                 requestId,
-                accountId,
-                region,
+                apiAccount,
+                apiRegion,
+                callerAccount,
                 headerMap(headers),
                 rawBody);
     }
