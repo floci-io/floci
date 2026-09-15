@@ -381,8 +381,9 @@ public class CodePipelineService {
 
     private ObjectNode getPipelineResponse(JsonNode request, String region, String account) {
         CodePipelinePipeline pipeline = requirePipeline(account, region, text(request, "name"));
-        int version = request.path("version").asInt(pipeline.getVersion());
-        if (version != pipeline.getVersion()) {
+        int currentVersion = pipeline.getVersion() == null ? 1 : pipeline.getVersion();
+        int version = request.path("version").asInt(currentVersion);
+        if (version != currentVersion) {
             throw new AwsException("PipelineVersionNotFoundException",
                     "Pipeline version not found: " + version, 400);
         }
