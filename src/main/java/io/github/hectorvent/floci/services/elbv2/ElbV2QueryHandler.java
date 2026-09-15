@@ -470,7 +470,10 @@ public class ElbV2QueryHandler {
         Integer port = parseIntOrNull(p.getFirst("Port"));
         String sslPolicy = p.getFirst("SslPolicy");
         List<String> certs = parseCertificateList(p, "Certificates");
-        List<Action> defaultActions = parseActions(p, "DefaultActions");
+        List<Action> defaultActions = parseActions(p, "DefaultActions", false);
+        applyExistingClientSecrets(defaultActions,
+                service.describeListeners(region, null, List.of(listenerArn)).stream()
+                        .findFirst().map(Listener::getDefaultActions).orElse(null));
         List<String> alpnPolicy = memberList(p, "AlpnPolicy");
 
         Listener listener = service.modifyListener(region, listenerArn, protocol, port, sslPolicy,
@@ -585,7 +588,10 @@ public class ElbV2QueryHandler {
     private Response handleModifyRule(MultivaluedMap<String, String> p, String region) {
         String ruleArn = p.getFirst("RuleArn");
         List<RuleCondition> conditions = parseConditions(p);
-        List<Action> actions = parseActions(p, "Actions");
+        List<Action> actions = parseActions(p, "Actions", false);
+        applyExistingClientSecrets(actions,
+                service.describeRules(region, null, List.of(ruleArn)).stream()
+                        .findFirst().map(Rule::getActions).orElse(null));
 
         Rule rule = service.modifyRule(region, ruleArn,
                 conditions.isEmpty() ? null : conditions,
@@ -1108,6 +1114,16 @@ public class ElbV2QueryHandler {
     }
 
     private List<Action> parseActions(MultivaluedMap<String, String> p, String prefix) {
+        return parseActions(p, prefix, true);
+    }
+
+    /**
+     * @param creating true for CreateListener and CreateRule, false for the two modify operations.
+     *     AuthenticateOidcActionConfig.ClientSecret is required on a create and may be omitted on a
+     *     modify only when UseExistingClientSecret is true, so the two paths cannot share one rule.
+     */
+    private List<Action> parseActions(MultivaluedMap<String, String> p, String prefix,
+                                      boolean creating) {
         List<Action> result = new ArrayList<>();
         int i = 1;
         while (true) {
@@ -1155,7 +1171,7 @@ public class ElbV2QueryHandler {
                     a.setFixedResponseMessageBody(p.getFirst(prefix + ".member." + i + ".FixedResponseConfig.MessageBody"));
                 }
                 case "authenticate-oidc" -> parseAuthenticateOidc(p,
-                        prefix + ".member." + i + ".AuthenticateOidcConfig.", a);
+                        prefix + ".member." + i + ".AuthenticateOidcConfig.", a, creating);
                 case "authenticate-cognito" -> parseAuthenticateCognito(p,
                         prefix + ".member." + i + ".AuthenticateCognitoConfig.", a);
             }
@@ -1171,13 +1187,26 @@ public class ElbV2QueryHandler {
     private static final String DEFAULT_AUTH_SCOPE = "openid";
     private static final long DEFAULT_AUTH_SESSION_TIMEOUT = 604800L;
 
-    private void parseAuthenticateOidc(MultivaluedMap<String, String> p, String base, Action a) {
+    private void parseAuthenticateOidc(MultivaluedMap<String, String> p, String base, Action a,
+                                       boolean creating) {
         a.setOidcIssuer(requiredAuthMember(p, base, "Issuer"));
         a.setOidcAuthorizationEndpoint(requiredAuthMember(p, base, "AuthorizationEndpoint"));
         a.setOidcTokenEndpoint(requiredAuthMember(p, base, "TokenEndpoint"));
         a.setOidcUserInfoEndpoint(requiredAuthMember(p, base, "UserInfoEndpoint"));
         a.setOidcClientId(requiredAuthMember(p, base, "ClientId"));
-        a.setOidcClientSecret(p.getFirst(base + "ClientSecret"));
+        String clientSecret = p.getFirst(base + "ClientSecret");
+        boolean useExisting = Boolean.parseBoolean(p.getFirst(base + "UseExistingClientSecret"));
+        if (clientSecret == null || clientSecret.isBlank()) {
+            // Required on a create. On a modify it may be dropped only by asking for the stored
+            // one, and modifyExistingClientSecrets below is what puts that secret back.
+            if (creating || !useExisting) {
+                throw new AwsException("ValidationError", creating
+                        ? "ClientSecret is required."
+                        : "ClientSecret is required unless UseExistingClientSecret is true.", 400);
+            }
+        }
+        a.setOidcClientSecret(clientSecret);
+        a.setOidcUseExistingClientSecret(useExisting);
         a.setOidcSessionCookieName(orDefault(p.getFirst(base + "SessionCookieName"),
                 DEFAULT_AUTH_SESSION_COOKIE));
         a.setOidcScope(orDefault(p.getFirst(base + "Scope"), DEFAULT_AUTH_SCOPE));
@@ -1196,6 +1225,30 @@ public class ElbV2QueryHandler {
         a.setCognitoSessionTimeout(parseSessionTimeout(p.getFirst(base + "SessionTimeout")));
         a.setCognitoOnUnauthenticatedRequest(p.getFirst(base + "OnUnauthenticatedRequest"));
         a.setCognitoAuthenticationRequestExtraParams(parseAuthExtraParams(p, base));
+    }
+
+    /**
+     * Puts the stored client secret back on any authenticate-oidc action that asked to keep it.
+     * Both modify operations replace the action list wholesale, so without this the documented
+     * UseExistingClientSecret flow would blank the secret it was written to preserve. A rule or a
+     * listener carries at most one authentication action, so the stored one is unambiguous.
+     */
+    private void applyExistingClientSecrets(List<Action> parsed, List<Action> existing) {
+        String stored = existing == null ? null : existing.stream()
+                .filter(a -> "authenticate-oidc".equals(a.getType()))
+                .map(Action::getOidcClientSecret)
+                .filter(Objects::nonNull)
+                .findFirst().orElse(null);
+        for (Action a : parsed) {
+            if ("authenticate-oidc".equals(a.getType()) && a.isOidcUseExistingClientSecret()
+                    && (a.getOidcClientSecret() == null || a.getOidcClientSecret().isBlank())) {
+                if (stored == null) {
+                    throw new AwsException("ValidationError",
+                            "UseExistingClientSecret is true but no client secret is stored.", 400);
+                }
+                a.setOidcClientSecret(stored);
+            }
+        }
     }
 
     private String requiredAuthMember(MultivaluedMap<String, String> p, String base, String name) {

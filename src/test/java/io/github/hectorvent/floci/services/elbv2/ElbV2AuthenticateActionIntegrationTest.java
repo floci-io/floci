@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -32,7 +33,7 @@ class ElbV2AuthenticateActionIntegrationTest {
     private static String tgArn;
     private static String listenerArn;
 
-    private static String xml(io.restassured.specification.RequestSpecification spec) {
+    private static String xml(RequestSpecification spec) {
         return spec.header("Authorization", AUTH).when().post("/").then().statusCode(200)
                 .extract().asString();
     }
@@ -154,8 +155,98 @@ class ElbV2AuthenticateActionIntegrationTest {
         assertEquals("AWSELBAuthSessionCookie", described.getString(action + "SessionCookieName"));
     }
 
+    // ClientSecret is required on a create and may be omitted on a modify only by asking for the
+    // stored one. Both modify operations replace the action list wholesale, so without carrying the
+    // stored secret forward the documented keep-the-secret flow would blank it instead.
     @Test
     @Order(4)
+    void createListener_withoutClientSecret_isRejected() {
+        String base = "DefaultActions.member.1.AuthenticateOidcConfig.";
+        given()
+                .formParam("Action", "CreateListener")
+                .formParam("LoadBalancerArn", lbArn)
+                .formParam("Protocol", "HTTPS")
+                .formParam("Port", "9443")
+                .formParam("DefaultActions.member.1.Type", "authenticate-oidc")
+                .formParam(base + "Issuer", "https://idp.example.com")
+                .formParam(base + "AuthorizationEndpoint", "https://idp.example.com/authorize")
+                .formParam(base + "TokenEndpoint", "https://idp.example.com/token")
+                .formParam(base + "UserInfoEndpoint", "https://idp.example.com/userinfo")
+                .formParam(base + "ClientId", "client-abc")
+                .header("Authorization", AUTH)
+            .when().post("/")
+            .then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo("ClientSecret is required."));
+    }
+
+    @Test
+    @Order(5)
+    void modifyListener_withUseExistingClientSecret_keepsTheStoredSecret() {
+        String base = "DefaultActions.member.1.AuthenticateOidcConfig.";
+        xml(given()
+                .formParam("Action", "ModifyListener")
+                .formParam("ListenerArn", listenerArn)
+                .formParam("DefaultActions.member.1.Type", "authenticate-oidc")
+                .formParam("DefaultActions.member.1.Order", "1")
+                .formParam(base + "Issuer", "https://idp.example.com")
+                .formParam(base + "AuthorizationEndpoint", "https://idp.example.com/authorize")
+                .formParam(base + "TokenEndpoint", "https://idp.example.com/token")
+                .formParam(base + "UserInfoEndpoint", "https://idp.example.com/userinfo")
+                .formParam(base + "ClientId", "client-abc")
+                .formParam(base + "UseExistingClientSecret", "true")
+                .formParam(base + "Scope", "openid email")
+                .formParam("DefaultActions.member.2.Type", "forward")
+                .formParam("DefaultActions.member.2.Order", "2")
+                .formParam("DefaultActions.member.2.TargetGroupArn", tgArn));
+
+        // The modify took effect, and the secret the create supplied is still the stored one.
+        XmlPath described = XmlPath.from(xml(given()
+                .formParam("Action", "DescribeListeners")
+                .formParam("ListenerArns.member.1", listenerArn)));
+        String action = "DescribeListenersResponse.DescribeListenersResult.Listeners.member"
+                + ".DefaultActions.member[0].AuthenticateOidcConfig.";
+        assertEquals("openid email", described.getString(action + "Scope"));
+
+        // A later modify that keeps the secret again still works, which it cannot do once the
+        // stored secret has been blanked.
+        given()
+                .formParam("Action", "ModifyListener")
+                .formParam("ListenerArn", listenerArn)
+                .formParam("DefaultActions.member.1.Type", "authenticate-oidc")
+                .formParam(base + "Issuer", "https://idp.example.com")
+                .formParam(base + "AuthorizationEndpoint", "https://idp.example.com/authorize")
+                .formParam(base + "TokenEndpoint", "https://idp.example.com/token")
+                .formParam(base + "UserInfoEndpoint", "https://idp.example.com/userinfo")
+                .formParam(base + "ClientId", "client-abc")
+                .formParam(base + "UseExistingClientSecret", "true")
+                .header("Authorization", AUTH)
+            .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    @Order(6)
+    void modifyListener_withoutSecretAndWithoutTheFlag_isRejected() {
+        String base = "DefaultActions.member.1.AuthenticateOidcConfig.";
+        given()
+                .formParam("Action", "ModifyListener")
+                .formParam("ListenerArn", listenerArn)
+                .formParam("DefaultActions.member.1.Type", "authenticate-oidc")
+                .formParam(base + "Issuer", "https://idp.example.com")
+                .formParam(base + "AuthorizationEndpoint", "https://idp.example.com/authorize")
+                .formParam(base + "TokenEndpoint", "https://idp.example.com/token")
+                .formParam(base + "UserInfoEndpoint", "https://idp.example.com/userinfo")
+                .formParam(base + "ClientId", "client-abc")
+                .header("Authorization", AUTH)
+            .when().post("/")
+            .then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("ClientSecret is required unless UseExistingClientSecret is true."));
+    }
+
+    @Test
+    @Order(7)
     void createListener_missingRequiredOidcMember_isRejected() {
         given()
                 .formParam("Action", "CreateListener")

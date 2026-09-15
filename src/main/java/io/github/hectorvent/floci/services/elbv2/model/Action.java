@@ -48,6 +48,8 @@ public class Action {
      * it back.
      */
     private String oidcClientSecret;
+    /** Set by a modify that asked to keep the stored secret. Never reported. */
+    private boolean oidcUseExistingClientSecret;
     private String oidcSessionCookieName;
     private String oidcScope;
     private Long oidcSessionTimeout;
@@ -132,6 +134,11 @@ public class Action {
 
     public String getOidcClientSecret() { return oidcClientSecret; }
     public void setOidcClientSecret(String oidcClientSecret) { this.oidcClientSecret = oidcClientSecret; }
+
+    public boolean isOidcUseExistingClientSecret() { return oidcUseExistingClientSecret; }
+    public void setOidcUseExistingClientSecret(boolean oidcUseExistingClientSecret) {
+        this.oidcUseExistingClientSecret = oidcUseExistingClientSecret;
+    }
 
     public String getOidcSessionCookieName() { return oidcSessionCookieName; }
     public void setOidcSessionCookieName(String oidcSessionCookieName) {
