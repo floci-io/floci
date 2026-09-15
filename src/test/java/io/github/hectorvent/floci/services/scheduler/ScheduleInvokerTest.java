@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.scheduler;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
@@ -28,8 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -37,6 +38,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ScheduleInvokerTest {
@@ -86,6 +88,16 @@ class ScheduleInvokerTest {
                         && "my-subject".equals(attrs.get("EventName").getStringValue())
                         && "String".equals(attrs.get("EventName").getDataType())),
                 isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
+    void materializesSqsRequestForDeadLetterBody() {
+        Target target = new Target();
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:queue");
+        target.setInput("payload");
+
+        assertEquals("{\"MessageBody\":\"payload\",\"QueueUrl\":\"http://localhost:4566/000000000000/queue\"}",
+                invoker.materializeRequest(target, "us-east-1"));
     }
 
     @Test
@@ -365,14 +377,35 @@ class ScheduleInvokerTest {
     }
 
     @Test
-    void unsupportedUniversalActionDoesNotThrowOrDispatch() {
+    void unsupportedUniversalActionFailsWithoutDispatch() {
         Target target = new Target();
         target.setArn("arn:aws:scheduler:::aws-sdk:dynamodb:putItem");
         target.setInput("{}");
 
-        invoker.invoke(target, "us-east-1");
+        assertThrows(UnsupportedOperationException.class, () -> invoker.invoke(target, "us-east-1"));
 
-        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), anyString(), any(), anyString());
-        verify(snsService, never()).publish(anyString(), any(), anyString(), anyString(), anyString());
+        verifyNoInteractions(sqsService, lambdaService, snsService, eventBridgeService, ecsService);
+    }
+
+    @Test
+    void malformedUniversalInputFailsWithoutDispatch() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");
+        target.setInput("{not-json");
+
+        assertThrows(AwsException.class, () -> invoker.invoke(target, "us-east-1"));
+
+        verifyNoInteractions(sqsService, lambdaService, snsService, eventBridgeService, ecsService);
+    }
+
+    @Test
+    void unsupportedTargetArnFailsWithoutDispatch() {
+        Target target = new Target();
+        target.setArn("arn:aws:dynamodb:us-east-1:000000000000:table/orders");
+        target.setInput("{}");
+
+        assertThrows(UnsupportedOperationException.class, () -> invoker.invoke(target, "us-east-1"));
+
+        verifyNoInteractions(sqsService, lambdaService, snsService, eventBridgeService, ecsService);
     }
 }
