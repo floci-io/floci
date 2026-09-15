@@ -14,8 +14,10 @@ import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.StreamType;
 import java.nio.charset.StandardCharsets;
 import com.github.dockerjava.api.model.NetworkSettings;
@@ -331,6 +333,74 @@ class Ec2ContainerManagerTest {
         assertEquals("172.17.0.9", instance.getImdsSourceIp(),
                 "the stale address would otherwise stay registered while IMDS requests arrive "
                         + "from an address nothing knows about");
+    }
+
+    @Test
+    void startOfAProtectedInstanceReusesTheHelperTransportAddress() throws Exception {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
+                .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        // A workload in the helper's namespace has no Docker attachment of its own, so there is
+        // no bridge address on it to rediscover after the restart.
+        InspectContainerResponse workload = mock(InspectContainerResponse.class);
+        HostConfig hostConfig = mock(HostConfig.class);
+        when(hostConfig.getNetworkMode()).thenReturn("container:helper-1");
+        when(workload.getHostConfig()).thenReturn(hostConfig);
+        InspectContainerCmd inspectWorkload = mock(InspectContainerCmd.class);
+        when(inspectWorkload.exec()).thenReturn(workload);
+        when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspectWorkload);
+
+        InspectContainerResponse helper = mock(InspectContainerResponse.class);
+        ContainerConfig helperConfig = mock(ContainerConfig.class);
+        when(helperConfig.getLabels()).thenReturn(Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"));
+        when(helper.getConfig()).thenReturn(helperConfig);
+        NetworkSettings helperNetworks = mock(NetworkSettings.class);
+        when(helperNetworks.getNetworks())
+                .thenReturn(Map.of("bridge", new ContainerNetwork().withIpv4Address("172.17.0.7")));
+        when(helper.getNetworkSettings()).thenReturn(helperNetworks);
+        InspectContainerCmd inspectHelper = mock(InspectContainerCmd.class);
+        when(inspectHelper.exec()).thenReturn(helper);
+        when(dockerClient.inspectContainerCmd("helper-1")).thenReturn(inspectHelper);
+
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.port()).thenReturn(4566);
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        Ec2ContainerManager manager = new Ec2ContainerManager(
+                mock(ContainerBuilder.class),
+                lifecycleManager,
+                mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class),
+                mock(DockerHostResolver.class),
+                dockerClient,
+                mock(PortAllocator.class),
+                config,
+                metadataServer,
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class),
+                mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class),
+                mock(SecurityGroupFirewallManager.class));
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-protected");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+
+        manager.start(instance);
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
+
+        verify(metadataServer, timeout(2000)).registerContainer("172.17.0.7", "i-protected", instance);
+        assertEquals("172.17.0.7", instance.getContainerBridgeIp(),
+                "StartInstances must keep addressing the instance through its protected namespace");
     }
 
     private static Ec2ContainerManager managerWith(ContainerLifecycleManager lifecycleManager,

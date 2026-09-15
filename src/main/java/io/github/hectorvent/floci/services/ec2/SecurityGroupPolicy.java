@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -65,12 +67,12 @@ public final class SecurityGroupPolicy {
         if (protocol == null) {
             return null;
         }
-        return switch (protocol.toLowerCase(java.util.Locale.ROOT)) {
+        return switch (protocol.toLowerCase(Locale.ROOT)) {
             case "6" -> "tcp";
             case "17" -> "udp";
             case "1" -> "icmp";
             case "58" -> "icmpv6";
-            default -> protocol.toLowerCase(java.util.Locale.ROOT);
+            default -> protocol.toLowerCase(Locale.ROOT);
         };
     }
 
@@ -85,7 +87,7 @@ public final class SecurityGroupPolicy {
             return true;
         }
         if (permission.getPrefixListIds() != null && prefixLists != null) {
-            for (var reference : permission.getPrefixListIds()) {
+            for (PrefixListId reference : permission.getPrefixListIds()) {
                 if (prefixLists.getOrDefault(reference.getPrefixListId(), List.of()).stream()
                         .anyMatch(cidr -> inCidr(peer.logicalAddress(), cidr))) {
                     return true;

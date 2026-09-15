@@ -8,6 +8,7 @@ import java.net.UnknownHostException;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -132,12 +133,12 @@ public final class SecurityGroupNftCompiler {
         if ("-1".equals(protocol)) {
             return "accept";
         }
-        String normalized = switch (protocol.toLowerCase(java.util.Locale.ROOT)) {
+        String normalized = switch (protocol.toLowerCase(Locale.ROOT)) {
             case "6" -> "tcp";
             case "17" -> "udp";
             case "1" -> "icmp";
             case "58" -> "icmpv6";
-            default -> protocol.toLowerCase(java.util.Locale.ROOT);
+            default -> protocol.toLowerCase(Locale.ROOT);
         };
         if ("tcp".equals(normalized) || "udp".equals(normalized)) {
             Integer from = permission.getFromPort();
@@ -148,16 +149,21 @@ public final class SecurityGroupNftCompiler {
             return normalized + " dport " + (from.equals(to) ? from : from + "-" + to) + " accept";
         }
         if ("icmp".equals(normalized) || "icmpv6".equals(normalized)) {
-            StringBuilder expression = new StringBuilder(normalized);
+            // nftables header fields are separate expressions, so type and code each repeat
+            // the protocol keyword: "icmp type 8 icmp code 0", never "icmp type 8 code 0".
+            StringBuilder expression = new StringBuilder();
             Integer type = permission.getFromPort();
             Integer code = permission.getToPort();
             if (type != null && type >= 0) {
-                expression.append(" type ").append(type);
+                expression.append(normalized).append(" type ").append(type).append(' ');
             }
             if (code != null && code >= 0) {
-                expression.append(" code ").append(code);
+                expression.append(normalized).append(" code ").append(code).append(' ');
             }
-            return expression.append(" accept").toString();
+            if (expression.isEmpty()) {
+                expression.append("meta l4proto ").append(normalized).append(' ');
+            }
+            return expression.append("accept").toString();
         }
         try {
             int number = Integer.parseInt(normalized);

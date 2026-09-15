@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
@@ -62,6 +63,7 @@ import java.util.function.BiPredicate;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -195,18 +197,19 @@ public class Ec2ContainerManager {
         }
     }
 
-    public void restoreSecurityGroups(Instance instance, String region, List<SecurityGroup> groups,
-                                      Map<String, List<String>> prefixLists) {
-        if (firewallManager == null || !firewallManager.enabled()) {
-            return;
+    /** A workload's own Floci-owned namespace, or null when the instance is not protected. */
+    private ProtectedNamespace protectedNamespace(Instance instance) {
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null) {
+            return null;
         }
-        var worker = dockerClient.inspectContainerCmd(instance.getDockerContainerId()).exec();
-        String mode = worker.getHostConfig().getNetworkMode();
+        InspectContainerResponse worker = dockerClient.inspectContainerCmd(containerId).exec();
+        String mode = worker.getHostConfig() == null ? null : worker.getHostConfig().getNetworkMode();
         if (mode == null || !mode.startsWith("container:")) {
-            throw new IllegalStateException("EC2 workload has no protected network namespace");
+            return null;
         }
         String helperId = mode.substring("container:".length());
-        var helper = dockerClient.inspectContainerCmd(helperId).exec();
+        InspectContainerResponse helper = dockerClient.inspectContainerCmd(helperId).exec();
         Map<String, String> labels = helper.getConfig().getLabels();
         if (!"true".equals(labels.get("floci.security-group-helper"))
                 || !"ec2".equals(labels.get(LABEL_SERVICE))
@@ -217,13 +220,29 @@ public class Ec2ContainerManager {
         String address = helper.getNetworkSettings().getNetworks().values().stream()
                 .map(network -> network.getIpAddress()).filter(ip -> ip != null && !ip.isBlank())
                 .findFirst().orElseThrow(() -> new IllegalStateException("EC2 firewall helper has no Docker IP"));
-        var eni = instance.getNetworkInterfaces().getFirst();
+        return new ProtectedNamespace(helperId, address);
+    }
+
+    private record ProtectedNamespace(String helperId, String transportAddress) {}
+
+    public void restoreSecurityGroups(Instance instance, String region, List<SecurityGroup> groups,
+                                      Map<String, List<String>> prefixLists) {
+        if (firewallManager == null || !firewallManager.enabled()) {
+            return;
+        }
+        ProtectedNamespace namespace = protectedNamespace(instance);
+        if (namespace == null) {
+            throw new IllegalStateException("EC2 workload has no protected network namespace");
+        }
+        String helperId = namespace.helperId();
+        String address = namespace.transportAddress();
+        InstanceNetworkInterface eni = instance.getNetworkInterfaces().getFirst();
         String logical = instance.getLogicalPrivateIpAddress() != null
                 ? instance.getLogicalPrivateIpAddress() : eni.getPrivateIpAddress();
         firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(), region,
                 instance.getVpcId(), eni.getNetworkInterfaceId(), logical, address,
                 instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId)
-                        .collect(java.util.stream.Collectors.toSet()), groups), helperId, prefixLists);
+                        .collect(Collectors.toSet()), groups), helperId, prefixLists);
     }
 
     @Inject
@@ -550,7 +569,7 @@ public class Ec2ContainerManager {
                     if (instance.getNetworkInterfaces() == null || instance.getNetworkInterfaces().isEmpty()) {
                         throw new IllegalStateException("EC2 instance has no network interface to protect");
                     }
-                    var eni = instance.getNetworkInterfaces().getFirst();
+                    InstanceNetworkInterface eni = instance.getNetworkInterfaces().getFirst();
                     eniId = eni.getNetworkInterfaceId();
                     instance.setLogicalPrivateIpAddress(eni.getPrivateIpAddress());
                     namespace = firewallManager.createNamespace("ec2", instanceId,
@@ -559,7 +578,7 @@ public class Ec2ContainerManager {
                             region, instance.getVpcId(), eniId, eni.getPrivateIpAddress(),
                             namespace.transportAddress(),
                             instance.getSecurityGroups().stream().map(g -> g.getGroupId())
-                                    .collect(java.util.stream.Collectors.toSet()), groups),
+                                    .collect(Collectors.toSet()), groups),
                             namespace.helperId(), prefixLists);
                 }
                 ContainerSpec spec = buildContainerSpec(containerName, image, region, serviceEndpoint, imdsEndpoint,
@@ -907,10 +926,19 @@ public class Ec2ContainerManager {
                     }
                 }
                 String instanceId = instance.getInstanceId();
-                String containerIp = waitForContainerBridgeIp(containerId, instanceId);
+                // A protected workload shares the helper's namespace, so it has no Docker network
+                // attachment of its own to rediscover: the helper keeps the transport address
+                // across the workload's stop/start, exactly as launch used it.
+                ProtectedNamespace namespace = protectedNamespace(instance);
+                String containerIp = namespace == null
+                        ? waitForContainerBridgeIp(containerId, instanceId)
+                        : namespace.transportAddress();
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
-                    exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
+                    if (namespace == null) {
+                        exposeReachablePrivateAddress(instance, containerIp,
+                                config.services().ec2().awsFaithfulPrivateIp());
+                    }
                     // Docker hands out a new bridge IP on restart, so the previously reported
                     // public address can now point at another container entirely.
                     if (instance.isAssociatePublicIp() || instance.getPublicIpAddress() != null) {

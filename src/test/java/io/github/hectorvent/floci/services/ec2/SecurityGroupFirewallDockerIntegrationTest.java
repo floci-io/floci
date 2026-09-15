@@ -45,13 +45,13 @@ class SecurityGroupFirewallDockerIntegrationTest {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String targetEni = "eni-target-" + suffix;
         String sourceEni = "eni-source-" + suffix;
-        var namespaces = new ArrayList<SecurityGroupFirewallManager.Namespace>();
-        var workers = new ArrayList<String>();
+        List<SecurityGroupFirewallManager.Namespace> namespaces = new ArrayList<>();
+        List<String> workers = new ArrayList<>();
         try {
-            var target = firewall.createNamespace("ec2", "sg-target-" + suffix, "000000000000",
+            SecurityGroupFirewallManager.Namespace target = firewall.createNamespace("ec2", "sg-target-" + suffix, "000000000000",
                     "us-east-1", Optional.empty(), Map.of());
             namespaces.add(target);
-            var source = firewall.createNamespace("ec2", "sg-source-" + suffix, "000000000000",
+            SecurityGroupFirewallManager.Namespace source = firewall.createNamespace("ec2", "sg-source-" + suffix, "000000000000",
                     "us-east-1", Optional.empty(), Map.of());
             namespaces.add(source);
 
@@ -95,7 +95,7 @@ class SecurityGroupFirewallDockerIntegrationTest {
             assertEquals(0, connect(workers.get(1), target.transportAddress()));
 
             SecurityGroup replacement = group("sg-replacement", false, "192.0.2.0/24");
-            var groups = Map.of("sg-target", targetGroup, "sg-source", sourceGroup,
+            Map<String, SecurityGroup> groups = Map.of("sg-target", targetGroup, "sg-source", sourceGroup,
                     "sg-replacement", replacement);
             firewall.updateGroups(targetEni, Set.of("sg-replacement"), groups, Map.of());
             assertNotEquals(0, connect(workers.get(1), target.transportAddress()));
@@ -111,7 +111,7 @@ class SecurityGroupFirewallDockerIntegrationTest {
             }
             firewall.unregister(sourceEni);
             firewall.unregister(targetEni);
-            for (var namespace : namespaces) {
+            for (SecurityGroupFirewallManager.Namespace namespace : namespaces) {
                 lifecycle.removeIfExists(namespace.helperId());
             }
         }
@@ -121,7 +121,7 @@ class SecurityGroupFirewallDockerIntegrationTest {
         String id = docker.execCreateCmd(worker).withAttachStdout(true).withAttachStderr(true)
                 .withCmd("nc", "-z", "-w", "2", address, "8080")
                 .exec().getId();
-        try (var callback = new ResultCallback.Adapter<Frame>()) {
+        try (ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>()) {
             docker.execStartCmd(id).exec(callback).awaitCompletion(5, TimeUnit.SECONDS);
         }
         return docker.inspectExecCmd(id).exec().getExitCodeLong().intValue();

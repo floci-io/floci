@@ -3,8 +3,11 @@ package io.github.hectorvent.floci.services.ec2;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.BuildImageResultCallback;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Info;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -12,6 +15,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -20,10 +24,12 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -87,12 +93,12 @@ public class SecurityGroupFirewallManager {
         if (!enabled()) {
             throw new IllegalStateException("Security-group enforcement is disabled");
         }
-        var daemon = dockerClient.infoCmd().exec();
+        Info daemon = dockerClient.infoCmd().exec();
         if (!"linux".equalsIgnoreCase(daemon.getOsType())) {
             throw new IllegalStateException("Security-group enforcement requires a Linux Docker daemon");
         }
         if (daemon.getSecurityOptions() != null && daemon.getSecurityOptions().stream()
-                .anyMatch(option -> option.toLowerCase(java.util.Locale.ROOT).contains("rootless"))) {
+                .anyMatch(option -> option.toLowerCase(Locale.ROOT).contains("rootless"))) {
             throw new IllegalStateException("Security-group enforcement requires rootful Docker");
         }
         ensureHelperImage();
@@ -100,7 +106,7 @@ public class SecurityGroupFirewallManager {
                 resourceId.replaceAll("[^a-zA-Z0-9_.-]", "-"));
         String namespace = config.docker().resourceNamespace().orElse("");
         String owner = namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
-        var builder = containerBuilder.newContainer(config.network().securityGroupEnforcement().helperImage())
+        ContainerBuilder.Builder builder = containerBuilder.newContainer(config.network().securityGroupEnforcement().helperImage())
                 .withName(name)
                 .withDockerNetwork(dockerNetwork)
                 .withPrivileged(true)
@@ -141,7 +147,7 @@ public class SecurityGroupFirewallManager {
         } catch (NotFoundException missing) {
             // Build the versioned Floci recipe in the daemon used for workloads.
         }
-        try (var dockerfile = getClass().getResourceAsStream("/docker/network-helper.Dockerfile")) {
+        try (InputStream dockerfile = getClass().getResourceAsStream("/docker/network-helper.Dockerfile")) {
             if (dockerfile == null) {
                 throw new IllegalStateException("Floci network helper Dockerfile is missing");
             }
@@ -154,9 +160,9 @@ public class SecurityGroupFirewallManager {
                 tar.write(content);
                 tar.closeArchiveEntry();
             }
-            try (var callback = new BuildImageResultCallback()) {
+            try (BuildImageResultCallback callback = new BuildImageResultCallback()) {
                 String built = dockerClient.buildImageCmd(new ByteArrayInputStream(archive.toByteArray()))
-                        .withTags(java.util.Set.of(image)).exec(callback).awaitImageId();
+                        .withTags(Set.of(image)).exec(callback).awaitImageId();
                 if (built == null || built.isBlank()) {
                     throw new IllegalStateException("Docker did not build the Floci network helper image");
                 }
@@ -199,28 +205,27 @@ public class SecurityGroupFirewallManager {
     }
 
     public synchronized void updateGroups(String eniId, Set<String> groupIds,
-                                          Map<String, io.github.hectorvent.floci.services.ec2.model.SecurityGroup> groups,
+                                          Map<String, SecurityGroup> groups,
                                           Map<String, List<String>> prefixLists) {
         ProtectedEndpoint current = endpoints.get(eniId);
         if (current == null) {
             return;
         }
         SecurityGroupNftCompiler.Endpoint identity = current.endpoint();
-        List<io.github.hectorvent.floci.services.ec2.model.SecurityGroup> attached = groupIds.stream()
-                .map(groups::get).toList();
+        List<SecurityGroup> attached = groupIds.stream().map(groups::get).toList();
         if (attached.isEmpty() || attached.stream().anyMatch(group -> group == null)) {
             quarantine(current.helperId());
             throw new IllegalArgumentException("Protected endpoint needs valid security groups");
         }
-        var updated = new SecurityGroupNftCompiler.Endpoint(identity.accountId(), identity.region(),
-                identity.vpcId(), identity.eniId(), identity.logicalAddress(),
-                identity.transportAddress(), Set.copyOf(groupIds), attached);
+        SecurityGroupNftCompiler.Endpoint updated = new SecurityGroupNftCompiler.Endpoint(
+                identity.accountId(), identity.region(), identity.vpcId(), identity.eniId(),
+                identity.logicalAddress(), identity.transportAddress(), Set.copyOf(groupIds), attached);
         endpoints.put(eniId, new ProtectedEndpoint(updated, current.helperId(), Map.copyOf(prefixLists)));
         reconcileAll();
     }
 
     public synchronized void reconcileAll() {
-        for (var entry : new ArrayList<>(endpoints.entrySet())) {
+        for (Map.Entry<String, ProtectedEndpoint> entry : new ArrayList<>(endpoints.entrySet())) {
             boolean running;
             try {
                 running = Boolean.TRUE.equals(dockerClient.inspectContainerCmd(entry.getValue().helperId())
@@ -248,22 +253,22 @@ public class SecurityGroupFirewallManager {
     }
 
     /** Refreshes every affected EC2 instance and ECS task after a control-plane rule change. */
-    public synchronized void refreshPolicies(String region, Map<String, io.github.hectorvent.floci.services.ec2.model.SecurityGroup> groups,
+    public synchronized void refreshPolicies(String region, Map<String, SecurityGroup> groups,
                                              Map<String, List<String>> prefixLists) {
-        for (var entry : new ArrayList<>(endpoints.entrySet())) {
+        for (Map.Entry<String, ProtectedEndpoint> entry : new ArrayList<>(endpoints.entrySet())) {
             ProtectedEndpoint current = entry.getValue();
             SecurityGroupNftCompiler.Endpoint identity = current.endpoint();
             if (!region.equals(identity.region())) {
                 continue;
             }
-            var attached = identity.groupIds().stream().map(groups::get).toList();
+            List<SecurityGroup> attached = identity.groupIds().stream().map(groups::get).toList();
             if (attached.stream().anyMatch(group -> group == null)) {
                 endpoints.values().forEach(endpoint -> quarantine(endpoint.helperId()));
                 throw new IllegalStateException("A protected endpoint's security group disappeared");
             }
-            var updated = new SecurityGroupNftCompiler.Endpoint(identity.accountId(), identity.region(),
-                    identity.vpcId(), identity.eniId(), identity.logicalAddress(),
-                    identity.transportAddress(), identity.groupIds(), attached);
+            SecurityGroupNftCompiler.Endpoint updated = new SecurityGroupNftCompiler.Endpoint(
+                    identity.accountId(), identity.region(), identity.vpcId(), identity.eniId(),
+                    identity.logicalAddress(), identity.transportAddress(), identity.groupIds(), attached);
             endpoints.put(entry.getKey(), new ProtectedEndpoint(updated, current.helperId(),
                     Map.copyOf(prefixLists)));
         }
@@ -285,8 +290,8 @@ public class SecurityGroupFirewallManager {
     }
 
     private void stopNamespaceWorkloads(String helperId) {
-        for (var container : dockerClient.listContainersCmd().exec()) {
-            var inspect = dockerClient.inspectContainerCmd(container.getId()).exec();
+        for (Container container : dockerClient.listContainersCmd().exec()) {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(container.getId()).exec();
             if (inspect.getHostConfig() != null && ("container:" + helperId)
                     .equals(inspect.getHostConfig().getNetworkMode())) {
                 dockerClient.stopContainerCmd(container.getId()).withTimeout(0).exec();
@@ -295,8 +300,8 @@ public class SecurityGroupFirewallManager {
     }
 
     private void removeNamespaceWorkloads(String helperId) {
-        for (var container : dockerClient.listContainersCmd().withShowAll(true).exec()) {
-            var inspect = dockerClient.inspectContainerCmd(container.getId()).exec();
+        for (Container container : dockerClient.listContainersCmd().withShowAll(true).exec()) {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(container.getId()).exec();
             if (inspect.getHostConfig() != null && ("container:" + helperId)
                     .equals(inspect.getHostConfig().getNetworkMode())) {
                 lifecycleManager.removeIfExists(container.getId());
@@ -324,7 +329,7 @@ public class SecurityGroupFirewallManager {
                         .withAttachStdout(true).withAttachStderr(true)
                         .withCmd("nft", "-f", "/tmp/floci-sg.nft").exec().getId();
                 StringBuilder output = new StringBuilder();
-                try (var callback = new ResultCallback.Adapter<Frame>() {
+                try (ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<Frame>() {
                     @Override public void onNext(Frame frame) {
                         output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
                     }

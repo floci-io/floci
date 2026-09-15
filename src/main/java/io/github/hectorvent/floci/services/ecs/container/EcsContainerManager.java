@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.ec2.SecurityGroupNftCompiler;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
@@ -53,6 +54,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Manages Docker container lifecycle for ECS tasks.
@@ -314,13 +316,13 @@ public class EcsContainerManager {
                 || firewallManager == null || !firewallManager.enabled()) {
             return null;
         }
-        var config = task.getNetworkConfiguration() == null ? null
+        AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
                 : task.getNetworkConfiguration().getAwsvpcConfiguration();
-        if (config == null || config.getSubnets() == null || config.getSubnets().isEmpty()) {
+        if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
             throw new AwsException("ClientException", "awsvpc tasks require a subnet", 400);
         }
-        NetworkInterface eni = ec2Service.createNetworkInterface(region, config.getSubnets().getFirst(),
-                "ECS task " + task.getTaskArn(), null, List.of(), config.getSecurityGroups(), List.of());
+        NetworkInterface eni = ec2Service.createNetworkInterface(region, awsvpc.getSubnets().getFirst(),
+                "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
         String eniId = eni.getNetworkInterfaceId();
         SecurityGroupFirewallManager.Namespace namespace = null;
         try {
@@ -333,7 +335,7 @@ public class EcsContainerManager {
                 }
             }
             namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
-                    region, this.config.services().ecs().dockerNetwork(), bindings);
+                    region, config.services().ecs().dockerNetwork(), bindings);
             List<String> groupIds = eni.getGroups().stream().map(g -> g.getGroupId()).toList();
             List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
             if (groups.size() != groupIds.size()) {
@@ -341,7 +343,7 @@ public class EcsContainerManager {
             }
             Map<String, List<String>> prefixLists = new LinkedHashMap<>();
             for (SecurityGroup group : groups) {
-                java.util.stream.Stream.concat(group.getIpPermissions().stream(),
+                Stream.concat(group.getIpPermissions().stream(),
                                 group.getIpPermissionsEgress().stream())
                         .flatMap(permission -> permission.getPrefixListIds().stream())
                         .map(reference -> reference.getPrefixListId())
