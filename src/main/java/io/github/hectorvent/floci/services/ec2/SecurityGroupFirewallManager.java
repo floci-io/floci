@@ -109,7 +109,6 @@ public class SecurityGroupFirewallManager {
         ContainerBuilder.Builder builder = containerBuilder.newContainer(config.network().securityGroupEnforcement().helperImage())
                 .withName(name)
                 .withDockerNetwork(dockerNetwork)
-                .withPrivileged(true)
                 .withEntrypoint(List.of("sh", "-c"))
                 .withCmd(List.of("exec sleep 2147483647"))
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))

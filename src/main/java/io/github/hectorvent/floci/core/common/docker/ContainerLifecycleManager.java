@@ -872,6 +872,11 @@ public class ContainerLifecycleManager {
         if (spec.labels() != null && "true".equals(spec.labels().get("floci.security-group-workload"))) {
             hostConfig.withCapDrop(Capability.NET_ADMIN, Capability.NET_RAW);
         }
+        // The firewall helper only has to program nftables in the namespace it already owns,
+        // which needs CAP_NET_ADMIN and nothing else that privileged mode would also grant.
+        if (spec.labels() != null && "true".equals(spec.labels().get("floci.security-group-helper"))) {
+            hostConfig.withCapAdd(Capability.NET_ADMIN);
+        }
 
         if (spec.cgroupnsMode() != null && !spec.cgroupnsMode().isBlank()) {
             hostConfig.withCgroupnsMode(spec.cgroupnsMode());

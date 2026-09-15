@@ -28,6 +28,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -113,6 +114,18 @@ class ContainerLifecycleManagerLabelsTest {
         List<Capability> dropped = List.of(hostConfig.getValue().getCapDrop());
         assertTrue(dropped.contains(Capability.NET_ADMIN));
         assertTrue(dropped.contains(Capability.NET_RAW));
+    }
+
+    @Test
+    void firewallHelperGetsNetAdminInsteadOfFullPrivilege() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of("floci.security-group-helper", "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        assertEquals(List.of(Capability.NET_ADMIN), List.of(hostConfig.getValue().getCapAdd()));
+        assertNotEquals(Boolean.TRUE, hostConfig.getValue().getPrivileged());
     }
 
     @Test

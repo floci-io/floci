@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.jboss.logging.Logger;
 
@@ -2803,9 +2804,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private Map<String, List<String>> policyPrefixLists(String region, List<SecurityGroup> groups) {
-        Map<String, List<String>> resolved = new java.util.LinkedHashMap<>();
+        Map<String, List<String>> resolved = new LinkedHashMap<>();
         for (SecurityGroup group : groups) {
-            java.util.stream.Stream.concat(group.getIpPermissions().stream(),
+            Stream.concat(group.getIpPermissions().stream(),
                             group.getIpPermissionsEgress().stream())
                     .flatMap(permission -> permission.getPrefixListIds().stream())
                     .map(PrefixListId::getPrefixListId).distinct()
@@ -2827,7 +2828,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
         Map<String, SecurityGroup> byId = current.stream()
-                .collect(Collectors.toMap(SecurityGroup::getGroupId, java.util.function.Function.identity()));
+                .collect(Collectors.toMap(SecurityGroup::getGroupId, Function.identity()));
         containerManager.refreshSecurityGroups(region, byId, policyPrefixLists(region, current));
     }
 
@@ -3336,7 +3337,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<GroupIdentifier> identifiers = new ArrayList<>();
         for (String groupId : groupIds) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            if (!java.util.Objects.equals(inst.getVpcId(), sg.getVpcId())) {
+            if (!Objects.equals(inst.getVpcId(), sg.getVpcId())) {
                 throw new AwsException("InvalidGroup.NotFound", "Security group is not in the instance VPC", 400);
             }
             identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
@@ -3347,9 +3348,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 && inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {
             List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
             Map<String, SecurityGroup> byId = current.stream().collect(Collectors.toMap(
-                    SecurityGroup::getGroupId, java.util.function.Function.identity()));
+                    SecurityGroup::getGroupId, Function.identity()));
             containerManager.updateSecurityGroups(inst.getNetworkInterfaces().getFirst().getNetworkInterfaceId(),
-                    new java.util.HashSet<>(groupIds), byId, policyPrefixLists(region, current));
+                    new HashSet<>(groupIds), byId, policyPrefixLists(region, current));
         }
 
         inst.setSecurityGroups(new ArrayList<>(identifiers));
