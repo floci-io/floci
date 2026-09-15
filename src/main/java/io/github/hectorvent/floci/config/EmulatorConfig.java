@@ -768,6 +768,12 @@ public interface EmulatorConfig {
         EfsServiceConfig efs();
         CodeGuruReviewerServiceConfig codegurureviewer();
         MarketplaceServiceConfig marketplace();
+        DmsServiceConfig dms();
+    }
+
+    interface DmsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface ConnectServiceConfig {

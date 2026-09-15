@@ -223,6 +223,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>neptune</artifactId>
         </dependency>
+        <!-- DMS management client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>databasemigration</artifactId>
+        </dependency>
         <!-- EventBridge client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

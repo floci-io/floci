@@ -778,3 +778,5 @@ floci:
       enabled: true
     marketplace:
       enabled: true
+    dms:
+      enabled: true

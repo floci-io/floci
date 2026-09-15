@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.cloudhsmv2.CloudHsmV2JsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployJsonHandler;
 import io.github.hectorvent.floci.services.codepipeline.CodePipelineJsonHandler;
+import io.github.hectorvent.floci.services.dms.DmsJsonHandler;
 import io.github.hectorvent.floci.services.ecr.EcrJsonHandler;
 import io.github.hectorvent.floci.services.transfer.TransferHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -139,6 +140,7 @@ public class AwsJson11Controller {
     private final ServiceQuotasJsonHandler serviceQuotasJsonHandler;
     private final MarketplaceEntitlementController marketplaceEntitlementController;
     private final MarketplaceMeteringController marketplaceMeteringController;
+    private final DmsJsonHandler dmsJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -192,7 +194,8 @@ public class AwsJson11Controller {
                                BudgetsJsonHandler budgetsJsonHandler,
                                ServiceQuotasJsonHandler serviceQuotasJsonHandler,
                                MarketplaceEntitlementController marketplaceEntitlementController,
-                               MarketplaceMeteringController marketplaceMeteringController) {
+                               MarketplaceMeteringController marketplaceMeteringController,
+                               DmsJsonHandler dmsJsonHandler) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -251,6 +254,7 @@ public class AwsJson11Controller {
         this.serviceQuotasJsonHandler = serviceQuotasJsonHandler;
         this.marketplaceEntitlementController = marketplaceEntitlementController;
         this.marketplaceMeteringController = marketplaceMeteringController;
+        this.dmsJsonHandler = dmsJsonHandler;
     }
 
     @POST
@@ -362,6 +366,7 @@ public class AwsJson11Controller {
                     }
                     yield marketplaceMeteringController.handle(action, request, region);
                 }
+                case "dms" -> dmsJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

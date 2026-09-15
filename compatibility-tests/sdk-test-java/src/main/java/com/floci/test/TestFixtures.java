@@ -52,6 +52,7 @@ import software.amazon.awssdk.services.marketplacemetering.MarketplaceMeteringCl
 import software.amazon.awssdk.services.marketplacediscovery.MarketplaceDiscoveryClient;
 import software.amazon.awssdk.services.inspector2.Inspector2Client;
 import software.amazon.awssdk.services.securityhub.SecurityHubClient;
+import software.amazon.awssdk.services.databasemigration.DatabaseMigrationClient;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.globalaccelerator.GlobalAcceleratorClient;
 import software.amazon.awssdk.services.rum.RumClient;
@@ -1011,6 +1012,14 @@ public final class TestFixtures {
 
     public static RdsClient rdsClient() {
         return RdsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static DatabaseMigrationClient databaseMigrationClient() {
+        return DatabaseMigrationClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

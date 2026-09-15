@@ -168,6 +168,10 @@ services:
     doc: docs/services/detective.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/detective/DetectiveController.java, mode: rest }
+  - service: dms
+    doc: docs/services/dms.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/dms/DmsJsonHandler.java, mode: switch }
   - service: docdb
     doc: docs/services/docdb.md
     sources:
