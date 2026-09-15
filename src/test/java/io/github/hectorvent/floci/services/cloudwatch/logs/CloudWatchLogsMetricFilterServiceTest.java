@@ -420,21 +420,22 @@ class CloudWatchLogsMetricFilterServiceTest {
     }
 
     /**
-     * AWS allows five filter patterns holding a regular expression per log group. The sixth is
-     * refused, replacing one of the five reuses its slot, and a pattern without a regex never
-     * counts.
+     * AWS allows five regular expressions per log group, so two patterns holding two each and one
+     * holding a single expression fill the quota. Replacing a filter reuses its slot, a pattern
+     * without a regular expression never counts, and the quota is per log group.
      */
     @Test
     void theRegexQuotaOfALogGroup() {
-        for (int i = 0; i < 5; i++) {
-            service.putMetricFilter(filter(GROUP, "r" + i, "%ERROR%", transformation("E", "App", "1")), REGION);
-        }
-        rejected(() -> service.putMetricFilter(filter(GROUP, "r5", "%WARN%", transformation("E", "App", "1")), REGION),
+        service.putMetricFilter(filter(GROUP, "r0", "%ERROR% %WARN%", transformation("E", "App", "1")), REGION);
+        service.putMetricFilter(filter(GROUP, "r1", "%FATAL% %TRACE%", transformation("E", "App", "1")), REGION);
+        service.putMetricFilter(filter(GROUP, "r2", "%DEBUG%", transformation("E", "App", "1")), REGION);
+
+        rejected(() -> service.putMetricFilter(filter(GROUP, "r3", "%INFO%", transformation("E", "App", "1")), REGION),
                 "LimitExceededException");
 
-        service.putMetricFilter(filter(GROUP, "r4", "%FATAL%", transformation("E", "App", "1")), REGION);
+        service.putMetricFilter(filter(GROUP, "r2", "%NOTICE%", transformation("E", "App", "1")), REGION);
         service.putMetricFilter(filter(GROUP, "plain", "ERROR", transformation("E", "App", "1")), REGION);
-        service.putMetricFilter(filter(OTHER_GROUP, "r5", "%WARN%", transformation("E", "App", "1")), REGION);
+        service.putMetricFilter(filter(OTHER_GROUP, "r3", "%INFO%", transformation("E", "App", "1")), REGION);
     }
 
     /** The criterion has to parse and to fit the 2000 characters the API allows. */

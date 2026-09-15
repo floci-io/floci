@@ -72,9 +72,14 @@ A metric filter turns log events into a CloudWatch metric as they are written. O
 `PutLogEvents`, each filter on the log group runs its pattern over the stored events and publishes
 one value per match, at the event's timestamp: the literal `metricValue`, or the field it names
 (`$.latency` in a JSON event, `$size` in a space-delimited one). Dimensions take their values from
-fields the same way, and a dimension whose field the event lacks is left out. When a batch matches
-nothing and the filter has a `defaultValue`, that value is published once for the batch. The metric
-is then readable with `GetMetricStatistics` and `GetMetricData`, and alarms on it evaluate as usual.
+fields the same way, and a dimension whose field the event lacks is left out. The metric is then
+readable with `GetMetricStatistics` and `GetMetricData`, and alarms on it evaluate as usual.
+
+A `defaultValue` belongs to a one-minute period rather than to a `PutLogEvents` call, as it does on
+AWS: a minute that ingested logs without a match reports the default once, a minute holding any
+match reports no default, and a minute that ingested nothing reports nothing. A period is settled
+when a later one arrives, so the last minute before ingestion stops keeps its default value until
+traffic resumes, where AWS reports it when the minute ends.
 
 The filter pattern syntax follows the AWS reference:
 
@@ -93,9 +98,9 @@ The filter pattern syntax follows the AWS reference:
 `PutMetricFilter` applies the rules AWS applies: the log group must exist, the pattern must parse,
 at most two regular expressions per pattern, exactly one transformation whose `metricValue` is a
 number or a field the pattern can supply, at most three dimensions, only on JSON or space-delimited
-patterns and not together with a `defaultValue`, 100 filters per log group, and five filter patterns
-holding a regular expression per log group, counted over the group's metric and subscription
-filters together. `TestMetricFilter` reports matches with the extracted values as AWS does: named
+patterns and not together with a `defaultValue`, 100 filters per log group, and five regular expressions per
+log group, counted over the group's metric and subscription filters together and beside the two a
+single pattern may hold. `TestMetricFilter` reports matches with the extracted values as AWS does: named
 fields as `$name`, the others by position as `$1`, `$2` and so on.
 
 `fieldSelectionCriteria` selects which batches a filter processes from the system fields

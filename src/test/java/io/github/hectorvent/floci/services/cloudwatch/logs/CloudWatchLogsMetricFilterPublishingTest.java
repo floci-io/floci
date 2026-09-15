@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -84,6 +85,13 @@ class CloudWatchLogsMetricFilterPublishingTest {
 
     private List<MetricDatum> published(String namespace) {
         return published(null, namespace);
+    }
+
+    /** Every datum published across the calls a test made, for the tests that send several batches. */
+    private List<MetricDatum> allPublished(String namespace) {
+        ArgumentCaptor<List<MetricDatum>> datums = ArgumentCaptor.captor();
+        verify(metrics, atLeastOnce()).putMetricDataForAccount(isNull(), eq(namespace), datums.capture(), eq(REGION));
+        return datums.getAllValues().stream().flatMap(List::stream).toList();
     }
 
     private List<MetricDatum> published(String accountId, String namespace) {
@@ -161,20 +169,65 @@ class CloudWatchLogsMetricFilterPublishingTest {
         assertEquals(List.of(new Dimension("eventType", "UpdateTrail")), datums.getFirst().getDimensions());
     }
 
+    /**
+     * AWS reports metric filter values every minute and reports the default value for a minute that
+     * ingested logs without a match, so two calls inside one minute still produce one default. It
+     * is published once the next minute arrives, which is what settles the one before it.
+     */
     @Test
-    void theDefaultValueIsPublishedOnceWhenNothingInTheBatchMatched() {
+    void theDefaultValueIsPublishedOncePerMinuteRatherThanOncePerBatch() {
+        MetricTransformation t = transformation("ErrorCount", "App", "1");
+        t.setDefaultValue(0.0);
+        service.putMetricFilter(filter(GROUP, "errors", "ERROR", t), REGION);
+
+        service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1",
+                List.of(event(1_700_000_000_000L, "[INFO] one"))));
+        service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1",
+                List.of(event(1_700_000_005_000L, "[INFO] two"))));
+        verify(metrics, never()).putMetricDataForAccount(any(), anyString(), anyList(), anyString());
+
+        service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1",
+                List.of(event(1_700_000_065_000L, "[INFO] the next minute"))));
+
+        List<MetricDatum> datums = allPublished("App");
+        assertEquals(1, datums.size(), "one default value for the minute, not one per batch");
+        assertEquals(0.0, datums.getFirst().getValue());
+        assertEquals(1_700_000_005L, datums.getFirst().getTimestamp(), "at that minute's last event");
+    }
+
+    /** A minute holding one miss and one match reports the match and no default value. */
+    @Test
+    void aMinuteThatMatchedSomethingReportsNoDefaultValue() {
+        MetricTransformation t = transformation("ErrorCount", "App", "1");
+        t.setDefaultValue(0.0);
+        service.putMetricFilter(filter(GROUP, "errors", "ERROR", t), REGION);
+
+        service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1",
+                List.of(event(1_700_000_000_000L, "[INFO] one"))));
+        service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1",
+                List.of(event(1_700_000_005_000L, "[ERROR] two"))));
+        service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1",
+                List.of(event(1_700_000_065_000L, "[INFO] the next minute"))));
+
+        List<MetricDatum> datums = allPublished("App");
+        assertEquals(1, datums.size(), "the match alone");
+        assertEquals(1.0, datums.getFirst().getValue());
+    }
+
+    /** One batch spanning two minutes settles the earlier one on the spot. */
+    @Test
+    void aBatchSpanningTwoMinutesSettlesTheEarlierOne() {
         MetricTransformation t = transformation("ErrorCount", "App", "1");
         t.setDefaultValue(0.0);
         service.putMetricFilter(filter(GROUP, "errors", "ERROR", t), REGION);
 
         service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s1", List.of(
-                event(1_700_000_000_000L, "[INFO] one"),
-                event(1_700_000_005_000L, "[INFO] two"))));
+                event(1_700_000_000_000L, "[INFO] first minute"),
+                event(1_700_000_065_000L, "[INFO] second minute"))));
 
-        List<MetricDatum> datums = published("App");
-        assertEquals(1, datums.size());
-        assertEquals(0.0, datums.getFirst().getValue());
-        assertEquals(1_700_000_005L, datums.getFirst().getTimestamp(), "at the batch's last event");
+        List<MetricDatum> datums = allPublished("App");
+        assertEquals(1, datums.size(), "only the minute the batch moved past is settled");
+        assertEquals(1_700_000_000L, datums.getFirst().getTimestamp());
     }
 
     /** A match whose field is missing or not a number is still a match: no default for that batch. */

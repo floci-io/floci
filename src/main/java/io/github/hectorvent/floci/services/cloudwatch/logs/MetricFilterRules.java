@@ -10,6 +10,7 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * The rules PutMetricFilter applies to the three options that describe a filter rather than its
@@ -25,6 +26,9 @@ import java.util.Set;
 final class MetricFilterRules {
 
     private static final Logger LOG = Logger.getLogger(MetricFilterRules.class);
+
+    /** A metric value or default value written as a number, rather than a field of the pattern. */
+    static final Pattern NUMBER = Pattern.compile("[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?");
 
     private MetricFilterRules() {
     }
@@ -116,5 +120,16 @@ final class MetricFilterRules {
 
     static AwsException invalid(String message) {
         return new AwsException("InvalidParameterException", message, 400);
+    }
+
+    static Double number(String text) {
+        if (text == null || !NUMBER.matcher(text).matches()) {
+            return null;
+        }
+        try {
+            return Double.parseDouble(text);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }

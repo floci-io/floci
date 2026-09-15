@@ -103,7 +103,7 @@ class CloudWatchLogsMetricFilterIntegrationTest {
     }
 
     @Test
-    void aTermFilterCountsMatchesAndPublishesTheDefaultValueForABatchWithoutOne() {
+    void aTermFilterCountsMatchesAndPublishesTheDefaultValueForAMinuteWithoutOne() {
         String group = "/it/metric-filter/errors-" + System.nanoTime();
         createGroupAndStream(group, "app");
         logs("PutMetricFilter", """
@@ -112,9 +112,12 @@ class CloudWatchLogsMetricFilterIntegrationTest {
                    "defaultValue":0}]}
                 """.formatted(group, group)).then().statusCode(200);
 
+        // The default value belongs to a one-minute period, and a period is settled once a later
+        // one arrives, so the middle minute is the one that reports it.
         long now = System.currentTimeMillis();
         putLogEvents(group, "app", now, List.of("[ERROR] one", "[INFO] fine", "[ERROR] two"));
-        putLogEvents(group, "app", now + 10, List.of("[INFO] only"));
+        putLogEvents(group, "app", now + 61_000, List.of("[INFO] only"));
+        putLogEvents(group, "app", now + 122_000, List.of("[INFO] later still"));
 
         Instant from = Instant.ofEpochMilli(now).minusSeconds(120);
         Instant to = Instant.ofEpochMilli(now).plusSeconds(120);
@@ -122,7 +125,7 @@ class CloudWatchLogsMetricFilterIntegrationTest {
         assertEquals(2, sum(statistics), 0.001);
         List<Float> samples = statistics.then().extract().jsonPath().getList("Datapoints.SampleCount", Float.class);
         assertEquals(3, samples.stream().mapToDouble(Float::doubleValue).sum(), 0.001,
-                "two matches plus one default value for the batch that matched nothing");
+                "two matches plus one default value for the minute that ingested without a match");
     }
 
     @Test
