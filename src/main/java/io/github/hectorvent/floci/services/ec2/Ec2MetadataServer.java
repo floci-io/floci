@@ -75,7 +75,7 @@ public class Ec2MetadataServer {
     }
 
     /** Reconcile every Docker attachment without retaining stale addresses after restart. */
-    void reconcileContainerAddresses(Set<String> addresses, Instance instance) {
+    public void reconcileContainerAddresses(Set<String> addresses, Instance instance) {
         for (String address : addresses) {
             registerContainer(address, instance.getInstanceId(), instance);
         }
@@ -83,15 +83,20 @@ public class Ec2MetadataServer {
                 entry.getValue() == instance && !addresses.contains(entry.getKey()));
     }
 
-    void unregisterInstance(Instance instance) {
-        containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
+    public void unregisterInstance(Instance instance) {
+        if (instance != null) {
+            containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
+        }
     }
 
     Optional<Instance> registeredContainer(String containerIp) {
         return Optional.ofNullable(containerIpToInstance.get(containerIp));
     }
 
-    public CompletableFuture<Void> start() {
+    public synchronized CompletableFuture<Void> start() {
+        if (httpServer != null) {
+            return CompletableFuture.completedFuture(null);
+        }
         CompletableFuture<Void> future = new CompletableFuture<>();
         int port = config.services().ec2().imdsPort();
 
@@ -137,9 +142,10 @@ public class Ec2MetadataServer {
         return future;
     }
 
-    public void stop() {
+    public synchronized void stop() {
         if (httpServer != null) {
             httpServer.close();
+            httpServer = null;
         }
     }
 
