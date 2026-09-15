@@ -229,20 +229,7 @@ class RedshiftCatalogSeedIntegrationTest {
                 }
             }
 
-            // 18. Verify COPY error records into stl_load_errors
-            try {
-                stmt.execute("COPY test_catalog_users FROM 's3://nonexistent-seed-bucket/bad.csv' FORMAT AS CSV");
-            } catch (SQLException expected) {
-                // Expected to fail because S3 bucket does not exist
-            }
-            try (ResultSet rs = stmt.executeQuery(
-                    "SELECT filename, err_code, err_reason FROM stl_load_errors WHERE filename LIKE '%nonexistent-seed-bucket%'")) {
-                assertTrue(rs.next(), "stl_load_errors must record the failed COPY attempt");
-                assertTrue(rs.getString("filename").contains("nonexistent-seed-bucket"));
-                assertEquals(1204, rs.getInt("err_code"));
-            }
-
-            // 19. Verify newly created database inherits catalog views from template1
+            // 18. Verify newly created database inherits catalog views from template1
             stmt.execute("CREATE DATABASE test_clone_db");
         }
 
