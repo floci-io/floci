@@ -252,6 +252,31 @@ the result to S3 as one or more objects under `<prefix>`.
 - Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no
   bind parameters. Parameterized statements are forwarded unchanged.
 
+## Catalog Views
+
+When a Redshift cluster container starts, Floci bootstraps common Redshift system and catalog views into both `template1` (ensuring any future `CREATE DATABASE` inherits them automatically) and the active cluster database (`dev`). This ensures BI tools (Tableau, Looker, DBeaver), ORMs, and migration tools (Flyway, Liquibase, dbt) can introspect database schema metadata without missing-relation errors:
+
+- `pg_table_def`: Table and column metadata (`schemaname`, `tablename`, `column`, `type`, `encoding`, `distkey`, `sortkey`, `notnull`).
+- `svv_table_info`: Table-level summary metadata (`database`, `schema`, `table_id`, `table`, `encoded`, `diststyle`, `sortkey1`, `max_varchar`, `tbl_rows`, `size`).
+- `svv_all_columns`: All columns across database schemas (`database_name`, `schema_name`, `table_name`, `column_name`, `data_type`, `is_nullable`).
+- `svv_columns`: Column catalog list (`table_catalog`, `table_schema`, `table_name`, `column_name`, `ordinal_position`, `column_default`, `is_nullable`, `data_type`).
+- `svv_tables`: Table catalog list (`table_catalog`, `table_schema`, `table_name`, `table_type`).
+- `stv_tbl_perm`: Table persistence metadata (`id`, `name`, `db_id`, `temp`, `backup`).
+- `stl_load_errors`: Table exposing the documented Redshift load-error schema for catalog and tooling compatibility.
+- `svl_qlog`: Query execution log view (`userid`, `query`, `xid`, `pid`, `starttime`, `endtime`, `elapsed`, `aborted`, `label`).
+- `pg_user_info`: User catalog information (`usesysid`, `usename`, `usecreatedb`, `usesuper`, `useconnlimit`, `syslogaccess`).
+- `svl_user_info`: Standard Redshift user information view matching AWS documented columns.
+- `pg_database_info`: Database catalog information (`datid`, `datname`, `datdba`, `encoding`, `datconnlimit`).
+- `stv_sessions`: Active database sessions (`process`, `user_name`, `db_name`, `starttime`, `timeout_sec`).
+- `stv_recents`: Recently executed queries (`userid`, `pid`, `process`, `query`, `starttime`, `duration`, `status`).
+- `svv_transactions`: Current transaction status (`txn_owner`, `txn_db`, `xid`, `pid`, `txn_start`, `lock_mode`, `relation`, `granted`).
+- `stv_slices`: Cluster slice metadata (`node`, `slice`, `localslice`, `type`).
+- `stl_query`: Dynamic query execution log view mapped from `pg_stat_activity` (`query`, `xid`, `pid`, `userid`, `starttime`, `endtime`, `elapsed`, `querytxt`, `database`, `aborted`, `insert_pristine`, `concurrency_scaling_status`).
+- `stv_wlm_query_state`: Dynamic WLM query state view (`xid`, `task`, `query`, `service_class`, `slot_count`, `wlm_start_time`, `queue_time`, `exec_time`, `state`, `query_priority`).
+- `svv_diskusage`: Disk space usage summary per relation exposing full documented Redshift block layout columns (`db_id`, `name`, `slice`, `col`, `tbl`, `blocknum`, `num_values`, `minvalue`, `maxvalue`, `sb_pos`, `pinned`, `on_disk`, `modified`, `hdr_modified`, `unsorted`, `tombstone`, `preferred_diskno`, `temporary`, `newblock`) as well as compatibility aliases (`database`, `schema`, `table_id`, `size`, `used`).
+
+These views expose the documented Redshift column names, types, and ordering mapped from PostgreSQL internal catalogs (`pg_catalog`, `information_schema`, `pg_stat_activity`), with deterministic placeholders where PostgreSQL cannot provide multi-node metrics.
+
 ## Out of Scope
 
 - Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER/SPECTRUM are not emulated.

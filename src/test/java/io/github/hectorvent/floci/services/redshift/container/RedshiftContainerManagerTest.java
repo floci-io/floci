@@ -92,6 +92,9 @@ class RedshiftContainerManagerTest {
         when(defaultInspectCmd.exec()).thenReturn(defaultInspectResponse);
         when(dockerClient.inspectExecCmd(anyString())).thenReturn(defaultInspectCmd);
 
+        CopyArchiveToContainerCmd defaultCopyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(defaultCopyCmd);
+
         manager = new RedshiftContainerManager(
                 containerBuilder,
                 lifecycleManager,
@@ -284,8 +287,8 @@ class RedshiftContainerManagerTest {
         Path tempFile = Files.createTempFile("test-restore-snapshot", ".sql");
         try {
             manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",tempFile);
-            verify(dockerClient).copyArchiveToContainerCmd("cont-123");
-            verify(dockerClient, org.mockito.Mockito.times(2)).execCreateCmd("cont-123");
+            verify(dockerClient, org.mockito.Mockito.times(2)).copyArchiveToContainerCmd("cont-123");
+            verify(dockerClient, org.mockito.Mockito.times(4)).execCreateCmd("cont-123");
         } finally {
             Files.deleteIfExists(tempFile);
         }
@@ -390,7 +393,7 @@ class RedshiftContainerManagerTest {
 
         manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "NewSecret1");
 
-        verify(dockerClient, org.mockito.Mockito.times(2)).execCreateCmd("cont-123");
+        verify(dockerClient, org.mockito.Mockito.times(4)).execCreateCmd("cont-123");
     }
 
     @Test
@@ -490,5 +493,39 @@ class RedshiftContainerManagerTest {
                 manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "NewSecret1"));
         assertEquals("InternalFailure", ex.getErrorCode());
         assertEquals(500, ex.getHttpStatus());
+    }
+
+    @Test
+    void testBootstrapCatalogSuccess() {
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("cont-bootstrap")).thenReturn(copyCmd);
+
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
+        when(createResponse.getId()).thenReturn("exec-bootstrap");
+        when(createCmd.exec()).thenReturn(createResponse);
+        when(dockerClient.execCreateCmd("cont-bootstrap")).thenReturn(createCmd);
+
+        InspectExecCmd inspectCmd = mock(InspectExecCmd.class);
+        InspectExecResponse inspectResponse = mock(InspectExecResponse.class);
+        when(inspectResponse.getExitCodeLong()).thenReturn(0L);
+        when(inspectCmd.exec()).thenReturn(inspectResponse);
+        when(dockerClient.inspectExecCmd("exec-bootstrap")).thenReturn(inspectCmd);
+
+        manager.bootstrapCatalog("cont-bootstrap", "admin", "dev");
+
+        verify(dockerClient).copyArchiveToContainerCmd("cont-bootstrap");
+        verify(dockerClient, org.mockito.Mockito.times(2)).execCreateCmd("cont-bootstrap");
+    }
+
+    @Test
+    void testBootstrapCatalogFailureDoesNotThrow() {
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        when(copyCmd.exec()).thenThrow(new RuntimeException("Docker copy error"));
+        when(dockerClient.copyArchiveToContainerCmd("cont-bootstrap-fail")).thenReturn(copyCmd);
+
+        // Must not bubble an exception that fails cluster startup
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+                manager.bootstrapCatalog("cont-bootstrap-fail", "admin", "dev"));
     }
 }

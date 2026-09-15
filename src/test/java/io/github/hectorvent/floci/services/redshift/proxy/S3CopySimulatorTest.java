@@ -1196,4 +1196,5 @@ class S3CopySimulatorTest {
         assertEquals('E', err.type());
         assertNull(in.nextMessage(), "Client must not receive an unconfirmed ReadyForQuery");
     }
+
 }

@@ -75,6 +75,7 @@ public class RedshiftContainerManager {
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv(envVars)
+                .withCmd(List.of("postgres", "-c", "allow_system_table_mods=on"))
                 .withDockerNetwork(config.services().redshift().dockerNetwork())
                 .withLogRotation();
 
@@ -100,6 +101,7 @@ public class RedshiftContainerManager {
         }
 
         waitForReady(containerName, info.containerId(), masterUsername, "dev");
+        bootstrapCatalog(info.containerId(), masterUsername, "dev");
 
         containers.put(containerKey(accountId, clusterIdentifier), handle);
         return handle;
@@ -140,6 +142,7 @@ public class RedshiftContainerManager {
         }
 
         waitForReady(containerName, info.containerId(), masterUsername, "dev");
+        bootstrapCatalog(info.containerId(), masterUsername, "dev");
 
         containers.put(containerKey(accountId, clusterIdentifier), handle);
         return handle;
@@ -413,6 +416,49 @@ public class RedshiftContainerManager {
             }
         }
         throw new IllegalStateException("Timed out initializing " + description + " in " + containerName + ": " + lastOutput);
+    }
+
+    /**
+     * Bootstraps Redshift catalog and system views in the dev database so BI
+     * and migration tooling can inspect metadata without relation-does-not-exist errors.
+     */
+    void bootstrapCatalog(String containerId, String username, String dbName) {
+        String effectiveUser = (username != null && !username.isBlank()) ? username : "postgres";
+        String effectiveDb = (dbName != null && !dbName.isBlank()) ? dbName : "dev";
+        try (InputStream in = getClass().getResourceAsStream("/redshift/bootstrap-catalog.sql")) {
+            if (in == null) {
+                LOG.warnv("Redshift bootstrap-catalog.sql not found on classpath; skipping catalog seed for container {0}", containerId);
+                return;
+            }
+            byte[] sqlBytes = in.readAllBytes();
+            byte[] tarBytes = buildSingleFileTar("bootstrap-catalog.sql", sqlBytes, 0644);
+            lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(tarBytes))
+                    .withRemotePath("/tmp")
+                    .exec();
+
+            List<String> targetDbs = effectiveDb.equals("template1")
+                    ? List.of("template1")
+                    : List.of("template1", effectiveDb);
+            for (String db : targetDbs) {
+                String[] cmd = new String[]{
+                        "psql",
+                        "-h", "127.0.0.1",
+                        "-v", "ON_ERROR_STOP=1",
+                        "-U", effectiveUser,
+                        "-d", db,
+                        "-f", "/tmp/bootstrap-catalog.sql"
+                };
+                ExecResult result = execInContainer(containerId, cmd, 30);
+                if (result.exitCode() != 0) {
+                    LOG.warnv("Redshift catalog bootstrap for {0} exited with code {1}: {2}", db, result.exitCode(), result.stderr());
+                } else {
+                    LOG.infov("Redshift catalog views bootstrapped successfully for {0} in container {1}", db, containerId);
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv(e, "Error bootstrapping Redshift catalog views for container {0}", containerId);
+        }
     }
 
     public record ExecResult(long exitCode, String stdout, String stderr) {}
