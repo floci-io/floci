@@ -10,6 +10,8 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 @ApplicationScoped
 public class CognitoFederationStateStore {
@@ -30,14 +32,7 @@ public class CognitoFederationStateStore {
     }
 
     public Optional<CognitoAuthorizationTransaction> consumeTransaction(String state) {
-        CognitoAuthorizationTransaction transaction = transactions.get(state);
-        if (transaction == null || isExpired(transaction.expiresAt())) {
-            if (transaction != null) {
-                transactions.remove(state, transaction);
-            }
-            return Optional.empty();
-        }
-        return transactions.remove(state, transaction) ? Optional.of(transaction) : Optional.empty();
+        return consume(transactions, state, CognitoAuthorizationTransaction::expiresAt);
     }
 
     public String putAuthorizationCode(CognitoAuthorizationCode authorizationCode) {
@@ -45,14 +40,7 @@ public class CognitoFederationStateStore {
     }
 
     public Optional<CognitoAuthorizationCode> consumeAuthorizationCode(String code) {
-        CognitoAuthorizationCode authorizationCode = authorizationCodes.get(code);
-        if (authorizationCode == null || isExpired(authorizationCode.expiresAt())) {
-            if (authorizationCode != null) {
-                authorizationCodes.remove(code, authorizationCode);
-            }
-            return Optional.empty();
-        }
-        return authorizationCodes.remove(code, authorizationCode) ? Optional.of(authorizationCode) : Optional.empty();
+        return consume(authorizationCodes, code, CognitoAuthorizationCode::expiresAt);
     }
 
     private <T> String put(ConcurrentHashMap<String, T> store, T value) {
@@ -61,6 +49,18 @@ public class CognitoFederationStateStore {
             key = generateOpaqueKey();
         } while (store.putIfAbsent(key, value) != null);
         return key;
+    }
+
+    private <T> Optional<T> consume(ConcurrentHashMap<String, T> store, String key,
+                                    Function<T, Instant> expiresAt) {
+        AtomicReference<T> consumed = new AtomicReference<>();
+        store.computeIfPresent(key, (ignored, value) -> {
+            if (!isExpired(expiresAt.apply(value))) {
+                consumed.set(value);
+            }
+            return null;
+        });
+        return Optional.ofNullable(consumed.get());
     }
 
     private boolean isExpired(Instant expiresAt) {

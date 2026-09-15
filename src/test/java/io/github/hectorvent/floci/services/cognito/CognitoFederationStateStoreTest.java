@@ -4,16 +4,20 @@ import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationCod
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationTransaction;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,6 +42,17 @@ class CognitoFederationStateStoreTest {
     void consumeTransaction_expiredTransactionReturnsEmpty() {
         CognitoFederationStateStore store = storeAt(NOW);
         String state = store.putTransaction(transaction(NOW));
+
+        assertTrue(store.consumeTransaction(state).isEmpty());
+    }
+
+    @Test
+    void consumeTransaction_expiringAtMapMutationReturnsEmpty() throws ReflectiveOperationException {
+        Instant expiresAt = NOW.plusSeconds(1);
+        MutableClock clock = new MutableClock(NOW);
+        CognitoFederationStateStore store = new CognitoFederationStateStore(clock);
+        replaceStoreMap(store, "transactions", new ExpiringAtMutationMap<>(clock, expiresAt));
+        String state = store.putTransaction(transaction(expiresAt));
 
         assertTrue(store.consumeTransaction(state).isEmpty());
     }
@@ -95,6 +110,17 @@ class CognitoFederationStateStoreTest {
         assertFalse(store.consumeAuthorizationCode(code).isPresent());
     }
 
+    @Test
+    void consumeAuthorizationCode_expiringAtMapMutationReturnsEmpty() throws ReflectiveOperationException {
+        Instant expiresAt = NOW.plusSeconds(1);
+        MutableClock clock = new MutableClock(NOW);
+        CognitoFederationStateStore store = new CognitoFederationStateStore(clock);
+        replaceStoreMap(store, "authorizationCodes", new ExpiringAtMutationMap<>(clock, expiresAt));
+        String code = store.putAuthorizationCode(authorizationCode(expiresAt));
+
+        assertTrue(store.consumeAuthorizationCode(code).isEmpty());
+    }
+
     private CognitoFederationStateStore storeAt(Instant now) {
         return new CognitoFederationStateStore(Clock.fixed(now, ZoneOffset.UTC));
     }
@@ -111,5 +137,62 @@ class CognitoFederationStateStoreTest {
             "pool-id", "client-id", "user-id", "https://example.com/callback", List.of("openid", "email"),
             expiresAt
         );
+    }
+
+    private void replaceStoreMap(CognitoFederationStateStore store, String fieldName,
+                                 ConcurrentHashMap<?, ?> replacement) throws ReflectiveOperationException {
+        Field field = CognitoFederationStateStore.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(store, replacement);
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant now;
+
+        private MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void set(Instant now) {
+            this.now = now;
+        }
+
+        @Override
+        public ZoneOffset getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+    }
+
+    private static final class ExpiringAtMutationMap<V> extends ConcurrentHashMap<String, V> {
+        private final MutableClock clock;
+        private final Instant expiresAt;
+
+        private ExpiringAtMutationMap(MutableClock clock, Instant expiresAt) {
+            this.clock = clock;
+            this.expiresAt = expiresAt;
+        }
+
+        @Override
+        public boolean remove(Object key, Object value) {
+            clock.set(expiresAt);
+            return super.remove(key, value);
+        }
+
+        @Override
+        public V computeIfPresent(String key,
+                                  BiFunction<? super String, ? super V, ? extends V> remappingFunction) {
+            clock.set(expiresAt);
+            return super.computeIfPresent(key, remappingFunction);
+        }
     }
 }
