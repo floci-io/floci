@@ -2710,6 +2710,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean disableCni();
+
+        /**
+         * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
+         * network namespace that relays to Floci's EC2 metadata service.
+         */
+        @WithDefault("true")
+        boolean imds();
     }
 
     /**

@@ -14,9 +14,17 @@ import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import io.github.hectorvent.floci.services.ec2.Ec2MetadataProxy;
+import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.Placement;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -33,7 +41,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -62,6 +76,20 @@ public class EksClusterManager {
     private final EcrRegistryManager ecrRegistryManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final Ec2MetadataServer metadataServer;
+    private final Map<String, Instance> clusterNodeInstances = new ConcurrentHashMap<>();
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, null);
+    }
 
     @Inject
     public EksClusterManager(ContainerBuilder containerBuilder,
@@ -71,7 +99,8 @@ public class EksClusterManager {
                              DockerHostResolver dockerHostResolver,
                              EcrRegistryManager ecrRegistryManager,
                              EmulatorConfig config,
-                             RegionResolver regionResolver) {
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -80,6 +109,7 @@ public class EksClusterManager {
         this.ecrRegistryManager = ecrRegistryManager;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.metadataServer = metadataServer;
     }
 
     /**
@@ -222,6 +252,7 @@ public class EksClusterManager {
         ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
         applyEndpoints(cluster, containerName, hostPort, info);
+        configureLinkLocalMetadataEndpoint(cluster, containerId);
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
                 containerId, cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -272,6 +303,7 @@ public class EksClusterManager {
         cluster.setContainerId(info.containerId());
         cluster.setHostPort(hostPort);
         applyEndpoints(cluster, containerName, hostPort, info);
+        configureLinkLocalMetadataEndpoint(cluster, info.containerId());
 
         LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
                 info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -365,6 +397,7 @@ public class EksClusterManager {
      * cluster's workloads survive a Floci restart and are re-latched by {@link #restoreCluster}.
      */
     public void stopCluster(Cluster cluster) {
+        unregisterMetadataEndpoint(cluster);
         if (cluster.getContainerId() == null) {
             return;
         }
@@ -691,8 +724,124 @@ public class EksClusterManager {
                 """.formatted(serverUrl);
     }
 
-    private String execInContainer(String containerId, String[] cmd) throws Exception {
-        var dockerClient = lifecycleManager.getDockerClient();
+    void configureLinkLocalMetadataEndpoint(Cluster cluster, String containerId) {
+        if (!config.services().eks().imds()) {
+            return;
+        }
+        try {
+            String accountId = cluster.getAccountId() != null
+                    ? cluster.getAccountId()
+                    : regionResolver.getAccountId();
+            String region = regionResolver.getDefaultRegion();
+
+            ContainerIps containerIps = resolveContainerIps(containerId);
+            Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
+            clusterNodeInstances.put(clusterResourceName(cluster), nodeInstance);
+
+            if (metadataServer != null) {
+                metadataServer.reconcileContainerAddresses(containerIps.allIps(), nodeInstance);
+            }
+
+            ContainerExecResult install = execInContainerForResult(containerId,
+                    Ec2MetadataProxy.installCommand(), 180);
+            if (install.exitCode() != 0) {
+                LOG.warnv("Could not install IMDS proxy dependencies for EKS cluster {0}: {1}",
+                        cluster.getName(), install.summary());
+                return;
+            }
+
+            String flociHost = dockerHostResolver.resolve();
+            int imdsPort = config.services().ec2().imdsPort();
+
+            ContainerExecResult start = execInContainerForResult(containerId,
+                    Ec2MetadataProxy.startCommand(flociHost, imdsPort), 30);
+            if (start.exitCode() != 0) {
+                LOG.warnv("Could not start link-local IMDS proxy for EKS cluster {0}: {1}",
+                        cluster.getName(), start.summary());
+                return;
+            }
+
+            LOG.infov("Configured link-local IMDS endpoint for EKS cluster {0}", cluster.getName());
+        } catch (Exception e) {
+            LOG.warnv("Could not configure link-local IMDS endpoint for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    void unregisterMetadataEndpoint(Cluster cluster) {
+        Instance nodeInstance = clusterNodeInstances.remove(clusterResourceName(cluster));
+        if (metadataServer != null && nodeInstance != null) {
+            metadataServer.unregisterInstance(nodeInstance);
+        }
+    }
+
+    Instance synthesizeClusterNodeInstance(Cluster cluster, String containerIp, String region, String accountId) {
+        Instance inst = new Instance();
+        String safeClusterName = cluster.getName() != null ? cluster.getName() : "eks-cluster";
+        String safeAccountId = accountId != null ? accountId : config.defaultAccountId();
+        String safeRegion = region != null ? region : regionResolver.getDefaultRegion();
+
+        String seed = safeClusterName + "-" + safeAccountId;
+        String hex = UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
+        String instanceId = "i-" + (hex.length() >= 17 ? hex.substring(0, 17) : (hex + "00000000000000000").substring(0, 17));
+
+        inst.setInstanceId(instanceId);
+        inst.setImageId("ami-eks-k3s");
+        inst.setInstanceType("m5.large");
+        inst.setPlacement(new Placement(safeRegion + "a"));
+        inst.setRegion(safeRegion);
+        inst.setState(InstanceState.running());
+
+        String ip = (containerIp != null && !containerIp.isBlank()) ? containerIp : "10.0.0.1";
+        inst.setPrivateIpAddress(ip);
+        inst.setPrivateDnsName("ip-" + ip.replace('.', '-') + "." + safeRegion + ".compute.internal");
+
+        String roleArn = cluster.getRoleArn();
+        if (roleArn != null && !roleArn.isBlank()) {
+            inst.setIamInstanceProfileArn(roleArn);
+        } else {
+            inst.setIamInstanceProfileArn("arn:aws:iam::" + safeAccountId + ":instance-profile/" + safeClusterName + "-node-profile");
+        }
+        return inst;
+    }
+
+    record ContainerIps(String primaryIp, Set<String> allIps) {}
+
+    ContainerIps resolveContainerIps(String containerId) {
+        Set<String> ips = new LinkedHashSet<>();
+        String preferred = null;
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec();
+            if (inspect.getNetworkSettings() != null) {
+                Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
+                if (networks != null) {
+                    preferred = Ec2MetadataProxy.preferredMetadataSourceIp(networks).orElse(null);
+                    for (ContainerNetwork network : networks.values()) {
+                        if (network != null && network.getIpAddress() != null && !network.getIpAddress().isBlank()) {
+                            ips.add(network.getIpAddress());
+                        }
+                    }
+                }
+                String ip = inspect.getNetworkSettings().getIpAddress();
+                if (ip != null && !ip.isBlank()) {
+                    ips.add(ip);
+                    if (preferred == null) {
+                        preferred = ip;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not inspect container {0} for IPs: {1}", containerId, e.getMessage());
+        }
+        return new ContainerIps(preferred != null ? preferred : "10.0.0.1", ips);
+    }
+
+    Instance getRegisteredClusterNodeInstance(Cluster cluster) {
+        return clusterNodeInstances.get(clusterResourceName(cluster));
+    }
+
+    ContainerExecResult execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
+        DockerClient dockerClient = lifecycleManager.getDockerClient();
         ExecCreateCmdResponse exec = dockerClient
                 .execCreateCmd(containerId)
                 .withCmd(cmd)
@@ -705,15 +854,32 @@ public class EksClusterManager {
                 .exec(new ResultCallback.Adapter<Frame>() {
                     @Override
                     public void onNext(Frame frame) {
-                        output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                        if (frame != null && frame.getPayload() != null) {
+                            output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                        }
                     }
                 })
-                .awaitCompletion(10, TimeUnit.SECONDS);
+                .awaitCompletion(timeoutSeconds, TimeUnit.SECONDS);
 
         if (!completed) {
+            return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
+        }
+        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
+        return new ContainerExecResult(exitCode != null ? exitCode : -1, output.toString());
+    }
+
+    record ContainerExecResult(long exitCode, String output) {
+        String summary() {
+            return output == null || output.isBlank() ? "(no output)" : output.trim();
+        }
+    }
+
+    private String execInContainer(String containerId, String[] cmd) throws Exception {
+        ContainerExecResult result = execInContainerForResult(containerId, cmd, 10);
+        if (result.exitCode() == -1 && result.output().startsWith("Timed out")) {
             throw new RuntimeException("exec timed out in container " + containerId);
         }
-        return output.toString();
+        return result.output();
     }
 
     private String extractYamlField(String yaml, String fieldName) {

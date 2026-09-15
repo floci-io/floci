@@ -215,7 +215,8 @@ public class EmulatorLifecycle {
             elbClassicService.restorePersistedRuntime();
         }
 
-        if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+        if ((config.services().ec2().enabled() && !config.services().ec2().mock())
+                || (config.services().eks().enabled() && !config.services().eks().mock() && config.services().eks().imds())) {
             ec2MetadataServer.start().exceptionally(ex -> {
                 LOG.warnv("EC2 IMDS server failed to start: {0}", ex.getMessage());
                 return null;
@@ -304,7 +305,8 @@ public class EmulatorLifecycle {
         // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
         runCleanup("storage flush", storageFactory::flushAll);
         runCleanup("EC2 metadata server", () -> {
-            if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+            if ((config.services().ec2().enabled() && !config.services().ec2().mock())
+                    || (config.services().eks().enabled() && !config.services().eks().mock() && config.services().eks().imds())) {
                 ec2MetadataServer.stop();
             }
         });
