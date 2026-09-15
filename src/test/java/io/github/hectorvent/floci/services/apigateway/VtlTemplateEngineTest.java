@@ -177,6 +177,27 @@ class VtlTemplateEngineTest {
     }
 
     @Test
+    void contextErrorForGatewayResponses() {
+        VtlTemplateEngine.VtlContext errorCtx = new VtlTemplateEngine.VtlContext(
+                null, Map.of(), Map.of(), Map.of(), "prod", "GET", "/users",
+                "req-123", "000000000000", Map.of(), null,
+                Map.of("path", "/prod/users",
+                        "error", Map.of("message", "Missing Authentication Token",
+                                "messageString", "\"Missing Authentication Token\"",
+                                "responseType", "MISSING_AUTHENTICATION_TOKEN",
+                                "validationErrorString", "")));
+        String template = "{\"message\":$context.error.messageString,"
+                + "\"raw\":\"$context.error.message\",\"type\":\"$context.error.responseType\","
+                + "\"path\":\"$context.path\",\"stage\":\"$context.stage\"}";
+
+        assertEquals("{\"message\":\"Missing Authentication Token\",\"raw\":\"Missing Authentication Token\","
+                + "\"type\":\"MISSING_AUTHENTICATION_TOKEN\",\"path\":\"/prod/users\",\"stage\":\"prod\"}",
+                engine.evaluate(template, errorCtx).body());
+        // Outside a gateway response $context.error is simply absent.
+        assertEquals("$context.error", engine.evaluate("$context.error", ctx("{}")).body());
+    }
+
+    @Test
     void stageVariables() {
         VtlTemplateEngine.VtlContext svCtx = new VtlTemplateEngine.VtlContext(
                 "{}", Map.of(), Map.of(), Map.of(), "prod", "GET", "/",

@@ -3,12 +3,6 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
-import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
-import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
-import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
-import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
-import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
-import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ReplacementCleanup;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
@@ -174,7 +168,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::ApiGatewayV2::Route",
             "AWS::ApiGatewayV2::Stage",
             "AWS::CloudFormation::CustomResource",
-            "AWS::CloudFront::Distribution",
             "AWS::DynamoDB::GlobalTable",
             "AWS::DynamoDB::Table",
             "AWS::EC2::Instance",
@@ -214,7 +207,6 @@ public class CloudFormationResourceProvisioner {
     private final StepFunctionsService stepFunctionsService;
     private final Ec2Service ec2Service;
     private final EksService eksService;
-    private final CloudFrontService cloudFrontService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
     // now-dead service deps above are cleared in the final cleanup once the switch is empty.
@@ -242,7 +234,6 @@ public class CloudFormationResourceProvisioner {
                                              KinesisService kinesisService,
                                              CloudWatchMetricsService cloudWatchMetricsService,
                                              FirehoseService firehoseService,
-                                             CloudFrontService cloudFrontService,
                                              CloudFormationResourceRegistry resourceRegistry,
                                              CfnDynamicReferences dynamicReferences,
                                              EmulatorConfig config) {
@@ -260,7 +251,6 @@ public class CloudFormationResourceProvisioner {
         this.stepFunctionsService = stepFunctionsService;
         this.ec2Service = ec2Service;
         this.eksService = eksService;
-        this.cloudFrontService = cloudFrontService;
         this.resourceRegistry = resourceRegistry;
         this.dynamicReferences = dynamicReferences;
     }
@@ -347,8 +337,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
-                case "AWS::CloudFront::Distribution" ->
-                        provisionCloudFrontDistribution(resource, properties, engine);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -573,7 +561,6 @@ public class CloudFormationResourceProvisioner {
             case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
             case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
-            case "AWS::CloudFront::Distribution" -> cloudFrontService.removeDistribution(physicalId);
             // Warn for the same reason the create path does: the delete reports success over a
             // type nothing here removes, and at debug that is invisible at the default log level.
             // The line names the physical id without claiming a resource survives it: this arm
@@ -718,9 +705,6 @@ public class CloudFormationResourceProvisioner {
         return new ArrayList<>(engine.resolveStringList(props.get(field)));
     }
 
-    private String blankToNull(String value) {
-        return (value == null || value.isBlank()) ? null : value;
-    }
 
     private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                       String region) {
@@ -4279,179 +4263,14 @@ public class CloudFormationResourceProvisioner {
 
     // ── CloudFront ────────────────────────────────────────────────────────────
 
-    /**
-     * Provisions an {@code AWS::CloudFront::Distribution} by translating its {@code DistributionConfig}
-     * property tree into a {@link DistributionConfig} and creating or updating the distribution.
-     * {@code Ref} returns the distribution id; {@code Fn::GetAtt} exposes {@code Id} and
-     * {@code DomainName} (closes #1147, where {@code Fn::GetAtt DomainName} previously returned an
-     * unresolved token).
-     */
-    private void provisionCloudFrontDistribution(StackResource r, JsonNode props,
-                                                 CloudFormationTemplateEngine engine) {
-        JsonNode dc = props != null ? props.path("DistributionConfig") : null;
-        DistributionConfig config = new DistributionConfig();
-        if (dc != null && !dc.isMissingNode() && !dc.isNull()) {
-            config.setEnabled(cfnBool(dc, "Enabled", engine, true));
-            config.setComment(cfnText(dc, "Comment", engine));
-            config.setDefaultRootObject(cfnText(dc, "DefaultRootObject", engine));
-            config.setHttpVersion(cfnTextOrDefault(dc, "HttpVersion", engine, "http2"));
-            config.setPriceClass(cfnTextOrDefault(dc, "PriceClass", engine, "PriceClass_All"));
-            config.setAliases(cfnStringList(dc.path("Aliases"), engine));
-            config.setOrigins(cfnOrigins(dc, engine));
-            config.setDefaultCacheBehavior(cfnDefaultCacheBehavior(dc.path("DefaultCacheBehavior"), engine));
-            config.setCacheBehaviors(cfnCacheBehaviors(dc, engine));
-            config.setCustomErrorResponses(cfnCustomErrorResponses(dc, engine));
-        }
 
-        Distribution dist = new Distribution();
-        dist.setConfig(config);
-        if (r.getPhysicalId() == null || r.getPhysicalId().isBlank()) {
-            dist = cloudFrontService.createDistribution(dist, Map.of());
-        } else {
-            Distribution existing = cloudFrontService.getDistribution(r.getPhysicalId());
-            dist = cloudFrontService.updateDistribution(
-                    existing.getId(), existing.getEtag(), dist);
-        }
 
-        r.setPhysicalId(dist.getId());
-        r.getAttributes().put("Id", dist.getId());
-        r.getAttributes().put("DomainName", dist.getDomainName());
-        r.getAttributes().put("Arn", dist.getArn());
-    }
 
-    private List<Origin> cfnOrigins(JsonNode dc, CloudFormationTemplateEngine engine) {
-        List<Origin> origins = new ArrayList<>();
-        JsonNode items = dc.path("Origins");
-        if (items.isArray()) {
-            for (JsonNode node : items) {
-                Origin origin = new Origin();
-                origin.setId(cfnText(node, "Id", engine));
-                origin.setDomainName(cfnText(node, "DomainName", engine));
-                String originPath = cfnText(node, "OriginPath", engine);
-                if (!originPath.isEmpty()) {
-                    origin.setOriginPath(originPath);
-                }
-                String originAccessControlId =
-                        cfnText(node, "OriginAccessControlId", engine);
-                if (!originAccessControlId.isEmpty()) {
-                    origin.setOriginAccessControlId(originAccessControlId);
-                }
-                JsonNode originCustomHeaders = node.path("OriginCustomHeaders");
-                if (originCustomHeaders.isArray()) {
-                    List<Map<String, String>> customHeaders = new ArrayList<>();
-                    for (JsonNode customHeader : originCustomHeaders) {
-                        Map<String, String> mapped = new LinkedHashMap<>();
-                        mapped.put("HeaderName", cfnText(customHeader, "HeaderName", engine));
-                        mapped.put("HeaderValue", cfnText(customHeader, "HeaderValue", engine));
-                        customHeaders.add(mapped);
-                    }
-                    origin.setCustomHeaders(customHeaders);
-                }
-                JsonNode s3 = node.path("S3OriginConfig");
-                JsonNode custom = node.path("CustomOriginConfig");
-                if (!custom.isMissingNode() && !custom.isNull()) {
-                    Map<String, Object> coc = new LinkedHashMap<>();
-                    coc.put("HTTPPort", cfnTextOrDefault(custom, "HTTPPort", engine, "80"));
-                    coc.put("HTTPSPort", cfnTextOrDefault(custom, "HTTPSPort", engine, "443"));
-                    coc.put("OriginProtocolPolicy",
-                            cfnTextOrDefault(custom, "OriginProtocolPolicy", engine, "https-only"));
-                    origin.setCustomOriginConfig(coc);
-                } else {
-                    // No CustomOriginConfig => S3 origin (S3OriginConfig may be present or defaulted).
-                    Map<String, String> s3c = new LinkedHashMap<>();
-                    s3c.put("OriginAccessIdentity",
-                            s3.isMissingNode() || s3.isNull() ? "" : cfnText(s3, "OriginAccessIdentity", engine));
-                    origin.setS3OriginConfig(s3c);
-                }
-                origins.add(origin);
-            }
-        }
-        return origins;
-    }
 
-    private DefaultCacheBehavior cfnDefaultCacheBehavior(JsonNode node, CloudFormationTemplateEngine engine) {
-        DefaultCacheBehavior dcb = new DefaultCacheBehavior();
-        if (node != null && !node.isMissingNode() && !node.isNull()) {
-            dcb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
-            dcb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
-            dcb.setResponseHeadersPolicyId(cfnText(node, "ResponseHeadersPolicyId", engine));
-            List<String> trustedKeyGroups = cfnStringList(node.path("TrustedKeyGroups"), engine);
-            if (!trustedKeyGroups.isEmpty()) {
-                dcb.setTrustedKeyGroups(trustedKeyGroups);
-            }
-        }
-        return dcb;
-    }
 
-    private List<CacheBehavior> cfnCacheBehaviors(JsonNode dc, CloudFormationTemplateEngine engine) {
-        List<CacheBehavior> behaviors = new ArrayList<>();
-        JsonNode items = dc.path("CacheBehaviors");
-        if (items.isArray()) {
-            for (JsonNode node : items) {
-                CacheBehavior cb = new CacheBehavior();
-                cb.setPathPattern(cfnText(node, "PathPattern", engine));
-                cb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
-                cb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
-                cb.setResponseHeadersPolicyId(cfnText(node, "ResponseHeadersPolicyId", engine));
-                List<String> trustedKeyGroups = cfnStringList(node.path("TrustedKeyGroups"), engine);
-                if (!trustedKeyGroups.isEmpty()) {
-                    cb.setTrustedKeyGroups(trustedKeyGroups);
-                }
-                behaviors.add(cb);
-            }
-        }
-        return behaviors;
-    }
 
-    private List<Map<String, Object>> cfnCustomErrorResponses(JsonNode dc, CloudFormationTemplateEngine engine) {
-        List<Map<String, Object>> result = new ArrayList<>();
-        JsonNode items = dc.path("CustomErrorResponses");
-        if (items.isArray()) {
-            for (JsonNode node : items) {
-                Map<String, Object> cer = new LinkedHashMap<>();
-                cer.put("ErrorCode", cfnText(node, "ErrorCode", engine));
-                putIfPresent(cer, "ResponseCode", cfnText(node, "ResponseCode", engine));
-                putIfPresent(cer, "ResponsePagePath", cfnText(node, "ResponsePagePath", engine));
-                putIfPresent(cer, "ErrorCachingMinTTL", cfnText(node, "ErrorCachingMinTTL", engine));
-                result.add(cer);
-            }
-        }
-        return result;
-    }
 
-    private static void putIfPresent(Map<String, Object> map, String key, String value) {
-        if (value != null && !value.isEmpty()) {
-            map.put(key, value);
-        }
-    }
 
-    private List<String> cfnStringList(JsonNode arrayNode, CloudFormationTemplateEngine engine) {
-        List<String> result = new ArrayList<>();
-        if (arrayNode != null && arrayNode.isArray()) {
-            for (JsonNode item : arrayNode) {
-                String value = engine.resolve(item);
-                if (value != null && !value.isEmpty()) {
-                    result.add(value);
-                }
-            }
-        }
-        return result;
-    }
-
-    private String cfnText(JsonNode parent, String field, CloudFormationTemplateEngine engine) {
-        return parent == null ? "" : engine.resolve(parent.path(field));
-    }
-
-    private String cfnTextOrDefault(JsonNode parent, String field, CloudFormationTemplateEngine engine,
-                                    String dflt) {
-        String value = cfnText(parent, field, engine);
-        return value.isEmpty() ? dflt : value;
-    }
-
-    private boolean cfnBool(JsonNode parent, String field, CloudFormationTemplateEngine engine, boolean dflt) {
-        String value = cfnText(parent, field, engine);
-        return value.isEmpty() ? dflt : "true".equalsIgnoreCase(value);
-    }
 
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(name) || props.get(name).isNull()) {

@@ -266,20 +266,7 @@ public class CloudFrontService {
     public List<Distribution> listDistributions(String marker, int maxItems) {
         List<Distribution> all = new ArrayList<>(distStore.scan(k -> true));
         all.sort((a, b) -> a.getId().compareTo(b.getId()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, Distribution::getId);
     }
 
     public synchronized void associateAlias(String targetDistributionId, String alias) {
@@ -443,20 +430,7 @@ public class CloudFrontService {
         getDistribution(distributionId);
         List<Invalidation> all = new ArrayList<>(
                 invalidationStore.get(distributionId).orElse(List.of()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, Invalidation::getId);
     }
 
     // ── Cache Policies ────────────────────────────────────────────────────────
@@ -505,20 +479,7 @@ public class CloudFrontService {
         List<CachePolicy> all = new ArrayList<>(cachePolicyStore.scan(k -> true));
         all.sort((a, b) -> a.getName() != null && b.getName() != null
                 ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, CachePolicy::getId);
     }
 
     // ── Origin Request Policies ───────────────────────────────────────────────
@@ -569,20 +530,7 @@ public class CloudFrontService {
         List<OriginRequestPolicy> all = new ArrayList<>(orpStore.scan(k -> true));
         all.sort((a, b) -> a.getName() != null && b.getName() != null
                 ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, OriginRequestPolicy::getId);
     }
 
     // ── Response Headers Policies ─────────────────────────────────────────────
@@ -933,20 +881,7 @@ public class CloudFrontService {
         List<OriginAccessControl> all = new ArrayList<>(oacStore.scan(k -> true));
         all.sort((a, b) -> a.getName() != null && b.getName() != null
                 ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, OriginAccessControl::getId);
     }
 
     // ── Origin Access Identity (OAI) ──────────────────────────────────────────
@@ -1003,20 +938,7 @@ public class CloudFrontService {
     public List<CloudFrontOriginAccessIdentity> listCloudFrontOriginAccessIdentities(
             String marker, int maxItems) {
         List<CloudFrontOriginAccessIdentity> all = new ArrayList<>(oaiStore.scan(k -> true));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, CloudFrontOriginAccessIdentity::getId);
     }
 
     private static void validateOriginAccessControl(OriginAccessControl oac) {

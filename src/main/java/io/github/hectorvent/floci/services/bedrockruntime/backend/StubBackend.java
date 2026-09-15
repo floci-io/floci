@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.bedrockruntime.backend;
 
+import io.github.hectorvent.floci.core.common.AwsEventStreamWriter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -82,7 +83,7 @@ public class StubBackend implements BedrockBackend {
     @Override
     public Consumer<OutputStream> converseStream(String modelId, ObjectNode bedrockRequest) {
         return output -> {
-            BedrockStreamEncoder.writeEvent(objectMapper, output, "messageStart",
+            AwsEventStreamWriter.writeEvent(objectMapper, output, "messageStart",
                     objectMapper.createObjectNode().put("role", "assistant"));
 
             List<String> flociStubResponse = List.of("Floci stub response", " for model=", modelId);
@@ -90,13 +91,13 @@ public class StubBackend implements BedrockBackend {
                 ObjectNode contentBlockDelta = objectMapper.createObjectNode();
                 contentBlockDelta.put("contentBlockIndex", 0);
                 contentBlockDelta.putObject("delta").put("text", fragment);
-                BedrockStreamEncoder.writeEvent(objectMapper, output, "contentBlockDelta", contentBlockDelta);
+                AwsEventStreamWriter.writeEvent(objectMapper, output, "contentBlockDelta", contentBlockDelta);
             }
 
-            BedrockStreamEncoder.writeEvent(objectMapper, output, "contentBlockStop",
+            AwsEventStreamWriter.writeEvent(objectMapper, output, "contentBlockStop",
                     objectMapper.createObjectNode().put("contentBlockIndex", 0));
 
-            BedrockStreamEncoder.writeEvent(objectMapper, output, "messageStop",
+            AwsEventStreamWriter.writeEvent(objectMapper, output, "messageStop",
                     objectMapper.createObjectNode().put("stopReason", "end_turn"));
 
             ObjectNode metadata = objectMapper.createObjectNode();
@@ -105,7 +106,7 @@ public class StubBackend implements BedrockBackend {
                     .put("outputTokens", 12)
                     .put("totalTokens", 22);
             metadata.putObject("metrics").put("latencyMs", 1);
-            BedrockStreamEncoder.writeEvent(objectMapper, output, "metadata", metadata);
+            AwsEventStreamWriter.writeEvent(objectMapper, output, "metadata", metadata);
         };
     }
 }

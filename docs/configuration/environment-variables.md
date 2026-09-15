@@ -472,6 +472,35 @@ These services spawn Docker containers. They require access to the Docker socket
 
 ---
 
+### Web Console (UI)
+
+Floci starts the web console as a sidecar container the first time `/_floci/ui` is opened.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_UI_ENABLED` | `true` | Enable the web console sidecar |
+| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
+| `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
+| `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
+| `FLOCI_SERVICES_UI_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave the sidecar running when Floci stops |
+| `FLOCI_SERVICES_UI_DOCKER_NETWORK` | _(none)_ | Docker network for the sidecar (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_UI_ENDPOINT` | _(derived)_ | Floci endpoint handed to the console, instead of deriving it from the Docker host and TLS settings |
+| `FLOCI_SERVICES_UI_EXTRA_ENV` | _(none)_ | Extra `KEY=VALUE` entries for the console, comma-separated (escape a literal comma as `\,`). Applied last, so an entry may override an injected default |
+| `FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY` | `false` | Have the console skip TLS verification on its connection to Floci |
+| `FLOCI_SERVICES_UI_INTERNAL_PORT` | _(discovered, else `4500`)_ | Port the console listens on inside its container |
+| `FLOCI_SERVICES_UI_ENDPOINT_ENV` | _(none)_ | An extra variable to repeat the Floci endpoint in, for a console reading neither `AWS_ENDPOINT_URL` nor `FLOCI_ENDPOINT` |
+| `FLOCI_SERVICES_UI_STATUS_PATH` | _(discovered, else `/api/health`)_ | Path the readiness probe requests on the console |
+| `FLOCI_SERVICES_UI_STATUS_READY_FIELD` | _(discovered, else `status`)_ | JSON field in that response reporting readiness. Set to `none` to make any `200` count as ready |
+| `FLOCI_SERVICES_UI_STATUS_READY_VALUE` | _(discovered, else `ok`)_ | Value of that field meaning the console reached Floci |
+| `FLOCI_SERVICES_UI_STATUS_UNAVAILABLE_VALUE` | _(discovered, else `unavailable`)_ | Value meaning the console is up but cannot reach Floci |
+
+The last six exist only for a console that neither follows the
+[console contract](../ui/console-contract.md) nor describes itself in its image labels. Leave them
+unset otherwise: setting one overrides both discovery paths.
+
+See [Web Console](../ui/index.md) for running the console and swapping in a third-party one, and
+[Console Contract v1](../ui/console-contract.md) for writing one.
+
 ## Services — Additional
 
 | Variable | Default | Description |

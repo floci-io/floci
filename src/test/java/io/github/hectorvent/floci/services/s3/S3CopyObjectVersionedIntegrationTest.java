@@ -22,6 +22,8 @@ class S3CopyObjectVersionedIntegrationTest {
     private static final String BUCKET = "copy-version-repro-it";
     /** First object version id (after v1 upload, while still latest). */
     private static String v1VersionId;
+    /** Version created by copying v1 back over the key. */
+    private static String copiedVersionId;
 
     @Test
     @Order(1)
@@ -78,19 +80,23 @@ class S3CopyObjectVersionedIntegrationTest {
     @Test
     @Order(6)
     void copyObjectFromV1RestoresV1AsLatest() {
-        given()
+        copiedVersionId = given()
                 .header("x-amz-copy-source", "/" + BUCKET + "/key?versionId=" + v1VersionId)
                 .when()
                 .put("/" + BUCKET + "/key")
                 .then()
                 .statusCode(200)
-                .body(containsString("CopyObjectResult"));
+                .body(containsString("CopyObjectResult"))
+                .header("x-amz-version-id", notNullValue())
+                .extract()
+                .header("x-amz-version-id");
 
         given()
                 .when()
                 .get("/" + BUCKET + "/key")
                 .then()
                 .statusCode(200)
+                .header("x-amz-version-id", equalTo(copiedVersionId))
                 .body(equalTo("v1"));
     }
 }

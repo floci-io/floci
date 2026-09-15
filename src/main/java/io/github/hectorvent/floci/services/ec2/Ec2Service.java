@@ -3456,6 +3456,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), block, region);
     }
 
+    private boolean vpcHasAssociatedIpv6CidrBlock(Vpc vpc) {
+        return vpc.getIpv6CidrBlockAssociationSet().stream()
+                .anyMatch(assoc -> "associated".equalsIgnoreCase(assoc.getIpv6CidrBlockState()));
+    }
+
     public void disassociateVpcCidrBlock(String region, String associationId) {
         ensureDefaultResources(region);
         for (Vpc vpc : vpcs.scan(k -> true)) {
@@ -3852,11 +3857,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone,
                                String availabilityZoneId) {
+        return createSubnet(region, vpcId, cidrBlock, availabilityZone, availabilityZoneId, null);
+    }
+
+    public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone,
+                               String availabilityZoneId, String ipv6CidrBlock) {
         if (vpcId == null || vpcId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter VpcId", 400);
         }
         ensureDefaultResources(region);
-        getRequiredVpc(region, vpcId);
+        Vpc vpc = getRequiredVpc(region, vpcId);
+        if (ipv6CidrBlock != null && !ipv6CidrBlock.isBlank() && !vpcHasAssociatedIpv6CidrBlock(vpc)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Ipv6CidrBlock can only be specified for a subnet in a VPC with an associated "
+                            + "IPv6 CIDR block. VPC " + vpcId + " has none.", 400);
+        }
 
         String zoneName = resolveSubnetZoneName(region, availabilityZone, availabilityZoneId);
 
@@ -3872,6 +3887,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         subnet.setOwnerId(accountId);
         subnet.setRegion(region);
         subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetId).toString());
+        if (ipv6CidrBlock != null && !ipv6CidrBlock.isBlank()) {
+            subnet.getIpv6CidrBlockAssociationSet().add(new VpcIpv6CidrBlockAssociation(
+                    "subnet-cidr-assoc-" + randomHex(17), ipv6CidrBlock, null));
+        }
         // The conflict scan and the store must be one step under the VPC's lock, or two
         // overlapping creates in flight together both pass the scan before either is stored.
         synchronized (lockFor(key(region, vpcId))) {

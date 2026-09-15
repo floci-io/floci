@@ -1338,6 +1338,291 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithItemBatcher_groupsItemsIntoBatchesOfMaxItemsPerBatch() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}, {"n": 5}],
+                            "ItemBatcher": {"MaxItemsPerBatch": 2},
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Keep",
+                                "States": {
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-item-batcher-max-items", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode batches = new ObjectMapper().readTree(output);
+
+        assertEquals(3, batches.size());
+        assertEquals(2, batches.get(0).path("Items").size());
+        assertEquals(2, batches.get(1).path("Items").size());
+        assertEquals(1, batches.get(2).path("Items").size());
+        assertEquals(1, batches.get(0).path("Items").get(0).path("n").asInt());
+    }
+
+    @Test
+    void distributedMapWithItemBatcher_mergesBatchInputIntoEveryBatch() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}, {"n": 5}],
+                            "ItemBatcher": {"MaxItemsPerBatch": 2, "BatchInput": {"runType": "nightly"}},
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Keep",
+                                "States": {
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-item-batcher-batch-input", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode batches = new ObjectMapper().readTree(output);
+
+        assertEquals(3, batches.size());
+        for (JsonNode batch : batches) {
+            assertEquals("nightly", batch.path("BatchInput").path("runType").asText());
+        }
+    }
+
+    @Test
+    void distributedMapWithItemBatcher_startsANewBatchOnMaxInputBytesPerBatch() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}, {"n": 5}],
+                            "ItemBatcher": {"MaxInputBytesPerBatch": 20},
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Keep",
+                                "States": {
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-item-batcher-max-bytes", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode batches = new ObjectMapper().readTree(output);
+
+        assertTrue(batches.size() > 1, "expected the byte limit to split the items: " + output);
+        for (JsonNode batch : batches) {
+            assertTrue(batch.path("Items").size() >= 1);
+        }
+    }
+
+    @Test
+    void distributedMapWithoutItemBatcher_stillGivesEachChildOneItem() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": 2}],
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Keep",
+                                "States": {
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-item-batcher-absent", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode children = new ObjectMapper().readTree(output);
+
+        assertEquals(2, children.size());
+        assertEquals(1, children.get(0).path("n").asInt());
+        assertTrue(children.get(0).path("Items").isMissingNode());
+    }
+
+    @Test
+    void distributedMapWithItemBatcher_capsABatchAtTheChildInputCeiling() throws Exception {
+        createBucket("map-inputs-large");
+        StringBuilder dataset = new StringBuilder("[");
+        for (int i = 0; i < 40; i++) {
+            if (i > 0) {
+                dataset.append(",");
+            }
+            dataset.append("{\"pad\":\"").append("x".repeat(10_000)).append("\"}");
+        }
+        dataset.append("]");
+        putObject("map-inputs-large", "large.json", dataset.toString());
+
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON"
+                                },
+                                "Arguments": {
+                                    "Bucket": "map-inputs-large",
+                                    "Key": "large.json"
+                                }
+                            },
+                            "ItemBatcher": {
+                                "MaxItemsPerBatch": 100
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Count",
+                                "States": {
+                                    "Count": {
+                                        "Type": "Pass",
+                                        "Output": "{% { 'n': $count($states.input.Items) } %}",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-item-batcher-ceiling", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode batches = new ObjectMapper().readTree(output);
+
+        // 40 items of about 10 KB each exceed 256 KiB, so MaxItemsPerBatch 100 cannot be the only limit.
+        assertTrue(batches.size() > 1, "the ceiling must split the run: " + batches.size() + " batches");
+        int counted = 0;
+        for (JsonNode batch : batches) {
+            int size = batch.path("n").asInt();
+            assertTrue(size * 10_000 < 256 * 1024, "batch of " + size + " items exceeds the ceiling");
+            counted += size;
+        }
+        assertEquals(40, counted);
+    }
+
+    @Test
+    void distributedMapWithItemBatcher_failsWhenASingleItemExceedsTheCeiling() throws Exception {
+        createBucket("map-inputs-oversized");
+        putObject("map-inputs-oversized", "oversized.json",
+                "[{\"pad\":\"" + "x".repeat(300_000) + "\"}]");
+
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON"
+                                },
+                                "Arguments": {
+                                    "Bucket": "map-inputs-oversized",
+                                    "Key": "oversized.json"
+                                }
+                            },
+                            "ItemBatcher": {
+                                "MaxItemsPerBatch": 10
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Keep",
+                                "States": {
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-item-batcher-oversized", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.DataLimitExceeded", failure.jsonPath().getString("error"));
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_objectIteratesKeyValuePairs() throws Exception {
         createBucket("map-inputs-object");
         putObject("map-inputs-object", "workers.json", """

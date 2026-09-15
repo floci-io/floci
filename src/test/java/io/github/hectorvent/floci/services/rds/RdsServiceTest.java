@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
@@ -234,6 +236,68 @@ class RdsServiceTest {
 
         assertEquals(List.of("sg-updated-a", "sg-updated-b"), modified.getVpcSecurityGroupIds());
         assertEquals(List.of("sg-updated-a", "sg-updated-b"), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void createAndModifyDbInstancePersistPubliclyAccessible() {
+        DbInstance instance = rdsService.createDbInstance("pubdb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), true);
+
+        assertTrue(instance.isPubliclyAccessible());
+        assertTrue(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+
+        DbInstance modified = rdsService.modifyDbInstance("pubdb", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), false);
+
+        assertFalse(modified.isPubliclyAccessible());
+        assertFalse(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsTrueForNonAuroraWithNoSubnetGroup() {
+        DbInstance instance = rdsService.createDbInstance("plain-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertTrue(instance.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsFalseForAuroraWithNoSubnetGroup() {
+        rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        DbInstance member = rdsService.createDbInstance("aurora-member", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.r5.large",
+                20, false, null, null, "aurora-cluster", null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertFalse(member.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsFalseForNamedNonDefaultSubnetGroup() {
+        rdsService.createDbSubnetGroup("custom-subnets", "test", List.of("subnet-default-a", "subnet-default-b"));
+
+        DbInstance instance = rdsService.createDbInstance("custom-subnet-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, "custom-subnets", null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertFalse(instance.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsTrueForDefaultSubnetGroup() {
+        DbInstance instance = rdsService.createDbInstance("default-subnet-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, "default", null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertTrue(instance.isPubliclyAccessible());
     }
 
     @Test
@@ -1071,6 +1135,9 @@ class RdsServiceTest {
 
         assertEquals("original-password", modified.getMasterPassword());
         assertTrue(modified.isIamDatabaseAuthenticationEnabled());
+        verify(proxyManager).updateIamEnabled(anyString(), eq(true));
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
+        verify(proxyManager, never()).stopProxy(anyString());
     }
 
     @Test
@@ -1254,8 +1321,13 @@ class RdsServiceTest {
                 rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:pg:some-parameter-group"));
         assertEquals("DBParameterGroupNotFound", absentGroup.getErrorCode());
 
-        AwsException unsupportedType = assertThrows(AwsException.class, () ->
+        // Snapshots are tagged now too, so an absent one is a missing resource as well.
+        AwsException absentSnapshot = assertThrows(AwsException.class, () ->
                 rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:snapshot:some-snapshot"));
+        assertEquals("DBSnapshotNotFound", absentSnapshot.getErrorCode());
+
+        AwsException unsupportedType = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:ri:some-reserved-instance"));
         assertEquals("InvalidParameterValue", unsupportedType.getErrorCode());
         // The type is valid on real AWS; the message must present this as a Floci limitation.
         assertTrue(unsupportedType.getMessage().contains("not yet implemented by Floci"));
@@ -2719,7 +2791,65 @@ class RdsServiceTest {
         assertEquals("mydb", snapshot.getDbInstanceIdentifier());
         assertEquals(DatabaseEngine.POSTGRES, snapshot.getEngine());
         assertEquals("available", snapshot.getStatus());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:snapshot:mysnap", snapshot.getDbSnapshotArn());
         verify(containerManager).createPostgresSnapshot(any(), eq("admin"));
+    }
+
+    @Test
+    void createDbSnapshotStoresTagsGivenAtCreation() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb", Map.of("owner", "platform"));
+
+        assertEquals(Map.of("owner", "platform"), snapshot.getTags());
+        assertEquals(Map.of("owner", "platform"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+    }
+
+    @Test
+    void dbSnapshotTagsRoundTripAndMutateByArn() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb");
+
+        rdsService.addTagsToResource(snapshot.getDbSnapshotArn(), Map.of("Name", "mysnap"));
+        assertEquals(Map.of("Name", "mysnap"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+
+        rdsService.removeTagsFromResource(snapshot.getDbSnapshotArn(), List.of("Name"));
+        assertEquals(Map.of(), rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+    }
+
+    @Test
+    void dbSnapshotArnAndTagsAreScopedToTheRequestRegion() {
+        rdsService.createDbInstance("mydb", "postgres", "13", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), "us-west-2");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb", Map.of("owner", "west-team"), "us-west-2");
+
+        assertEquals("arn:aws:rds:us-west-2:123456789012:snapshot:mysnap", snapshot.getDbSnapshotArn());
+
+        // Reachable and taggable through the region it was created in.
+        assertEquals(1, rdsService.describeDbSnapshots("mysnap", null, "us-west-2").size());
+        assertEquals(Map.of("owner", "west-team"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn(), "us-west-2"));
+        rdsService.addTagsToResource(snapshot.getDbSnapshotArn(), Map.of("Name", "west-snap"), "us-west-2");
+        assertEquals(Map.of("owner", "west-team", "Name", "west-snap"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn(), "us-west-2"));
+
+        // A different region must not see or resolve another region's snapshot.
+        assertThrows(AwsException.class, () -> rdsService.describeDbSnapshots("mysnap", null, "us-east-1"));
+        assertTrue(rdsService.describeDbSnapshots(null, null, "us-east-1").isEmpty());
     }
 
     @Test
@@ -2804,6 +2934,42 @@ class RdsServiceTest {
         Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> inst1Result = rdsService.describeDbSnapshots(null, "mydb1");
         assertEquals(1, inst1Result.size());
         assertEquals("snap1", inst1Result.iterator().next().getDbSnapshotIdentifier());
+    }
+
+    @Test
+    void describeDbSnapshotAttributesDefaultsToNoSharedAccounts() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.describeDbSnapshotAttributes("mysnap");
+        assertEquals(List.of(), snapshot.getRestoreAccountIds());
+
+        assertThrows(AwsException.class, () -> rdsService.describeDbSnapshotAttributes("missing-snap"));
+    }
+
+    @Test
+    void modifyDbSnapshotAttributeAddsAndRemovesRestoreAccountIds() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot added = rdsService.modifyDbSnapshotAttribute(
+                "mysnap", "restore", List.of("111111111111", "222222222222"), List.of());
+        assertEquals(List.of("111111111111", "222222222222"), added.getRestoreAccountIds());
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot removed = rdsService.modifyDbSnapshotAttribute(
+                "mysnap", "restore", List.of(), List.of("111111111111"));
+        assertEquals(List.of("222222222222"), removed.getRestoreAccountIds());
+
+        AwsException badAttribute = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbSnapshotAttribute("mysnap", "share", List.of("333333333333"), List.of()));
+        assertEquals("InvalidParameterValue", badAttribute.getErrorCode());
     }
 
     @Test
@@ -3128,6 +3294,74 @@ class RdsServiceTest {
                         List.of("subnet-vpc-a", "subnet-vpc-b"),
                         List.of(), PROXY_AUTH, Map.of()));
         assertEquals("InvalidSubnet", mixedVpc.getErrorCode());
+    }
+
+    @Test
+    void createDbProxyRejectsIpv6NetworkTypeWhenVpcHasNoIpv6CidrBlock() {
+        // PROXY_SUBNET_IDS resolves to vpc-default, which the default ec2Service stub gives no
+        // IPv6 CIDR block association, matching real AWS's IPv4-only VPC rejection.
+        AwsException endpointRejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("ipv4-only-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", "DUAL", null));
+        assertEquals("InvalidParameterValue", endpointRejected.getErrorCode());
+        assertTrue(endpointRejected.getMessage().contains("IPv6 CIDR block"));
+
+        AwsException targetRejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("ipv4-only-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", null, "IPV6"));
+        assertEquals("InvalidParameterValue", targetRejected.getErrorCode());
+        assertTrue(rdsService.listDbProxies(null).isEmpty());
+    }
+
+    @Test
+    void createDbProxyAcceptsIpv6NetworkTypeWhenVpcHasIpv6CidrBlock() {
+        List<String> dualStackSubnetIds = List.of("subnet-dualstack-a", "subnet-dualstack-b");
+        Subnet subnetA = subnet("subnet-dualstack-a", "vpc-dualstack", "us-east-1a");
+        subnetA.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("subnet-cidr-assoc-a", "2600:1f18:1::/64", null));
+        Subnet subnetB = subnet("subnet-dualstack-b", "vpc-dualstack", "us-east-1b");
+        subnetB.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("subnet-cidr-assoc-b", "2600:1f18:2::/64", null));
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(dualStackSubnetIds), eq(Map.of())))
+                .thenReturn(List.of(subnetA, subnetB));
+        Vpc dualStackVpc = new Vpc();
+        dualStackVpc.setVpcId("vpc-dualstack");
+        dualStackVpc.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-test", "2600:1f18::/56", "us-east-1"));
+        when(ec2Service.describeVpcs(eq("us-east-1"), eq(List.of("vpc-dualstack")), eq(Map.of())))
+                .thenReturn(List.of(dualStackVpc));
+
+        DbProxy proxy = rdsService.createDbProxy("dualstack-proxy", "POSTGRESQL", true, false, "NONE",
+                PROXY_ROLE_ARN, dualStackSubnetIds, List.of(), PROXY_AUTH,
+                1800, false, Map.of(), "us-east-1", "DUAL", "IPV6");
+
+        assertEquals("DUAL", proxy.getEndpointNetworkType());
+        assertEquals("IPV6", proxy.getTargetConnectionNetworkType());
+    }
+
+    @Test
+    void createDbProxyRejectsIpv6NetworkTypeWhenSubnetsHaveNoIpv6CidrBlock() {
+        List<String> mixedSubnetIds = List.of("subnet-mixed-a", "subnet-mixed-b");
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(mixedSubnetIds), eq(Map.of())))
+                .thenReturn(List.of(
+                        subnet("subnet-mixed-a", "vpc-mixed", "us-east-1a"),
+                        subnet("subnet-mixed-b", "vpc-mixed", "us-east-1b")));
+        Vpc dualStackVpc = new Vpc();
+        dualStackVpc.setVpcId("vpc-mixed");
+        dualStackVpc.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-mixed", "2600:1f18::/56", "us-east-1"));
+        when(ec2Service.describeVpcs(eq("us-east-1"), eq(List.of("vpc-mixed")), eq(Map.of())))
+                .thenReturn(List.of(dualStackVpc));
+
+        AwsException rejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("mixed-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, mixedSubnetIds, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", "DUAL", null));
+        assertEquals("InvalidParameterValue", rejected.getErrorCode());
+        assertTrue(rejected.getMessage().contains("VpcSubnetIds"));
+        assertTrue(rdsService.listDbProxies(null).isEmpty());
     }
 
     @Test

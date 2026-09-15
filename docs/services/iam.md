@@ -396,6 +396,7 @@ account key carries no identity policies of its own.
 - **Session policies**: inline policies passed during `sts:AssumeRole`.
 - **Permission boundaries**: managed policies used to cap maximum permissions.
 - **Action/Resource patterns**: literal matches, wildcards (`*`, `?`), and `NotAction`/`NotResource` blocks.
+  Action names match without regard to case, resource ARNs match case-sensitively, as on AWS.
 - **Conditions**: support for `Condition` blocks with multiple operators.
 - **Effects**: `Allow` and `Deny`.
 

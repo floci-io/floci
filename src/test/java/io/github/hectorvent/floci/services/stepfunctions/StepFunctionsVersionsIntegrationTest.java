@@ -214,6 +214,44 @@ class StepFunctionsVersionsIntegrationTest {
     }
 
     @Test
+    void publishEnforcesTheQuotaOfOneThousandVersionsPerStateMachine() {
+        String name = "ver-quota-" + System.currentTimeMillis();
+        String arn = call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
+                        + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r0\",\"publish\":true}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("stateMachineArn");
+        for (int i = 2; i <= 1000; i++) {
+            call("UpdateStateMachine", "{\"stateMachineArn\":\"" + arn
+                    + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r" + i + "\",\"publish\":true}")
+                    .then().statusCode(200);
+        }
+
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("stateMachineVersionArn", is(arn + ":1000"));
+        call("UpdateStateMachine", "{\"stateMachineArn\":\"" + arn
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/over\",\"publish\":true}")
+                .then().statusCode(402)
+                .body(containsString("ServiceQuotaExceededException"));
+        call("DescribeStateMachine", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("roleArn", is("arn:aws:iam::000000000000:role/r1000"));
+        call("UpdateStateMachine", "{\"stateMachineArn\":\"" + arn
+                + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/unpublished\"}")
+                .then().statusCode(200);
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(402)
+                .body(containsString("ServiceQuotaExceededException"));
+
+        call("DeleteStateMachineVersion", "{\"stateMachineVersionArn\":\"" + arn + ":1\"}")
+                .then().statusCode(200);
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("stateMachineVersionArn", is(arn + ":1001"));
+    }
+
+    @Test
     void invalidCreatePublishOptionsAndNamesAreRejectedBeforeStorage() {
         String name = "ver-invalid-publish-" + System.currentTimeMillis();
         String baseRequest = "{\"name\":\"" + name + "\",\"definition\":\"" + DEF
