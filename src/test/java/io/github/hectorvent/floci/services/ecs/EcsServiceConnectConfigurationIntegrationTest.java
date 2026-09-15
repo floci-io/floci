@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -108,6 +109,60 @@ class EcsServiceConnectConfigurationIntegrationTest {
         Response described = describe(name);
         assertEquals("sc-ns", described.jsonPath()
                 .getString("services[0].deployments[0].serviceConnectConfiguration.namespace"));
+    }
+
+    private static String deploymentId(String serviceName) {
+        return describe(serviceName).jsonPath().getString("services[0].deployments[0].id");
+    }
+
+    // UpdateServiceRequest.serviceConnectConfiguration is documented as triggering a new service
+    // deployment, so a changed configuration must not be reported under the old deployment id.
+    @Test
+    void updateService_changingTheConfiguration_rollsTheDeployment() {
+        seed();
+        String name = "sc-rolls";
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"" + name + "\","
+                + "\"taskDefinition\":\"" + FAMILY + "\",\"desiredCount\":0,"
+                + "\"serviceConnectConfiguration\":" + CONFIG + "}");
+        String before = deploymentId(name);
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + name + "\","
+                + "\"serviceConnectConfiguration\":{\"enabled\":false}}");
+
+        assertNotEquals(before, deploymentId(name),
+                "a Service Connect change starts a new deployment");
+    }
+
+    @Test
+    void updateService_resendingTheSameConfiguration_keepsTheDeployment() {
+        seed();
+        String name = "sc-same";
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"" + name + "\","
+                + "\"taskDefinition\":\"" + FAMILY + "\",\"desiredCount\":0,"
+                + "\"serviceConnectConfiguration\":" + CONFIG + "}");
+        String before = deploymentId(name);
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + name + "\","
+                + "\"serviceConnectConfiguration\":" + CONFIG + "}");
+
+        assertEquals(before, deploymentId(name),
+                "resending an identical configuration is not a change");
+    }
+
+    @Test
+    void updateService_withoutTheField_keepsTheDeployment() {
+        seed();
+        String name = "sc-untouched";
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"" + name + "\","
+                + "\"taskDefinition\":\"" + FAMILY + "\",\"desiredCount\":0,"
+                + "\"serviceConnectConfiguration\":" + CONFIG + "}");
+        String before = deploymentId(name);
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + name + "\","
+                + "\"desiredCount\":0}");
+
+        assertEquals(before, deploymentId(name),
+                "omitting the parameter is not a change");
     }
 
     @Test

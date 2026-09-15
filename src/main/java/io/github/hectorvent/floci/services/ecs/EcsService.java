@@ -944,6 +944,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         if (availabilityZoneRebalancing != null) {
             svc.setAvailabilityZoneRebalancing(availabilityZoneRebalancing);
         }
+        // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
+        // triggers a new service deployment", so a real change rolls the deployment the way a
+        // task-definition change does. An omitted parameter is not a change and rolls nothing.
+        boolean serviceConnectChanged = serviceConnectConfiguration != null
+                && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
         if (serviceConnectConfiguration != null) {
             svc.setServiceConnectConfiguration(serviceConnectConfiguration);
         }
@@ -953,7 +958,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
             taskDefChanged = !resolvedArn.equals(svc.getTaskDefinition());
             svc.setTaskDefinition(resolvedArn);
         }
-        if (taskDefChanged || forceNewDeployment) {
+        if (taskDefChanged || forceNewDeployment || serviceConnectChanged) {
             svc.setDeploymentId(newDeploymentId());
             svc.setLastDeploymentAt(Instant.now());
             recordServiceDeployment(svc, svc.getTaskDefinition(), region);
