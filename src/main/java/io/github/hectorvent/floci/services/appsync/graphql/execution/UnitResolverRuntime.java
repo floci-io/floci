@@ -82,7 +82,6 @@ public class UnitResolverRuntime {
         Map<String, Object> stash = new HashMap<>();
         List<FieldError> appended = new ArrayList<>();
 
-        // Request template
         AppSyncVtlResult request;
         try {
             request = vtlEngine.evaluate(resolver.getRequestMappingTemplate(),
@@ -115,7 +114,6 @@ public class UnitResolverRuntime {
             return FieldOutcome.ofError(FieldError.of("UnsupportedOperation", e.getMessage()), appended);
         }
 
-        // Response template
         AppSyncVtlResult response;
         try {
             response = vtlEngine.evaluate(resolver.getResponseMappingTemplate(),

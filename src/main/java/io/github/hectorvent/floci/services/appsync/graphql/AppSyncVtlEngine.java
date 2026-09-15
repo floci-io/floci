@@ -17,14 +17,25 @@ import org.apache.velocity.app.VelocityEngine;
 import org.apache.velocity.runtime.RuntimeConstants;
 
 import java.io.StringWriter;
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Velocity loads the custom {@code #return} directive by class name and resolves every
  * {@code $util} call reflectively, so those classes must be registered for the native image the
  * same way {@code VtlTemplateEngine} registers the API Gateway helpers; the JSON reflection
- * config alone is not applied to them.
+ * config alone is not applied to them. Resolver templates also call JDK methods on context
+ * values through the same reflective path: {@code #if($ctx.error)} invokes {@code Map.isEmpty()},
+ * {@code $ctx.stash.put(...)} invokes {@code Map.put}, {@code $ctx.error.type.equals(...)}
+ * invokes {@code String.equals}, so the collection and value types those templates see are
+ * registered as well.
  */
 @ApplicationScoped
 @RegisterForReflection(targets = {
@@ -37,7 +48,25 @@ import java.util.Map;
         MathUtil.class,
         TransformUtil.class,
         ListUtil.class,
-        MapUtil.class
+        MapUtil.class,
+        Map.class,
+        Map.Entry.class,
+        HashMap.class,
+        LinkedHashMap.class,
+        Collection.class,
+        List.class,
+        ArrayList.class,
+        Set.class,
+        Iterator.class,
+        String.class,
+        CharSequence.class,
+        Boolean.class,
+        Number.class,
+        Integer.class,
+        Long.class,
+        Double.class,
+        BigDecimal.class,
+        Object.class
 })
 public class AppSyncVtlEngine {
 

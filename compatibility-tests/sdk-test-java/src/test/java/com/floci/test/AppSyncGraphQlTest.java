@@ -24,6 +24,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -35,6 +37,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class AppSyncGraphQlTest {
 
+    private static final Logger LOG = Logger.getLogger(AppSyncGraphQlTest.class.getName());
     private static final String TABLE = "sdk-gql-todos";
     private static final String ROLE_POLICY = "AppSyncDynamoDbAccess";
     private static final ObjectMapper mapper = new ObjectMapper();
@@ -61,20 +64,20 @@ class AppSyncGraphQlTest {
             try {
                 appSync.deleteGraphqlApi(r -> r.apiId(apiId));
             } catch (Exception e) {
-                System.err.println("cleanup: failed to delete GraphQL API " + apiId + ": " + e.getMessage());
+                LOG.log(Level.WARNING, "cleanup: failed to delete GraphQL API " + apiId, e);
             }
         }
         try {
             dynamoDb.deleteTable(r -> r.tableName(TABLE));
         } catch (Exception e) {
-            System.err.println("cleanup: failed to delete table " + TABLE + ": " + e.getMessage());
+            LOG.log(Level.WARNING, "cleanup: failed to delete table " + TABLE, e);
         }
         if (roleName != null) {
             try {
                 iam.deleteRolePolicy(r -> r.roleName(roleName).policyName(ROLE_POLICY));
                 iam.deleteRole(r -> r.roleName(roleName));
             } catch (Exception e) {
-                System.err.println("cleanup: failed to delete IAM role " + roleName + ": " + e.getMessage());
+                LOG.log(Level.WARNING, "cleanup: failed to delete IAM role " + roleName, e);
             }
         }
         if (appSync != null) {
