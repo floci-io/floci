@@ -581,6 +581,7 @@ floci:
       iam-auth-webhook: true       # validate `aws eks get-token` SigV4 tokens through a k3s webhook
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+      imds: true                   # expose link-local IMDS (169.254.169.254) inside the cluster container
     mwaa:
       enabled: true
       mock: false

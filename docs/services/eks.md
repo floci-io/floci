@@ -115,6 +115,7 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 | `FLOCI_SERVICES_EKS_ENDPOINT_MODE` | `host` | `describe-cluster` endpoint: `host` (`localhost:<hostPort>`) or `network` (container DNS) |
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
+| `FLOCI_SERVICES_EKS_IMDS` | `true` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 
 ### Pulling images from Floci ECR
 
@@ -171,6 +172,39 @@ services:
     environment:
       FLOCI_SERVICES_EKS_MOCK: "true"
 ```
+
+## Instance Metadata Service (IMDS)
+
+Each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, Floci adds `169.254.169.254/32` to the loopback interface (`lo`) and runs a lightweight `socat` TCP relay forwarding metadata requests to Floci's IMDS server.
+
+Both IMDSv1 and IMDSv2 (`PUT /latest/api/token`) are supported. The cluster container is registered as a synthesized EC2 instance node (type `m5.large`, image `ami-eks-k3s`) associated with the cluster's IAM role:
+
+```bash
+# IMDSv2: obtain token
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "x-aws-ec2-metadata-token-ttl-seconds: 21600")
+
+# Read node instance ID
+curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-id
+```
+
+### Reachability and network namespaces
+
+The link-local proxy attaches to the loopback interface of the k3s container network namespace (the node network namespace).
+
+- **Reachable from node network namespace:** Workloads configured with `hostNetwork: true` share the node network namespace and can reach `169.254.169.254:80`. This allows local testing of host-network security policies, intrusion-detection rules, and credential exfiltration defenses.
+- **Not reachable from ordinary pods:** Pods running in separate pod network namespaces cannot reach `169.254.169.254` through this loopback alias because link-local addresses are non-routable across network namespaces. Pod-CIDR DNAT routing is not implemented.
+
+### Configuration
+
+IMDS proxy initialization is enabled by default (`floci.services.eks.imds=true`). Set `FLOCI_SERVICES_EKS_IMDS=false` to disable the proxy setup inside the k3s container.
+
+A failure to configure the proxy (for example on custom minimal images lacking network utilities) logs a warning and allows cluster startup to continue.
+
+### Hop limits
+
+EC2 metadata options store `HttpPutResponseHopLimit`, but the userspace TCP proxy relay terminates the incoming connection and opens a new connection to Floci, regenerating the IP packet TTL. Hop limits are recorded on the instance metadata options model but are not enforced by the userspace proxy.
 
 ## IRSA (IAM Roles for Service Accounts)
 
