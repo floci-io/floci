@@ -262,7 +262,7 @@ curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 
 ### Usage reporting
 
-`GetUsage` returns the real response envelope: an `items` map of API key id to one `[used, remaining]`
+`GetUsage` returns the real response envelope: a `values` map of API key id to one `[used, remaining]`
 pair per day of the inclusive range, alongside `usagePlanId`, `startDate` and `endDate`. The second
 element of each pair is the quota limit minus cumulative use on real API Gateway, not the quota
 itself.

@@ -16,7 +16,7 @@ import static org.hamcrest.Matchers.notNullValue;
 /**
  * {@code GetUsage}.
  *
- * <p>Envelope captured from real API Gateway: {@code items} maps an API key id to one pair per day
+ * <p>Envelope captured from real API Gateway: {@code values} maps an API key id to one pair per day
  * of the inclusive range, alongside {@code usagePlanId}, {@code startDate} and {@code endDate}, with
  * no {@code position} when there is no further page.
  *
@@ -50,7 +50,7 @@ class ApiGatewayGetUsageIntegrationTest {
     }
 
     @Test
-    void aPlanWithNoKeysReportsAnEmptyItemsMap() {
+    void aPlanWithNoKeysReportsAnEmptyValuesMap() {
         String planId = createUsagePlan("usage-empty");
 
         given().when().get("/usageplans/" + planId + "/usage?startDate=2026-09-01&endDate=2026-09-13")
@@ -58,11 +58,11 @@ class ApiGatewayGetUsageIntegrationTest {
                 .body("usagePlanId", equalTo(planId))
                 .body("startDate", equalTo("2026-09-01"))
                 .body("endDate", equalTo("2026-09-13"))
-                .body("items", anEmptyMap());
+                .body("values", anEmptyMap());
     }
 
     // API key ids are random and can start with a digit, which a dotted GPath parses as a number.
-    // Every lookup into items therefore uses bracket notation.
+    // Every lookup into values therefore uses bracket notation.
     @Test
     void eachKeyGetsOnePairPerDayOfTheInclusiveRange() {
         String planId = createUsagePlan("usage-range");
@@ -71,10 +71,10 @@ class ApiGatewayGetUsageIntegrationTest {
         given().when().get("/usageplans/" + planId + "/usage?startDate=2026-09-01&endDate=2026-09-13")
                 .then().statusCode(200)
                 // 1 to 13 September inclusive is 13 days, matching real API Gateway.
-                .body("items['" + keyId + "']", hasSize(13))
-                .body("items['" + keyId + "'][0]", hasSize(2))
-                .body("items['" + keyId + "'][0][0]", equalTo(0))
-                .body("items['" + keyId + "'][0][1]", equalTo(0));
+                .body("values['" + keyId + "']", hasSize(13))
+                .body("values['" + keyId + "'][0]", hasSize(2))
+                .body("values['" + keyId + "'][0][0]", equalTo(0))
+                .body("values['" + keyId + "'][0][1]", equalTo(0));
     }
 
     @Test
@@ -84,7 +84,7 @@ class ApiGatewayGetUsageIntegrationTest {
 
         given().when().get("/usageplans/" + planId + "/usage?startDate=2026-09-05&endDate=2026-09-05")
                 .then().statusCode(200)
-                .body("items['" + keyId + "']", hasSize(1));
+                .body("values['" + keyId + "']", hasSize(1));
     }
 
     @Test
@@ -96,8 +96,8 @@ class ApiGatewayGetUsageIntegrationTest {
         given().when().get("/usageplans/" + planId + "/usage"
                         + "?startDate=2026-09-01&endDate=2026-09-02&keyId=" + first)
                 .then().statusCode(200)
-                .body("items", aMapWithSize(1))
-                .body("items['" + first + "']", hasSize(2));
+                .body("values", aMapWithSize(1))
+                .body("values['" + first + "']", hasSize(2));
     }
 
     @Test
@@ -144,7 +144,7 @@ class ApiGatewayGetUsageIntegrationTest {
                 .when().get("/usageplans/" + planId + "/usage"
                         + "?startDate=2026-09-01&endDate=2026-09-02&limit=2")
                 .then().statusCode(200)
-                .body("items", aMapWithSize(2))
+                .body("values", aMapWithSize(2))
                 .body("position", notNullValue())
                 .extract().path("position");
 
@@ -152,7 +152,7 @@ class ApiGatewayGetUsageIntegrationTest {
                 .when().get("/usageplans/" + planId + "/usage"
                         + "?startDate=2026-09-01&endDate=2026-09-02&limit=2&position=" + position)
                 .then().statusCode(200)
-                .body("items", aMapWithSize(1))
+                .body("values", aMapWithSize(1))
                 // No token on the terminal page, matching the capture from real AWS.
                 .body("position", nullValue());
     }
@@ -165,7 +165,7 @@ class ApiGatewayGetUsageIntegrationTest {
         given()
                 .when().get("/usageplans/" + planId + "/usage?startDate=2026-09-01&endDate=2026-09-02")
                 .then().statusCode(200)
-                .body("items", aMapWithSize(1))
+                .body("values", aMapWithSize(1))
                 .body("position", nullValue());
     }
 
@@ -204,7 +204,7 @@ class ApiGatewayGetUsageIntegrationTest {
                     .when().get("/usageplans/" + planId + "/usage"
                             + "?startDate=2026-09-01&endDate=2026-09-02&limit=" + limit)
                     .then().statusCode(200)
-                    .body("items", aMapWithSize(1));
+                    .body("values", aMapWithSize(1));
         }
     }
 

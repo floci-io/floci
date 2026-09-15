@@ -875,9 +875,12 @@ public class ApiGatewayController {
                 service.getUsage(region, usagePlanId, startDate, endDate, keyId, limit, position);
 
         ObjectNode root = objectMapper.createObjectNode();
-        ObjectNode items = root.putObject("items");
+        // The wire key is "values", not "items": the Usage shape models this map with
+        // locationName "values", and "items" is only the SDK-side member name. A body keyed
+        // "items" parses to nothing in a real client.
+        ObjectNode values = root.putObject("values");
         report.items().forEach((apiKeyId, perDay) -> {
-            ArrayNode days = items.putArray(apiKeyId);
+            ArrayNode days = values.putArray(apiKeyId);
             for (long[] pair : perDay) {
                 ArrayNode entry = days.addArray();
                 entry.add(pair[0]);
