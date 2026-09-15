@@ -12,23 +12,34 @@ dotnet add package Testcontainers.Floci
 
 !!! note "Published to GitHub Packages, not nuget.org"
 
-    The package is served from the `floci-io` GitHub Packages feed. Add the source once, in a `nuget.config` next to your solution:
+    The package is served from the [floci-io GitHub Packages feed](https://github.com/floci-io/testcontainers-floci-dotnet/pkgs/nuget/Testcontainers.Floci). A package with the same id, `Testcontainers.Floci`, also exists on nuget.org, published by the Testcontainers project. Without package source mapping, NuGet may resolve that one instead of this module, so the mapping block below is required, not optional. Add a `nuget.config` next to your solution:
 
     ```xml
     <?xml version="1.0" encoding="utf-8"?>
     <configuration>
       <packageSources>
-        <add key="floci" value="https://nuget.pkg.github.com/floci-io/index.json" />
+        <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+        <add key="github-floci-io" value="https://nuget.pkg.github.com/floci-io/index.json" />
       </packageSources>
+      <packageSourceCredentials>
+        <github-floci-io>
+          <add key="Username" value="%GITHUB_ACTOR%" />
+          <add key="ClearTextPassword" value="%GITHUB_PACKAGES_PAT%" />
+        </github-floci-io>
+      </packageSourceCredentials>
+      <packageSourceMapping>
+        <!-- Route only this package to the floci-io feed; everything else stays on nuget.org. -->
+        <packageSource key="github-floci-io">
+          <package pattern="Testcontainers.Floci" />
+        </packageSource>
+        <packageSource key="nuget.org">
+          <package pattern="*" />
+        </packageSource>
+      </packageSourceMapping>
     </configuration>
     ```
 
-    GitHub Packages requires authentication even for public packages, so add a personal access token with the `read:packages` scope:
-
-    ```bash
-    dotnet nuget add source https://nuget.pkg.github.com/floci-io/index.json \
-      --name floci --username <your-github-username> --password <token> --store-password-in-clear-text
-    ```
+    GitHub Packages requires authentication even for public packages. `GITHUB_PACKAGES_PAT` is a personal access token with the `read:packages` scope, and `GITHUB_ACTOR` is your GitHub username. The `dotnet nuget add source` command can register the feed and credentials for you, but it does not create the `packageSourceMapping` entry, so the config file above is the canonical setup.
 
 ## Basic usage with xUnit
 
