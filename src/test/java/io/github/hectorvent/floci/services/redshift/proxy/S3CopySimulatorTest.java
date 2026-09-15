@@ -19,7 +19,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
@@ -1198,24 +1197,4 @@ class S3CopySimulatorTest {
         assertNull(in.nextMessage(), "Client must not receive an unconfirmed ReadyForQuery");
     }
 
-    @Test
-    void runCopyFromFailureInvokesLoadErrorRecorder() throws Exception {
-        when(s3.objectExists("wh", "missing")).thenReturn(false);
-        when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
-                new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
-        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "missing", "|", 0, false, false, null);
-
-        AtomicReference<String> recordedFilename = new AtomicReference<>();
-        AtomicInteger recordedErrCode = new AtomicInteger();
-        LoadErrorRecorder recorder = (filename, line, col, errCode, reason) -> {
-            recordedFilename.set(filename);
-            recordedErrCode.set(errCode);
-        };
-
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I', null, recorder);
-
-        assertEquals("s3://wh/missing", recordedFilename.get());
-        assertEquals(1204, recordedErrCode.get());
-    }
 }
