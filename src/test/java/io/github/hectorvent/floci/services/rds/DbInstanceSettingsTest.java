@@ -1,8 +1,12 @@
 package io.github.hectorvent.floci.services.rds;
 
+import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -45,5 +49,27 @@ class DbInstanceSettingsTest {
         }
         assertTrue(DbInstanceSettings.windowsOverlap(
                 DbInstanceSettings.backupWindowAfter("mon:00:00-mon:23:45"), "mon:00:00-mon:23:45"));
+    }
+
+    @Test
+    void applyToUpdatesMonitoringLifecycleAndLogExportSettings() {
+        DbInstance instance = new DbInstance();
+        instance.setEnabledCloudwatchLogsExports(List.of("postgresql", "upgrade"));
+        DbInstanceSettings settings = new DbInstanceSettings(
+                null, null, null, null, null, null,
+                5, "arn:aws:iam::123456789012:role/rds-monitoring", true, 93,
+                "open-source-rds-extended-support-disabled", 100,
+                List.of("iam-db-auth-error", "postgresql"), List.of("upgrade"));
+
+        settings.applyTo(instance);
+
+        assertEquals(5, instance.getMonitoringInterval());
+        assertEquals("arn:aws:iam::123456789012:role/rds-monitoring", instance.getMonitoringRoleArn());
+        assertTrue(instance.isPerformanceInsightsEnabled());
+        assertEquals(93, instance.getPerformanceInsightsRetentionPeriod());
+        assertEquals("open-source-rds-extended-support-disabled", instance.getEngineLifecycleSupport());
+        assertEquals(100, instance.getMaxAllocatedStorage());
+        assertEquals(List.of("postgresql", "iam-db-auth-error"),
+                instance.getEnabledCloudwatchLogsExports());
     }
 }

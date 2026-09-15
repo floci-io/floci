@@ -6153,10 +6153,15 @@ class RdsServiceTest {
                 20, false, null, null, null, null, false, false, null,
                 Map.of(), List.of(), null, null, true,
                 new DbInstanceSettings(true, "arn:aws:kms:us-east-1:123456789012:key/k1", 7,
-                        "23:30-00:00", "sun:03:08-sun:03:38", false));
+                        "23:30-00:00", "sun:03:08-sun:03:38", false,
+                        60, "arn:aws:iam::123456789012:role/rds-monitoring", true, 731,
+                        "open-source-rds-extended-support-disabled", 100,
+                        List.of("postgresql", "upgrade"), null));
 
         rdsService.modifyDbInstance("mydb", null, null, null, List.of(), null, null, null,
-                new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true));
+                new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true,
+                        5, null, true, 93, "open-source-rds-extended-support", 120,
+                        List.of("iam-db-auth-error"), List.of("upgrade")));
 
         DbInstance stored = rdsService.getDbInstance("mydb");
         assertEquals(3, stored.getBackupRetentionPeriod());
@@ -6165,6 +6170,13 @@ class RdsServiceTest {
         assertTrue(stored.isStorageEncrypted());
         assertEquals("arn:aws:kms:us-east-1:123456789012:key/k1", stored.getKmsKeyId());
         assertEquals("sun:03:08-sun:03:38", stored.getPreferredMaintenanceWindow());
+        assertEquals(5, stored.getMonitoringInterval());
+        assertEquals("arn:aws:iam::123456789012:role/rds-monitoring", stored.getMonitoringRoleArn());
+        assertTrue(stored.isPerformanceInsightsEnabled());
+        assertEquals(93, stored.getPerformanceInsightsRetentionPeriod());
+        assertEquals("open-source-rds-extended-support", stored.getEngineLifecycleSupport());
+        assertEquals(120, stored.getMaxAllocatedStorage());
+        assertEquals(List.of("postgresql", "iam-db-auth-error"), stored.getEnabledCloudwatchLogsExports());
     }
 
     @Test

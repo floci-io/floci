@@ -2475,6 +2475,14 @@ class RdsQueryHandlerTest {
         p.add("PreferredBackupWindow", "23:30-00:00");
         p.add("PreferredMaintenanceWindow", "sun:03:08-sun:03:38");
         p.add("CopyTagsToSnapshot", "true");
+        p.add("MonitoringInterval", "60");
+        p.add("MonitoringRoleArn", "arn:aws:iam::123456789012:role/rds-monitoring");
+        p.add("EnablePerformanceInsights", "true");
+        p.add("PerformanceInsightsRetentionPeriod", "731");
+        p.add("EngineLifecycleSupport", "open-source-rds-extended-support-disabled");
+        p.add("MaxAllocatedStorage", "100");
+        p.add("EnableCloudwatchLogsExports.member.1", "postgresql");
+        p.add("EnableCloudwatchLogsExports.member.2", "upgrade");
 
         assertEquals(200, handler.handle("CreateDBInstance", p).getStatus());
 
@@ -2489,6 +2497,14 @@ class RdsQueryHandlerTest {
         assertEquals("23:30-00:00", settings.preferredBackupWindow());
         assertEquals("sun:03:08-sun:03:38", settings.preferredMaintenanceWindow());
         assertEquals(Boolean.TRUE, settings.copyTagsToSnapshot());
+        assertEquals(60, settings.monitoringInterval());
+        assertEquals("arn:aws:iam::123456789012:role/rds-monitoring", settings.monitoringRoleArn());
+        assertEquals(Boolean.TRUE, settings.performanceInsightsEnabled());
+        assertEquals(731, settings.performanceInsightsRetentionPeriod());
+        assertEquals("open-source-rds-extended-support-disabled", settings.engineLifecycleSupport());
+        assertEquals(100, settings.maxAllocatedStorage());
+        assertEquals(List.of("postgresql", "upgrade"), settings.enableLogTypes());
+        assertNull(settings.disableLogTypes());
     }
 
     @Test
@@ -2537,6 +2553,13 @@ class RdsQueryHandlerTest {
         instance.setPreferredBackupWindow("23:30-00:00");
         instance.setPreferredMaintenanceWindow("sun:03:08-sun:03:38");
         instance.setCopyTagsToSnapshot(true);
+        instance.setMonitoringInterval(60);
+        instance.setMonitoringRoleArn("arn:aws:iam::123456789012:role/rds-monitoring");
+        instance.setPerformanceInsightsEnabled(true);
+        instance.setPerformanceInsightsRetentionPeriod(731);
+        instance.setEngineLifecycleSupport("open-source-rds-extended-support-disabled");
+        instance.setMaxAllocatedStorage(100);
+        instance.setEnabledCloudwatchLogsExports(List.of("postgresql", "upgrade"));
         when(service.listDbInstances("mydb", null)).thenReturn(List.of(instance));
 
         MultivaluedMap<String, String> p = params();
@@ -2549,6 +2572,13 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<PreferredBackupWindow>23:30-00:00</PreferredBackupWindow>"), body);
         assertTrue(body.contains("<PreferredMaintenanceWindow>sun:03:08-sun:03:38</PreferredMaintenanceWindow>"), body);
         assertTrue(body.contains("<CopyTagsToSnapshot>true</CopyTagsToSnapshot>"), body);
+        assertTrue(body.contains("<MonitoringInterval>60</MonitoringInterval>"), body);
+        assertTrue(body.contains("<MonitoringRoleArn>arn:aws:iam::123456789012:role/rds-monitoring</MonitoringRoleArn>"), body);
+        assertTrue(body.contains("<PerformanceInsightsEnabled>true</PerformanceInsightsEnabled>"), body);
+        assertTrue(body.contains("<PerformanceInsightsRetentionPeriod>731</PerformanceInsightsRetentionPeriod>"), body);
+        assertTrue(body.contains("<EngineLifecycleSupport>open-source-rds-extended-support-disabled</EngineLifecycleSupport>"), body);
+        assertTrue(body.contains("<MaxAllocatedStorage>100</MaxAllocatedStorage>"), body);
+        assertTrue(body.contains("<EnabledCloudwatchLogsExports><member>postgresql</member><member>upgrade</member></EnabledCloudwatchLogsExports>"), body);
     }
 
     @Test
@@ -2580,6 +2610,14 @@ class RdsQueryHandlerTest {
         p.add("BackupRetentionPeriod", "3");
         p.add("PreferredBackupWindow", "01:00-01:30");
         p.add("CopyTagsToSnapshot", "true");
+        p.add("MonitoringInterval", "5");
+        p.add("MonitoringRoleArn", "arn:aws:iam::123456789012:role/rds-monitoring-updated");
+        p.add("EnablePerformanceInsights", "true");
+        p.add("PerformanceInsightsRetentionPeriod", "93");
+        p.add("EngineLifecycleSupport", "open-source-rds-extended-support");
+        p.add("MaxAllocatedStorage", "120");
+        p.add("CloudwatchLogsExportConfiguration.EnableLogTypes.member.1", "iam-db-auth-error");
+        p.add("CloudwatchLogsExportConfiguration.DisableLogTypes.member.1", "upgrade");
         // not part of the ModifyDBInstance shape: encryption is fixed at create
         p.add("StorageEncrypted", "true");
         p.add("KmsKeyId", "arn:aws:kms:us-east-1:123456789012:key/other");
@@ -2588,7 +2626,10 @@ class RdsQueryHandlerTest {
         ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
         verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
                 isNull(), isNull(), captor.capture(), isNull());
-        assertEquals(new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true), captor.getValue());
+        assertEquals(new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true,
+                5, "arn:aws:iam::123456789012:role/rds-monitoring-updated", true, 93,
+                "open-source-rds-extended-support", 120,
+                List.of("iam-db-auth-error"), List.of("upgrade")), captor.getValue());
     }
 
     @Test

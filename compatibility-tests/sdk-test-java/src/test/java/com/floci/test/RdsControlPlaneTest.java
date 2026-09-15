@@ -14,6 +14,7 @@ import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo
 import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
+import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
@@ -350,6 +351,60 @@ class RdsControlPlaneTest {
     }
 
     @Test
+    void sdkRoundTripsDbInstanceMonitoringAndLifecycleSettings() {
+        String instanceName = TestFixtures.uniqueName("rds-db-settings");
+        String monitoringRoleArn = "arn:aws:iam::000000000000:role/rds-monitoring";
+        try {
+            DBInstance created = rds.createDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .engine("postgres")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("settings-secret")
+                    .dbName("app")
+                    .dbInstanceClass("db.t3.micro")
+                    .allocatedStorage(20)
+                    .monitoringInterval(60)
+                    .monitoringRoleArn(monitoringRoleArn)
+                    .enablePerformanceInsights(true)
+                    .performanceInsightsRetentionPeriod(731)
+                    .engineLifecycleSupport("open-source-rds-extended-support-disabled")
+                    .maxAllocatedStorage(100)
+                    .enableCloudwatchLogsExports("postgresql", "upgrade"))
+                    .dbInstance();
+
+            assertDbInstanceSettings(created, 60, monitoringRoleArn, 731,
+                    "open-source-rds-extended-support-disabled", 100,
+                    List.of("postgresql", "upgrade"));
+
+            DBInstance modified = rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .monitoringInterval(5)
+                    .enablePerformanceInsights(true)
+                    .performanceInsightsRetentionPeriod(93)
+                    .engineLifecycleSupport("open-source-rds-extended-support")
+                    .maxAllocatedStorage(120)
+                    .cloudwatchLogsExportConfiguration(c -> c
+                            .enableLogTypes("iam-db-auth-error")
+                            .disableLogTypes("upgrade")))
+                    .dbInstance();
+
+            assertDbInstanceSettings(modified, 5, monitoringRoleArn, 93,
+                    "open-source-rds-extended-support", 120,
+                    List.of("postgresql", "iam-db-auth-error"));
+
+            DBInstance described = rds.describeDBInstances(b -> b
+                            .dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertDbInstanceSettings(described, 5, monitoringRoleArn, 93,
+                    "open-source-rds-extended-support", 120,
+                    List.of("postgresql", "iam-db-auth-error"));
+        } finally {
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    @Test
     void sdkRegistersDescribesAndDeregistersDbProxyInstanceTarget() {
         String targetProxyName = TestFixtures.uniqueName("rds-proxy-target");
         String targetInstanceName = TestFixtures.uniqueName("rds-db-target");
@@ -627,6 +682,20 @@ class RdsControlPlaneTest {
         assertThat(target.rdsResourceId()).isEqualTo(instanceName);
         assertThat(target.targetArn()).isEqualTo(instanceArn);
         assertThat(target.targetHealth().stateAsString()).isEqualTo("AVAILABLE");
+    }
+
+    private static void assertDbInstanceSettings(
+            DBInstance instance, int monitoringInterval, String monitoringRoleArn,
+            int performanceInsightsRetentionPeriod, String engineLifecycleSupport,
+            int maxAllocatedStorage, List<String> enabledLogTypes) {
+        assertThat(instance.monitoringInterval()).isEqualTo(monitoringInterval);
+        assertThat(instance.monitoringRoleArn()).isEqualTo(monitoringRoleArn);
+        assertThat(instance.performanceInsightsEnabled()).isTrue();
+        assertThat(instance.performanceInsightsRetentionPeriod())
+                .isEqualTo(performanceInsightsRetentionPeriod);
+        assertThat(instance.engineLifecycleSupport()).isEqualTo(engineLifecycleSupport);
+        assertThat(instance.maxAllocatedStorage()).isEqualTo(maxAllocatedStorage);
+        assertThat(instance.enabledCloudwatchLogsExports()).containsExactlyElementsOf(enabledLogTypes);
     }
 
     private static void assertPoolConfiguration(ConnectionPoolConfigurationInfo pool) {

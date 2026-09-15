@@ -398,7 +398,18 @@ public class RdsQueryHandler {
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("CopyTagsToSnapshot")));
+                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                optionalInt(params.getFirst("MonitoringInterval")),
+                params.getFirst("MonitoringRoleArn"),
+                optionalBoolean(params.getFirst("EnablePerformanceInsights")),
+                optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
+                params.getFirst("EngineLifecycleSupport"),
+                optionalInt(params.getFirst("MaxAllocatedStorage")),
+                optionalMemberList(params, includeEncryption
+                        ? "EnableCloudwatchLogsExports"
+                        : "CloudwatchLogsExportConfiguration.EnableLogTypes"),
+                includeEncryption ? null : optionalMemberList(params,
+                        "CloudwatchLogsExportConfiguration.DisableLogTypes"));
     }
 
     private static Boolean optionalBoolean(String value) {
@@ -1484,6 +1495,8 @@ public class RdsQueryHandler {
            .elem("BackupRetentionPeriod", i.getBackupRetentionPeriod())
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
+           .elem("MonitoringInterval", i.getMonitoringInterval())
+           .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled())
            .raw(vpcSecurityGroupsXml(i))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))
@@ -1493,6 +1506,23 @@ public class RdsQueryHandler {
         if (i.getKmsKeyId() != null && !i.getKmsKeyId().isBlank()) {
             xml.elem("KmsKeyId", i.getKmsKeyId());
         }
+        if (i.getMonitoringRoleArn() != null && !i.getMonitoringRoleArn().isBlank()) {
+            xml.elem("MonitoringRoleArn", i.getMonitoringRoleArn());
+        }
+        if (i.getPerformanceInsightsRetentionPeriod() != null) {
+            xml.elem("PerformanceInsightsRetentionPeriod", i.getPerformanceInsightsRetentionPeriod());
+        }
+        if (i.getEngineLifecycleSupport() != null && !i.getEngineLifecycleSupport().isBlank()) {
+            xml.elem("EngineLifecycleSupport", i.getEngineLifecycleSupport());
+        }
+        if (i.getMaxAllocatedStorage() != null) {
+            xml.elem("MaxAllocatedStorage", i.getMaxAllocatedStorage());
+        }
+        xml.start("EnabledCloudwatchLogsExports");
+        for (String logType : i.getEnabledCloudwatchLogsExports()) {
+            xml.elem("member", logType);
+        }
+        xml.end("EnabledCloudwatchLogsExports");
         if (i.getMasterUserSecretArn() != null && !i.getMasterUserSecretArn().isBlank()) {
             xml.start("MasterUserSecret")
                     .elem("SecretArn", i.getMasterUserSecretArn())
@@ -1968,6 +1998,11 @@ public class RdsQueryHandler {
                 .map(params::getFirst)
                 .filter(value -> value != null && !value.isBlank())
                 .toList();
+    }
+
+    private static List<String> optionalMemberList(
+            MultivaluedMap<String, String> params, String baseName) {
+        return hasMemberKeys(params, baseName) ? memberList(params, baseName) : null;
     }
 
     private static boolean hasMemberKeys(MultivaluedMap<String, String> params, String baseName) {

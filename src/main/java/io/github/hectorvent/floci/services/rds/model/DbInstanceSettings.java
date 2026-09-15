@@ -4,6 +4,10 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * The storage and backup settings of a DB instance as a request carries them: a null member is
@@ -15,14 +19,34 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  Integer backupRetentionPeriod,
                                  String preferredBackupWindow,
                                  String preferredMaintenanceWindow,
-                                 Boolean copyTagsToSnapshot) {
+                                 Boolean copyTagsToSnapshot,
+                                 Integer monitoringInterval,
+                                 String monitoringRoleArn,
+                                 Boolean performanceInsightsEnabled,
+                                 Integer performanceInsightsRetentionPeriod,
+                                 String engineLifecycleSupport,
+                                 Integer maxAllocatedStorage,
+                                 List<String> enableLogTypes,
+                                 List<String> disableLogTypes) {
 
     /** Where AWS picks a random 30-minute window, Floci picks these. */
     public static final String DEFAULT_BACKUP_WINDOW = BackupWindows.DEFAULT_BACKUP_WINDOW;
     public static final String DEFAULT_MAINTENANCE_WINDOW = BackupWindows.DEFAULT_MAINTENANCE_WINDOW;
 
+    public DbInstanceSettings(Boolean storageEncrypted,
+                              String kmsKeyId,
+                              Integer backupRetentionPeriod,
+                              String preferredBackupWindow,
+                              String preferredMaintenanceWindow,
+                              Boolean copyTagsToSnapshot) {
+        this(storageEncrypted, kmsKeyId, backupRetentionPeriod, preferredBackupWindow,
+                preferredMaintenanceWindow, copyTagsToSnapshot, null, null, null, null,
+                null, null, null, null);
+    }
+
     public static DbInstanceSettings defaults() {
-        return new DbInstanceSettings(null, null, null, null, null, null);
+        return new DbInstanceSettings(null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null);
     }
 
     public static DbInstanceSettings unchanged() {
@@ -86,7 +110,10 @@ public record DbInstanceSettings(Boolean storageEncrypted,
 
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
         return new DbInstanceSettings(storageEncrypted, resolvedKmsKeyId, backupRetentionPeriod,
-                preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot);
+                preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot,
+                monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
+                performanceInsightsRetentionPeriod, engineLifecycleSupport, maxAllocatedStorage,
+                enableLogTypes, disableLogTypes);
     }
 
     public void applyTo(DbInstance instance) {
@@ -107,6 +134,34 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (copyTagsToSnapshot != null) {
             instance.setCopyTagsToSnapshot(copyTagsToSnapshot);
+        }
+        if (monitoringInterval != null) {
+            instance.setMonitoringInterval(monitoringInterval);
+        }
+        if (monitoringRoleArn != null && !monitoringRoleArn.isBlank()) {
+            instance.setMonitoringRoleArn(monitoringRoleArn);
+        }
+        if (performanceInsightsEnabled != null) {
+            instance.setPerformanceInsightsEnabled(performanceInsightsEnabled);
+        }
+        if (performanceInsightsRetentionPeriod != null) {
+            instance.setPerformanceInsightsRetentionPeriod(performanceInsightsRetentionPeriod);
+        }
+        if (engineLifecycleSupport != null && !engineLifecycleSupport.isBlank()) {
+            instance.setEngineLifecycleSupport(engineLifecycleSupport);
+        }
+        if (maxAllocatedStorage != null) {
+            instance.setMaxAllocatedStorage(maxAllocatedStorage);
+        }
+        if (enableLogTypes != null || disableLogTypes != null) {
+            Set<String> logTypes = new LinkedHashSet<>(instance.getEnabledCloudwatchLogsExports());
+            if (disableLogTypes != null) {
+                logTypes.removeAll(disableLogTypes);
+            }
+            if (enableLogTypes != null) {
+                logTypes.addAll(enableLogTypes);
+            }
+            instance.setEnabledCloudwatchLogsExports(new ArrayList<>(logTypes));
         }
     }
 }
