@@ -132,7 +132,10 @@ class CognitoServiceTest {
         assertNotNull(pool.getId());
         assertEquals("FullConfigPool", pool.getName());
         assertEquals("arn:aws:cognito-idp:us-east-1:000000000000:userpool/" + pool.getId(), pool.getArn());
-        assertEquals(schema, pool.getSchemaAttributes());
+        assertEquals(
+                List.of(Map.of("Name", "custom:my-attr", "AttributeDataType", "String")),
+                pool.getSchemaAttributes(),
+                "a non-standard Schema attribute is stored under the custom: namespace");
         // A supplied PasswordPolicy is normalized with AWS's defaults for the fields left unset
         // (MinimumLength here was explicit; the rest were not), matching what DescribeUserPool
         // returns on real Cognito for a policy submitted this way.
@@ -290,6 +293,83 @@ class CognitoServiceTest {
         assertDoesNotThrow(() -> service.signUp(
                 client.getClientId(), "bob@example.com", "Eightplus1!", Map.of(
                         "email", "bob@example.com", "phone_number", "+4915112345679")));
+    }
+
+    @Test
+    void createUserPoolNamespacesNonStandardSchemaAttributes() {
+        // The Schema property carries custom attributes unprefixed - it is what CloudFormation
+        // and the SDKs send - and AWS files them under custom: on the way in. A pool that stored
+        // the bare name answered DescribeUserPool with an attribute no client ever asks for.
+        Map<String, Object> request = new HashMap<>();
+        request.put("PoolName", "CustomAttrPool");
+        request.put("Schema", List.of(
+                Map.of("Name", "EmployeeId", "AttributeDataType", "String", "Mutable", true),
+                Map.of("Name", "Seniority", "AttributeDataType", "Number")));
+
+        UserPool pool = service.createUserPool(request, "us-east-1");
+
+        assertEquals(List.of("custom:EmployeeId", "custom:Seniority"), schemaNames(pool));
+        assertEquals(Boolean.TRUE, findSchemaAttribute(pool, "custom:EmployeeId").get("Mutable"),
+                "the rest of the attribute definition is carried through unchanged");
+    }
+
+    @Test
+    void createUserPoolLeavesStandardSchemaAttributesUnprefixed() {
+        // A standard attribute travels in the same list to override its default, typically to make
+        // email required. Namespacing it would file a second, custom attribute and leave the
+        // non-required default in force.
+        Map<String, Object> request = new HashMap<>();
+        request.put("PoolName", "StandardOverridePool");
+        request.put("Schema", List.of(
+                Map.of("Name", "email", "AttributeDataType", "String", "Required", true),
+                Map.of("Name", "Department", "AttributeDataType", "String")));
+
+        UserPool pool = service.createUserPool(request, "us-east-1");
+
+        assertEquals(List.of("email", "custom:Department"), schemaNames(pool));
+        assertEquals(Boolean.TRUE, findSchemaAttribute(pool, "email").get("Required"));
+    }
+
+    @Test
+    void createUserPoolLeavesAlreadyNamespacedSchemaAttributesAlone() {
+        Map<String, Object> request = new HashMap<>();
+        request.put("PoolName", "PrefixedAttrPool");
+        request.put("Schema", List.of(
+                Map.of("Name", "custom:tenant_id", "AttributeDataType", "String"),
+                Map.of("Name", "internal", "AttributeDataType", "String",
+                        "DeveloperOnlyAttribute", true)));
+
+        UserPool pool = service.createUserPool(request, "us-east-1");
+
+        assertEquals(List.of("custom:tenant_id", "dev:internal"), schemaNames(pool));
+    }
+
+    @Test
+    void updateUserPoolResendingTheSameSchemaDoesNotPrefixTwice() {
+        // CloudFormation re-sends the whole template on every UpdateStack, so the same Schema
+        // arrives again through updateUserPool. A second pass must be a no-op, not custom:custom:.
+        Map<String, Object> create = new HashMap<>();
+        create.put("PoolName", "ReappliedSchemaPool");
+        create.put("Schema", List.of(Map.of("Name", "EmployeeId", "AttributeDataType", "String")));
+        UserPool pool = service.createUserPool(create, "us-east-1");
+
+        Map<String, Object> update = new HashMap<>();
+        update.put("UserPoolId", pool.getId());
+        update.put("Schema", pool.getSchemaAttributes());
+        UserPool updated = service.updateUserPool(update, "us-east-1");
+
+        assertEquals(List.of("custom:EmployeeId"), schemaNames(updated));
+    }
+
+    private static List<String> schemaNames(UserPool pool) {
+        return pool.getSchemaAttributes().stream().map(attr -> (String) attr.get("Name")).toList();
+    }
+
+    private static Map<String, Object> findSchemaAttribute(UserPool pool, String name) {
+        return pool.getSchemaAttributes().stream()
+                .filter(attr -> name.equals(attr.get("Name")))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no schema attribute named " + name));
     }
 
     @Test

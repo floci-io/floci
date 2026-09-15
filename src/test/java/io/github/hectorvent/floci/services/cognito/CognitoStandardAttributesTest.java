@@ -25,6 +25,15 @@ class CognitoStandardAttributesTest {
     }
 
     @Test
+    void isStandardRecognisesEveryDefaultAndNothingElse() {
+        EXPECTED_NAMES.forEach(name ->
+                assertTrue(CognitoStandardAttributes.isStandard(name), name + " is a standard attribute"));
+        assertFalse(CognitoStandardAttributes.isStandard("EmployeeId"));
+        assertFalse(CognitoStandardAttributes.isStandard("custom:email"));
+        assertFalse(CognitoStandardAttributes.isStandard(null));
+    }
+
+    @Test
     void subIsRequiredAndImmutable() {
         Map<String, Object> sub = findByName(CognitoStandardAttributes.DEFAULTS, "sub");
         assertEquals("String", sub.get("AttributeDataType"));

@@ -49,6 +49,7 @@ AWS::CodePipeline::Webhook	CodePipelineCfnProvisioner
 AWS::Cognito::UserPool	CognitoCfnProvisioner
 AWS::Cognito::UserPoolClient	CognitoCfnProvisioner
 AWS::Cognito::UserPoolDomain	CognitoCfnProvisioner
+AWS::Cognito::UserPoolGroup	CognitoUserPoolGroupCfnProvisioner
 AWS::Config::ConfigRule	ConfigCfnProvisioner
 AWS::DynamoDB::GlobalTable	LEGACY_SWITCH
 AWS::DynamoDB::Table	LEGACY_SWITCH

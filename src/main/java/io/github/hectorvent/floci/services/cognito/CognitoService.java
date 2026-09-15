@@ -311,11 +311,7 @@ public class CognitoService implements ResourceProvider {
                 throw new AwsException("InvalidParameterException", "Attribute name contains invalid characters.", 400);
             }
 
-            boolean developerOnly = Boolean.TRUE.equals(attr.get("DeveloperOnlyAttribute"));
-            String prefix = developerOnly ? "dev:" : "custom:";
-            if (!name.startsWith("custom:") && !name.startsWith("dev:")) {
-                attr.put("Name", prefix + name);
-            }
+            attr.put("Name", prefixedAttributeName(name, Boolean.TRUE.equals(attr.get("DeveloperOnlyAttribute"))));
 
             String finalName = (String) attr.get("Name");
             boolean exists = schema.stream().anyMatch(existing -> finalName.equals(existing.get("Name")));
@@ -366,12 +362,37 @@ public class CognitoService implements ResourceProvider {
         pool.setPolicies(normalized);
     }
 
+    private static String prefixedAttributeName(String name, boolean developerOnly) {
+        if (name.startsWith("custom:") || name.startsWith("dev:")) {
+            return name;
+        }
+        return (developerOnly ? "dev:" : "custom:") + name;
+    }
+
+    private static List<Map<String, Object>> prefixCustomSchemaAttributes(List<Map<String, Object>> schema) {
+        if (schema == null) {
+            return null;
+        }
+        List<Map<String, Object>> prefixed = new ArrayList<>(schema.size());
+        for (Map<String, Object> attr : schema) {
+            String name = attr == null ? null : (String) attr.get("Name");
+            if (name == null || name.isBlank() || CognitoStandardAttributes.isStandard(name)) {
+                prefixed.add(attr);
+                continue;
+            }
+            Map<String, Object> copy = new HashMap<>(attr);
+            copy.put("Name", prefixedAttributeName(name, Boolean.TRUE.equals(attr.get("DeveloperOnlyAttribute"))));
+            prefixed.add(copy);
+        }
+        return prefixed;
+    }
+
     @SuppressWarnings("unchecked")
     private void populateUserPool(UserPool pool, Map<String, Object> request) {
         if (request.containsKey("Policies")) pool.setPolicies((Map<String, Object>) request.get("Policies"));
         if (request.containsKey("DeletionProtection")) pool.setDeletionProtection((String) request.get("DeletionProtection"));
         if (request.containsKey("LambdaConfig")) pool.setLambdaConfig((Map<String, Object>) request.get("LambdaConfig"));
-        if (request.containsKey("Schema")) pool.setSchemaAttributes((List<Map<String, Object>>) request.get("Schema"));
+        if (request.containsKey("Schema")) pool.setSchemaAttributes(prefixCustomSchemaAttributes((List<Map<String, Object>>) request.get("Schema")));
         if (request.containsKey("AutoVerifiedAttributes")) pool.setAutoVerifiedAttributes((List<String>) request.get("AutoVerifiedAttributes"));
         if (request.containsKey("AliasAttributes")) pool.setAliasAttributes((List<String>) request.get("AliasAttributes"));
         if (request.containsKey("UsernameAttributes")) pool.setUsernameAttributes((List<String>) request.get("UsernameAttributes"));
