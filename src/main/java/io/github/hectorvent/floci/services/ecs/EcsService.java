@@ -808,6 +808,25 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                                           Map<String, String> tags, String schedulingStrategy,
                                           String deploymentControllerType, String availabilityZoneRebalancing,
                                           String region) {
+        return createService(clusterRef, serviceName, taskDefinition, desiredCount, launchType,
+                loadBalancers, networkConfiguration, tags, schedulingStrategy, deploymentControllerType,
+                availabilityZoneRebalancing, null, region);
+    }
+
+    /**
+     * @param schedulingStrategy            {@code REPLICA} (default) or {@code DAEMON}
+     * @param deploymentControllerType      {@code ECS} (default), {@code CODE_DEPLOY} or {@code EXTERNAL}
+     * @param availabilityZoneRebalancing   {@code ENABLED} or {@code DISABLED} (default)
+     * @param serviceConnectConfiguration   reported back on each {@code deployments[]} entry
+     */
+    public EcsServiceModel createService(String clusterRef, String serviceName, String taskDefinition,
+                                          int desiredCount, LaunchType launchType,
+                                          List<EcsLoadBalancer> loadBalancers,
+                                          NetworkConfiguration networkConfiguration,
+                                          Map<String, String> tags, String schedulingStrategy,
+                                          String deploymentControllerType, String availabilityZoneRebalancing,
+                                          Map<String, Object> serviceConnectConfiguration,
+                                          String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         // AWS resolves family / family:revision at create time and stores the ARN; the
         // reconciler compares it with each task's taskDefinitionArn, so pin it here.
@@ -852,6 +871,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         svc.setDeploymentController(controller);
         svc.setAvailabilityZoneRebalancing(availabilityZoneRebalancing != null
                 ? availabilityZoneRebalancing : DEFAULT_AZ_REBALANCING_ON_CREATE);
+        svc.setServiceConnectConfiguration(serviceConnectConfiguration);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
         svc.setLastDeploymentAt(svc.getCreatedAt());
@@ -890,6 +910,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                                           Integer desiredCount, NetworkConfiguration networkConfiguration,
                                           String availabilityZoneRebalancing, boolean forceNewDeployment,
                                           String region) {
+        return updateService(clusterRef, serviceName, taskDefinition, desiredCount, networkConfiguration,
+                availabilityZoneRebalancing, forceNewDeployment, null, region);
+    }
+
+    public EcsServiceModel updateService(String clusterRef, String serviceName, String taskDefinition,
+                                          Integer desiredCount, NetworkConfiguration networkConfiguration,
+                                          String availabilityZoneRebalancing, boolean forceNewDeployment,
+                                          Map<String, Object> serviceConnectConfiguration,
+                                          String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
 
         serviceName = extractServiceName(serviceName);
@@ -914,6 +943,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         }
         if (availabilityZoneRebalancing != null) {
             svc.setAvailabilityZoneRebalancing(availabilityZoneRebalancing);
+        }
+        if (serviceConnectConfiguration != null) {
+            svc.setServiceConnectConfiguration(serviceConnectConfiguration);
         }
         boolean taskDefChanged = false;
         if (taskDefinition != null) {
@@ -1496,6 +1528,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         d.setRolloutStateReason("ECS deployment " + deploymentId
                 + (converged ? " completed." : " in progress."));
         d.setLaunchType(svc.getLaunchType());
+        d.setServiceConnectConfiguration(svc.getServiceConnectConfiguration());
         // The deployment's own start time, not the service's: a task-definition change mints a
         // new deployment id, so reporting service creation here would contradict it. Older
         // persisted services predate the field and fall back to the service creation time.
