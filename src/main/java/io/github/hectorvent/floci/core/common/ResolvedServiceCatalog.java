@@ -59,6 +59,7 @@ import io.github.hectorvent.floci.services.marketplace.MarketplaceCatalogControl
 import io.github.hectorvent.floci.services.marketplace.MarketplaceDeploymentController;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceDiscoveryController;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceReportingController;
+import io.github.hectorvent.floci.services.sagemaker.SageMakerRuntimeController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -401,6 +402,12 @@ public class ResolvedServiceCatalog {
                         config.storage().services().batch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("batch"), Set.of(), Set.of(BatchController.class)),
+                descriptor("sagemaker", "sagemaker", config.services().sagemaker().enabled(), true,
+                        "sagemaker", storageMode(config.storage().services().sagemaker().mode(), config.storage().mode()),
+                        config.storage().services().sagemaker().flushIntervalMs(), null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON, ServiceProtocol.REST_JSON),
+                        Set.of("SageMaker."), Set.of("sagemaker", "runtime.sagemaker"), Set.of(),
+                        Set.of(SageMakerRuntimeController.class)),
                 descriptor("codedeploy", "codedeploy", config.services().codedeploy().enabled(), true,
                         "codedeploy", storageMode(config.storage().services().codedeploy().mode(), config.storage().mode()),
                         config.storage().services().codedeploy().flushIntervalMs(), null, ServiceProtocol.JSON,
