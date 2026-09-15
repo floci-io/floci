@@ -1108,7 +1108,7 @@ class RdsQueryHandlerTest {
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setDbInstanceIdentifier("mydb");
         snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
-        when(service.describeDbSnapshots("mysnap", "mydb")).thenReturn(List.of(snapshot));
+        when(service.describeDbSnapshots(eq("mysnap"), eq("mydb"), isNull())).thenReturn(List.of(snapshot));
 
         MultivaluedMap<String, String> p = params();
         p.add("DBSnapshotIdentifier", "mysnap");
@@ -1771,11 +1771,15 @@ class RdsQueryHandlerTest {
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setDbInstanceIdentifier("mydb");
         snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
-        when(service.createDbSnapshot("mysnap", "mydb")).thenReturn(snapshot);
+        snapshot.setTags(Map.of("owner", "platform"));
+        when(service.createDbSnapshot(eq("mysnap"), eq("mydb"), eq(Map.of("owner", "platform")), isNull()))
+                .thenReturn(snapshot);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBSnapshotIdentifier", "mysnap");
         p.add("DBInstanceIdentifier", "mydb");
+        p.add("Tags.Tag.1.Key", "owner");
+        p.add("Tags.Tag.1.Value", "platform");
         Response response = handler.handle("CreateDBSnapshot", p);
 
         assertEquals(200, response.getStatus());
@@ -1784,12 +1788,53 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DBSnapshotIdentifier>mysnap</DBSnapshotIdentifier>"));
         assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
         assertTrue(body.contains("<Engine>postgres</Engine>"));
+        assertTrue(body.contains("<Key>owner</Key>"));
+        assertTrue(body.contains("<Value>platform</Value>"));
+    }
+
+    @Test
+    void describeDbSnapshotAttributes_returnsRestoreAttribute() {
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("mysnap");
+        snapshot.setRestoreAccountIds(List.of("111111111111"));
+        when(service.describeDbSnapshotAttributes(eq("mysnap"), isNull())).thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "mysnap");
+        Response response = handler.handle("DescribeDBSnapshotAttributes", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<AttributeName>restore</AttributeName>"));
+        assertTrue(body.contains("<AttributeValue>111111111111</AttributeValue>"));
+    }
+
+    @Test
+    void modifyDbSnapshotAttribute_passesValuesToAddAndRemove() {
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("mysnap");
+        snapshot.setRestoreAccountIds(List.of("222222222222"));
+        when(service.modifyDbSnapshotAttribute(eq("mysnap"), eq("restore"),
+                eq(List.of("222222222222")), eq(List.of("111111111111")), isNull())).thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "mysnap");
+        p.add("AttributeName", "restore");
+        p.add("ValuesToAdd.AttributeValue.1", "222222222222");
+        p.add("ValuesToRemove.AttributeValue.1", "111111111111");
+        Response response = handler.handle("ModifyDBSnapshotAttribute", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<AttributeValue>222222222222</AttributeValue>"));
+        verify(service).modifyDbSnapshotAttribute(eq("mysnap"), eq("restore"),
+                eq(List.of("222222222222")), eq(List.of("111111111111")), isNull());
     }
 
     @Test
     void restoreDbInstanceFromDbSnapshot_success() {
         DbInstance instance = makeInstance("mydb");
-        when(service.restoreDbInstanceFromDbSnapshot(eq("mydb"), eq("mysnap"), eq("db.t3.large"), eq("us-east-1a"), eq(true), eq("my-subnets"), eq(List.of("sg-123")), eq(Map.of("Env", "Prod"))))
+        when(service.restoreDbInstanceFromDbSnapshot(eq("mydb"), eq("mysnap"), eq("db.t3.large"), eq("us-east-1a"), eq(true), eq("my-subnets"), eq(List.of("sg-123")), eq(Map.of("Env", "Prod")), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();

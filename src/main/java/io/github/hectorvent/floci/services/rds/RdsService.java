@@ -756,11 +756,22 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbSnapshot createDbSnapshot(String snapshotId, String instanceId) {
-        if (snapshots.get(snapshotId).isPresent()) {
+        return createDbSnapshot(snapshotId, instanceId, Map.of(), regionResolver.getDefaultRegion());
+    }
+
+    public DbSnapshot createDbSnapshot(String snapshotId, String instanceId, Map<String, String> tags) {
+        return createDbSnapshot(snapshotId, instanceId, tags, regionResolver.getDefaultRegion());
+    }
+
+    public synchronized DbSnapshot createDbSnapshot(String snapshotId, String instanceId,
+                                                     Map<String, String> tags, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        if (findSnapshotForScope(accountId, effectiveRegion, snapshotId) != null) {
             throw new AwsException("DBSnapshotAlreadyExists", "DBSnapshot " + snapshotId + " already exists.", 400);
         }
 
-        DbInstance instance = getDbInstance(instanceId);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
 
         if (instance.getEngine() != DatabaseEngine.POSTGRES) {
             throw new AwsException("InvalidDBInstanceState", "Operation CreateDBSnapshot is not supported for engine " + instance.getEngine() + ".", 400);
@@ -772,6 +783,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
                 instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId(), instance.getDbInstanceClass());
         snapshot.setDbName(instance.getDbName());
+        snapshot.setTags(tags != null ? new java.util.LinkedHashMap<>(tags) : new java.util.LinkedHashMap<>());
+        snapshot.setDbSnapshotArn(regionResolver.buildArn("rds", effectiveRegion, "snapshot:" + snapshotId));
 
         String sqlDump = "";
         if (!config.services().rds().mock()) {
@@ -782,17 +795,26 @@ public class RdsService implements Resettable, ResourceProvider {
                 throw new AwsException("InvalidDBInstanceState", "Failed to create snapshot: " + e.getMessage(), 400);
             }
         }
-        snapshotData.put(snapshotId, sqlDump);
-        snapshots.put(snapshotId, snapshot);
+        snapshotData.put(dbResourceKey(effectiveRegion, snapshotId), sqlDump);
+        putSnapshotForScope(accountId, effectiveRegion, snapshotId, snapshot);
 
         return snapshot;
     }
 
     public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass, String availabilityZone, boolean multiAz, String dbSubnetGroupName, java.util.List<String> vpcSecurityGroupIds, java.util.Map<String, String> tags) {
-        DbSnapshot snapshot = snapshots.get(snapshotId)
+        return restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone,
+                multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags, regionResolver.getDefaultRegion());
+    }
+
+    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass,
+                                                       String availabilityZone, boolean multiAz, String dbSubnetGroupName,
+                                                       java.util.List<String> vpcSecurityGroupIds,
+                                                       java.util.Map<String, String> tags, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(currentAccountId(), effectiveRegion, snapshotId))
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
 
-        String sqlDump = snapshotData.get(snapshotId)
+        String sqlDump = snapshotData.get(dbResourceKey(effectiveRegion, snapshotId))
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot data for " + snapshotId + " not found.", 404));
 
         String targetClass = (dbInstanceClass != null && !dbInstanceClass.isBlank()) ? dbInstanceClass : snapshot.getDbInstanceClass();
@@ -824,8 +846,14 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public Collection<DbSnapshot> describeDbSnapshots(String snapshotId, String instanceId) {
+        return describeDbSnapshots(snapshotId, instanceId, regionResolver.getDefaultRegion());
+    }
+
+    public Collection<DbSnapshot> describeDbSnapshots(String snapshotId, String instanceId, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
         if (snapshotId != null && !snapshotId.isBlank()) {
-            DbSnapshot snapshot = snapshots.get(snapshotId)
+            DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(accountId, effectiveRegion, snapshotId))
                     .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
             if (instanceId != null && !instanceId.isBlank()) {
                 if (instanceId.equals(snapshot.getDbInstanceIdentifier())) {
@@ -837,13 +865,56 @@ public class RdsService implements Resettable, ResourceProvider {
             return List.of(snapshot);
         }
 
-        List<DbSnapshot> allSnapshots = snapshots.scan(k -> true);
+        List<DbSnapshot> allSnapshots = snapshots.scan(k -> true).stream()
+                .filter(s -> hasRdsResourceIdentity(s.getDbSnapshotArn(), accountId, effectiveRegion,
+                        "snapshot", s.getDbSnapshotIdentifier()))
+                .toList();
         if (instanceId != null && !instanceId.isBlank()) {
             return allSnapshots.stream()
                     .filter(s -> instanceId.equals(s.getDbInstanceIdentifier()))
                     .toList();
         }
         return allSnapshots;
+    }
+
+    public DbSnapshot describeDbSnapshotAttributes(String snapshotId) {
+        return describeDbSnapshotAttributes(snapshotId, regionResolver.getDefaultRegion());
+    }
+
+    public DbSnapshot describeDbSnapshotAttributes(String snapshotId, String region) {
+        return Optional.ofNullable(findSnapshotForScope(currentAccountId(), effectiveRegion(region), snapshotId))
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot " + snapshotId + " not found.", 404));
+    }
+
+    public DbSnapshot modifyDbSnapshotAttribute(String snapshotId, String attributeName,
+                                                List<String> valuesToAdd, List<String> valuesToRemove) {
+        return modifyDbSnapshotAttribute(snapshotId, attributeName, valuesToAdd, valuesToRemove,
+                regionResolver.getDefaultRegion());
+    }
+
+    public synchronized DbSnapshot modifyDbSnapshotAttribute(String snapshotId, String attributeName,
+                                                              List<String> valuesToAdd, List<String> valuesToRemove,
+                                                              String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(accountId, effectiveRegion, snapshotId))
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot " + snapshotId + " not found.", 404));
+        if (!"restore".equals(attributeName)) {
+            throw new AwsException("InvalidParameterValue",
+                    "AttributeName must be restore.", 400);
+        }
+        List<String> updated = new java.util.ArrayList<>(snapshot.getRestoreAccountIds());
+        if (valuesToAdd != null) {
+            valuesToAdd.stream().filter(v -> !updated.contains(v)).forEach(updated::add);
+        }
+        if (valuesToRemove != null) {
+            updated.removeAll(valuesToRemove);
+        }
+        snapshot.setRestoreAccountIds(updated);
+        putSnapshotForScope(accountId, effectiveRegion, snapshotId, snapshot);
+        return snapshot;
     }
 
     public Map<String, String> listTagsForResource(String resourceName) {
@@ -949,6 +1020,16 @@ public class RdsService implements Resettable, ResourceProvider {
                     group.setTags(updated);
                     putSubnetGroupForScope(
                             currentAccountId(), effectiveRegion, resourceId, group);
+                });
+            }
+            case "snapshot" -> {
+                DbSnapshot snapshot = Optional.ofNullable(
+                        findSnapshotForScope(currentAccountId(), effectiveRegion, resourceId))
+                        .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                                "DBSnapshot " + resourceId + " not found.", 404));
+                yield new TagHandle(snapshot.getTags(), updated -> {
+                    snapshot.setTags(updated);
+                    putSnapshotForScope(currentAccountId(), effectiveRegion, resourceId, snapshot);
                 });
             }
             case "db-proxy" -> {
@@ -5313,6 +5394,41 @@ public class RdsService implements Resettable, ResourceProvider {
             aware.deleteForAccount(accountId, key);
         } else {
             instances.delete(key);
+        }
+    }
+
+    private synchronized DbSnapshot findSnapshotForScope(String accountId, String region, String snapshotId) {
+        String effectiveAccountId = accountId != null ? accountId : currentAccountId();
+        String effectiveRegion = effectiveRegion(region);
+        String key = dbResourceKey(effectiveRegion, snapshotId);
+        java.util.function.Predicate<DbSnapshot> owner = snapshot -> hasRdsResourceIdentity(
+                snapshot.getDbSnapshotArn(), effectiveAccountId, effectiveRegion, "snapshot", snapshotId);
+        if (snapshots instanceof AccountAwareStorageBackend<DbSnapshot> aware) {
+            return aware.getForAccountMigratingLegacyKeys(
+                            effectiveAccountId, key, List.of(snapshotId), owner)
+                    .filter(owner)
+                    .orElse(null);
+        }
+
+        Optional<DbSnapshot> canonical = snapshots.get(key).filter(owner);
+        if (canonical.isPresent()) {
+            snapshots.get(snapshotId).filter(owner).ifPresent(ignored -> snapshots.delete(snapshotId));
+            return canonical.get();
+        }
+        Optional<DbSnapshot> legacy = snapshots.get(snapshotId).filter(owner);
+        if (legacy.isPresent()) {
+            snapshots.put(key, legacy.get());
+            snapshots.delete(snapshotId);
+        }
+        return legacy.orElse(null);
+    }
+
+    private void putSnapshotForScope(String accountId, String region, String snapshotId, DbSnapshot snapshot) {
+        String key = dbResourceKey(region, snapshotId);
+        if (snapshots instanceof AccountAwareStorageBackend<DbSnapshot> aware) {
+            aware.putForAccount(accountId, key, snapshot);
+        } else {
+            snapshots.put(key, snapshot);
         }
     }
 

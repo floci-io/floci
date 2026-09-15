@@ -1316,8 +1316,13 @@ class RdsServiceTest {
                 rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:pg:some-parameter-group"));
         assertEquals("DBParameterGroupNotFound", absentGroup.getErrorCode());
 
-        AwsException unsupportedType = assertThrows(AwsException.class, () ->
+        // Snapshots are tagged now too, so an absent one is a missing resource as well.
+        AwsException absentSnapshot = assertThrows(AwsException.class, () ->
                 rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:snapshot:some-snapshot"));
+        assertEquals("DBSnapshotNotFound", absentSnapshot.getErrorCode());
+
+        AwsException unsupportedType = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:ri:some-reserved-instance"));
         assertEquals("InvalidParameterValue", unsupportedType.getErrorCode());
         // The type is valid on real AWS; the message must present this as a Floci limitation.
         assertTrue(unsupportedType.getMessage().contains("not yet implemented by Floci"));
@@ -2781,7 +2786,65 @@ class RdsServiceTest {
         assertEquals("mydb", snapshot.getDbInstanceIdentifier());
         assertEquals(DatabaseEngine.POSTGRES, snapshot.getEngine());
         assertEquals("available", snapshot.getStatus());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:snapshot:mysnap", snapshot.getDbSnapshotArn());
         verify(containerManager).createPostgresSnapshot(any(), eq("admin"));
+    }
+
+    @Test
+    void createDbSnapshotStoresTagsGivenAtCreation() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb", Map.of("owner", "platform"));
+
+        assertEquals(Map.of("owner", "platform"), snapshot.getTags());
+        assertEquals(Map.of("owner", "platform"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+    }
+
+    @Test
+    void dbSnapshotTagsRoundTripAndMutateByArn() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb");
+
+        rdsService.addTagsToResource(snapshot.getDbSnapshotArn(), Map.of("Name", "mysnap"));
+        assertEquals(Map.of("Name", "mysnap"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+
+        rdsService.removeTagsFromResource(snapshot.getDbSnapshotArn(), List.of("Name"));
+        assertEquals(Map.of(), rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+    }
+
+    @Test
+    void dbSnapshotArnAndTagsAreScopedToTheRequestRegion() {
+        rdsService.createDbInstance("mydb", "postgres", "13", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), "us-west-2");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb", Map.of("owner", "west-team"), "us-west-2");
+
+        assertEquals("arn:aws:rds:us-west-2:123456789012:snapshot:mysnap", snapshot.getDbSnapshotArn());
+
+        // Reachable and taggable through the region it was created in.
+        assertEquals(1, rdsService.describeDbSnapshots("mysnap", null, "us-west-2").size());
+        assertEquals(Map.of("owner", "west-team"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn(), "us-west-2"));
+        rdsService.addTagsToResource(snapshot.getDbSnapshotArn(), Map.of("Name", "west-snap"), "us-west-2");
+        assertEquals(Map.of("owner", "west-team", "Name", "west-snap"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn(), "us-west-2"));
+
+        // A different region must not see or resolve another region's snapshot.
+        assertThrows(AwsException.class, () -> rdsService.describeDbSnapshots("mysnap", null, "us-east-1"));
+        assertTrue(rdsService.describeDbSnapshots(null, null, "us-east-1").isEmpty());
     }
 
     @Test
@@ -2866,6 +2929,42 @@ class RdsServiceTest {
         Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> inst1Result = rdsService.describeDbSnapshots(null, "mydb1");
         assertEquals(1, inst1Result.size());
         assertEquals("snap1", inst1Result.iterator().next().getDbSnapshotIdentifier());
+    }
+
+    @Test
+    void describeDbSnapshotAttributesDefaultsToNoSharedAccounts() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.describeDbSnapshotAttributes("mysnap");
+        assertEquals(List.of(), snapshot.getRestoreAccountIds());
+
+        assertThrows(AwsException.class, () -> rdsService.describeDbSnapshotAttributes("missing-snap"));
+    }
+
+    @Test
+    void modifyDbSnapshotAttributeAddsAndRemovesRestoreAccountIds() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot added = rdsService.modifyDbSnapshotAttribute(
+                "mysnap", "restore", List.of("111111111111", "222222222222"), List.of());
+        assertEquals(List.of("111111111111", "222222222222"), added.getRestoreAccountIds());
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot removed = rdsService.modifyDbSnapshotAttribute(
+                "mysnap", "restore", List.of(), List.of("111111111111"));
+        assertEquals(List.of("222222222222"), removed.getRestoreAccountIds());
+
+        AwsException badAttribute = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbSnapshotAttribute("mysnap", "share", List.of("333333333333"), List.of()));
+        assertEquals("InvalidParameterValue", badAttribute.getErrorCode());
     }
 
     @Test

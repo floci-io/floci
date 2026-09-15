@@ -95,9 +95,11 @@ public class RdsQueryHandler {
                 case "DescribeOptionGroups" -> handleDescribeOptionGroups(params, region);
                 case "ModifyOptionGroup" -> handleModifyOptionGroup(params, region);
                 case "DeleteOptionGroup" -> handleDeleteOptionGroup(params, region);
-                case "CreateDBSnapshot" -> handleCreateDbSnapshot(params);
-                case "RestoreDBInstanceFromDBSnapshot" -> handleRestoreDbInstanceFromDbSnapshot(params);
-                case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params);
+                case "CreateDBSnapshot" -> handleCreateDbSnapshot(params, region);
+                case "RestoreDBInstanceFromDBSnapshot" -> handleRestoreDbInstanceFromDbSnapshot(params, region);
+                case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params, region);
+                case "DescribeDBSnapshotAttributes" -> handleDescribeDbSnapshotAttributes(params, region);
+                case "ModifyDBSnapshotAttribute" -> handleModifyDbSnapshotAttribute(params, region);
                 case "DescribeDBProxies" -> handleDescribeDbProxies(params, region);
                 case "CreateDBProxy" -> handleCreateDbProxy(params, region);
                 case "ModifyDBProxy" -> handleModifyDbProxy(params, region);
@@ -1054,9 +1056,7 @@ public class RdsQueryHandler {
         return settings;
     }
 
-    // ── Snapshots & Proxies (not modeled — empty lists) ───────────────────────
-
-    private Response handleCreateDbSnapshot(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbSnapshot(MultivaluedMap<String, String> params, String region) {
         String snapshotId = params.getFirst("DBSnapshotIdentifier");
         String instanceId = params.getFirst("DBInstanceIdentifier");
         if (snapshotId == null || snapshotId.isBlank()) {
@@ -1066,7 +1066,8 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = service.createDbSnapshot(snapshotId, instanceId);
+            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                    service.createDbSnapshot(snapshotId, instanceId, parseTags(params), region);
             String result = dbSnapshotXml(snapshot);
             return Response.ok(AwsQueryResponse.envelope("CreateDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1074,7 +1075,7 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleRestoreDbInstanceFromDbSnapshot(MultivaluedMap<String, String> params) {
+    private Response handleRestoreDbInstanceFromDbSnapshot(MultivaluedMap<String, String> params, String region) {
         String instanceId = params.getFirst("DBInstanceIdentifier");
         String snapshotId = params.getFirst("DBSnapshotIdentifier");
         if (instanceId == null || instanceId.isBlank()) {
@@ -1099,7 +1100,7 @@ public class RdsQueryHandler {
         java.util.Map<String, String> tags = parseTags(params);
 
         try {
-            DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags);
+            DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags, region);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1107,17 +1108,45 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleDescribeDbSnapshots(MultivaluedMap<String, String> params) {
+    private Response handleDescribeDbSnapshots(MultivaluedMap<String, String> params, String region) {
         String snapshotId = params.getFirst("DBSnapshotIdentifier");
         String instanceId = params.getFirst("DBInstanceIdentifier");
         try {
-            Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> result = service.describeDbSnapshots(snapshotId, instanceId);
+            Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> result =
+                    service.describeDbSnapshots(snapshotId, instanceId, region);
             XmlBuilder xml = new XmlBuilder().start("DBSnapshots");
             for (io.github.hectorvent.floci.services.rds.model.DbSnapshot s : result) {
                 xml.raw(dbSnapshotXml(s));
             }
             xml.end("DBSnapshots");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBSnapshots", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDescribeDbSnapshotAttributes(MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        try {
+            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                    service.describeDbSnapshotAttributes(snapshotId, region);
+            String result = dbSnapshotAttributesResultXml(snapshot);
+            return Response.ok(AwsQueryResponse.envelope(
+                    "DescribeDBSnapshotAttributes", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleModifyDbSnapshotAttribute(MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        String attributeName = params.getFirst("AttributeName");
+        try {
+            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = service.modifyDbSnapshotAttribute(
+                    snapshotId, attributeName, memberList(params, "ValuesToAdd"), memberList(params, "ValuesToRemove"), region);
+            String result = dbSnapshotAttributesResultXml(snapshot);
+            return Response.ok(AwsQueryResponse.envelope(
+                    "ModifyDBSnapshotAttribute", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
@@ -1446,7 +1475,23 @@ public class RdsQueryHandler {
                 .elem("Port", s.getPort())
                 .elem("IAMDatabaseAuthenticationEnabled", s.isIamDatabaseAuthenticationEnabled());
         if (s.getDbiResourceId() != null) xml.elem("DbiResourceId", s.getDbiResourceId());
+        if (s.getDbSnapshotArn() != null) xml.elem("DBSnapshotArn", s.getDbSnapshotArn());
+        xml.start("TagList");
+        writeTags(xml, s.getTags());
+        xml.end("TagList");
         return xml.end("DBSnapshot").build();
+    }
+
+    private String dbSnapshotAttributesResultXml(io.github.hectorvent.floci.services.rds.model.DbSnapshot s) {
+        XmlBuilder xml = new XmlBuilder().start("DBSnapshotAttributesResult")
+                .elem("DBSnapshotIdentifier", s.getDbSnapshotIdentifier());
+        xml.start("DBSnapshotAttributes").start("DBSnapshotAttribute")
+                .elem("AttributeName", "restore");
+        xml.start("AttributeValues");
+        s.getRestoreAccountIds().forEach(id -> xml.elem("AttributeValue", id));
+        xml.end("AttributeValues");
+        xml.end("DBSnapshotAttribute").end("DBSnapshotAttributes");
+        return xml.end("DBSnapshotAttributesResult").build();
     }
 
     private String dbInstanceInnerXml(DbInstance i) {
@@ -1980,6 +2025,7 @@ public class RdsQueryHandler {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
             case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
             case "OptionsToRemove" -> quoted + "(\\.member|\\.OptionName)?\\.\\d+";
+            case "ValuesToAdd", "ValuesToRemove" -> quoted + "(\\.member|\\.AttributeValue)?\\.\\d+";
             default -> {
                 // Option configurations nest their membership lists under an indexed prefix,
                 // so the alternate member names have to be matched on the suffix.
