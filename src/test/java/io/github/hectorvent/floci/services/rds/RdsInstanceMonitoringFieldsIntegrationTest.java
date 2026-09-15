@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.rds;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.AfterEach;
@@ -11,6 +13,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
@@ -37,7 +40,7 @@ class RdsInstanceMonitoringFieldsIntegrationTest {
     private static final String RESULT =
             "DescribeDBInstancesResponse.DescribeDBInstancesResult.DBInstances.DBInstance.";
 
-    private static io.restassured.specification.RequestSpecification rds(String action) {
+    private static RequestSpecification rds(String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")
@@ -46,7 +49,7 @@ class RdsInstanceMonitoringFieldsIntegrationTest {
                 .formParam("Version", "2014-10-31");
     }
 
-    private static io.restassured.specification.RequestSpecification create() {
+    private static RequestSpecification create() {
         return rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", ID)
                 .formParam("Engine", "postgres")
@@ -56,7 +59,7 @@ class RdsInstanceMonitoringFieldsIntegrationTest {
                 .formParam("AllocatedStorage", "20");
     }
 
-    private static io.restassured.response.ValidatableResponse describe() {
+    private static ValidatableResponse describe() {
         return rds("DescribeDBInstances").formParam("DBInstanceIdentifier", ID)
                 .when().post("/").then().statusCode(200);
     }
@@ -105,14 +108,17 @@ class RdsInstanceMonitoringFieldsIntegrationTest {
         // AWS reports neither when storage autoscaling is off and no log type is exported.
         String body = rds("DescribeDBInstances").formParam("DBInstanceIdentifier", ID)
                 .when().post("/").then().extract().asString();
-        org.junit.jupiter.api.Assertions.assertFalse(body.contains("MaxAllocatedStorage"));
-        org.junit.jupiter.api.Assertions.assertFalse(body.contains("EnabledCloudwatchLogsExports"));
+        assertFalse(body.contains("MaxAllocatedStorage"));
+        assertFalse(body.contains("EnabledCloudwatchLogsExports"));
     }
 
     @Test
     void modifyDBInstance_replacesTheStoredMonitoringMembers() {
-        create().formParam("MonitoringInterval", "15").when().post("/").then().statusCode(200);
+        create().formParam("MonitoringInterval", "15").formParam("MonitoringRoleArn", ROLE)
+                .when().post("/").then().statusCode(200);
 
+        // Raising the interval without naming a role is valid, because the instance already holds
+        // one. The pair is judged on what will be in effect, not on what the request carried.
         rds("ModifyDBInstance")
                 .formParam("DBInstanceIdentifier", ID)
                 .formParam("MonitoringInterval", "60")
@@ -126,10 +132,40 @@ class RdsInstanceMonitoringFieldsIntegrationTest {
 
     @Test
     void createDBInstance_rejectsAMonitoringIntervalOutsideTheValidValues() {
-        create().formParam("MonitoringInterval", "45")
+        create().formParam("MonitoringInterval", "45").formParam("MonitoringRoleArn", ROLE)
                 .when().post("/").then().statusCode(400)
                 .body(containsString("InvalidParameterValue"))
                 .body(containsString("Valid values are 0, 1, 5, 10, 15, 30, 60"));
+    }
+
+    // MonitoringInterval and MonitoringRoleArn are documented as a pair, in both directions and on
+    // both operations, so neither is valid alone.
+    @Test
+    void createDBInstance_withAnIntervalAndNoRole_isRejected() {
+        create().formParam("MonitoringInterval", "30")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("InvalidParameterCombination"))
+                .body(containsString("You must supply a MonitoringRoleArn value"));
+    }
+
+    @Test
+    void createDBInstance_withARoleAndAZeroInterval_isRejected() {
+        create().formParam("MonitoringRoleArn", ROLE).formParam("MonitoringInterval", "0")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("InvalidParameterCombination"))
+                .body(containsString("You must set MonitoringInterval to a value other than 0"));
+    }
+
+    @Test
+    void modifyDBInstance_turningMonitoringOffWhileARoleStandsIsRejected() {
+        create().formParam("MonitoringInterval", "30").formParam("MonitoringRoleArn", ROLE)
+                .when().post("/").then().statusCode(200);
+
+        rds("ModifyDBInstance")
+                .formParam("DBInstanceIdentifier", ID)
+                .formParam("MonitoringInterval", "0")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("You must set MonitoringInterval to a value other than 0"));
     }
 
     @Test

@@ -605,6 +605,9 @@ public class RdsService implements Resettable, ResourceProvider {
         // resolved with the other validations, before a port is taken or a container started
         DbInstanceSettings resolvedSettings = withEffectiveWindows(settings, null)
                 .withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
+        DbInstanceSettings.validateMonitoringPair(
+                settings.monitoringInterval() != null ? settings.monitoringInterval() : 0,
+                settings.monitoringRoleArn());
         boolean mock = config.services().rds().mock();
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
@@ -1498,6 +1501,11 @@ public class RdsService implements Resettable, ResourceProvider {
         validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
+        DbInstanceSettings.validateMonitoringPair(
+                settings.monitoringInterval() != null
+                        ? settings.monitoringInterval() : instance.getMonitoringInterval(),
+                settings.monitoringRoleArn() != null
+                        ? settings.monitoringRoleArn() : instance.getMonitoringRoleArn());
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {

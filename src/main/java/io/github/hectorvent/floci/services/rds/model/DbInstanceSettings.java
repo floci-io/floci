@@ -98,6 +98,29 @@ public record DbInstanceSettings(Boolean storageEncrypted,
     }
 
     /**
+     * The two monitoring members are documented as a pair, in both directions and on both
+     * CreateDBInstance and ModifyDBInstance. An interval other than 0 needs a role, and a role
+     * needs an interval other than 0.
+     *
+     * <p>It takes the values that will be in effect rather than the ones the request carried, since
+     * a modify may raise the interval on an instance that already holds a role, or attach a role to
+     * an instance whose interval is already non-zero. Judging the request alone would refuse both.
+     */
+    public static void validateMonitoringPair(int effectiveInterval, String effectiveRoleArn) {
+        boolean roleGiven = effectiveRoleArn != null && !effectiveRoleArn.isBlank();
+        if (effectiveInterval != 0 && !roleGiven) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You must supply a MonitoringRoleArn value when MonitoringInterval is set to a "
+                            + "value other than 0.", 400);
+        }
+        if (roleGiven && effectiveInterval == 0) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You must set MonitoringInterval to a value other than 0 when MonitoringRoleArn "
+                            + "is specified.", 400);
+        }
+    }
+
+    /**
      * 7 days, 731 days, or month * 31 for a whole number of months from 1 to 23, which is what
      * the member documents. A period outside that set, 94 for instance, is an error on AWS.
      */
