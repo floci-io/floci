@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -11,8 +12,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -115,7 +114,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             }
 
             String accessKeyId = credParts[0];
-            String secretKey = resolveSecretKey(accessKeyId);
+            String secretKey = resolveSecretKey(accessKeyId, queryParams.getFirst("X-Amz-Security-Token"));
             if (secretKey == null) {
                 requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
                         "The AWS Access Key Id you provided does not exist in our records."));
@@ -200,11 +199,12 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             String stringToSign = "AWS4-HMAC-SHA256\n"
                     + amzDate + "\n"
                     + credentialScope + "\n"
-                    + sha256Hex(canonicalRequest);
+                    + SigV4RequestValidator.sha256Hex(canonicalRequest);
 
             // Derive signing key and compute expected signature
-            byte[] signingKey = deriveSigningKey(secretKey, date, region, service);
-            String expectedSignature = hexEncode(hmacSha256(signingKey, stringToSign));
+            byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, date, region, service);
+            String expectedSignature = SigV4RequestValidator.hexEncode(
+                    SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
 
             return MessageDigest.isEqual(
                     expectedSignature.getBytes(StandardCharsets.UTF_8),
@@ -217,11 +217,15 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     }
 
     private String resolveSecretKey(String accessKeyId) {
+        return resolveSecretKey(accessKeyId, null);
+    }
+
+    private String resolveSecretKey(String accessKeyId, String sessionToken) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return LEGACY_SECRET_KEY;
         }
         if (iamService != null) {
-            Optional<String> registered = iamService.findSecretKey(accessKeyId);
+            Optional<String> registered = iamService.findSecretKey(accessKeyId, sessionToken);
             if (registered.isPresent()) {
                 return registered.get();
             }
@@ -282,35 +286,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return encoded.toString();
     }
 
-    private static byte[] deriveSigningKey(String secretKey, String date, String region,
-                                           String service) throws Exception {
-        byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
-        byte[] kDate = hmacSha256(kSecret, date);
-        byte[] kRegion = hmacSha256(kDate, region);
-        byte[] kService = hmacSha256(kRegion, service);
-        return hmacSha256(kService, "aws4_request");
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String sha256Hex(String input) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private static String hexEncode(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
-    }
-
-    private Response errorResponse(int status, String code, String message) {
+    static Response errorResponse(int status, String code, String message) {
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")

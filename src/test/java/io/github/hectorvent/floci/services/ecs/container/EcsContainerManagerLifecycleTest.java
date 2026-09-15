@@ -118,6 +118,6 @@ class EcsContainerManagerLifecycleTest {
                 mock(ContainerBuilder.class), lifecycleManager, mock(ContainerLogStreamer.class),
                 mock(ContainerDetector.class), mock(EmulatorConfig.class), mock(RegionResolver.class),
                 mock(LaunchedContainerAwsEnv.class), mock(SsmService.class), mock(SecretsManagerService.class),
-                mock(EcrRegistryManager.class));
+                mock(EcrRegistryManager.class), mock(HostVolumePolicy.class));
     }
 }

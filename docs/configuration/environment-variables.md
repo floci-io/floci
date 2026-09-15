@@ -162,7 +162,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_SQS_ENABLED` | `true` | Enable the SQS service |
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT` | `30` | Default message visibility timeout in seconds |
-| `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MB) |
+| `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MiB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | Reset the deduplication cache when a FIFO queue is purged |
 
 ### SNS
@@ -270,6 +270,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_ENABLED` | `true` | Enable the CloudWatch Logs service |
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_EVENTS_PER_QUERY` | `10000` | Maximum log events returned by a single `FilterLogEvents` or `GetLogEvents` call, and the upper bound for a Logs Insights `limit` |
+| `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_STORED_EVENTS` | `20000` | Maximum log events retained per account across all groups; oldest events are evicted first |
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_QUERY_COMPLETION_DELAY_MS` | `0` | Artificial Logs Insights query delay. With `0` a query completes immediately; a positive value emulates the asynchronous `Running` → `Complete` lifecycle |
 
 ### CloudWatch Metrics
@@ -421,8 +422,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECR_ENABLED` | `true` | Enable the ECR service |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` | Docker image for the ECR registry sidecar |
 | `FLOCI_SERVICES_ECR_REGISTRY_CONTAINER_NAME` | `floci-ecr-registry` | Name of the ECR registry sidecar container |
-| `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First port in the ECR registry range |
-| `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last port in the ECR registry range |
+| `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First private loopback port for the backing registry |
+| `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last private loopback port for the backing registry |
 | `FLOCI_SERVICES_ECR_TLS_ENABLED` | `false` | Enable TLS for the ECR registry |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Keep the ECR registry container running when Floci stops |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | Repository URI style: `hostname` (`<account>.dkr.ecr.<region>.localhost`) or `path` |
@@ -451,6 +452,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default task memory when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default task CPU units when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | _(none)_ | Comma-separated allowlist of parent directories host volume `sourcePath`s must resolve under. By default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
+| `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing `HOST_VOLUME_ROOTS`; traversal, the bare root, and the Docker socket (or an ancestor directory of it, e.g. `/var/run`) are still always rejected |
 
 ### EC2
 
@@ -472,6 +475,35 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ATHENA_DUCK_URL` | _(none)_ | URL of an existing DuckDB service. When set, Floci skips managing the container |
 
 ---
+
+### Web Console (UI)
+
+Floci starts the web console as a sidecar container the first time `/_floci/ui` is opened.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_UI_ENABLED` | `true` | Enable the web console sidecar |
+| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
+| `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
+| `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
+| `FLOCI_SERVICES_UI_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave the sidecar running when Floci stops |
+| `FLOCI_SERVICES_UI_DOCKER_NETWORK` | _(none)_ | Docker network for the sidecar (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_UI_ENDPOINT` | _(derived)_ | Floci endpoint handed to the console, instead of deriving it from the Docker host and TLS settings |
+| `FLOCI_SERVICES_UI_EXTRA_ENV` | _(none)_ | Extra `KEY=VALUE` entries for the console, comma-separated (escape a literal comma as `\,`). Applied last, so an entry may override an injected default |
+| `FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY` | `false` | Have the console skip TLS verification on its connection to Floci |
+| `FLOCI_SERVICES_UI_INTERNAL_PORT` | _(discovered, else `4500`)_ | Port the console listens on inside its container |
+| `FLOCI_SERVICES_UI_ENDPOINT_ENV` | _(none)_ | An extra variable to repeat the Floci endpoint in, for a console reading neither `AWS_ENDPOINT_URL` nor `FLOCI_ENDPOINT` |
+| `FLOCI_SERVICES_UI_STATUS_PATH` | _(discovered, else `/api/health`)_ | Path the readiness probe requests on the console |
+| `FLOCI_SERVICES_UI_STATUS_READY_FIELD` | _(discovered, else `status`)_ | JSON field in that response reporting readiness. Set to `none` to make any `200` count as ready |
+| `FLOCI_SERVICES_UI_STATUS_READY_VALUE` | _(discovered, else `ok`)_ | Value of that field meaning the console reached Floci |
+| `FLOCI_SERVICES_UI_STATUS_UNAVAILABLE_VALUE` | _(discovered, else `unavailable`)_ | Value meaning the console is up but cannot reach Floci |
+
+The last six exist only for a console that neither follows the
+[console contract](../ui/console-contract.md) nor describes itself in its image labels. Leave them
+unset otherwise: setting one overrides both discovery paths.
+
+See [Web Console](../ui/index.md) for running the console and swapping in a third-party one, and
+[Console Contract v1](../ui/console-contract.md) for writing one.
 
 ## Services — Additional
 

@@ -179,6 +179,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | StopInstances | Stops running instances and updates their stored lifecycle state. |
 | RebootInstances | Reboots instances through the local EC2 service model. |
 | DescribeInstanceStatus | Returns status records for stored instances. |
+| DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. `Filter.N` supports the modeled `instance-id` and narrows whichever set the request selected. `MaxResults` accepts 5 through 1000 and cannot be combined with instance ids. `DryRun=true` returns `DryRunOperation`. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. |
 | ModifyInstanceAttribute | Updates supported mutable attributes for an instance. |
 | ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. |
@@ -193,9 +194,9 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
-| CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument`. |
+| CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
-| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `DnsOptions`, `IpAddressType` and `SubnetConfiguration.N` are accepted and ignored. |
+| ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
@@ -532,7 +533,7 @@ allocated address.
 
 | Action | Description |
 |--------|-------------|
-| DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service. |
+| DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service, including `burstablePerformanceSupported` for the T families. |
 | DescribeInstanceTypeOfferings | Returns instance type offerings for the requested location filters. |
 
 ### Launch Templates
@@ -557,8 +558,36 @@ These members of `RequestLaunchTemplateData` are stored and read back unchanged 
 `IamInstanceProfile`, `BlockDeviceMappings`, `NetworkInterfaces`, `TagSpecifications`,
 `MetadataOptions`, `Monitoring`, `Placement`, `CpuOptions`, `CreditSpecification`,
 `EnclaveOptions`, `HibernationOptions`, `MaintenanceOptions`, `PrivateDnsNameOptions`,
-`CapacityReservationSpecification`, `EbsOptimized`, `DisableApiTermination`, `DisableApiStop`,
+`CapacityReservationSpecification`, `InstanceMarketOptions`, `InstanceRequirements`,
+`EbsOptimized`, `DisableApiTermination`, `DisableApiStop`,
 `InstanceInitiatedShutdownBehavior`.
+
+`InstanceRequirements` carries every member of the service model's
+`InstanceRequirementsRequest`, including the nested `BaselinePerformanceFactors.Cpu.References`.
+Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read back with all
+three of its timeout members.
+
+Both blocks are validated by `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` before
+anything is stored. An `InstanceRequirements` block must carry `VCpuCount` and `MemoryMiB`, each
+with its `Min`, which the service model declares required; a request missing either fails with
+`MissingParameter`. A connection tracking timeout outside the range its member documents fails
+with `InvalidParameterValue`: `TcpEstablishedTimeout` runs from 60 to 432000 seconds,
+`UdpTimeout` from 30 to 60, and `UdpStreamTimeout` from 60 to 180.
+
+Three combinations the service model documents in prose rather than in its constraints are
+rejected with `InvalidParameterCombination`:
+
+- `InstanceRequirements` and `InstanceType` together. A launch template selects instance types by
+  attribute or by name, not by both.
+- `AllowedInstanceTypes` and `ExcludedInstanceTypes` together inside `InstanceRequirements`.
+- `SpotMaxPricePercentageOverLowestPrice` and `MaxSpotPriceAsPercentageOfOptimalOnDemandPrice`
+  together inside `InstanceRequirements`.
+
+`CreateLaunchTemplateVersion` applies these three to the merged version as well as to the request
+it received, because the merged data is what the version stores. A version that names only
+`InstanceType` against a source version carrying `InstanceRequirements` is therefore rejected: the
+merge inherits the requirements block and cannot express its removal. Omitting `SourceVersion`
+starts from empty data and is how a template moves between the two selection modes.
 
 Two behaviours worth calling out, because they are what Terraform reads back:
 
@@ -586,13 +615,12 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   the same field for the initial version it creates.
 
 Members the service model declares that are accepted and ignored rather than stored:
-`InstanceMarketOptions`, `InstanceRequirements`, `LicenseSpecifications`, `ElasticGpuSpecifications`,
-`ElasticInferenceAccelerators`, `NetworkPerformanceOptions`, `Operator`, `SecondaryInterfaces` and
-`SecurityGroups` (security groups by name — resolving names to IDs would need lookup machinery,
+`LicenseSpecifications`, `ElasticGpuSpecifications`, `ElasticInferenceAccelerators`,
+`NetworkPerformanceOptions`, `Operator`, `SecondaryInterfaces` and
+`SecurityGroups` (security groups by name, where resolving names to IDs would need lookup machinery,
 including ambiguity handling across VPCs, that no other EC2 action here has either; `RunInstances`
 itself only accepts `SecurityGroupId`). Within `NetworkInterfaces`, the IPv4/IPv6 address and
-prefix lists, `EnaSrdSpecification`, `ConnectionTrackingSpecification`, `PrimaryIpv6` and
-`EnaQueueCount` are likewise ignored.
+prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likewise ignored.
 
 ### IAM Instance Profiles
 
@@ -636,6 +664,20 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 These are account-level settings scoped per region, not per volume, and nothing here encrypts anything — no volume's stored bytes change. LZA's SecurityStack drives them through its `Custom::EnableEbsEncryptionByDefault` Lambda, which calls enable plus `ModifyEbsDefaultKmsKeyId` on create and disable on delete, then reads the state back with the two `Get` calls.
 
 An account that has never set a key reports `alias/aws/ebs`, the AWS-managed EBS key every account starts with, rather than an empty value — the module runner fails hard on a missing `KmsKeyId`, so the fallback is what keeps it running. `ResetEbsDefaultKmsKeyId` returns to that same alias. `ModifyEbsDefaultKmsKeyId` requires `KmsKeyId` and rejects a blank one with `MissingParameter`; the key is stored as given and is not checked against KMS.
+
+### Snapshot Block Public Access
+
+| Action | Description |
+|--------|-------------|
+| EnableSnapshotBlockPublicAccess | Sets the region's snapshot sharing block to `block-all-sharing` or `block-new-sharing`. |
+| DisableSnapshotBlockPublicAccess | Returns the region to `unblocked`. |
+| GetSnapshotBlockPublicAccessState | Reads the region's current state. |
+
+This is an account-level setting scoped per region, not a resource, so there is no id and nothing to tag. A region that was never configured reads back `unblocked`. `EnableSnapshotBlockPublicAccess` accepts only `block-all-sharing` and `block-new-sharing`, and rejects `unblocked` with `InvalidParameterValue` the way AWS does: disabling goes through `DisableSnapshotBlockPublicAccess`, which returns the resulting `unblocked` rather than the prior state. A missing `State` is rejected with `MissingParameter`.
+
+Only `GetSnapshotBlockPublicAccessState` returns `managedBy`, and it always reports `account` because Floci has no declarative-policy layer that could take the setting over. Nothing here changes snapshot permissions: no snapshot's `createVolumePermission` is rewritten when the block goes on or off.
+
+All three actions honor `DryRun`. A request that would otherwise succeed returns `DryRunOperation` with HTTP 412 and leaves the stored state untouched. `EnableSnapshotBlockPublicAccess` validates `State` first, so an invalid or missing `State` is still rejected on its own error even when `DryRun=true` is set.
 
 ### IPAM
 

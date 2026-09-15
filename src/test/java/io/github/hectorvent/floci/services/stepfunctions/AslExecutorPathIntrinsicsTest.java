@@ -123,6 +123,74 @@ class AslExecutorPathIntrinsicsTest {
     }
 
     @Test
+    void filterNegationTreatsExplicitNullAndMissingPropertiesAsFalsy() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"session":null},
+                  {"id":2,"session":{"token":"active"}},
+                  {"id":3}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"id\":1,\"session\":null},{\"id\":3}]"),
+                executor.resolvePath("$.items[?(!@.session)]", root));
+    }
+
+    @Test
+    void filterNegationWorksInsideCompoundPredicates() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"student_programme":"A","archived_at":null},
+                  {"id":2,"student_programme":"B"},
+                  {"id":3,"student_programme":"C","archived_at":"2026-09-01"},
+                  {"id":4,"archived_at":null}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("""
+                        [{"id":1,"student_programme":"A","archived_at":null},
+                          {"id":2,"student_programme":"B"}]
+                        """),
+                executor.resolvePath("$.items[?(@.student_programme && !@.archived_at)]", root));
+    }
+
+    @Test
+    void filterNegationSupportsBracketQuotedMembers() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"archived-at":null},
+                  {"id":2,"archived-at":"2026-09-01"},
+                  {"id":3}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"id\":1,\"archived-at\":null},{\"id\":3}]"),
+                executor.resolvePath("$.items[?(!@['archived-at'])]", root));
+    }
+
+    @Test
+    void filterNegationCompatibilityDoesNotRewriteComparisonsOrStringLiterals() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"session":null,"label":"!@.session"},
+                  {"id":2,"session":"active","label":"other"},
+                  {"id":3,"label":"!@.session"}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("""
+                        [{"id":2,"session":"active","label":"other"},
+                          {"id":3,"label":"!@.session"}]
+                        """),
+                executor.resolvePath("$.items[?(@.session != null)]", root));
+        assertEquals(mapper.readTree("""
+                        [{"id":1,"session":null,"label":"!@.session"},
+                          {"id":3,"label":"!@.session"}]
+                        """),
+                executor.resolvePath("$.items[?(@.label == '!@.session')]", root));
+    }
+
+    @Test
     void recursiveDescentPreservesAndFlattensNestedArrayMatches() throws Exception {
         JsonNode root = mapper.readTree("{\"d\":{\"x\":{\"a\":[1,2]}}}");
 

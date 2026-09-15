@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.route53.model.AliasTarget;
 import io.github.hectorvent.floci.services.route53.model.ChangeInfo;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
 import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
@@ -25,6 +26,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -385,17 +387,10 @@ public class Route53Service {
         List<ResourceRecordSet> current = new ArrayList<>(
                 recordStore.get(zoneId).orElse(new ArrayList<>()));
 
-        // Validate all changes before applying any
         for (Map<String, Object> change : changes) {
             String action = (String) change.get("action");
             ResourceRecordSet rrs = (ResourceRecordSet) change.get("rrs");
             validateChange(action, rrs, current, zone.getName());
-        }
-
-        // Apply all changes
-        for (Map<String, Object> change : changes) {
-            String action = (String) change.get("action");
-            ResourceRecordSet rrs = (ResourceRecordSet) change.get("rrs");
             applyChange(action, rrs, current);
         }
 
@@ -774,12 +769,16 @@ public class Route53Service {
             }
         }
         if ("DELETE".equals(action)) {
-            boolean found = current.stream().anyMatch(r ->
-                    r.getName().equals(rrs.getName()) && r.getType().equals(rrs.getType()));
-            if (!found) {
+            ResourceRecordSet existing = findByNameTypeAndSetIdentifier(current, rrs);
+            if (existing == null) {
                 throw new AwsException("InvalidChangeBatch",
-                        "Tried to delete resource record set [name='" + rrs.getName() +
-                        "', type='" + rrs.getType() + "'] but it was not found.", 400);
+                        "Tried to delete resource record set " + deleteTargetDescription(rrs)
+                                + " but it was not found", 400);
+            }
+            if (!recordSetsMatch(existing, rrs)) {
+                throw new AwsException("InvalidChangeBatch",
+                        "Tried to delete resource record set " + deleteTargetDescription(rrs)
+                                + " but the values provided do not match the current values", 400);
             }
         }
     }
@@ -787,9 +786,7 @@ public class Route53Service {
     private void applyChange(String action, ResourceRecordSet rrs, List<ResourceRecordSet> current) {
         switch (action) {
             case "CREATE" -> current.add(rrs);
-            case "DELETE" -> current.removeIf(r ->
-                    r.getName().equals(rrs.getName()) && r.getType().equals(rrs.getType()) &&
-                    equalOrNull(r.getSetIdentifier(), rrs.getSetIdentifier()));
+            case "DELETE" -> current.removeIf(r -> recordSetsMatch(r, rrs));
             case "UPSERT" -> {
                 current.removeIf(r ->
                         r.getName().equals(rrs.getName()) && r.getType().equals(rrs.getType()) &&
@@ -803,5 +800,51 @@ public class Route53Service {
         if (a == null && b == null) return true;
         if (a == null || b == null) return false;
         return a.equals(b);
+    }
+
+    private static ResourceRecordSet findByNameTypeAndSetIdentifier(List<ResourceRecordSet> current,
+                                                                     ResourceRecordSet rrs) {
+        return current.stream()
+                .filter(r -> r.getName().equals(rrs.getName())
+                        && r.getType().equals(rrs.getType())
+                        && Objects.equals(r.getSetIdentifier(), rrs.getSetIdentifier()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static String deleteTargetDescription(ResourceRecordSet rrs) {
+        String description = "[name='" + rrs.getName() + "', type='" + rrs.getType() + "'";
+        if (rrs.getSetIdentifier() != null) {
+            description += ", set-identifier='" + rrs.getSetIdentifier() + "'";
+        }
+        return description + "]";
+    }
+
+    private static boolean recordSetsMatch(ResourceRecordSet a, ResourceRecordSet b) {
+        return a.getName().equals(b.getName())
+                && a.getType().equals(b.getType())
+                && Objects.equals(a.getSetIdentifier(), b.getSetIdentifier())
+                && Objects.equals(a.getTtl(), b.getTtl())
+                && Objects.equals(a.getWeight(), b.getWeight())
+                && Objects.equals(a.getRegion(), b.getRegion())
+                && Objects.equals(a.getFailover(), b.getFailover())
+                && Objects.equals(a.getHealthCheckId(), b.getHealthCheckId())
+                && aliasTargetsMatch(a.getAliasTarget(), b.getAliasTarget())
+                && recordValuesMatch(a.getRecords(), b.getRecords());
+    }
+
+    private static boolean aliasTargetsMatch(AliasTarget a, AliasTarget b) {
+        if (a == null || b == null) {
+            return a == b;
+        }
+        return Objects.equals(a.getHostedZoneId(), b.getHostedZoneId())
+                && Objects.equals(a.getDnsName(), b.getDnsName())
+                && a.isEvaluateTargetHealth() == b.isEvaluateTargetHealth();
+    }
+
+    private static boolean recordValuesMatch(List<ResourceRecord> a, List<ResourceRecord> b) {
+        List<String> av = a == null ? List.of() : a.stream().map(ResourceRecord::getValue).sorted().toList();
+        List<String> bv = b == null ? List.of() : b.stream().map(ResourceRecord::getValue).sorted().toList();
+        return av.equals(bv);
     }
 }

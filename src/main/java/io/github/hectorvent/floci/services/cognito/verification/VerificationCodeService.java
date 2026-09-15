@@ -86,9 +86,15 @@ public final class VerificationCodeService {
     }
 
     /**
-     * Validate a code. On success, marks it consumed and removes it. On any
-     * failure, throws {@link VerificationCodeException} with the specific
-     * {@link VerificationCodeException.Kind}.
+     * Validate a code. On success, marks it consumed. For the attribute-verification
+     * purposes, retains the tombstone until it expires or a new code replaces it, so a
+     * reused code answers {@code EXPIRED} rather than {@code NOT_FOUND}, validated against
+     * a real Cognito pool for {@code VerifyUserAttribute} (see CognitoServiceTest /
+     * CognitoAttributeVerificationIntegrationTest). {@link VerificationCode.Purpose#SIGNUP_CONFIRMATION}
+     * and {@link VerificationCode.Purpose#PASSWORD_RESET} keep the original delete-on-consume
+     * behavior instead, since that reuse case was never validated against real Cognito for
+     * {@code ConfirmSignUp} or {@code ConfirmForgotPassword}. On any failure, throws
+     * {@link VerificationCodeException} with the specific {@link VerificationCodeException.Kind}.
      *
      * <p>Note: not thread-safe under concurrent {@code consume()} of the same
      * (poolId, username, purpose) key — two racing wrong-code calls may
@@ -101,13 +107,13 @@ public final class VerificationCodeService {
         VerificationCode vc = store.get(key).orElseThrow(() -> new VerificationCodeException(
             VerificationCodeException.Kind.NOT_FOUND,
             "Invalid verification code provided, please try again"));
-        if (vc.isConsumed()) {
-            throw new VerificationCodeException(
-                VerificationCodeException.Kind.NOT_FOUND,
-                "Invalid verification code provided, please try again");
-        }
         if (vc.isExpired(clock.instant())) {
             store.delete(key);
+            throw new VerificationCodeException(
+                VerificationCodeException.Kind.EXPIRED,
+                "Invalid code provided, please request a code again");
+        }
+        if (vc.isConsumed()) {
             throw new VerificationCodeException(
                 VerificationCodeException.Kind.EXPIRED,
                 "Invalid code provided, please request a code again");
@@ -136,13 +142,37 @@ public final class VerificationCodeService {
         }
 
         vc.markConsumed();
-        store.delete(key);
+        if (retainsConsumedTombstone(purpose)) {
+            store.put(key, vc);
+        } else {
+            store.delete(key);
+        }
+    }
+
+    private boolean retainsConsumedTombstone(VerificationCode.Purpose purpose) {
+        return purpose == VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION
+            || purpose == VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION;
     }
 
     /** Remove any active code for the (pool, user, purpose). Idempotent. */
     public void invalidatePrevious(String userPoolId, String username,
                                    VerificationCode.Purpose purpose) {
         store.delete(VerificationCode.storageKey(userPoolId, username, purpose));
+    }
+
+    /**
+     * Removes every code issued for a pool, for DeleteUserPool. Pool ids are caller-chosen via
+     * floci:override-id and may contain a colon, so the key prefix alone also matches a distinct
+     * pool whose id extends this one. The stored record's own userPoolId settles the boundary.
+     * Keys are collected before deleting so the backing key set is not modified while iterated.
+     */
+    public void invalidateForPool(String userPoolId) {
+        String prefix = userPoolId + ":";
+        store.keys().stream()
+            .filter(k -> k.startsWith(prefix))
+            .filter(k -> store.get(k).map(c -> userPoolId.equals(c.getUserPoolId())).orElse(false))
+            .toList()
+            .forEach(store::delete);
     }
 
     private byte[] randomBytes(int n) {

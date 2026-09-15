@@ -56,10 +56,16 @@ final class S3RequestAuthorizationParser {
     }
 
     static S3Service.RequestAuthorization parse(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        return parse(httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters());
+        return parse(httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters(),
+                httpHeaders.getHeaderString("X-Amz-Security-Token"));
     }
 
     static S3Service.RequestAuthorization parse(String authorization, MultivaluedMap<String, String> queryParameters) {
+        return parse(authorization, queryParameters, null);
+    }
+
+    private static S3Service.RequestAuthorization parse(
+            String authorization, MultivaluedMap<String, String> queryParameters, String headerSessionToken) {
         if (authorization != null && !authorization.isBlank()) {
             String accessKeyId = extractAuthorizationHeaderAccessKeyId(authorization);
             if (accessKeyId == null) {
@@ -67,7 +73,10 @@ final class S3RequestAuthorizationParser {
                 String message = "The authorization header is malformed; the credential scope is invalid.";
                 throw new AwsException("AuthorizationHeaderMalformed", message, 400);
             }
-            return new S3Service.RequestAuthorization(true, accessKeyId);
+            String sessionToken = !isBlank(headerSessionToken)
+                    ? headerSessionToken
+                    : queryParameters.getFirst("X-Amz-Security-Token");
+            return new S3Service.RequestAuthorization(true, accessKeyId, sessionToken);
         }
 
         if (queryParameters.containsKey("X-Amz-Algorithm")) {
@@ -77,7 +86,8 @@ final class S3RequestAuthorizationParser {
                         AUTHORIZATION_QUERY_PARAMETERS_ERROR_MESSAGE,
                         AUTHORIZATION_QUERY_PARAMETERS_ERROR_STATUS);
             }
-            return new S3Service.RequestAuthorization(true, accessKeyId);
+            return new S3Service.RequestAuthorization(
+                    true, accessKeyId, queryParameters.getFirst("X-Amz-Security-Token"));
         }
 
         return S3Service.RequestAuthorization.unsigned();

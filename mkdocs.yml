@@ -154,6 +154,7 @@ nav:
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
+    - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
     - Managed Prometheus (AMP): services/managed-prometheus.md
     - GuardDuty: services/guardduty.md
@@ -209,7 +210,11 @@ nav:
     - Pricing: services/pricing.md
     - Cost Explorer: services/ce.md
     - Cost and Usage Reports: services/cur.md
+    - BCM Pricing Calculator: services/bcm-pricing-calculator.md
     - BCM Data Exports: services/bcm-data-exports.md
+  - Web Console:
+    - Overview: ui/index.md
+    - Console Contract v1: ui/console-contract.md
   - Testcontainers:
     - Overview: testcontainers/index.md
     - Java: testcontainers/java.md

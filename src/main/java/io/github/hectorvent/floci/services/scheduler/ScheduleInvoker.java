@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
@@ -20,6 +21,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -180,11 +182,45 @@ public class ScheduleInvoker {
                 String body = text(params, "MessageBody");
                 String messageGroupId = text(params, "MessageGroupId");
                 String messageDeduplicationId = text(params, "MessageDeduplicationId");
-                sqsService.sendMessage(queueUrl, body, 0, messageGroupId, messageDeduplicationId, region);
+                Map<String, MessageAttributeValue> messageAttributes =
+                        parseUniversalSqsMessageAttributes(params.path("MessageAttributes"));
+                sqsService.sendMessage(queueUrl, body, 0, messageGroupId, messageDeduplicationId,
+                        messageAttributes, region);
                 LOG.debugv("Scheduler delivered to SQS (universal target): {0}", queueUrl);
             }
             default -> LOG.warnv("Scheduler: unsupported universal target action: {0}", serviceAction);
         }
+    }
+
+    private static Map<String, MessageAttributeValue> parseUniversalSqsMessageAttributes(JsonNode attrsNode) {
+        Map<String, MessageAttributeValue> attributes = new HashMap<>();
+        if (attrsNode == null || !attrsNode.isObject()) {
+            return attributes;
+        }
+        attrsNode.fields().forEachRemaining(entry -> {
+            JsonNode valueNode = entry.getValue();
+            String dataType = valueNode.path("DataType").asText(null);
+            String stringValue = valueNode.path("StringValue").asText(null);
+            String binaryValueBase64 = valueNode.path("BinaryValue").asText(null);
+            if (dataType == null) {
+                return;
+            }
+            if (binaryValueBase64 != null) {
+                byte[] binaryValue;
+                try {
+                    binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                } catch (IllegalArgumentException e) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Invalid binary value for message attribute '" + entry.getKey()
+                                    + "': not valid base64.", 400);
+                }
+                attributes.put(entry.getKey(), new MessageAttributeValue(binaryValue, dataType));
+            } else if (stringValue != null) {
+                attributes.put(entry.getKey(), new MessageAttributeValue(
+                        stringValue, dataType));
+            }
+        });
+        return attributes;
     }
 
     private static String text(JsonNode node, String field) {

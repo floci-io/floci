@@ -8,6 +8,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.sql.DriverManager;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.util.UUID;
 
@@ -57,6 +59,29 @@ class RedshiftDataServiceTest {
 
     private ObjectNode idOf(String id) {
         return om.createObjectNode().put("Id", id);
+    }
+
+    /**
+     * Messages checked against a real Redshift cluster on 2026-09-13.
+     */
+    @Test
+    void rejectsResultTypesRedshiftLacksWithTheRedshiftMessage() throws Exception {
+        ResultSetMetaData meta = mock(ResultSetMetaData.class);
+        when(meta.getColumnCount()).thenReturn(2);
+        when(meta.getColumnTypeName(1)).thenReturn("int4");
+
+        when(meta.getColumnTypeName(2)).thenReturn("line");
+        SQLException lineError = assertThrows(SQLException.class,
+                () -> RedshiftDataService.rejectResultTypesRedshiftLacks(meta));
+        assertEquals("ERROR: type \"line\" not yet implemented", lineError.getMessage());
+
+        when(meta.getColumnTypeName(2)).thenReturn("jsonb");
+        SQLException jsonbError = assertThrows(SQLException.class,
+                () -> RedshiftDataService.rejectResultTypesRedshiftLacks(meta));
+        assertEquals("ERROR: type \"jsonb\" does not exist", jsonbError.getMessage());
+
+        when(meta.getColumnTypeName(2)).thenReturn("point");
+        RedshiftDataService.rejectResultTypesRedshiftLacks(meta);
     }
 
     @Test

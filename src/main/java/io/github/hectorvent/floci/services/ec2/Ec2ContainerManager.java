@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -16,6 +17,7 @@ import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Container;
@@ -39,6 +41,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -169,6 +172,7 @@ public class Ec2ContainerManager {
     private final RegionResolver regionResolver;
     private final ContainerNetworkReachability containerNetworkReachability;
     private final VpcNetworkManager vpcNetworkManager;
+    private final ContainerReachableEndpoint reachableEndpoint;
     private SecurityGroupFirewallManager firewallManager;
     private final ExecutorService executor;
     private final Duration userDataExecutionTimeout;
@@ -236,10 +240,11 @@ public class Ec2ContainerManager {
                                RegionResolver regionResolver,
                                ContainerNetworkReachability containerNetworkReachability,
                                VpcNetworkManager vpcNetworkManager,
+                               ContainerReachableEndpoint reachableEndpoint,
                                SecurityGroupFirewallManager firewallManager) {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver,
                 dockerClient, portAllocator, config, metadataServer, portForwardManager, regionResolver,
-                containerNetworkReachability, vpcNetworkManager);
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint);
         this.firewallManager = firewallManager;
     }
 
@@ -255,10 +260,11 @@ public class Ec2ContainerManager {
                                Ec2PortForwardManager portForwardManager,
                                RegionResolver regionResolver,
                                ContainerNetworkReachability containerNetworkReachability,
-                               VpcNetworkManager vpcNetworkManager) {
+                               VpcNetworkManager vpcNetworkManager,
+                               ContainerReachableEndpoint reachableEndpoint) {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
                 portAllocator, config, metadataServer, portForwardManager, regionResolver,
-                containerNetworkReachability, vpcNetworkManager, createLaunchExecutor(),
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, createLaunchExecutor(),
                 Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
     }
 
@@ -275,6 +281,7 @@ public class Ec2ContainerManager {
                         RegionResolver regionResolver,
                         ContainerNetworkReachability containerNetworkReachability,
                         VpcNetworkManager vpcNetworkManager,
+                        ContainerReachableEndpoint reachableEndpoint,
                         ExecutorService executor,
                         Duration userDataExecutionTimeout) {
         this.containerBuilder = containerBuilder;
@@ -290,6 +297,7 @@ public class Ec2ContainerManager {
         this.portForwardManager = portForwardManager;
         this.containerNetworkReachability = containerNetworkReachability;
         this.vpcNetworkManager = vpcNetworkManager;
+        this.reachableEndpoint = reachableEndpoint;
         this.executor = executor;
         this.userDataExecutionTimeout = userDataExecutionTimeout;
     }
@@ -451,6 +459,8 @@ public class Ec2ContainerManager {
                     return;
                 }
 
+                refreshMetadataAddresses(instance, containerId);
+
                 if (!markRunning(instance)) {
                     failLaunch(instance, leasedPrivateIp);
                     return;
@@ -522,7 +532,7 @@ public class Ec2ContainerManager {
         String instanceId = instance.getInstanceId();
         String containerName = ContainerStorageHelper.resourceName(config, "ec2", null, instanceId);
         String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
-        String serviceEndpoint = "http://" + flociHost + ":4566";
+        String serviceEndpoint = reachableEndpoint.baseUrl();
 
         while (true) {
             if (isLaunchCancelled(instance)) {
@@ -703,6 +713,7 @@ public class Ec2ContainerManager {
         if (sshHostPort > 0) {
             portAllocator.release(sshHostPort);
         }
+        metadataServer.unregisterInstance(instance);
         if (containerIp != null && !containerIp.isBlank()) {
             try {
                 metadataServer.unregisterContainer(containerIp, instance);
@@ -907,6 +918,7 @@ public class Ec2ContainerManager {
                     }
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                     refreshImdsSourceRegistration(instance, containerId, containerIp);
+                    refreshMetadataAddresses(instance, containerId);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -981,6 +993,28 @@ public class Ec2ContainerManager {
         return removed;
     }
 
+    private void refreshMetadataAddresses(Instance instance, String containerId) {
+        try {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
+                return;
+            }
+            Set<String> addresses = new HashSet<>();
+            for (ContainerNetwork network : inspect.getNetworkSettings().getNetworks().values()) {
+                if (network != null && network.getIpAddress() != null && !network.getIpAddress().isBlank()) {
+                    addresses.add(network.getIpAddress());
+                }
+            }
+            // An incomplete Docker response must not discard the last known registrations.
+            if (!addresses.isEmpty()) {
+                metadataServer.reconcileContainerAddresses(addresses, instance);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not refresh IMDS addresses for EC2 instance {0}, keeping existing registrations: {1}",
+                    instance.getInstanceId(), e.getMessage());
+        }
+    }
+
     boolean restoreMetadataRegistration(Instance instance) {
         if (instance == null || instance.getDockerContainerId() == null) {
             return false;
@@ -1011,6 +1045,7 @@ public class Ec2ContainerManager {
         }
         metadataServer.registerContainer(containerIp, instance.getInstanceId(), instance);
         refreshImdsSourceRegistration(instance, containerId, containerIp);
+        refreshMetadataAddresses(instance, containerId);
         return true;
     }
 
@@ -1199,6 +1234,7 @@ public class Ec2ContainerManager {
             }
             metadataServer.unregisterContainer(containerIp, instance);
             metadataServer.unregisterContainer(imdsSourceIp, instance);
+            metadataServer.unregisterInstance(instance);
             // Give the address back only now that the container is gone: releasing it while
             // Docker still holds the endpoint would hand the same IP to the next launch and
             // have Docker refuse it.
@@ -1731,7 +1767,12 @@ public class Ec2ContainerManager {
                 "  apt-get update -qq >/dev/null",
                 "  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 socat curl ca-certificates >/dev/null",
                 "elif command -v dnf >/dev/null 2>&1; then",
-                "  dnf install -y iproute socat curl ca-certificates >/dev/null",
+                // --allowerasing lets dnf swap the curl-minimal that
+                // public.ecr.aws/amazonlinux/amazonlinux:2023 ships by default for the full
+                // curl package this proxy needs. Without it, dnf aborts the whole transaction
+                // on a curl/curl-minimal conflict and iproute+socat never install either, even
+                // though neither of them conflicts with anything.
+                "  dnf install -y --allowerasing iproute socat curl ca-certificates >/dev/null",
                 // Same gap as the sshd probe: Amazon Linux 2 has only yum, so on an instance
                 // launched from ami-amazonlinux2 this chain reached its else branch and exited 1
                 // with "No supported package manager found for IMDS proxy dependencies" --

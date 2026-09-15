@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
 
@@ -9,6 +11,10 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 /**
  * SCP semantics in policy evaluation: service control policies gate the decision before
@@ -41,6 +47,138 @@ class IamPolicyEvaluatorTest {
         CallerContext caller = CallerContext.of(List.of(ALLOW_ALL));
         assertEquals(Decision.ALLOW,
                 evaluator.evaluate(caller, null, "s3:GetObject", "*", null));
+    }
+
+    @Test
+    void resolvedResourceAllowCompletesIdentityImplicitDeny() {
+        CallerContext caller = CallerContext.of(List.of());
+
+        assertEquals(Decision.ALLOW, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void identityExplicitDenyOverridesResolvedResourceAllow() {
+        CallerContext caller = CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny","Action":"s3:GetObject","Resource":"*"}
+                ]}"""));
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void resolvedResourceExplicitDenyOverridesIdentityAllow() {
+        CallerContext caller = CallerContext.of(List.of(ALLOW_ALL));
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.EXPLICIT_DENY,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void crossAccountIdentityAllowRequiresResourceAllow() {
+        CallerContext caller = CallerContext.of(List.of(ALLOW_ALL));
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.NEUTRAL,
+                ResourceAccountRelationship.CROSS_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void crossAccountResourceAllowRequiresIdentityAllow() {
+        CallerContext caller = CallerContext.of(List.of());
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW,
+                ResourceAccountRelationship.CROSS_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void crossAccountAccessAllowsWhenIdentityAndResourcePoliciesAllow() {
+        CallerContext caller = CallerContext.of(List.of(ALLOW_ALL));
+
+        assertEquals(Decision.ALLOW, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW,
+                ResourceAccountRelationship.CROSS_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void sameAccountDirectUserGrantBypassesBoundaryImplicitDeny() {
+        CallerContext caller = new CallerContext(
+                List.of(),
+                null,
+                """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:*","Resource":"*"}
+                ]}""");
+
+        assertEquals(Decision.ALLOW, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                ResourceAccountRelationship.SAME_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void sameAccountWildcardGrantRemainsLimitedByBoundary() {
+        CallerContext caller = new CallerContext(
+                List.of(),
+                null,
+                """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:*","Resource":"*"}
+                ]}""");
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW,
+                ResourceAccountRelationship.SAME_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
+    }
+
+    @Test
+    void sameAccountDirectUserGrantDoesNotBypassBoundaryExplicitDeny() {
+        CallerContext caller = new CallerContext(
+                List.of(),
+                null,
+                DENY_S3);
+
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
+                caller,
+                ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                ResourceAccountRelationship.SAME_ACCOUNT,
+                "s3:GetObject",
+                "arn:aws:s3:::bucket/key",
+                null));
     }
 
     @Test
@@ -281,5 +419,97 @@ class IamPolicyEvaluatorTest {
                 List.of(policy), "dynamodb:GetItem", "*",
                 Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
     }
-}
 
+    @Test
+    void sameDocumentIsParsedOnce() throws Exception {
+        ObjectMapper mapper = spy(new ObjectMapper());
+        IamPolicyEvaluator cachingEvaluator = new IamPolicyEvaluator(mapper);
+        CallerContext caller = CallerContext.of(List.of(ALLOW_S3_ONLY));
+
+        assertEquals(Decision.ALLOW, cachingEvaluator.evaluate(caller, null, "s3:GetObject", "*", null));
+        assertEquals(Decision.DENY, cachingEvaluator.evaluate(caller, null, "sqs:SendMessage", "*", null));
+
+        verify(mapper, times(1)).readTree(anyString());
+    }
+
+    @Test
+    void malformedDocumentIsParsedOnceAndStillDeniesScpLevel() throws Exception {
+        ObjectMapper mapper = spy(new ObjectMapper());
+        IamPolicyEvaluator cachingEvaluator = new IamPolicyEvaluator(mapper);
+        CallerContext caller = adminWithScps(List.of(List.of(MALFORMED, ALLOW_ALL)));
+
+        assertEquals(Decision.DENY, cachingEvaluator.evaluate(caller, null, "s3:GetObject", "*", null));
+        assertEquals(Decision.DENY, cachingEvaluator.evaluate(caller, null, "s3:GetObject", "*", null));
+
+        verify(mapper, times(1)).readTree(MALFORMED);
+        verify(mapper, times(1)).readTree(ALLOW_ALL);
+    }
+
+    @Test
+    void cacheIsClearedWhenBoundIsExceeded() throws Exception {
+        ObjectMapper mapper = spy(new ObjectMapper());
+        IamPolicyEvaluator cachingEvaluator = new IamPolicyEvaluator(mapper);
+        String first = sidDocument(0);
+        cachingEvaluator.evaluate(CallerContext.of(List.of(first)), null, "s3:GetObject", "*", null);
+        for (int i = 1; i <= IamPolicyEvaluator.MAX_CACHED_DOCUMENTS; i++) {
+            cachingEvaluator.evaluate(CallerContext.of(List.of(sidDocument(i))), null, "s3:GetObject", "*", null);
+        }
+
+        cachingEvaluator.evaluate(CallerContext.of(List.of(first)), null, "s3:GetObject", "*", null);
+
+        verify(mapper, times(2)).readTree(first);
+    }
+
+    @Test
+    void actionMatchingIsCaseInsensitive() {
+        String mixedCase = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"S3:GetObject\",\"Resource\":\"arn:aws:s3:::bucket/*\"},"
+                + "{\"Effect\":\"Deny\",\"NotAction\":\"s3:*\",\"Resource\":\"*\"}]}";
+        CallerContext caller = CallerContext.of(List.of(mixedCase));
+
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "s3:getobject", "arn:aws:s3:::bucket/key", null));
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "S3:GETOBJECT", "arn:aws:s3:::bucket/key", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "SQS:SendMessage", "arn:aws:sqs:us-east-1:000000000000:q", null));
+    }
+
+    @Test
+    void resourceMatchingIsCaseSensitive() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"iam:GetUser\","
+                + "\"Resource\":\"arn:aws:iam::000000000000:user/Bob\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"arn:aws:s3:::bucket/Private/*\"}]}";
+        CallerContext caller = CallerContext.of(List.of(policy));
+
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "iam:GetUser", "arn:aws:iam::000000000000:user/Bob", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "iam:GetUser", "arn:aws:iam::000000000000:user/bob", null));
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/Private/report.csv", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/private/report.csv", null));
+    }
+
+    @Test
+    void notResourceMatchingIsCaseSensitive() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Deny\",\"Action\":\"s3:*\","
+                + "\"NotResource\":\"arn:aws:s3:::bucket/Public/*\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}";
+        CallerContext caller = CallerContext.of(List.of(policy));
+
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/Public/index.html", null));
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/public/index.html", null));
+    }
+
+    private static String sidDocument(int sid) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"S" + sid + "\",\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:*\",\"Resource\":\"*\"}]}";
+    }
+}

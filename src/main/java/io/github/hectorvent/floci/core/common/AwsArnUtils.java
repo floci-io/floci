@@ -130,6 +130,36 @@ public final class AwsArnUtils {
     }
 
     /**
+     * True when the ARN names a partition other than {@code aws}, the only one Floci emulates.
+     * An empty partition field is not foreign: callers that omit it are naming a local
+     * resource.
+     *
+     * <p>Deliberately a literal {@code aws} rather than {@link #PARTITION_REGEX}. That constant
+     * exists to recognise a legal ARN in any partition; this asks the opposite question, whether
+     * the ARN names a partition this emulator can serve, and the answer is only ever the
+     * commercial one.
+     */
+    public static boolean isForeignPartition(Arn arn) {
+        if (arn == null) {
+            return false;
+        }
+        String partition = arn.partition();
+        return partition != null && !partition.isEmpty() && !"aws".equals(partition);
+    }
+
+    /**
+     * True when the ARN names an account other than {@code localAccountId}. An empty account
+     * field is not foreign: several AWS ARN forms omit it for a resource the caller owns.
+     */
+    public static boolean isForeignAccount(Arn arn, String localAccountId) {
+        if (arn == null) {
+            return false;
+        }
+        String account = arn.accountId();
+        return account != null && !account.isEmpty() && !account.equals(localAccountId);
+    }
+
+    /**
      * Converts an SQS ARN to a queue URL using the given base URL.
      * Example: arn:aws:sqs:us-east-1:000000000000:my-queue → http://localhost:4566/000000000000/my-queue
      */

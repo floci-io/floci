@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.sqs.model.Message;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 /**
@@ -53,10 +54,18 @@ class GuardedMessageQueue {
         }
     }
 
+    /** If persisting fails the in-memory add is rolled back and the exception propagates, so a
+     *  caller that compensates on the source side does not leave a duplicate here. */
     void addAll(List<Message> toAdd) {
         try (var _ = hold()) {
+            int mark = messages.size();
             messages.addAll(toAdd);
-            persist();
+            try {
+                persist();
+            } catch (RuntimeException e) {
+                messages.subList(mark, messages.size()).clear();
+                throw e;
+            }
         }
     }
 
@@ -194,17 +203,26 @@ class GuardedMessageQueue {
         }
     }
 
-    /** Remove and return the first message in insertion order, or null if empty.
-     *  Used by the message-move-task worker so the source queue stays observably
-     *  populated for the duration of a rate-limited move. */
-    Message drainOne() {
+    /** Remove and return the head message if {@code eligible} accepts it; otherwise leave the
+     *  queue untouched and return {@code null}. The check and the removal happen under one lock
+     *  hold so nothing can slip in between. Used by the message-move-task worker so the source
+     *  queue stays observably populated for the duration of a rate-limited move. */
+    Message drainFirstIf(Predicate<Message> eligible) {
         try (var _ = hold()) {
-            if (messages.isEmpty()) {
+            if (messages.isEmpty() || !eligible.test(messages.getFirst())) {
                 return null;
             }
-            Message head = messages.remove(0);
+            Message head = messages.removeFirst();
             persist();
             return head;
+        }
+    }
+
+    /** Put a message that could not be delivered back at the head, preserving queue order. */
+    void restoreFirst(Message message) {
+        try (var _ = hold()) {
+            messages.addFirst(message);
+            persist();
         }
     }
 

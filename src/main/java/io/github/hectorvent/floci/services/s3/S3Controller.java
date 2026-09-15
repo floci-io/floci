@@ -259,34 +259,45 @@ public class S3Controller {
                                   byte[] body) {
         try {
             validateRawUri();
+            S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                    s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (hasQueryParam(uriInfo, "notification")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketNotification", authorization);
                 return handlePutBucketNotification(bucket, body);
             }
             if (hasQueryParam(uriInfo, "versioning")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketVersioning", authorization);
                 return handlePutBucketVersioning(bucket, body);
             }
             if (hasQueryParam(uriInfo, "tagging")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketTagging", authorization);
                 return handlePutBucketTagging(bucket, body);
             }
             if (hasQueryParam(uriInfo, "object-lock")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketObjectLockConfiguration", authorization);
                 return handlePutObjectLockConfiguration(bucket, body);
             }
             if (hasQueryParam(uriInfo, "website")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketWebsite", authorization);
                 return handlePutBucketWebsite(bucket, body);
             }
             if (hasQueryParam(uriInfo, "logging")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketLogging", authorization);
                 s3Service.putBucketLogging(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "policy")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketPolicy", authorization);
                 s3Service.putBucketPolicy(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "cors")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketCORS", authorization);
                 s3Service.putBucketCors(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "lifecycle")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutLifecycleConfiguration", authorization);
                 String requestedSize = httpHeaders.getHeaderString("x-amz-transition-default-minimum-object-size");
                 String storedSize = s3Service.putBucketLifecycle(bucket,
                         new String(body, StandardCharsets.UTF_8), requestedSize);
@@ -295,6 +306,7 @@ public class S3Controller {
                         .build();
             }
             if (hasQueryParam(uriInfo, "acl")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketAcl", authorization);
                 s3Service.putBucketAcl(bucket, new String(body, StandardCharsets.UTF_8),
                         httpHeaders.getHeaderString("x-amz-acl"),
                         httpHeaders.getHeaderString("x-amz-grant-read"),
@@ -305,57 +317,59 @@ public class S3Controller {
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "encryption")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutEncryptionConfiguration", authorization);
                 s3Service.putBucketEncryption(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "publicAccessBlock")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketPublicAccessBlock", authorization);
                 s3Service.putPublicAccessBlock(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "ownershipControls")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketOwnershipControls", authorization);
                 s3Service.putBucketOwnershipControls(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "requestPayment")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketRequestPayment", authorization);
                 s3Service.putBucketRequestPayment(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "accelerate")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutAccelerateConfiguration", authorization);
                 s3Service.putBucketAccelerateConfiguration(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "replication")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutReplicationConfiguration", authorization);
                 s3Service.putBucketReplication(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
             // Must be handled here: an unmatched subresource falls through to CreateBucket below,
             // which answers a metrics call with BucketAlreadyOwnedByYou.
             if (hasQueryParam(uriInfo, "metrics")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutMetricsConfiguration", authorization);
                 return handlePutBucketMetricsConfiguration(bucket, uriInfo, body);
             }
             // Same fall-through hazard as metrics: an intelligent-tiering PUT must not become a
             // CreateBucket.
             if (hasQueryParam(uriInfo, "intelligent-tiering")) {
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
                 return handlePutBucketIntelligentTieringConfiguration(bucket, uriInfo, body);
             }
             // Same fall-through hazard as metrics: an analytics or inventory PUT must not become
             // a CreateBucket.
             if (hasQueryParam(uriInfo, "analytics")) {
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutAnalyticsConfiguration", authorization);
                 return handlePutBucketAnalyticsConfiguration(bucket, uriInfo, body);
             }
             if (hasQueryParam(uriInfo, "inventory")) {
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutInventoryConfiguration", authorization);
                 return handlePutBucketInventoryConfiguration(bucket, uriInfo, body);
             }
 
+            s3Service.authorizeCreateBucket(authorization);
             String locationConstraint = null;
             if (body != null && body.length > 0) {
                 locationConstraint = XmlParser.extractFirst(new String(body, StandardCharsets.UTF_8),
@@ -401,51 +415,61 @@ public class S3Controller {
                                   @Context HttpHeaders httpHeaders) {
         try {
             validateRawUri();
+            S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
+                    s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (hasQueryParam(uriInfo, "tagging")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketTagging", authorization);
                 s3Service.deleteBucketTagging(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "website")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:DeleteBucketWebsite", authorization);
                 s3Service.deleteBucketWebsite(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "policy")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:DeleteBucketPolicy", authorization);
                 s3Service.deleteBucketPolicy(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "cors")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketCORS", authorization);
                 s3Service.deleteBucketCors(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "lifecycle")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutLifecycleConfiguration", authorization);
                 s3Service.deleteBucketLifecycle(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "encryption")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutEncryptionConfiguration", authorization);
                 s3Service.deleteBucketEncryption(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "publicAccessBlock")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketPublicAccessBlock", authorization);
                 s3Service.deletePublicAccessBlock(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "ownershipControls")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutBucketOwnershipControls", authorization);
                 s3Service.deleteBucketOwnershipControls(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "replication")) {
+                s3Service.authorizeBucketWrite(bucket, "s3:PutReplicationConfiguration", authorization);
                 s3Service.deleteBucketReplication(bucket);
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "metrics")) {
                 // Likewise this must not fall through to deleting the bucket.
+                s3Service.authorizeBucketWrite(bucket, "s3:PutMetricsConfiguration", authorization);
                 s3Service.deleteBucketMetricsConfiguration(bucket, requireMetricsId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "intelligent-tiering")) {
                 // Likewise this must not fall through to deleting the bucket.
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
                 s3Service.deleteBucketIntelligentTieringConfiguration(bucket,
                         requireIntelligentTieringId(uriInfo));
@@ -453,16 +477,12 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "analytics")) {
                 // Likewise this must not fall through to deleting the bucket.
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutAnalyticsConfiguration", authorization);
                 s3Service.deleteBucketAnalyticsConfiguration(bucket, requireAnalyticsId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "inventory")) {
                 // Likewise this must not fall through to deleting the bucket.
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeBucketWrite(bucket, "s3:PutInventoryConfiguration", authorization);
                 s3Service.deleteBucketInventoryConfiguration(bucket, requireInventoryId(uriInfo));
                 return Response.noContent().build();
@@ -473,6 +493,7 @@ public class S3Controller {
                 throw new AwsException("MethodNotAllowed",
                         "The specified method is not allowed against this resource.", 405);
             }
+            s3Service.authorizeBucketWrite(bucket, "s3:DeleteBucket", authorization);
             s3Service.deleteBucket(bucket);
             return Response.noContent().build();
         } catch (AwsException e) {
@@ -486,7 +507,7 @@ public class S3Controller {
     public Response listObjects(@PathParam("bucket") String bucket,
                                 @QueryParam("prefix") String prefix,
                                 @QueryParam("delimiter") String delimiter,
-                                @QueryParam("max-keys") Integer maxKeys,
+                                @QueryParam("max-keys") String maxKeys,
                                 @QueryParam("list-type") String listType,
                                 @QueryParam("continuation-token") String continuationToken,
                                 @QueryParam("start-after") String startAfter,
@@ -639,7 +660,7 @@ public class S3Controller {
 
             s3Service.authorizeListBucket(bucket, authorization);
 
-            int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
+            int max = resolveMaxKeys(maxKeys);
             boolean v1 = !"2".equals(listType);
             String effectiveStartAfter = v1 && marker != null ? marker : startAfter;
             String effectiveContinuationToken = v1 ? null : continuationToken;
@@ -764,7 +785,8 @@ public class S3Controller {
             if (uploadId != null && partNumber != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 if (copySource != null && !copySource.isEmpty()) {
-                    return handleUploadPartCopy(copySource, bucket, key, uploadId, partNumber, httpHeaders);
+                    return handleUploadPartCopy(
+                            copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
                 }
                 byte[] partData = decodeAwsChunked(body, contentEncoding, contentSha256);
                 validateChecksumHeaders(httpHeaders, partData, getChecksumAlgorithm(httpHeaders));
@@ -786,10 +808,10 @@ public class S3Controller {
 
             if (copySource != null && !copySource.isEmpty()) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
-                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders);
+                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, authorization);
             }
 
-            Map<String, String> inlineTags = parseInlineTaggingHeader(tagging);
+            Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
 
             String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
             String retainUntilStr = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
@@ -1365,7 +1387,8 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
                         getChecksumAlgorithm(httpHeaders),
                         httpHeaders.getHeaderString("x-amz-checksum-type"),
-                        parseInlineTaggingHeader(httpHeaders.getHeaderString("x-amz-tagging")));
+                        parseInlineTaggingHeader(
+                                resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo)));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -1457,6 +1480,9 @@ public class S3Controller {
         }
         boolean quiet = XmlParser.containsValue(xml, "Quiet", "true");
 
+        boolean bypass = "true".equalsIgnoreCase(
+                httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+
         S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                 s3Service.isAuthEnforced(), httpHeaders, uriInfo);
         s3Service.authorizeSignedRequest(authorization);
@@ -1465,13 +1491,18 @@ public class S3Controller {
         for (XmlParser.KeyVersion entry : entries) {
             try {
                 s3Service.authorizeDeleteObject(bucket, entry.key(), entry.versionId(), authorization);
+                if (bypass && s3Service.isGovernanceRetentionActive(
+                        bucket, entry.key(), entry.versionId())) {
+                    s3Service.authorizeObjectWrite(bucket, entry.key(),
+                            "s3:BypassGovernanceRetention", authorization);
+                }
                 authorizedEntries.add(entry);
             } catch (AwsException e) {
                 authorizationErrors.add(new S3Service.DeleteError(entry.key(), e.getErrorCode(), e.getMessage()));
             }
         }
 
-        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, authorizedEntries);
+        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, authorizedEntries, bypass);
 
         XmlBuilder builder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -1655,13 +1686,13 @@ public class S3Controller {
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
-    private Response handleListObjectVersions(String bucket, String prefix, String delimiter, Integer maxKeys,
+    private Response handleListObjectVersions(String bucket, String prefix, String delimiter, String maxKeys,
                                               String keyMarker, String versionIdMarker, String encodingType) {
         if (hasText(versionIdMarker) && !hasText(keyMarker)) {
             throw new AwsException("InvalidArgument",
                     "A version-id marker cannot be specified without a key marker.", 400);
         }
-        int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
+        int max = resolveMaxKeys(maxKeys);
         S3Service.ListVersionsResult result =
                 s3Service.listObjectVersions(bucket, prefix, delimiter, max, keyMarker, versionIdMarker);
         XmlBuilder xml = new XmlBuilder()
@@ -1940,9 +1971,11 @@ public class S3Controller {
      * Format: hex-size;chunk-signature=sig\r\n data \r\n ... 0;chunk-signature=sig\r\n
      */
     private byte[] decodeAwsChunked(byte[] body, String contentEncoding, String contentSha256) {
-        boolean isAwsChunked = (contentEncoding != null && contentEncoding.contains("aws-chunked"))
+        boolean isAwsChunked = (contentEncoding != null
+                && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked"))
                 || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".equals(contentSha256)
-                || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER".equals(contentSha256);
+                || "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER".equals(contentSha256)
+                || "STREAMING-UNSIGNED-PAYLOAD-TRAILER".equals(contentSha256);
         if (!isAwsChunked) {
             return body;
         }
@@ -2557,10 +2590,11 @@ public class S3Controller {
     // --- Helpers ---
 
     private Response handleCopyObject(String copySource, String destBucket, String destKey,
-                                      String contentType, HttpHeaders httpHeaders) {
+                                      String contentType, HttpHeaders httpHeaders,
+                                      S3Service.RequestAuthorization authorization) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
-        authorizeCopySourceRead(httpHeaders, sourceBucket, sourceObject.objectKey());
+        authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -2627,6 +2661,9 @@ public class S3Controller {
         if (copy.getSseKmsKeyId() != null) {
             response.header("x-amz-server-side-encryption-aws-kms-key-id", copy.getSseKmsKeyId());
         }
+        if (copy.getVersionId() != null) {
+            response.header("x-amz-version-id", copy.getVersionId());
+        }
         appendSseCustomerHeaders(response, copy);
         return response.build();
     }
@@ -2637,10 +2674,11 @@ public class S3Controller {
     }
 
     private Response handleUploadPartCopy(String copySource, String destBucket, String destKey,
-                                           String uploadId, int partNumber, HttpHeaders httpHeaders) {
+                                          String uploadId, int partNumber, HttpHeaders httpHeaders,
+                                          S3Service.RequestAuthorization authorization) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
-        authorizeCopySourceRead(httpHeaders, sourceBucket, sourceObject.objectKey());
+        authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
@@ -3225,6 +3263,22 @@ public class S3Controller {
             lcFields.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
         }
 
+        /*
+         * IamEnforcementFilter's own filter() method only ever sees the Authorization header or,
+         * for a presigned URL, the X-Amz-Credential query parameter - a presigned POST's
+         * credential arrives only inside this multipart form body, invisible at that JAX-RS
+         * filter stage. Evaluate the signing principal's IAM identity policy here whenever a
+         * credential is present, independent of whether S3's own presigned-POST signature and
+         * condition checks (s3.enforce-auth) are enabled, so an IAM deny is not bypassed by
+         * running S3 without its own presigned-POST enforcement. authorizeAdditionalResource
+         * itself no-ops when IAM enforcement is disabled.
+         */
+        String credential = lcFields.get("x-amz-credential");
+        if (credential != null && !credential.isEmpty()) {
+            iamEnforcementFilter.authorizeAdditionalResource(
+                    "Credential=" + credential, "s3:PutObject", S3PublicAccessEvaluator.objectArn(bucket, key));
+        }
+
         if (s3Service.isAuthEnforced()) {
             validatePresignedPostAuth(lcFields, bucket, key, fileData.length);
         } else {
@@ -3306,7 +3360,8 @@ public class S3Controller {
         }
 
         String accessKeyId = credential.split("/", 2)[0];
-        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(iamService, accessKeyId);
+        Optional<String> secretKey = S3PostPolicySigner.resolveSecretKey(
+                iamService, accessKeyId, fields.get("x-amz-security-token"));
         if (secretKey.isEmpty()
                 || !S3PostPolicySigner.verifySignature(policy, credential, signature, secretKey.get())) {
             throw new AwsException("SignatureDoesNotMatch",
@@ -3314,13 +3369,10 @@ public class S3Controller {
                             + "Check your key and signing method.", 403);
         }
 
-        // Route through the same authorization check every other S3 write path uses, so this
-        // path automatically inherits any future strengthening (e.g. per-principal IAM policy
-        // evaluation) instead of silently staying behind. Today it only confirms accessKeyId is
-        // known - strictly weaker than the signature check just performed above - but that will
-        // change if authorizeObjectWrite grows real policy evaluation.
+        // Route through the same bucket-policy/ACL check every other S3 write path uses, so this
+        // path automatically inherits any future strengthening there too.
         s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject",
-                new S3Service.RequestAuthorization(true, accessKeyId));
+                new S3Service.RequestAuthorization(true, accessKeyId, fields.get("x-amz-security-token")));
 
         validatePolicyExpiration(policy);
         validatePolicyConditions(policy, bucket, fields, contentLength);
@@ -3557,8 +3609,24 @@ public class S3Controller {
     private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;
 
     /**
-     * Parses an {@code x-amz-tagging} request-header value (URL-encoded
-     * {@code k=v&k=v}) into a tag map. Returns an empty map for null or blank input.
+     * Resolves the inline {@code x-amz-tagging} value for PutObject and CreateMultipartUpload.
+     * The signed request header wins; otherwise the value comes from the {@code x-amz-tagging}
+     * query parameter, where SDK presigners hoist the header while signing only {@code host}.
+     * JAX-RS decodes the query value once, which yields the same URL-encoded {@code k=v&k=v}
+     * string the header form carries, so both sources feed
+     * {@link #parseInlineTaggingHeader(String)} unchanged. Real S3 honors both forms.
+     */
+    private static String resolveInlineTaggingSource(String taggingHeader, UriInfo uriInfo) {
+        if (taggingHeader != null) {
+            return taggingHeader;
+        }
+        return uriInfo.getQueryParameters().getFirst("x-amz-tagging");
+    }
+
+    /**
+     * Parses an {@code x-amz-tagging} value (URL-encoded {@code k=v&k=v}), taken from the
+     * request header or the presigned-URL query parameter, into a tag map. Returns an empty
+     * map for null or blank input.
      *
      * <p>Note: the error codes thrown here ({@code InvalidArgument} for malformed input,
      * {@code BadRequest} for exceeding the 10-tag limit) match real-AWS S3 behavior
@@ -3694,6 +3762,25 @@ public class S3Controller {
         return Response.ok(xml.build()).build();
     }
 
+    /**
+     * AWS accepts any integer from 0 to {@link Integer#MAX_VALUE} for {@code max-keys} and treats
+     * a missing parameter as 1000. Zero is a valid request for an empty page. Anything else,
+     * negative, non-numeric or overflowing, is rejected with the same InvalidArgument response.
+     */
+    private static int resolveMaxKeys(String maxKeys) {
+        if (maxKeys == null) {
+            return 1000;
+        }
+        if (maxKeys.matches("\\d{1,10}") && Long.parseLong(maxKeys) <= Integer.MAX_VALUE) {
+            return Integer.parseInt(maxKeys);
+        }
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("ArgumentName", "maxKeys");
+        detail.put("ArgumentValue", maxKeys);
+        throw new AwsException("InvalidArgument",
+                "Argument maxKeys must be an integer between 0 and 2147483647", 400, detail);
+    }
+
     private Response handlePutBucketWebsite(String bucket, byte[] body) {
         String xml = new String(body, StandardCharsets.UTF_8);
         String indexDoc = XmlParser.extractFirst(xml, "Suffix", null);
@@ -3712,10 +3799,18 @@ public class S3Controller {
      * allowed to write to the destination bucket must not be able to exfiltrate an object it cannot read.
      * A no-op when IAM enforcement is disabled, matching {@link IamEnforcementFilter}'s own bypass rules.
      */
-    private void authorizeCopySourceRead(HttpHeaders httpHeaders, String sourceBucket, String sourceKey) {
-        String resource = S3PublicAccessEvaluator.objectArn(sourceBucket, sourceKey);
+    private void authorizeCopySourceRead(HttpHeaders httpHeaders, CopySourceRef source,
+                                         S3Service.RequestAuthorization authorization) {
+        String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
+        String resource = S3PublicAccessEvaluator.objectArn(source.bucket(), source.objectKey());
+        S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
+                s3Service.signedPrincipalResourcePolicyDecision(
+                        source.bucket(), action, resource, authorization);
         iamEnforcementFilter.authorizeAdditionalResource(
-                httpHeaders.getHeaderString("Authorization"), "s3:GetObject", resource);
+                httpHeaders.getHeaderString("Authorization"), action, resource,
+                resourcePolicyEvaluation.decision(), resourcePolicyEvaluation.resourceOwnerAccountId());
+        s3Service.authorizeGetObject(
+                source.bucket(), source.objectKey(), source.versionId(), authorization);
     }
 
     /**

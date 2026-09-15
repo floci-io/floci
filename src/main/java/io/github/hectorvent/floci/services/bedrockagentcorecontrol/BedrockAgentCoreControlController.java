@@ -4,8 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -29,7 +27,6 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -409,8 +406,7 @@ public class BedrockAgentCoreControlController {
     }
 
     private static String text(JsonNode node, String field) {
-        JsonNode v = node.get(field);
-        return (v == null || v.isNull()) ? null : v.asText();
+        return BedrockAgentCoreControllerSupport.text(node, field);
     }
 
     private static JsonNode obj(JsonNode node, String field) {
@@ -419,27 +415,10 @@ public class BedrockAgentCoreControlController {
     }
 
     private static Map<String, String> stringMap(JsonNode node) {
-        if (node == null || !node.isObject()) {
-            return null;
-        }
-        Map<String, String> map = new HashMap<>();
-        node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
-        return map;
+        return BedrockAgentCoreControllerSupport.stringMap(node);
     }
 
     private Response error(Exception e, String action) {
-        if (e instanceof AwsException aws) {
-            return Response.status(aws.getHttpStatus())
-                    .type(MediaType.APPLICATION_JSON)
-                    .header("X-Amzn-Errortype", aws.jsonType())
-                    .entity(new AwsErrorResponse(aws.jsonType(), aws.getMessage()))
-                    .build();
-        }
-        LOG.errorv(e, "Error {0}", action);
-        return Response.status(400)
-                .type(MediaType.APPLICATION_JSON)
-                .header("X-Amzn-Errortype", "ValidationException")
-                .entity(new AwsErrorResponse("ValidationException", e.getMessage()))
-                .build();
+        return BedrockAgentCoreControllerSupport.error(LOG, e, action);
     }
 }

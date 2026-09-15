@@ -265,7 +265,7 @@ services:
     doc: docs/services/rds.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
-    exclude_actions: [SubnetIds, VpcSecurityGroupIds, OptionsToRemove]
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds, OptionsToRemove, ValuesToAdd, ValuesToRemove]
   - service: redshift
     doc: docs/services/redshift.md
     sources:
@@ -375,6 +375,7 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2JsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/applicationautoscaling/ScalingPolicyAlarmActionHandler.java }  # not a JSON/Query action dispatcher — its `case "X" ->` arms are the StepScaling AdjustmentType switch, not AWS actions
   - { path: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java }  # non-tabular doc (grouped/inline)
+  - { path: src/main/java/io/github/hectorvent/floci/services/bcmpricingcalculator/BcmPricingCalculatorJsonHandler.java }  # focused workload-estimate surface
   - { path: src/main/java/io/github/hectorvent/floci/services/bcmdataexports/BcmDataExportsJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/ce/CostExplorerJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudcontrol/CloudControlJsonHandler.java }  # no standalone action table yet

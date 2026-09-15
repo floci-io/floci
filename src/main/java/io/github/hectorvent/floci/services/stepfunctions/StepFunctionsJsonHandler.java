@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -11,7 +12,9 @@ import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.MapRun;
+import io.github.hectorvent.floci.services.stepfunctions.model.RoutingConfiguration;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineAlias;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -45,6 +48,11 @@ public class StepFunctionsJsonHandler {
             case "PublishStateMachineVersion" -> handlePublishStateMachineVersion(request);
             case "ListStateMachineVersions" -> handleListStateMachineVersions(request);
             case "DeleteStateMachineVersion" -> handleDeleteStateMachineVersion(request);
+            case "CreateStateMachineAlias" -> handleCreateStateMachineAlias(request);
+            case "DescribeStateMachineAlias" -> handleDescribeStateMachineAlias(request);
+            case "ListStateMachineAliases" -> handleListStateMachineAliases(request);
+            case "UpdateStateMachineAlias" -> handleUpdateStateMachineAlias(request);
+            case "DeleteStateMachineAlias" -> handleDeleteStateMachineAlias(request);
             case "ValidateStateMachineDefinition" -> handleValidateStateMachineDefinition(request);
             case "StartExecution" -> handleStartExecution(request, region);
             case "StartSyncExecution" -> handleStartSyncExecution(request, region);
@@ -159,6 +167,77 @@ public class StepFunctionsJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleCreateStateMachineAlias(JsonNode request) {
+        StateMachineAlias alias = service.createStateMachineAlias(
+                requiredText(request, "name"),
+                optionalText(request, "description"),
+                parseRoutingConfiguration(request, true));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("stateMachineAliasArn", alias.getStateMachineAliasArn());
+        response.put("creationDate", alias.getCreationDate());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeStateMachineAlias(JsonNode request) {
+        StateMachineAlias alias = service.describeStateMachineAlias(
+                requiredText(request, "stateMachineAliasArn"));
+        return Response.ok(aliasResponse(alias)).build();
+    }
+
+    private Response handleListStateMachineAliases(JsonNode request) {
+        Integer maxResults = request.hasNonNull("maxResults")
+                ? request.path("maxResults").asInt() : null;
+        PaginatedResult<StateMachineAlias> page = service.listStateMachineAliases(
+                requiredText(request, "stateMachineArn"),
+                maxResults,
+                optionalText(request, "nextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("stateMachineAliases");
+        for (StateMachineAlias alias : page.items()) {
+            ObjectNode item = array.addObject();
+            item.put("stateMachineAliasArn", alias.getStateMachineAliasArn());
+            item.put("creationDate", alias.getCreationDate());
+        }
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateStateMachineAlias(JsonNode request) {
+        boolean descriptionProvided = request.has("description");
+        StateMachineAlias alias = service.updateStateMachineAlias(
+                requiredText(request, "stateMachineAliasArn"),
+                optionalText(request, "description"),
+                descriptionProvided,
+                parseRoutingConfiguration(request, false));
+        return Response.ok(objectMapper.createObjectNode()
+                .put("updateDate", alias.getUpdateDate())).build();
+    }
+
+    private Response handleDeleteStateMachineAlias(JsonNode request) {
+        service.deleteStateMachineAlias(requiredText(request, "stateMachineAliasArn"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private ObjectNode aliasResponse(StateMachineAlias alias) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("stateMachineAliasArn", alias.getStateMachineAliasArn());
+        response.put("name", alias.getName());
+        if (alias.getDescription() != null) {
+            response.put("description", alias.getDescription());
+        }
+        ArrayNode routing = response.putArray("routingConfiguration");
+        for (RoutingConfiguration route : alias.getRoutingConfiguration()) {
+            ObjectNode item = routing.addObject();
+            item.put("stateMachineVersionArn", route.getStateMachineVersionArn());
+            item.put("weight", route.getWeight());
+        }
+        response.put("creationDate", alias.getCreationDate());
+        response.put("updateDate", alias.getUpdateDate());
+        return response;
+    }
+
     private Response handleDescribeStateMachine(JsonNode request) {
         String includedData = optionalText(request, "includedData");
         if (includedData != null
@@ -265,6 +344,12 @@ public class StepFunctionsJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("executionArn", exec.getExecutionArn());
         response.put("stateMachineArn", exec.getStateMachineArn());
+        if (exec.getStateMachineVersionArn() != null) {
+            response.put("stateMachineVersionArn", exec.getStateMachineVersionArn());
+        }
+        if (exec.getStateMachineAliasArn() != null) {
+            response.put("stateMachineAliasArn", exec.getStateMachineAliasArn());
+        }
         response.put("name", exec.getName());
         response.put("status", exec.getStatus());
         response.put("startDate", exec.getStartDate());
@@ -281,6 +366,12 @@ public class StepFunctionsJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("executionArn", exec.getExecutionArn());
         response.put("stateMachineArn", exec.getStateMachineArn());
+        if (exec.getStateMachineVersionArn() != null) {
+            response.put("stateMachineVersionArn", exec.getStateMachineVersionArn());
+        }
+        if (exec.getStateMachineAliasArn() != null) {
+            response.put("stateMachineAliasArn", exec.getStateMachineAliasArn());
+        }
         response.put("name", exec.getName());
         response.put("status", exec.getStatus());
         response.put("startDate", exec.getStartDate());
@@ -315,24 +406,24 @@ public class StepFunctionsJsonHandler {
         response.put("maxConcurrency", mapRun.getMaxConcurrency());
         response.put("toleratedFailurePercentage", 0.0);
         response.put("toleratedFailureCount", 0);
-        putMapRunCounts(response.putObject("itemCounts"), mapRun);
-        // One child execution per item: ItemBatcher is not applied, so no execution covers a batch.
-        putMapRunCounts(response.putObject("executionCounts"), mapRun);
+        putMapRunCounts(response.putObject("itemCounts"), mapRun.getItemCount(),
+                mapRun.getSucceededCount(), mapRun.getFailedCount());
+        // An ItemBatcher run has one execution per batch, so the two blocks differ there.
+        putMapRunCounts(response.putObject("executionCounts"), mapRun.getExecutionCount(),
+                mapRun.getSucceededExecutionCount(), mapRun.getFailedExecutionCount());
         response.put("redriveCount", 0);
         return response;
     }
 
     /** A failed item's result counts as written, as on AWS. */
-    private static void putMapRunCounts(ObjectNode counts, MapRun mapRun) {
-        var succeeded = mapRun.getSucceededCount();
-        var failed = mapRun.getFailedCount();
+    private static void putMapRunCounts(ObjectNode counts, int total, int succeeded, int failed) {
         counts.put("pending", 0);
         counts.put("running", 0);
         counts.put("succeeded", succeeded);
         counts.put("failed", failed);
         counts.put("timedOut", 0);
-        counts.put("aborted", mapRun.getItemCount() - succeeded - failed);
-        counts.put("total", mapRun.getItemCount());
+        counts.put("aborted", total - succeeded - failed);
+        counts.put("total", total);
         counts.put("resultsWritten", succeeded + failed);
         counts.put("failuresNotRedrivable", 0);
         counts.put("pendingRedrive", 0);
@@ -346,6 +437,12 @@ public class StepFunctionsJsonHandler {
             ObjectNode item = array.addObject();
             item.put("executionArn", e.getExecutionArn());
             item.put("stateMachineArn", e.getStateMachineArn());
+            if (e.getStateMachineVersionArn() != null) {
+                item.put("stateMachineVersionArn", e.getStateMachineVersionArn());
+            }
+            if (e.getStateMachineAliasArn() != null) {
+                item.put("stateMachineAliasArn", e.getStateMachineAliasArn());
+            }
             item.put("name", e.getName());
             item.put("status", e.getStatus());
             item.put("startDate", e.getStartDate());
@@ -525,6 +622,40 @@ public class StepFunctionsJsonHandler {
             }
         }
         return tags;
+    }
+
+    private List<RoutingConfiguration> parseRoutingConfiguration(
+            JsonNode request, boolean required) {
+        JsonNode routingNode = request.get("routingConfiguration");
+        if (routingNode == null || routingNode.isNull()) {
+            if (required) {
+                throw new AwsException(
+                        "MissingRequiredParameter", "routingConfiguration is required.", 400);
+            }
+            return null;
+        }
+        if (!routingNode.isArray()) {
+            throw new AwsException(
+                    "ValidationException", "routingConfiguration must be a list.", 400);
+        }
+        List<RoutingConfiguration> routing = new ArrayList<>();
+        for (JsonNode item : routingNode) {
+            if (!item.isObject()) {
+                throw new AwsException(
+                        "ValidationException",
+                        "routingConfiguration entries must be objects.", 400);
+            }
+            String versionArn = requiredText(item, "stateMachineVersionArn");
+            JsonNode weightNode = item.get("weight");
+            if (weightNode == null || weightNode.isNull()) {
+                throw new AwsException("MissingRequiredParameter", "weight is required.", 400);
+            }
+            if (!weightNode.isIntegralNumber()) {
+                throw new AwsException("ValidationException", "weight must be an integer.", 400);
+            }
+            routing.add(new RoutingConfiguration(versionArn, weightNode.intValue()));
+        }
+        return routing;
     }
 
     private static String requiredText(JsonNode request, String fieldName) {

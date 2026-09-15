@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -19,6 +20,96 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PostgresWireDecoderTest {
+
+    @Test
+    void decodesParseNameSqlAndParameterTypeOids() throws IOException {
+        byte[] packet = frame('P', concat(
+                cString("stmt-1"),
+                cString("select $1::int"),
+                int16(1),
+                int32(23)));
+
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(packet));
+        PostgresWireDecoder.ParseMessage parse = decoder.decodeParse(decoder.nextMessage());
+
+        assertEquals("stmt-1", parse.statementName());
+        assertEquals("select $1::int", parse.sql());
+        assertEquals(List.of(23), parse.parameterTypeOids());
+    }
+
+    @Test
+    void decodesBindNamesWithoutRetainingValueSemantics() throws IOException {
+        byte[] body = concat(cString("portal-1"), cString("stmt-1"), int16(0), int16(0), int16(0));
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(frame('B', body)));
+
+        PostgresWireDecoder.BindMessage bind = decoder.decodeBind(decoder.nextMessage());
+
+        assertEquals("portal-1", bind.portalName());
+        assertEquals("stmt-1", bind.statementName());
+    }
+
+    @Test
+    void decodesExecuteDescribeAndClose() throws IOException {
+        PostgresWireDecoder.ExecuteMessage execute = decodeExecute(frame('E', concat(cString("p"), int32(0))));
+        PostgresWireDecoder.TargetMessage describe = decodeDescribe(frame('D', concat(new byte[]{'S'}, cString("s"))));
+        PostgresWireDecoder.TargetMessage close = decodeClose(frame('C', concat(new byte[]{'P'}, cString("p"))));
+
+        assertEquals(new PostgresWireDecoder.ExecuteMessage("p", 0), execute);
+        assertEquals(new PostgresWireDecoder.TargetMessage('S', "s"), describe);
+        assertEquals(new PostgresWireDecoder.TargetMessage('P', "p"), close);
+    }
+
+    @Test
+    void rejectsParseWithMissingCStringTerminator() {
+        PostgresWireDecoder decoder = decoderFor('P', "stmt-1".getBytes(StandardCharsets.UTF_8));
+        assertThrows(IOException.class, () -> decoder.decodeParse(decoder.nextMessage()));
+    }
+
+    @Test
+    void rejectsParseWithTruncatedInt16() {
+        byte[] body = concat(cString("stmt-1"), cString("select 1"), new byte[]{0});
+        PostgresWireDecoder decoder = decoderFor('P', body);
+        assertThrows(IOException.class, () -> decoder.decodeParse(decoder.nextMessage()));
+    }
+
+    @Test
+    void rejectsParseWithTruncatedOidList() {
+        byte[] body = concat(cString("stmt-1"), cString("select $1"), int16(1), new byte[]{0, 0});
+        PostgresWireDecoder decoder = decoderFor('P', body);
+        assertThrows(IOException.class, () -> decoder.decodeParse(decoder.nextMessage()));
+    }
+
+    @Test
+    void rejectsDescribeWithInvalidTargetByte() {
+        PostgresWireDecoder decoder = decoderFor('D', concat(new byte[]{'X'}, cString("name")));
+        assertThrows(IOException.class, () -> decoder.decodeDescribe(decoder.nextMessage()));
+    }
+
+    @Test
+    void rejectsCloseWithInvalidTargetByte() {
+        PostgresWireDecoder decoder = decoderFor('C', concat(new byte[]{'X'}, cString("name")));
+        assertThrows(IOException.class, () -> decoder.decodeClose(decoder.nextMessage()));
+    }
+
+    @Test
+    void rejectsExecuteWithTrailingBytes() {
+        PostgresWireDecoder decoder = decoderFor('E', concat(cString("p"), int32(0), new byte[]{1}));
+        assertThrows(IOException.class, () -> decoder.decodeExecute(decoder.nextMessage()));
+    }
+
+    @Test
+    void encodeParsePreservesNameAndTypeOidsWhileReplacingSql() throws IOException {
+        PostgresWireDecoder.ParseMessage original = new PostgresWireDecoder.ParseMessage(
+                "ddl", "CREATE TABLE t (id int ENCODE az64)", List.of(23, 25));
+
+        byte[] encoded = PostgresWireDecoder.encodeParse(original, "CREATE TABLE t (id int)");
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(encoded));
+        PostgresWireDecoder.ParseMessage decoded = decoder.decodeParse(decoder.nextMessage());
+
+        assertEquals("ddl", decoded.statementName());
+        assertEquals("CREATE TABLE t (id int)", decoded.sql());
+        assertEquals(List.of(23, 25), decoded.parameterTypeOids());
+    }
 
     @Test
     void decodesASimpleQueryAndThenReportsEof() throws IOException {
@@ -307,5 +398,70 @@ class PostgresWireDecoderTest {
         assertFalse(msg.isQuery());
         assertNull(msg.body());
         assertEquals(1 + (long) totalLength, bytesWritten[0]);
+    }
+
+    private static PostgresWireDecoder decoderFor(char type, byte[] body) {
+        return new PostgresWireDecoder(new ByteArrayInputStream(frame(type, body)));
+    }
+
+    private static PostgresWireDecoder.ExecuteMessage decodeExecute(byte[] packet) throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(packet));
+        return decoder.decodeExecute(decoder.nextMessage());
+    }
+
+    private static PostgresWireDecoder.TargetMessage decodeDescribe(byte[] packet) throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(packet));
+        return decoder.decodeDescribe(decoder.nextMessage());
+    }
+
+    private static PostgresWireDecoder.TargetMessage decodeClose(byte[] packet) throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(packet));
+        return decoder.decodeClose(decoder.nextMessage());
+    }
+
+    private static byte[] frame(char type, byte[] body) {
+        int length = body.length + 4;
+        byte[] packet = new byte[body.length + 5];
+        packet[0] = (byte) type;
+        packet[1] = (byte) ((length >> 24) & 0xFF);
+        packet[2] = (byte) ((length >> 16) & 0xFF);
+        packet[3] = (byte) ((length >> 8) & 0xFF);
+        packet[4] = (byte) (length & 0xFF);
+        System.arraycopy(body, 0, packet, 5, body.length);
+        return packet;
+    }
+
+    private static byte[] cString(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        byte[] result = new byte[bytes.length + 1];
+        System.arraycopy(bytes, 0, result, 0, bytes.length);
+        return result;
+    }
+
+    private static byte[] int16(int value) {
+        return new byte[]{(byte) ((value >> 8) & 0xFF), (byte) (value & 0xFF)};
+    }
+
+    private static byte[] int32(int value) {
+        return new byte[]{
+                (byte) ((value >> 24) & 0xFF),
+                (byte) ((value >> 16) & 0xFF),
+                (byte) ((value >> 8) & 0xFF),
+                (byte) (value & 0xFF)
+        };
+    }
+
+    private static byte[] concat(byte[]... parts) {
+        int length = 0;
+        for (byte[] part : parts) {
+            length += part.length;
+        }
+        byte[] result = new byte[length];
+        int offset = 0;
+        for (byte[] part : parts) {
+            System.arraycopy(part, 0, result, offset, part.length);
+            offset += part.length;
+        }
+        return result;
     }
 }

@@ -35,6 +35,18 @@ class S3RequestAuthorizationParserTest {
 
         assertTrue(authorization.signed());
         assertEquals("bad-key", authorization.accessKeyId());
+        assertNull(authorization.sessionToken());
+    }
+
+    @Test
+    void parsesPresignedQuerySessionToken() {
+        MultivaluedMap<String, String> query = presignedQuery("ASIAEXAMPLE");
+        query.add("X-Amz-Security-Token", "issued-session-token");
+
+        S3Service.RequestAuthorization authorization = parse(null, query);
+
+        assertEquals("ASIAEXAMPLE", authorization.accessKeyId());
+        assertEquals("issued-session-token", authorization.sessionToken());
     }
 
     @Test

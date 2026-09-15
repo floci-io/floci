@@ -150,6 +150,62 @@ class MwaaEnvironmentManagerTest {
     }
 
     @Test
+    void airflowConfigurationOptionsEnvTranslatesSectionDotKeyToAirflowDoubleUnderscoreFormat() {
+        assertEquals(List.of("AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=false"),
+                MwaaEnvironmentManager.airflowConfigurationOptionsEnv(
+                        Map.of("core.dags_are_paused_at_creation", "false")));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvSkipsAKeyMissingTheSectionDotKeySeparator() {
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(
+                Map.of("not_dotted", "value")));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvSkipsAnEmptySectionOrKey() {
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(
+                Map.of(".key", "value", "section.", "value")));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvSkipsAnEntryThatWouldOverrideFlociOwnedWiring() {
+        // core.executor -> AIRFLOW__CORE__EXECUTOR, one of Floci's own mandatory (LocalExecutor)
+        // vars. A configuration option request doesn't get to override that.
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(
+                Map.of("core.executor", "CeleryExecutor")));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvHandlesANullOrEmptyMap() {
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(null));
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(Map.of()));
+    }
+
+    @Test
+    void startAirflowContainerAppliesConfiguredAirflowConfigurationOptions() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+        when(lifecycleManager.startCreated(eq("airflow-container-id"), any())).thenReturn(
+                new ContainerInfo("airflow-container-id", Map.of(8080, new EndpointInfo("172.18.0.5", 8080))));
+
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setAirflowConfigurationOptions(Map.of(
+                "core.dags_are_paused_at_creation", "false",
+                "core.executor", "CeleryExecutor"));
+
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null);
+
+        ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(captor.capture());
+        assertTrue(captor.getValue().env().contains("AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=false"));
+        // The colliding entry must not have replaced Floci's own required executor setting.
+        assertTrue(captor.getValue().env().contains("AIRFLOW__CORE__EXECUTOR=LocalExecutor"));
+        assertFalse(captor.getValue().env().contains("AIRFLOW__CORE__EXECUTOR=CeleryExecutor"));
+    }
+
+    @Test
     void airflowEnvVarsWireTheResolvedPostgresDsn() {
         ContainerSpec spec = startAirflowAndCaptureSpec(false);
 

@@ -51,6 +51,23 @@ class AppSyncServiceTest {
     }
 
     @Test
+    void updateFunctionAppliesANewName() {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "rename", "authenticationType", "API_KEY"), "us-east-1");
+        service.createDataSource(api.getApiId(), Map.of("name", "ds", "type", "NONE"), "us-east-1");
+        var created = service.createFunction(api.getApiId(),
+                Map.of("name", "Query_getMessages_0", "dataSourceName", "ds"), "us-east-1");
+
+        service.updateFunction(api.getApiId(), created.getFunctionId(),
+                Map.of("name", "Query_getMessages_1"));
+
+        // UpdateFunction takes a new name on AWS, and a CloudFormation rename goes through it:
+        // ignoring the member let a stack complete while GetFunction still reported the old name.
+        assertEquals("Query_getMessages_1",
+                service.getFunction(api.getApiId(), created.getFunctionId()).getName());
+    }
+
+    @Test
     void validateApiKeyLooksUpByValue() {
         GraphqlApi api = service.createGraphqlApi(Map.of("name", "a", "authenticationType", "API_KEY"), "us-east-1");
         ApiKey created = service.createApiKey(api.getApiId(), Map.of());

@@ -11,6 +11,8 @@ import java.util.List;
 public class Execution {
     private String executionArn;
     private String stateMachineArn;
+    private String stateMachineVersionArn;
+    private String stateMachineAliasArn;
     private String name;
     private String status = "RUNNING"; // RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED
     private String input;
@@ -30,6 +32,16 @@ public class Execution {
 
     public String getStateMachineArn() { return stateMachineArn; }
     public void setStateMachineArn(String stateMachineArn) { this.stateMachineArn = stateMachineArn; }
+
+    public String getStateMachineVersionArn() { return stateMachineVersionArn; }
+    public void setStateMachineVersionArn(String stateMachineVersionArn) {
+        this.stateMachineVersionArn = stateMachineVersionArn;
+    }
+
+    public String getStateMachineAliasArn() { return stateMachineAliasArn; }
+    public void setStateMachineAliasArn(String stateMachineAliasArn) {
+        this.stateMachineAliasArn = stateMachineAliasArn;
+    }
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }

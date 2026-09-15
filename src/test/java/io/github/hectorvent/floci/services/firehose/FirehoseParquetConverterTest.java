@@ -613,7 +613,7 @@ class FirehoseParquetConverterTest {
     @Test
     void unsupportedColumnTypeFailsTheWholeBatch() throws Exception {
         when(glueService.getTable("db", "events")).thenReturn(table(
-                new Column("ticker", "string"), new Column("tags", "array<string>")));
+                new Column("ticker", "string"), new Column("payload", "binary")));
 
         FirehoseParquetConverter.Outcome outcome = converter.deliver(stream(), BUCKET,
                 List.of(record("{\"ticker\": \"AAA\"}")), DELIVERY_TIME);
@@ -621,7 +621,7 @@ class FirehoseParquetConverterTest {
         assertEquals(0, outcome.convertedRecords());
         JsonNode line = errorLines().get(0);
         assertEquals("DataFormatConversion.UnsupportedSchema", line.get("lastErrorCode").asText());
-        assertTrue(line.get("lastErrorMessage").asText().contains("array<string>"));
+        assertTrue(line.get("lastErrorMessage").asText().contains("binary"));
     }
 
     @ParameterizedTest

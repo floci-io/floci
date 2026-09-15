@@ -26,6 +26,7 @@ import software.amazon.awssdk.http.Protocol;
 import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
+import software.amazon.awssdk.services.oam.OamClient;
 import software.amazon.awssdk.services.neptune.NeptuneClient;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.redshift.RedshiftClient;
@@ -38,6 +39,7 @@ import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
 import software.amazon.awssdk.services.ssooidc.SsoOidcClient;
 import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
 import software.amazon.awssdk.services.budgets.BudgetsClient;
+import software.amazon.awssdk.services.bcmpricingcalculator.BcmPricingCalculatorClient;
 import software.amazon.awssdk.services.macie2.Macie2Client;
 import software.amazon.awssdk.services.controlcatalog.ControlCatalogClient;
 import software.amazon.awssdk.services.marketplacecatalog.MarketplaceCatalogClient;
@@ -1288,6 +1290,22 @@ public final class TestFixtures {
 
     public static BackupClient backupClient() {
         return BackupClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static OamClient oamClient() {
+        return OamClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static BcmPricingCalculatorClient bcmPricingCalculatorClient() {
+        return BcmPricingCalculatorClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

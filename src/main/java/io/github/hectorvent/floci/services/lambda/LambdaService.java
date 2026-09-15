@@ -234,13 +234,42 @@ public class LambdaService implements ResourceProvider {
     // content mounted, which is correct AWS-parity behavior for a layer deleted *after* being
     // attached (AWS doesn't re-validate on every invoke either), but was previously the only
     // signal at all for a bad ARN, even a typo caught at attach time on real AWS.
+    //
+    // An ARN naming another account or another partition is answered on the live service by the
+    // layer's resource policy: a public layer resolves, and everything else is
+    // AccessDeniedException. Measured on CreateFunction in ap-southeast-1, a foreign-account ARN
+    // and a cross-partition ARN return the same AccessDeniedException, so Floci returns that for
+    // both rather than inventing a distinction the API does not make.
+    //
+    // Floci implements no layer permissions, so it cannot tell a public layer from a private one
+    // and cannot fetch either one's content. Refusing is the faithful default: it is the answer
+    // AWS gives to every foreign ARN except a public layer. floci.services.lambda
+    // .accept-external-layer-arns records a same-partition foreign ARN unresolved instead, which
+    // is what a stack attaching Powertools or the AppConfig extension needs. Cross-partition
+    // stays refused even then, because partitions are isolated and no policy can reach across
+    // one, and because GetLayerVersionByArn already calls such an ARN invalid.
     private void validateLayersResolvable(List<String> layerArns) {
         if (layerArns == null || layerService == null) return;
         for (String arn : layerArns) {
-            if (layerService.resolveLayerByArn(arn) == null) {
-                throw new AwsException("InvalidParameterValueException",
-                        "Layer version " + arn + " does not exist.", 400);
+            if (layerService.resolveLayerByArn(arn) != null) {
+                continue;
             }
+            if (layerService.isForeignLayerArn(arn)) {
+                boolean acceptable = !layerService.isForeignPartitionLayerArn(arn)
+                        && config != null
+                        && config.services().lambda().acceptExternalLayerArns();
+                if (!acceptable) {
+                    throw new AwsException("AccessDeniedException",
+                            "User is not authorized to perform: lambda:GetLayerVersion on resource: "
+                                    + arn + " because no resource-based policy allows the"
+                                    + " lambda:GetLayerVersion action", 403);
+                }
+                LOG.warnv("Layer {0} belongs to another account; recorded on the function but its"
+                        + " content will not be mounted at /opt", arn);
+                continue;
+            }
+            throw new AwsException("InvalidParameterValueException",
+                    "Layer version " + arn + " does not exist.", 400);
         }
     }
 
@@ -1290,6 +1319,8 @@ public class LambdaService implements ResourceProvider {
                 ? b
                 : null;
 
+        Integer maximumRetryAttempts = parseMaximumRetryAttempts(request);
+
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
         EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
@@ -1315,6 +1346,7 @@ public class LambdaService implements ResourceProvider {
         esm.setScalingConfig(scalingConfig);
         esm.setFunctionResponseTypes(functionResponseTypes);
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
+        esm.setMaximumRetryAttempts(maximumRetryAttempts);
         esm.setDestinationConfig(destinationConfig);
         esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
@@ -1698,6 +1730,28 @@ public class LambdaService implements ResourceProvider {
         return (int) value;
     }
 
+    private Integer parseMaximumRetryAttempts(Map<String, Object> request) {
+        Object raw = request.get("MaximumRetryAttempts");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Number)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be a numeric value", 400);
+        }
+        double d = ((Number) raw).doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be an integer", 400);
+        }
+        long value = ((Number) raw).longValue();
+        if (value < -1 || value > 10000) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be between -1 and 10000 (got " + value + ")", 400);
+        }
+        return (int) value;
+    }
+
     private void startPollingHelper(EventSourceMapping esm) {
         if (esm.getEventSourceArn() == null) {
             return;
@@ -1767,6 +1821,10 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("BisectBatchOnFunctionError")) {
             Object raw = request.get("BisectBatchOnFunctionError");
             esm.setBisectBatchOnFunctionError(raw instanceof Boolean b ? b : null);
+        }
+
+        if (request.containsKey("MaximumRetryAttempts")) {
+            esm.setMaximumRetryAttempts(parseMaximumRetryAttempts(request));
         }
 
         if (request.containsKey("DestinationConfig")) {

@@ -3,12 +3,6 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
-import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
-import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
-import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
-import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
-import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
-import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ReplacementCleanup;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
@@ -29,16 +23,11 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
-import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
-import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
-import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
-import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
-import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
@@ -52,13 +41,6 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
-import io.github.hectorvent.floci.services.rds.RdsService;
-import io.github.hectorvent.floci.services.rds.model.DbCluster;
-import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
-import io.github.hectorvent.floci.services.rds.model.DbInstance;
-import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
-import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
-import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
@@ -73,14 +55,11 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
-import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
-import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
@@ -127,19 +106,12 @@ public class CloudFormationResourceProvisioner {
     private static final String INLINE_CLEANUP_ROLE_TARGETS_ATTR = "__FlociInlineCleanupRoleTargets";
     private static final String INLINE_CLEANUP_USER_TARGETS_ATTR = "__FlociInlineCleanupUserTargets";
     private static final String INLINE_CLEANUP_GROUP_TARGETS_ATTR = "__FlociInlineCleanupGroupTargets";
-    private static final String SFN_NAME_MODE_ATTR = "FlociStepFunctionsNameMode";
-    static final String SFN_UPDATE_SNAPSHOT_ATTR = "__FlociStepFunctionsUpdateSnapshot";
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
     private static final int GENERATED_NAME_SUFFIX_LENGTH = 12;
-    private static final int STEP_FUNCTIONS_NAME_MAX_LENGTH = 80;
-    private static final String SECRET_TARGET_MANAGED_KEYS_ATTR = "__FlociSecretTargetManagedKeys";
-    private static final String SECRET_TARGET_OWNER_ATTR = "__FlociSecretTargetOwner";
     private static final String DDB_REPLICA_TABLE_NAME_ATTR = "TableName";
     private static final String DDB_REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
     private static final String DDB_REPLICA_SKIP_DELETION_ATTR = "__FlociDynamoDbReplicaSkipDeletion";
-    private static final List<String> SECRET_TARGET_CONNECTION_KEYS = List.of(
-            "engine", "host", "port", "dbname", "dbInstanceIdentifier", "dbClusterIdentifier");
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
     private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
@@ -175,7 +147,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::EKS::Nodegroup",
             "AWS::IAM::ManagedPolicy",
             "AWS::IAM::Policy",
-            "AWS::SecretsManager::SecretTargetAttachment",
             "Custom::DynamoDBReplica");
 
     static final Set<String> LEGACY_SWITCH_TYPES = Set.of(
@@ -191,10 +162,7 @@ public class CloudFormationResourceProvisioner {
             "AWS::ApiGatewayV2::Integration",
             "AWS::ApiGatewayV2::Route",
             "AWS::ApiGatewayV2::Stage",
-            "AWS::AutoScaling::AutoScalingGroup",
-            "AWS::AutoScaling::LaunchConfiguration",
             "AWS::CloudFormation::CustomResource",
-            "AWS::CloudFront::Distribution",
             "AWS::DynamoDB::GlobalTable",
             "AWS::DynamoDB::Table",
             "AWS::EC2::Instance",
@@ -207,17 +175,7 @@ public class CloudFormationResourceProvisioner {
             "AWS::IAM::Policy",
             "AWS::Lambda::Function",
             "AWS::Lambda::LayerVersion",
-            "AWS::RDS::DBCluster",
-            "AWS::RDS::DBClusterParameterGroup",
-            "AWS::RDS::DBInstance",
-            "AWS::RDS::DBParameterGroup",
-            "AWS::RDS::DBProxy",
-            "AWS::RDS::DBProxyTargetGroup",
-            "AWS::RDS::DBSubnetGroup",
             "AWS::Route53::RecordSet",
-            "AWS::SecretsManager::Secret",
-            "AWS::SecretsManager::SecretTargetAttachment",
-            "AWS::StepFunctions::StateMachine",
             "Custom::DynamoDBReplica");
 
     /** Reserved attribute keys used to carry custom-resource state to the later Delete invocation. */
@@ -234,20 +192,14 @@ public class CloudFormationResourceProvisioner {
     private final DynamoDbService dynamoDbService;
     private final LambdaService lambdaService;
     private final IamService iamService;
-    private final SecretsManagerService secretsManagerService;
     private final ApiGatewayService apiGatewayService;
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final LambdaLayerService lambdaLayerService;
     private final ObjectMapper objectMapper;
     private final CustomResourceResponseStore customResourceResponseStore;
     private final ContainerReachableEndpoint reachableEndpoint;
-    private final StepFunctionsService stepFunctionsService;
     private final Ec2Service ec2Service;
-    private final RdsService rdsService;
     private final EksService eksService;
-    private final AutoScalingService autoScalingService;
-    private final DocDbService docDbService;
-    private final CloudFrontService cloudFrontService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
     // now-dead service deps above are cleared in the final cleanup once the switch is empty.
@@ -260,7 +212,6 @@ public class CloudFormationResourceProvisioner {
                                              SnsService snsService, DynamoDbService dynamoDbService,
                                              LambdaService lambdaService, IamService iamService,
                                              SsmService ssmService, KmsService kmsService,
-                                             SecretsManagerService secretsManagerService,
                                              ApiGatewayService apiGatewayService,
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              EcrService ecrService,
@@ -269,17 +220,12 @@ public class CloudFormationResourceProvisioner {
                                              ObjectMapper objectMapper,
                                              CustomResourceResponseStore customResourceResponseStore,
                                              ContainerReachableEndpoint reachableEndpoint,
-                                             StepFunctionsService stepFunctionsService,
                                              Ec2Service ec2Service,
-                                             RdsService rdsService,
                                              EksService eksService,
                                              CloudWatchLogsService logsService,
                                              KinesisService kinesisService,
                                              CloudWatchMetricsService cloudWatchMetricsService,
-                                             AutoScalingService autoScalingService,
                                              FirehoseService firehoseService,
-                                             DocDbService docDbService,
-                                             CloudFrontService cloudFrontService,
                                              CloudFormationResourceRegistry resourceRegistry,
                                              CfnDynamicReferences dynamicReferences,
                                              EmulatorConfig config) {
@@ -288,20 +234,14 @@ public class CloudFormationResourceProvisioner {
         this.dynamoDbService = dynamoDbService;
         this.lambdaService = lambdaService;
         this.iamService = iamService;
-        this.secretsManagerService = secretsManagerService;
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaLayerService = lambdaLayerService;
         this.objectMapper = objectMapper;
         this.customResourceResponseStore = customResourceResponseStore;
         this.reachableEndpoint = reachableEndpoint;
-        this.stepFunctionsService = stepFunctionsService;
         this.ec2Service = ec2Service;
-        this.rdsService = rdsService;
         this.eksService = eksService;
-        this.autoScalingService = autoScalingService;
-        this.docDbService = docDbService;
-        this.cloudFrontService = cloudFrontService;
         this.resourceRegistry = resourceRegistry;
         this.dynamicReferences = dynamicReferences;
     }
@@ -357,9 +297,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::IAM::ManagedPolicy" ->
                         provisionIamManagedPolicy(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::InstanceProfile" -> provisionInstanceProfile(resource, properties, engine, accountId, stackName);
-                case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
-                case "AWS::SecretsManager::SecretTargetAttachment" ->
-                        provisionSecretTargetAttachment(resource, properties, engine, region, stackName);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
                 case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
@@ -373,14 +310,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ApiGatewayV2::Integration" -> provisionApiGatewayV2Integration(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Stage" -> provisionApiGatewayV2Stage(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Deployment" -> provisionApiGatewayV2Deployment(resource, properties, engine, region);
-                case "AWS::StepFunctions::StateMachine" ->
-                        provisionStepFunctionsStateMachine(
-                                resource,
-                                properties,
-                                engine,
-                                region,
-                                accountId,
-                                stackName);
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
                 case "Custom::DynamoDBReplica" -> provisionDynamoDbReplica(resource, properties, engine, region);
@@ -389,26 +318,8 @@ public class CloudFormationResourceProvisioner {
                 // fake physical id. Topological ordering guarantees parents are provisioned first.
                 case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
-                // RDS. DBInstance/DBCluster start real RDS containers (same as the direct API).
-                case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName, region);
-                case "AWS::RDS::DBParameterGroup" ->
-                        provisionDbParameterGroup(resource, properties, engine, stackName, region);
-                case "AWS::RDS::DBClusterParameterGroup" ->
-                        provisionDbClusterParameterGroup(
-                                resource, properties, engine, stackName, region);
-                case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName, region);
-                case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName, region);
-                case "AWS::RDS::DBProxy" -> provisionDbProxy(resource, properties, engine, region);
-                case "AWS::RDS::DBProxyTargetGroup" ->
-                        provisionDbProxyTargetGroup(resource, properties, engine, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
-                case "AWS::AutoScaling::LaunchConfiguration" ->
-                        provisionLaunchConfiguration(resource, properties, engine, region, stackName);
-                case "AWS::AutoScaling::AutoScalingGroup" ->
-                        provisionAutoScalingGroup(resource, properties, engine, region, stackName);
-                case "AWS::CloudFront::Distribution" ->
-                        provisionCloudFrontDistribution(resource, properties, engine);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -557,10 +468,6 @@ public class CloudFormationResourceProvisioner {
             deleteCustomResource(resource, region);
             return;
         }
-        if ("AWS::SecretsManager::SecretTargetAttachment".equals(resourceType)) {
-            deleteSecretTargetAttachment(resource, region);
-            return;
-        }
         // Nodegroup deletion needs both the cluster name (from a Fn::GetAtt attribute) and the
         // nodegroup name (the physical id), which the type/physicalId delete path can't provide.
         if ("AWS::EKS::Nodegroup".equals(resourceType)) {
@@ -629,34 +536,13 @@ public class CloudFormationResourceProvisioner {
             case "AWS::IAM::Policy" -> { }
             case "AWS::IAM::ManagedPolicy" -> deletePolicySafe(physicalId);
             case "AWS::IAM::InstanceProfile" -> iamService.deleteInstanceProfile(physicalId);
-            case "AWS::SecretsManager::Secret" -> deleteSecretSafe(physicalId, region);
-            case "AWS::SecretsManager::SecretTargetAttachment" -> throw new AwsException(
-                    "ValidationError",
-                    "SecretTargetAttachment deletion requires the StackResource metadata that records its managed fields.",
-                    400);
             // No bus context on the type/physicalId path (e.g. CREATE-rollback); targets the default bus.
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
-            case "AWS::StepFunctions::StateMachine" -> stepFunctionsService.deleteStateMachine(physicalId);
             case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
             case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
             case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
-            case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId, region);
-            case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId, region);
-            case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId, region);
-            case "AWS::RDS::DBProxyTargetGroup" -> clearDbProxyTargetGroupSafe(physicalId, region);
-            case "AWS::RDS::DBSubnetGroup" ->
-                    rdsService.deleteDbSubnetGroup(physicalId, region);
-            case "AWS::RDS::DBParameterGroup" ->
-                    rdsService.deleteDbParameterGroup(physicalId, region);
-            case "AWS::RDS::DBClusterParameterGroup" ->
-                    rdsService.deleteDbClusterParameterGroup(physicalId, region);
             case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
-            case "AWS::AutoScaling::LaunchConfiguration" ->
-                    autoScalingService.deleteLaunchConfiguration(region, physicalId);
-            case "AWS::AutoScaling::AutoScalingGroup" ->
-                    autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
-            case "AWS::CloudFront::Distribution" -> cloudFrontService.removeDistribution(physicalId);
             // Warn for the same reason the create path does: the delete reports success over a
             // type nothing here removes, and at debug that is invisible at the default log level.
             // The line names the physical id without claiming a resource survives it: this arm
@@ -786,225 +672,11 @@ public class CloudFormationResourceProvisioner {
 
     // ── Auto Scaling ────────────────────────────────────────────────────────────
 
-    private void provisionLaunchConfiguration(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                              String region, String stackName) {
-        String explicitName = resolveOptional(props, "LaunchConfigurationName", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String name;
-        if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
-        } else if (priorPhysicalId != null) {
-            name = priorPhysicalId;
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
 
-        // Launch configurations have no update API on real AWS at all (any property change replaces
-        // the resource), so provision() being re-invoked on every UpdateStack means a same-named one
-        // already on file must be left alone rather than re-created (createLaunchConfiguration throws
-        // AlreadyExists).
-        LaunchConfiguration lc = sameNameExistingResource(priorPhysicalId, name,
-                n -> requireLaunchConfiguration(region, n));
-        if (lc == null) {
-            String associatePublicIp = resolveOptional(props, "AssociatePublicIpAddress", engine);
-            lc = autoScalingService.createLaunchConfiguration(region, name,
-                    resolveOptional(props, "InstanceId", engine),
-                    resolveOptional(props, "ImageId", engine),
-                    resolveOptional(props, "InstanceType", engine),
-                    resolveOptional(props, "KeyName", engine),
-                    resolveStringList(props, "SecurityGroups", engine),
-                    resolveOptional(props, "UserData", engine),
-                    resolveOptional(props, "IamInstanceProfile", engine),
-                    // Absent in the template means the subnet default applies, so
-                    // it stays null rather than collapsing to false.
-                    associatePublicIp == null || associatePublicIp.isBlank()
-                            ? null
-                            : Boolean.parseBoolean(associatePublicIp));
-            deleteRenamedResource(priorPhysicalId, name, n -> autoScalingService.deleteLaunchConfiguration(region, n),
-                    "launch configuration");
-        }
-        // Ref returns the launch configuration name.
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
-    }
 
-    private LaunchConfiguration requireLaunchConfiguration(String region, String name) {
-        List<LaunchConfiguration> found = autoScalingService.describeLaunchConfigurations(region, List.of(name));
-        if (found.isEmpty()) {
-            throw new AwsException("ValidationError", "Launch configuration '" + name + "' not found.", 400);
-        }
-        return found.getFirst();
-    }
 
-    private void provisionAutoScalingGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                           String region, String stackName) {
-        String explicitName = resolveOptional(props, "AutoScalingGroupName", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String name;
-        if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
-        } else if (priorPhysicalId != null) {
-            name = priorPhysicalId;
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
-        String launchConfigName = resolveOptional(props, "LaunchConfigurationName", engine);
-        String launchTemplateId = null;
-        String launchTemplateName = null;
-        String launchTemplateVersion = null;
-        if (props != null && props.has("LaunchTemplate")) {
-            JsonNode lt = props.get("LaunchTemplate");
-            // Id and name are distinct lookup keys in Auto Scaling: passing an lt- id in the name slot
-            // never matches a stored template.
-            launchTemplateId = engine.resolve(lt.path("LaunchTemplateId"));
-            launchTemplateName = engine.resolve(lt.path("LaunchTemplateName"));
-            launchTemplateVersion = engine.resolve(lt.path("Version"));
-        }
-        MixedInstancesPolicy mixedInstancesPolicy = resolveMixedInstancesPolicy(props, engine);
-        int minSize = parseIntProp(props, "MinSize", engine, 0);
-        int maxSize = parseIntProp(props, "MaxSize", engine, 0);
-        int desiredCapacity = parseIntProp(props, "DesiredCapacity", engine, 0);
-        int cooldown = parseIntProp(props, "Cooldown", engine, 0);
-        List<String> availabilityZones = resolveStringList(props, "AvailabilityZones", engine);
-        List<String> subnetIds = resolveStringList(props, "VPCZoneIdentifier", engine);
-        String healthCheckType = resolveOptional(props, "HealthCheckType", engine);
-        int healthCheckGracePeriod = parseIntProp(props, "HealthCheckGracePeriod", engine, 0);
-        List<String> terminationPolicies = resolveStringList(props, "TerminationPolicies", engine);
 
-        // provision() re-runs on every UpdateStack, so a same-named group already on file must be
-        // reconciled via UpdateAutoScalingGroup instead of re-created (createAutoScalingGroup throws
-        // AlreadyExists). TargetGroupARNs/LoadBalancerNames/Tags aren't reconciled here: they need
-        // their own attach/detach and tagging APIs that updateAutoScalingGroup doesn't cover.
-        AutoScalingGroup existing = sameNameExistingResource(priorPhysicalId, name,
-                n -> requireAutoScalingGroup(region, n));
-        AutoScalingGroup asg;
-        if (existing != null) {
-            autoScalingService.updateAutoScalingGroup(region, name,
-                    blankToNull(launchConfigName),
-                    blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
-                    mixedInstancesPolicy, minSize, maxSize, desiredCapacity, cooldown,
-                    availabilityZones, subnetIds, healthCheckType, healthCheckGracePeriod, terminationPolicies);
-            asg = requireAutoScalingGroup(region, name);
-        } else {
-            asg = autoScalingService.createAutoScalingGroup(region, name,
-                    blankToNull(launchConfigName),
-                    blankToNull(launchTemplateId), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
-                    mixedInstancesPolicy, minSize, maxSize, desiredCapacity, cooldown,
-                    availabilityZones, subnetIds,
-                    resolveStringList(props, "TargetGroupARNs", engine),
-                    resolveStringList(props, "LoadBalancerNames", engine),
-                    healthCheckType, healthCheckGracePeriod, terminationPolicies,
-                    resolveAsgTags(props, engine),
-                    resolveAsgTagPropagation(props, engine));
-            deleteRenamedResource(priorPhysicalId, name, n -> autoScalingService.deleteAutoScalingGroup(region, n, true),
-                    "Auto Scaling group");
-        }
-        // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
-        r.setPhysicalId(name);
-        r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
-    }
 
-    private AutoScalingGroup requireAutoScalingGroup(String region, String name) {
-        List<AutoScalingGroup> found = autoScalingService.describeAutoScalingGroups(region, List.of(name));
-        if (found.isEmpty()) {
-            throw new AwsException("ValidationError", "Auto Scaling group '" + name + "' not found.", 400);
-        }
-        return found.getFirst();
-    }
-
-    /**
-     * Builds the {@code MixedInstancesPolicy} of an Auto Scaling group from template properties, in the
-     * same shape the Query API parser produces. Returns {@code null} when the property is absent, so
-     * that the group falls back to its {@code LaunchTemplate} or {@code LaunchConfigurationName}.
-     */
-    private MixedInstancesPolicy resolveMixedInstancesPolicy(JsonNode props,
-                                                             CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("MixedInstancesPolicy") || props.get("MixedInstancesPolicy").isNull()) {
-            return null;
-        }
-        JsonNode policyNode = props.get("MixedInstancesPolicy");
-        MixedInstancesPolicy policy = new MixedInstancesPolicy();
-
-        JsonNode launchTemplateNode = policyNode.path("LaunchTemplate");
-        if (launchTemplateNode.isObject()) {
-            MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
-            JsonNode specNode = launchTemplateNode.path("LaunchTemplateSpecification");
-            if (specNode.isObject()) {
-                var specification = new MixedInstancesPolicy.LaunchTemplateSpecification();
-                specification.setLaunchTemplateId(blankToNull(engine.resolve(specNode.path("LaunchTemplateId"))));
-                specification.setLaunchTemplateName(blankToNull(engine.resolve(specNode.path("LaunchTemplateName"))));
-                specification.setVersion(blankToNull(engine.resolve(specNode.path("Version"))));
-                launchTemplate.setLaunchTemplateSpecification(specification);
-            }
-            for (JsonNode overrideNode : launchTemplateNode.path("Overrides")) {
-                String instanceType = engine.resolve(overrideNode.path("InstanceType"));
-                if (instanceType != null && !instanceType.isBlank()) {
-                    var override = new MixedInstancesPolicy.LaunchTemplateOverride();
-                    override.setInstanceType(instanceType);
-                    launchTemplate.getOverrides().add(override);
-                }
-            }
-            policy.setLaunchTemplate(launchTemplate);
-        }
-
-        JsonNode distributionNode = policyNode.path("InstancesDistribution");
-        if (distributionNode.isObject()) {
-            var distribution = new MixedInstancesPolicy.InstancesDistribution();
-            distribution.setOnDemandBaseCapacity(parseOptionalInt("OnDemandBaseCapacity",
-                    engine.resolve(distributionNode.path("OnDemandBaseCapacity"))));
-            distribution.setOnDemandPercentageAboveBaseCapacity(
-                    parseOptionalInt("OnDemandPercentageAboveBaseCapacity",
-                            engine.resolve(distributionNode.path("OnDemandPercentageAboveBaseCapacity"))));
-            distribution.setSpotAllocationStrategy(
-                    blankToNull(engine.resolve(distributionNode.path("SpotAllocationStrategy"))));
-            policy.setInstancesDistribution(distribution);
-        }
-        return policy;
-    }
-
-    /**
-     * Reads an optional integer property. A value that is present but not a number is a template
-     * error, and AWS rejects it rather than treating it as absent.
-     */
-    private Integer parseOptionalInt(String field, String value) {
-        if (value == null || value.isBlank()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(value.trim());
-        } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError",
-                    "Value of property " + field + " must be an integer.", 400);
-        }
-    }
-
-    private Map<String, String> resolveAsgTags(JsonNode props, CloudFormationTemplateEngine engine) {
-        Map<String, String> tags = new LinkedHashMap<>();
-        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
-        if (tagsNode != null && tagsNode.isArray()) {
-            for (JsonNode tag : tagsNode) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    tags.put(key, engine.resolve(tag.path("Value")));
-                }
-            }
-        }
-        return tags;
-    }
-
-    private Map<String, Boolean> resolveAsgTagPropagation(JsonNode props, CloudFormationTemplateEngine engine) {
-        Map<String, Boolean> propagation = new LinkedHashMap<>();
-        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
-        if (tagsNode != null && tagsNode.isArray()) {
-            for (JsonNode tag : tagsNode) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    propagation.put(key, Boolean.parseBoolean(engine.resolve(tag.path("PropagateAtLaunch"))));
-                }
-            }
-        }
-        return propagation;
-    }
 
     private List<String> resolveStringList(JsonNode props, String field, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(field)) {
@@ -1015,9 +687,6 @@ public class CloudFormationResourceProvisioner {
         return new ArrayList<>(engine.resolveStringList(props.get(field)));
     }
 
-    private String blankToNull(String value) {
-        return (value == null || value.isBlank()) ? null : value;
-    }
 
     private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                       String region) {
@@ -1108,110 +777,6 @@ public class CloudFormationResourceProvisioner {
         if (instance.getPlacement() != null && instance.getPlacement().getAvailabilityZone() != null) {
             r.getAttributes().put("AvailabilityZone", instance.getPlacement().getAvailabilityZone());
         }
-    }
-
-    // ── RDS ─────────────────────────────────────────────────────────────────────
-
-    private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                        String stackName, String region) {
-        String explicitName = resolveOptional(props, "DBSubnetGroupName", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String name;
-        if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
-        } else if (priorPhysicalId != null) {
-            // No explicit name: keep the name RDS already has on file instead of generating a fresh
-            // one on every update, which would otherwise orphan the previously provisioned group.
-            name = priorPhysicalId;
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
-        }
-        String description = firstNonBlank(resolveOptional(props, "DBSubnetGroupDescription", engine),
-                "Managed by CloudFormation");
-        // SubnetIds may be a literal array, or a list-valued intrinsic — e.g. CDK's
-        // Fn::Split over a cross-stack Fn::ImportValue when the source VPC exports its
-        // subnet ids as one comma-joined value (issue #2937).
-        List<String> subnetIds = props != null && props.has("SubnetIds")
-                ? engine.resolveStringList(props.get("SubnetIds"))
-                : new ArrayList<>();
-
-        // On UpdateStack, provision() is re-invoked for every resource regardless of whether its
-        // properties actually changed, so a same-named group already on file must be reconciled in
-        // place rather than re-created (createDbSubnetGroup throws DBSubnetGroupAlreadyExists).
-        DbSubnetGroup existing = sameNameExistingResource(priorPhysicalId, name, n -> rdsService.getDbSubnetGroup(n, region));
-        DbSubnetGroup group;
-        if (existing != null) {
-            group = rdsService.modifyDbSubnetGroup(name, subnetIds, region);
-        } else {
-            group = rdsService.createDbSubnetGroup(name, description, subnetIds, region);
-            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbSubnetGroup(id), "DB subnet group");
-        }
-        r.setPhysicalId(group.getDbSubnetGroupName());
-        r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
-    }
-
-    private void provisionDbParameterGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                           String stackName, String region) {
-        String explicitName = resolveOptional(props, "DBParameterGroupName", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String name;
-        if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
-        } else if (priorPhysicalId != null) {
-            name = priorPhysicalId;
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
-        }
-        String family = resolveOptional(props, "Family", engine);
-        String description = firstNonBlank(resolveOptional(props, "Description", engine),
-                "Managed by CloudFormation");
-
-        // DBParameterGroupName, Family and Description are all immutable on real AWS (any change
-        // replaces the resource), so a same-named group already on file is a no-op, not a re-create.
-        DbParameterGroup existing = sameNameExistingResource(priorPhysicalId, name,
-                n -> rdsService.getDbParameterGroup(n, region));
-        DbParameterGroup group;
-        if (existing != null) {
-            group = existing;
-        } else {
-            group = rdsService.createDbParameterGroup(name, family, description, region);
-            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbParameterGroup(id, region),
-                    "DB parameter group");
-        }
-        r.setPhysicalId(group.getDbParameterGroupName());
-        r.getAttributes().put("DBParameterGroupName", group.getDbParameterGroupName());
-    }
-
-    private void provisionDbClusterParameterGroup(StackResource r, JsonNode props,
-                                                  CloudFormationTemplateEngine engine,
-                                                  String stackName, String region) {
-        String explicitName = resolveOptional(props, "DBClusterParameterGroupName", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String name;
-        if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
-        } else if (priorPhysicalId != null) {
-            name = priorPhysicalId;
-        } else {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
-        }
-        String family = resolveOptional(props, "Family", engine);
-        String description = firstNonBlank(resolveOptional(props, "Description", engine),
-                "Managed by CloudFormation");
-
-        // Same immutability rationale as provisionDbParameterGroup above.
-        DbClusterParameterGroup existing = sameNameExistingResource(priorPhysicalId, name,
-                n -> rdsService.getDbClusterParameterGroup(n, region));
-        DbClusterParameterGroup group;
-        if (existing != null) {
-            group = existing;
-        } else {
-            group = rdsService.createDbClusterParameterGroup(name, family, description, region);
-            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbClusterParameterGroup(id, region),
-                    "DB cluster parameter group");
-        }
-        r.setPhysicalId(group.getDbClusterParameterGroupName());
-        r.getAttributes().put("DBClusterParameterGroupName", group.getDbClusterParameterGroupName());
     }
 
     /** The VPC a security group would land in for this template value: the default when omitted. */
@@ -1328,409 +893,6 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    /**
-     * Looks up {@code name} via {@code lookup} when this is an update re-invocation for the same
-     * physical resource (i.e. {@code priorPhysicalId} is set and unchanged), returning {@code null}
-     * either when this is a fresh create, a rename (handled as a replacement by the caller), or the
-     * resource is missing on the backend despite the stack still remembering a physical id (e.g. it
-     * was deleted out of band; the caller then falls back to creating it fresh).
-     */
-    private <T> T sameNameExistingResource(String priorPhysicalId, String name, java.util.function.Function<String, T> lookup) {
-        if (priorPhysicalId == null || !priorPhysicalId.equals(name)) {
-            return null;
-        }
-        try {
-            return lookup.apply(name);
-        } catch (AwsException notFound) {
-            // Expected when the resource was deleted out of band since the prior update; the
-            // caller falls back to creating it fresh under the same name.
-            LOG.debugv(notFound, "No existing {0} found on file, falling back to create", name);
-            return null;
-        }
-    }
-
-    /**
-     * Best-effort cleanup of the previous physical resource after a rename forced a fresh create
-     * under the new name (mirrors provisionLogGroup's create-new-then-delete-old handling). Failures
-     * are logged, not thrown: the new resource was already created successfully, so surfacing a
-     * delete failure here would report the update as failed despite the stack now being in a usable
-     * (if slightly leaky) state.
-     */
-    private void deleteRenamedResource(String priorPhysicalId, String newName, java.util.function.Consumer<String> delete,
-                                       String resourceKind) {
-        if (priorPhysicalId == null || priorPhysicalId.equals(newName)) {
-            return;
-        }
-        try {
-            delete.accept(priorPhysicalId);
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Failed to delete renamed {0} {1} after replacement by {2}",
-                    resourceKind, priorPhysicalId, newName);
-        }
-    }
-
-    private void provisionDbInstance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                     String stackName, String region) {
-        String explicitId = resolveOptional(props, "DBInstanceIdentifier", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String id;
-        if (explicitId != null && !explicitId.isBlank()) {
-            id = explicitId;
-        } else if (priorPhysicalId != null) {
-            id = priorPhysicalId;
-        } else {
-            id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
-        }
-
-        // provision() is re-invoked on every UpdateStack for every resource, so a same-id instance
-        // already on file must be reconciled rather than re-created (createDbInstance throws
-        // DBInstanceAlreadyExists). Only the properties RdsService.modifyDbInstance actually supports
-        // (password, IAM auth, subnet group) are reconciled here; other property changes (engine,
-        // instance class, allocated storage, ...) are a pre-existing gap in that method, not addressed
-        // by this fix.
-        DbInstance instance = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbInstance);
-        if (instance != null) {
-            instance = rdsService.modifyDbInstance(
-                    id,
-                    resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
-                    parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                    resolveOptional(props, "DBSubnetGroupName", engine));
-        } else {
-            instance = rdsService.createDbInstance(
-                    id,
-                    resolveOptional(props, "Engine", engine),
-                    resolveOptional(props, "EngineVersion", engine),
-                    resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUsername", engine), region, false),
-                    resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
-                    resolveOptional(props, "DBName", engine),
-                    firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
-                    parseIntProp(props, "AllocatedStorage", engine, 20),
-                    parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                    resolveOptional(props, "DBParameterGroupName", engine),
-                    resolveOptional(props, "DBSubnetGroupName", engine),
-                    resolveOptional(props, "DBClusterIdentifier", engine),
-                    null, false, false, null, Map.of(), region);
-            deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbInstance, "DB instance");
-        }
-        r.setPhysicalId(instance.getDbInstanceIdentifier());
-        r.getAttributes().put("DBInstanceIdentifier", instance.getDbInstanceIdentifier());
-        if (instance.getEndpoint() != null) {
-            r.getAttributes().put("Endpoint.Address", instance.getEndpoint().address());
-            r.getAttributes().put("Endpoint.Port", String.valueOf(instance.getEndpoint().port()));
-        }
-        if (instance.getDbInstanceArn() != null) {
-            r.getAttributes().put("DBInstanceArn", instance.getDbInstanceArn());
-        }
-    }
-
-    private void provisionDbCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                    String stackName, String region) {
-        String explicitId = resolveOptional(props, "DBClusterIdentifier", engine);
-        String priorPhysicalId = r.getPhysicalId();
-        String id;
-        if (explicitId != null && !explicitId.isBlank()) {
-            id = explicitId;
-        } else if (priorPhysicalId != null) {
-            id = priorPhysicalId;
-        } else {
-            id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
-        }
-
-        // Same re-invocation rationale as provisionDbInstance above; modifyDbCluster only reconciles
-        // password and IAM auth, mirroring that method's existing scope.
-        DbCluster cluster = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbCluster);
-        if (cluster != null) {
-            cluster = rdsService.modifyDbCluster(
-                    id,
-                    resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
-                    parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                    parseServerlessV2Capacity(props, "MinCapacity", engine),
-                    parseServerlessV2Capacity(props, "MaxCapacity", engine),
-                    parseServerlessV2SecondsUntilAutoPause(props, engine), region);
-        } else {
-            Double serverlessV2MinCapacity = parseServerlessV2Capacity(props, "MinCapacity", engine);
-            Double serverlessV2MaxCapacity = parseServerlessV2Capacity(props, "MaxCapacity", engine);
-            Integer serverlessV2SecondsUntilAutoPause =
-                    parseServerlessV2SecondsUntilAutoPause(props, engine);
-            String engineName = resolveOptional(props, "Engine", engine);
-            String engineVersion = resolveOptional(props, "EngineVersion", engine);
-            String masterUsername = resolveDynamicReferences(
-                    resolveOptionalWithoutDynamicReferences(props, "MasterUsername", engine), region, false);
-            String masterPassword = resolveDynamicReferences(
-                    resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true);
-            String databaseName = resolveOptional(props, "DatabaseName", engine);
-            boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
-            String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
-            if (serverlessV2MinCapacity == null && serverlessV2MaxCapacity == null
-                    && serverlessV2SecondsUntilAutoPause == null) {
-                cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                        masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region);
-            } else {
-                cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                        masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
-                        serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
-            }
-            deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbCluster, "DB cluster");
-        }
-        r.setPhysicalId(cluster.getDbClusterIdentifier());
-        r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
-        if (cluster.getEndpoint() != null) {
-            r.getAttributes().put("Endpoint.Address", cluster.getEndpoint().address());
-            r.getAttributes().put("Endpoint.Port", String.valueOf(cluster.getEndpoint().port()));
-        }
-        if (cluster.getReaderEndpoint() != null) {
-            r.getAttributes().put("ReadEndpoint.Address", cluster.getReaderEndpoint().address());
-        }
-        if (cluster.getDbClusterArn() != null) {
-            r.getAttributes().put("DBClusterArn", cluster.getDbClusterArn());
-        }
-    }
-
-    private Double parseServerlessV2Capacity(JsonNode props, String field,
-                                             CloudFormationTemplateEngine engine) {
-        JsonNode config = props.get("ServerlessV2ScalingConfiguration");
-        if (config == null || config.isNull()) {
-            return null;
-        }
-        String resolved = resolveOptional(config, field, engine);
-        if (resolved == null || resolved.isBlank()) {
-            return null;
-        }
-        try {
-            return Double.valueOf(resolved.trim());
-        } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError",
-                    "ServerlessV2ScalingConfiguration " + field + " must be a number.", 400);
-        }
-    }
-
-    private Integer parseServerlessV2SecondsUntilAutoPause(
-            JsonNode props, CloudFormationTemplateEngine engine) {
-        JsonNode config = props.get("ServerlessV2ScalingConfiguration");
-        if (config == null || config.isNull()) {
-            return null;
-        }
-        String resolved = resolveOptional(config, "SecondsUntilAutoPause", engine);
-        if (resolved == null || resolved.isBlank()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(resolved.trim());
-        } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError",
-                    "ServerlessV2ScalingConfiguration SecondsUntilAutoPause must be an integer.", 400);
-        }
-    }
-
-    private void provisionDbProxy(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                  String region) {
-        String name = resolveOptional(props, "DBProxyName", engine);
-        String engineFamily = resolveOptional(props, "EngineFamily", engine);
-        String defaultAuthScheme = resolveOptional(props, "DefaultAuthScheme", engine);
-        if (defaultAuthScheme == null) {
-            defaultAuthScheme = "NONE";
-        } else if (defaultAuthScheme.isBlank()) {
-            throw new AwsException("InvalidParameterValue",
-                    "DefaultAuthScheme must be NONE or IAM_AUTH.", 400);
-        }
-        String endpointNetworkType = resolveOptional(props, "EndpointNetworkType", engine);
-        String targetConnectionNetworkType = resolveOptional(
-                props, "TargetConnectionNetworkType", engine);
-        validateIpv4DbProxyNetworkType(endpointNetworkType,
-                "EndpointNetworkType", true, "IPV4, IPV6, or DUAL");
-        validateIpv4DbProxyNetworkType(targetConnectionNetworkType,
-                "TargetConnectionNetworkType", false, "IPV4 or IPV6");
-        boolean requireTls = parseBoolProp(props, "RequireTLS", engine);
-        boolean debugLogging = parseBoolProp(props, "DebugLogging", engine);
-        Integer configuredIdleClientTimeout = parseOptionalIntProp(props, "IdleClientTimeout", engine);
-        int idleClientTimeout = configuredIdleClientTimeout != null ? configuredIdleClientTimeout : 1800;
-        String roleArn = resolveOptional(props, "RoleArn", engine);
-        List<String> subnetIds = resolveStringList(props, "VpcSubnetIds", engine);
-        if (subnetIds.stream().distinct().count() < 2) {
-            throw new AwsException("InvalidParameterValue",
-                    "AWS::RDS::DBProxy VpcSubnetIds must contain at least two distinct subnet IDs.", 400);
-        }
-        List<String> sgIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
-        List<DbProxyAuth> auth = parseProxyAuth(props, engine);
-        boolean iamAuth = "IAM_AUTH".equalsIgnoreCase(defaultAuthScheme)
-                || auth.stream().anyMatch(a ->
-                "REQUIRED".equalsIgnoreCase(a.getIamAuth())
-                        || "ENABLED".equalsIgnoreCase(a.getIamAuth()));
-        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
-        var proxy = r.getPhysicalId() == null
-                ? rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth,
-                defaultAuthScheme, roleArn, subnetIds, sgIds, auth, idleClientTimeout,
-                debugLogging, tags, region)
-                : updateDbProxy(r, name, engineFamily, defaultAuthScheme, requireTls,
-                idleClientTimeout, debugLogging, roleArn, subnetIds, sgIds, auth, tags, region);
-        r.setPhysicalId(proxy.getDbProxyName());              // Ref -> DBProxyName
-        r.getAttributes().put("Endpoint", proxy.getEndpoint());   // GetAtt "Endpoint" (bare host)
-        r.getAttributes().put("DBProxyArn", proxy.getDbProxyArn());
-        if (proxy.getVpcId() != null) {
-            r.getAttributes().put("VpcId", proxy.getVpcId());
-        }
-    }
-
-    private io.github.hectorvent.floci.services.rds.model.DbProxy updateDbProxy(
-            StackResource resource, String name, String engineFamily, String defaultAuthScheme,
-            boolean requireTls, int idleClientTimeout, boolean debugLogging, String roleArn,
-            List<String> subnetIds, List<String> securityGroupIds, List<DbProxyAuth> auth,
-            Map<String, String> tags, String region) {
-        var existing = rdsService.getDbProxy(resource.getPhysicalId(), region);
-        if (!Objects.equals(existing.getDbProxyName(), name)
-                || engineFamily == null
-                || !existing.getEngineFamily().equalsIgnoreCase(engineFamily)
-                || !Set.copyOf(existing.getVpcSubnetIds()).equals(Set.copyOf(subnetIds))) {
-            throw new AwsException("UnsupportedOperation",
-                    "Changing DBProxyName, EngineFamily, or VpcSubnetIds requires CloudFormation "
-                            + "replacement, which is not yet supported by Floci.", 400);
-        }
-        return rdsService.modifyDbProxy(existing.getDbProxyName(), defaultAuthScheme, auth,
-                requireTls, idleClientTimeout, debugLogging, roleArn,
-                securityGroupIds, tags, region);
-    }
-
-    private void provisionDbProxyTargetGroup(StackResource r, JsonNode props,
-                                             CloudFormationTemplateEngine engine, String region) {
-        String dbProxyName = resolveOptional(props, "DBProxyName", engine);
-        String targetGroupName = resolveOptional(props, "TargetGroupName", engine);
-        if (!"default".equals(targetGroupName)) {
-            throw new AwsException("InvalidParameterValue",
-                    "AWS::RDS::DBProxyTargetGroup TargetGroupName must be default.", 400);
-        }
-        List<String> clusterIds = resolveStringList(props, "DBClusterIdentifiers", engine);
-        List<String> instanceIds = resolveStringList(props, "DBInstanceIdentifiers", engine);
-        Integer maxConn = null;
-        Integer maxIdle = null;
-        Integer connectionBorrowTimeout = null;
-        String initQuery = null;
-        List<String> sessionPinningFilters = List.of();
-        if (props != null && props.has("ConnectionPoolConfigurationInfo")) {
-            JsonNode cpc = props.get("ConnectionPoolConfigurationInfo");
-            maxConn = parseOptionalIntProp(cpc, "MaxConnectionsPercent", engine);
-            maxIdle = parseOptionalIntProp(cpc, "MaxIdleConnectionsPercent", engine);
-            connectionBorrowTimeout = parseOptionalIntProp(cpc, "ConnectionBorrowTimeout", engine);
-            initQuery = resolveOptional(cpc, "InitQuery", engine);
-            sessionPinningFilters = resolveStringList(cpc, "SessionPinningFilters", engine);
-        }
-        if (maxIdle != null && maxConn == null) {
-            throw new AwsException("InvalidParameterValue",
-                    "MaxConnectionsPercent is required when MaxIdleConnectionsPercent is specified.",
-                    400);
-        }
-        if (r.getPhysicalId() != null) {
-            var existing = rdsService.getDbProxyTargetGroupByArn(r.getPhysicalId(), region);
-            if (!Objects.equals(existing.getDbProxyName(), dbProxyName)
-                    || !Objects.equals(existing.getTargetGroupName(), targetGroupName)) {
-                throw new AwsException("UnsupportedOperation",
-                        "Changing DBProxyName or TargetGroupName requires CloudFormation replacement.",
-                        400);
-            }
-        }
-        var proxy = rdsService.getDbProxy(dbProxyName, region);
-        int effectiveMaxConnections = maxConn != null ? maxConn
-                : ("SQLSERVER".equals(proxy.getEngineFamily()) ? 10 : 100);
-        int effectiveMaxIdle = maxIdle != null ? maxIdle : effectiveMaxConnections / 2;
-        int effectiveBorrowTimeout = connectionBorrowTimeout != null ? connectionBorrowTimeout : 120;
-        var tg = rdsService.reconcileDbProxyTargetGroup(
-                dbProxyName, targetGroupName, clusterIds, instanceIds,
-                effectiveMaxConnections, effectiveMaxIdle, effectiveBorrowTimeout,
-                initQuery, sessionPinningFilters, region);
-        r.setPhysicalId(tg.getTargetGroupArn());              // Ref -> TargetGroupArn
-        r.getAttributes().put("TargetGroupArn", tg.getTargetGroupArn());
-        r.getAttributes().put("DBProxyName", tg.getDbProxyName());
-    }
-
-    private List<DbProxyAuth> parseProxyAuth(JsonNode props, CloudFormationTemplateEngine engine) {
-        List<DbProxyAuth> auth = new ArrayList<>();
-        if (props != null && props.has("Auth") && props.get("Auth").isArray()) {
-            for (JsonNode a : props.get("Auth")) {
-                DbProxyAuth entry = new DbProxyAuth();
-                entry.setAuthScheme(resolveOptional(a, "AuthScheme", engine));
-                entry.setSecretArn(resolveOptional(a, "SecretArn", engine));
-                entry.setIamAuth(resolveOptional(a, "IAMAuth", engine));
-                entry.setClientPasswordAuthType(resolveOptional(a, "ClientPasswordAuthType", engine));
-                entry.setDescription(resolveOptional(a, "Description", engine));
-                entry.setUserName(resolveOptional(a, "UserName", engine));
-                auth.add(entry);
-            }
-        }
-        return auth;
-    }
-
-    private void validateIpv4DbProxyNetworkType(
-            String value, String propertyName, boolean dualAllowed, String validValues) {
-        if (value == null) {
-            return;
-        }
-        if ("IPV4".equalsIgnoreCase(value)) {
-            return;
-        }
-        boolean supportedAwsValue = "IPV6".equalsIgnoreCase(value)
-                || (dualAllowed && "DUAL".equalsIgnoreCase(value));
-        if (value.isBlank() || !supportedAwsValue) {
-            throw new AwsException("InvalidParameterValue",
-                    propertyName + " must be " + validValues + ".", 400);
-        }
-        throw new AwsException("UnsupportedOperation",
-                propertyName + " " + value.toUpperCase()
-                        + " is not supported because Floci currently exposes IPv4 proxy networking only.",
-                400);
-    }
-
-    private void deleteDbProxySafe(String name, String region) {
-        try {
-            rdsService.deleteDbProxy(name, region);
-        } catch (AwsException e) {
-            if (!"DBProxyNotFoundFault".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("DB proxy already gone, treating as deleted: {0}", name);
-        }
-    }
-
-    private void clearDbProxyTargetGroupSafe(String targetGroupArn, String region) {
-        try {
-            rdsService.clearDbProxyTargetGroupByArn(targetGroupArn, region);
-        } catch (AwsException e) {
-            if (!"DBProxyTargetGroupNotFoundFault".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("DB proxy target group already gone, treating as deleted: {0}", targetGroupArn);
-        }
-    }
-
-    private static String firstNonBlank(String value, String fallback) {
-        return (value == null || value.isBlank()) ? fallback : value;
-    }
-
-    private int parseIntProp(JsonNode props, String name, CloudFormationTemplateEngine engine, int fallback) {
-        String value = resolveOptional(props, name, engine);
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
-    }
-
-    private Integer parseOptionalIntProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
-        String value = resolveOptional(props, name, engine);
-        if (value == null || value.isBlank()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(value.trim());
-        } catch (NumberFormatException e) {
-            throw new AwsException("InvalidParameterValue", name + " must be an integer.", 400);
-        }
-    }
-
-    private boolean parseBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
-        return Boolean.parseBoolean(resolveOptional(props, name, engine));
-    }
 
     // ── EKS ─────────────────────────────────────────────────────────────────────
 
@@ -2965,433 +2127,6 @@ public class CloudFormationResourceProvisioner {
 
     // ── KMS ───────────────────────────────────────────────────────────────────
 
-    // ── Secrets Manager ───────────────────────────────────────────────────────
-
-    private void provisionSecret(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                 String region, String accountId, String stackName) {
-        String name = resolveOptional(props, "Name", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 512, false);
-        }
-        String description = resolveOptional(props, "Description", engine);
-        String value = resolveSecretValue(props, engine);
-        var secret = secretsManagerService.createSecret(name, value, null, description, null, List.of(), region);
-        r.setPhysicalId(secret.getArn());
-        r.getAttributes().put("Arn", secret.getArn());
-        r.getAttributes().put("Name", name);
-    }
-
-    /** Provisions an AWS-compatible Secrets Manager database target attachment. */
-    private void provisionSecretTargetAttachment(StackResource r, JsonNode props,
-                                                 CloudFormationTemplateEngine engine, String region,
-                                                 String stackName) {
-        String secretId = requireSecretTargetProperty(props, "SecretId", engine);
-        String targetId = requireSecretTargetProperty(props, "TargetId", engine);
-        String targetType = requireSecretTargetProperty(props, "TargetType", engine);
-        validateSecretTargetType(targetType);
-        SecretTargetConnection connection = resolveSecretTargetConnection(targetType, targetId);
-
-        String previousSecretId = r.getPhysicalId();
-        String previousManagedKeys = r.getAttributes().get(SECRET_TARGET_MANAGED_KEYS_ATTR);
-        String attachmentOwner = r.getAttributes().getOrDefault(
-                SECRET_TARGET_OWNER_ATTR, stackName + "/" + r.getLogicalId());
-        String secretArn = secretsManagerService.describeSecret(secretId, region).getArn();
-        String previousSecretArn = canonicalExistingSecretArn(previousSecretId, secretArn, region);
-        boolean replacingSecret = previousSecretArn != null && !previousSecretArn.equals(secretArn);
-        boolean claimCreated = false;
-        boolean wroteNewSecret = false;
-        boolean detachedPreviousSecret = false;
-        ObjectNode currentSecretJson = null;
-        SecretTargetMutation previousDetach = null;
-
-        try {
-            claimCreated = secretsManagerService.claimTargetAttachment(
-                    secretArn, attachmentOwner, region);
-
-            currentSecretJson = readSecretJsonObject(secretArn, region);
-            ObjectNode desiredSecretJson = currentSecretJson.deepCopy();
-            SECRET_TARGET_CONNECTION_KEYS.forEach(desiredSecretJson::remove);
-
-            List<String> managedKeys = new ArrayList<>();
-            addSecretTargetConnection(desiredSecretJson, managedKeys, connection);
-
-            if (replacingSecret) {
-                previousDetach = prepareSecretTargetDetach(previousSecretArn, previousManagedKeys, region);
-            }
-            if (!desiredSecretJson.equals(currentSecretJson)) {
-                secretsManagerService.putSecretValue(
-                        secretArn, desiredSecretJson.toString(), null, null, region, null);
-                wroteNewSecret = true;
-            }
-            if (previousDetach != null) {
-                putSecretTargetMutation(previousDetach, region);
-                detachedPreviousSecret = true;
-            }
-            if (replacingSecret) {
-                secretsManagerService.releaseTargetAttachment(
-                        previousSecretArn, attachmentOwner, region);
-            }
-
-            r.setPhysicalId(secretArn);
-            r.getAttributes().remove("Arn");
-            r.getAttributes().put("Id", secretArn);
-            r.getAttributes().put(SECRET_TARGET_OWNER_ATTR, attachmentOwner);
-            r.getAttributes().put(SECRET_TARGET_MANAGED_KEYS_ATTR, String.join(",", managedKeys));
-        } catch (RuntimeException failure) {
-            if (detachedPreviousSecret && previousDetach != null) {
-                ObjectNode previousValue = previousDetach.originalValue();
-                attemptSecretTargetCleanup(failure, "restore previous secret " + previousSecretArn,
-                        () -> secretsManagerService.putSecretValue(
-                                previousSecretArn, previousValue.toString(),
-                                null, null, region, null));
-            }
-            if (wroteNewSecret && currentSecretJson != null) {
-                ObjectNode originalValue = currentSecretJson;
-                attemptSecretTargetCleanup(failure, "restore new secret " + secretArn,
-                        () -> secretsManagerService.putSecretValue(
-                                secretArn, originalValue.toString(),
-                                null, null, region, null));
-            }
-            if (claimCreated) {
-                attemptSecretTargetCleanup(failure, "release target attachment claim for " + secretArn,
-                        () -> secretsManagerService.releaseTargetAttachment(
-                                secretArn, attachmentOwner, region));
-            }
-            throw failure;
-        }
-    }
-
-    private static void validateSecretTargetType(String targetType) {
-        if (!Set.of(
-                "AWS::RDS::DBInstance",
-                "AWS::RDS::DBCluster",
-                "AWS::DocDB::DBInstance",
-                "AWS::DocDB::DBCluster").contains(targetType)) {
-            throw new AwsException("ValidationError",
-                    "SecretTargetAttachment TargetType " + targetType
-                            + " is not supported by Floci; supported values are AWS::RDS::DBInstance,"
-                            + " AWS::RDS::DBCluster, AWS::DocDB::DBInstance,"
-                            + " and AWS::DocDB::DBCluster.", 400);
-        }
-    }
-
-    private String canonicalExistingSecretArn(String secretId, String newSecretArn, String region) {
-        if (secretId == null || secretId.isBlank() || secretId.equals(newSecretArn)) {
-            return secretId;
-        }
-        try {
-            return secretsManagerService.describeSecret(secretId, region).getArn();
-        } catch (AwsException e) {
-            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
-                return null;
-            }
-            throw e;
-        }
-    }
-
-    private String requireSecretTargetProperty(JsonNode props, String name,
-                                               CloudFormationTemplateEngine engine) {
-        String value = resolveOptional(props, name, engine);
-        if (value == null || value.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "AWS::SecretsManager::SecretTargetAttachment requires " + name + ".", 400);
-        }
-        return value;
-    }
-
-    private ObjectNode readSecretJsonObject(String secretId, String region) {
-        return tryReadSecretJsonObject(secretId, region)
-                .orElseThrow(CloudFormationResourceProvisioner::invalidSecretTargetValue);
-    }
-
-    private Optional<ObjectNode> tryReadSecretJsonObject(String secretId, String region) {
-        String secretString = secretsManagerService
-                .getSecretValue(secretId, null, null, region)
-                .getSecretString();
-        if (secretString == null) {
-            return Optional.empty();
-        }
-        try {
-            JsonNode parsed = objectMapper.readTree(secretString);
-            if (parsed == null || !parsed.isObject()) {
-                return Optional.empty();
-            }
-            return Optional.of(((ObjectNode) parsed).deepCopy());
-        } catch (JsonProcessingException e) {
-            return Optional.empty();
-        }
-    }
-
-    private static AwsException invalidSecretTargetValue() {
-        return new AwsException("ValidationError",
-                "SecretString for AWS::SecretsManager::SecretTargetAttachment must be a JSON object.", 400);
-    }
-
-    private SecretTargetConnection resolveSecretTargetConnection(String targetType, String targetId) {
-        return switch (targetType) {
-            case "AWS::RDS::DBInstance" -> dbInstanceConnection(targetId);
-            case "AWS::RDS::DBCluster" -> dbClusterConnection(targetId);
-            case "AWS::DocDB::DBInstance" -> docDbInstanceConnection(targetId);
-            case "AWS::DocDB::DBCluster" -> docDbClusterConnection(targetId);
-            default -> throw new IllegalStateException("Validated target type was not handled: " + targetType);
-        };
-    }
-
-    private SecretTargetConnection dbInstanceConnection(String targetId) {
-        var instance = rdsService.getDbInstance(targetId);
-        if (instance == null || instance.getEngine() == null || instance.getEndpoint() == null
-                || instance.getEndpoint().address() == null
-                || instance.getEndpoint().address().isBlank()
-                || instance.getEndpoint().port() <= 0
-                || instance.getDbInstanceIdentifier() == null
-                || instance.getDbInstanceIdentifier().isBlank()) {
-            throw incompleteSecretTarget(targetId);
-        }
-        return new SecretTargetConnection(
-                instance.getEngine().name().toLowerCase(Locale.ROOT),
-                instance.getEndpoint().address(),
-                instance.getEndpoint().port(),
-                instance.getDbName(),
-                "dbInstanceIdentifier",
-                instance.getDbInstanceIdentifier());
-    }
-
-    private SecretTargetConnection dbClusterConnection(String targetId) {
-        var cluster = rdsService.getDbCluster(targetId);
-        if (cluster == null || cluster.getEngine() == null || cluster.getEndpoint() == null
-                || cluster.getEndpoint().address() == null
-                || cluster.getEndpoint().address().isBlank()
-                || cluster.getEndpoint().port() <= 0
-                || cluster.getDbClusterIdentifier() == null
-                || cluster.getDbClusterIdentifier().isBlank()) {
-            throw incompleteSecretTarget(targetId);
-        }
-        return new SecretTargetConnection(
-                cluster.getEngine().name().toLowerCase(Locale.ROOT),
-                cluster.getEndpoint().address(),
-                cluster.getEndpoint().port(),
-                cluster.getDatabaseName(),
-                "dbClusterIdentifier",
-                cluster.getDbClusterIdentifier());
-    }
-
-    private SecretTargetConnection docDbInstanceConnection(String targetId) {
-        var instance = docDbService.getDbInstance(targetId);
-        if (instance == null || instance.getEndpoint() == null
-                || instance.getEndpoint().isBlank()
-                || instance.getPort() <= 0
-                || instance.getDbInstanceIdentifier() == null
-                || instance.getDbInstanceIdentifier().isBlank()) {
-            throw incompleteSecretTarget(targetId);
-        }
-        return new SecretTargetConnection(
-                "mongo",
-                instance.getEndpoint(),
-                instance.getPort(),
-                null,
-                "dbInstanceIdentifier",
-                instance.getDbInstanceIdentifier());
-    }
-
-    private SecretTargetConnection docDbClusterConnection(String targetId) {
-        var cluster = docDbService.getDbCluster(targetId);
-        if (cluster == null || cluster.getEndpoint() == null
-                || cluster.getEndpoint().isBlank()
-                || cluster.getPort() <= 0
-                || cluster.getDbClusterIdentifier() == null
-                || cluster.getDbClusterIdentifier().isBlank()) {
-            throw incompleteSecretTarget(targetId);
-        }
-        return new SecretTargetConnection(
-                "mongo",
-                cluster.getEndpoint(),
-                cluster.getPort(),
-                null,
-                "dbClusterIdentifier",
-                cluster.getDbClusterIdentifier());
-    }
-
-    private static void addSecretTargetConnection(ObjectNode secretJson, List<String> managedKeys,
-                                                  SecretTargetConnection connection) {
-        putSecretTargetField(secretJson, managedKeys, "engine", connection.engine());
-        putSecretTargetField(secretJson, managedKeys, "host", connection.host());
-        putSecretTargetField(secretJson, managedKeys, "port", connection.port());
-        putOptionalSecretTargetField(secretJson, managedKeys, "dbname", connection.dbname());
-        putSecretTargetField(secretJson, managedKeys,
-                connection.identifierKey(), connection.identifier());
-    }
-
-    private static AwsException incompleteSecretTarget(String targetId) {
-        return new AwsException("ValidationError",
-                "SecretTargetAttachment target " + targetId + " has incomplete connection information.", 400);
-    }
-
-    private record SecretTargetConnection(String engine, String host, int port, String dbname,
-                                          String identifierKey, String identifier) {
-    }
-
-    private record SecretTargetMutation(String secretId, ObjectNode originalValue, ObjectNode value) {
-    }
-
-    private static void putSecretTargetField(ObjectNode secretJson, List<String> managedKeys,
-                                             String name, String value) {
-        secretJson.put(name, value);
-        managedKeys.add(name);
-    }
-
-    private static void putSecretTargetField(ObjectNode secretJson, List<String> managedKeys,
-                                             String name, int value) {
-        secretJson.put(name, value);
-        managedKeys.add(name);
-    }
-
-    private static void putOptionalSecretTargetField(ObjectNode secretJson, List<String> managedKeys,
-                                                     String name, String value) {
-        if (value != null && !value.isBlank()) {
-            putSecretTargetField(secretJson, managedKeys, name, value);
-        }
-    }
-
-    private void deleteSecretTargetAttachment(StackResource resource, String region) {
-        String attachmentOwner = resource.getAttributes().get(SECRET_TARGET_OWNER_ATTR);
-        if (!secretsManagerService.canManageTargetAttachment(
-                resource.getPhysicalId(), attachmentOwner, region)) {
-            LOG.warnv("Skipping SecretTargetAttachment detach because secret {0}"
-                            + " is owned by a different attachment",
-                    resource.getPhysicalId());
-            return;
-        }
-        detachSecretTarget(resource.getPhysicalId(),
-                resource.getAttributes().get(SECRET_TARGET_MANAGED_KEYS_ATTR), region);
-        secretsManagerService.releaseTargetAttachment(
-                resource.getPhysicalId(), attachmentOwner, region);
-    }
-
-    private void detachSecretTarget(String secretId, String managedKeysAttribute, String region) {
-        SecretTargetMutation mutation = prepareSecretTargetDetach(secretId, managedKeysAttribute, region);
-        if (mutation != null) {
-            putSecretTargetMutation(mutation, region);
-        }
-    }
-
-    private SecretTargetMutation prepareSecretTargetDetach(String secretId,
-                                                           String managedKeysAttribute,
-                                                           String region) {
-        try {
-            Optional<ObjectNode> parsedSecret = tryReadSecretJsonObject(secretId, region);
-            if (parsedSecret.isEmpty()) {
-                LOG.debugv("SecretTargetAttachment current secret value is no longer a JSON object;"
-                        + " treating as already detached: {0}", secretId);
-                return null;
-            }
-            ObjectNode currentSecretJson = parsedSecret.get();
-            ObjectNode detachedSecretJson = currentSecretJson.deepCopy();
-            List<String> managedKeys = managedSecretTargetKeys(managedKeysAttribute);
-            managedKeys.forEach(detachedSecretJson::remove);
-            return detachedSecretJson.equals(currentSecretJson)
-                    ? null
-                    : new SecretTargetMutation(secretId, currentSecretJson, detachedSecretJson);
-        } catch (AwsException e) {
-            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("SecretTargetAttachment secret already gone, treating as detached: {0}", secretId);
-            return null;
-        }
-    }
-
-    private void putSecretTargetMutation(SecretTargetMutation mutation, String region) {
-        secretsManagerService.putSecretValue(
-                mutation.secretId(), mutation.value().toString(), null, null, region, null);
-    }
-
-    private void attemptSecretTargetCleanup(RuntimeException primaryFailure,
-                                            String description,
-                                            Runnable cleanup) {
-        try {
-            cleanup.run();
-        } catch (RuntimeException cleanupFailure) {
-            primaryFailure.addSuppressed(cleanupFailure);
-            LOG.warnv("SecretTargetAttachment rollback cleanup failed while attempting to {0}: {1}",
-                    description, cleanupFailure.getMessage());
-        }
-    }
-
-    private static List<String> managedSecretTargetKeys(String attribute) {
-        if (attribute == null || attribute.isBlank()) {
-            return SECRET_TARGET_CONNECTION_KEYS;
-        }
-        List<String> keys = Arrays.stream(attribute.split(","))
-                .filter(SECRET_TARGET_CONNECTION_KEYS::contains)
-                .toList();
-        return keys.isEmpty() ? SECRET_TARGET_CONNECTION_KEYS : keys;
-    }
-
-    /**
-     * Resolves the secret value from CloudFormation properties.
-     * SecretString and GenerateSecretString are mutually exclusive per AWS spec.
-     * If GenerateSecretString is present, a random password is generated.
-     * If SecretStringTemplate and GenerateStringKey are specified inside
-     * GenerateSecretString, the generated password is embedded in the template JSON.
-     */
-    private String resolveSecretValue(JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null) {
-            return "{}";
-        }
-
-        // SecretString takes precedence when explicitly set
-        String secretString = resolveOptional(props, "SecretString", engine);
-        JsonNode genNode = props.get("GenerateSecretString");
-
-        if (secretString != null && genNode != null && !genNode.isNull()) {
-            throw new AwsException("ValidationError",
-                    "You can't specify both SecretString and GenerateSecretString", 400);
-        }
-
-        if (secretString != null) {
-            return secretString;
-        }
-
-        if (genNode != null && !genNode.isNull()) {
-            return generateSecretString(genNode);
-        }
-
-        return "{}";
-    }
-
-    private String generateSecretString(JsonNode genNode) {
-        String password = io.github.hectorvent.floci.services.secretsmanager
-                .RandomPasswordGenerator.generate(genNode);
-
-        String template = null;
-        String key = null;
-        JsonNode templateNode = genNode.get("SecretStringTemplate");
-        JsonNode keyNode = genNode.get("GenerateStringKey");
-
-        if (templateNode != null && !templateNode.isNull()) {
-            template = templateNode.asText();
-        }
-        if (keyNode != null && !keyNode.isNull()) {
-            key = keyNode.asText();
-        }
-
-        if (template != null && key != null) {
-            // Insert the generated password into the template JSON
-            try {
-                var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                var tree = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(template);
-                tree.put(key, password);
-                return mapper.writeValueAsString(tree);
-            } catch (Exception e) {
-                // If the template is not valid JSON, fall back to raw password
-                LOG.warnv("Failed to parse SecretStringTemplate: {0}", e.getMessage());
-                return password;
-            }
-        }
-
-        return password;
-    }
-
 
     private void putResolvedText(ObjectNode req, String target, JsonNode props, String source,
                                  CloudFormationTemplateEngine engine) {
@@ -3453,686 +2188,69 @@ public class CloudFormationResourceProvisioner {
 
     // ── Pipes ──────────────────────────────────────────────────────────────────
 
-    private void provisionStepFunctionsStateMachine(StackResource r, JsonNode props,
-                                                    CloudFormationTemplateEngine engine,
-                                                    String region, String accountId,
-                                                    String stackName) {
-        String explicitName = resolveOptional(props, "StateMachineName", engine);
-        boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
-        String roleArn = resolveOptional(props, "RoleArn", engine);
-        if (roleArn == null || roleArn.isBlank()) {
-            throw new AwsException("ValidationError", "RoleArn is required for a state machine", 400);
-        }
-        String type = resolveOrDefault(props, "StateMachineType", engine, "STANDARD");
-        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
-        String definition = resolveStateMachineDefinition(props, engine);
-        JsonNode loggingConfiguration = resolveStateMachineLoggingConfiguration(props, engine);
-        JsonNode tracingConfiguration = resolveStateMachineTracingConfiguration(props, engine);
-        JsonNode encryptionConfiguration = resolveStateMachineEncryptionConfiguration(props, engine);
 
-        StateMachine existing = findExistingOrStubbedStateMachine(r.getPhysicalId());
-        String desiredNameMode = hasExplicitName ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED;
-        String previousNameMode = r.getAttributes().get(SFN_NAME_MODE_ATTR);
-        if (existing != null && previousNameMode == null) {
-            previousNameMode = inferStepFunctionsNameMode(existing, stackName, r.getLogicalId());
-        }
-        boolean nameModeReplacement = existing != null
-                && !Objects.equals(previousNameMode, desiredNameMode);
-        boolean typeReplacement = existing != null && !Objects.equals(existing.getType(), type);
 
-        String name;
-        if (hasExplicitName) {
-            name = explicitName;
-        } else if (existing != null && !nameModeReplacement && !typeReplacement) {
-            name = existing.getName();
-        } else {
-            name = generatePhysicalName(
-                    stackName, r.getLogicalId(), STEP_FUNCTIONS_NAME_MAX_LENGTH, false);
-        }
-        String desiredArn = AwsArnUtils.Arn.of(
-                "states", region, accountId, "stateMachine:" + name).toString();
 
-        boolean nameReplacement = existing != null && !Objects.equals(existing.getName(), name);
-        boolean replacement = nameReplacement || nameModeReplacement || typeReplacement;
-        if (replacement && Objects.equals(existing.getName(), name)) {
-            throw new AwsException("ValidationError",
-                    "Cannot replace state machine " + existing.getName()
-                            + " without a new StateMachineName", 400);
-        }
 
-        boolean configurationChanged = existing != null
-                && !stateMachineConfigurationMatches(
-                        existing,
-                        definition,
-                        roleArn,
-                        loggingConfiguration,
-                        tracingConfiguration,
-                        encryptionConfiguration);
-        boolean tagsChanged = existing != null && !Objects.equals(existing.getTags(), tags);
 
-        StateMachine sm;
-        if (existing == null) {
-            sm = stepFunctionsService.createStateMachine(
-                    name, definition, roleArn, type, region, tags,
-                    loggingConfiguration, tracingConfiguration, encryptionConfiguration);
-        } else if (!replacement && !configurationChanged && !tagsChanged) {
-            sm = existing;
-        } else {
-            String replacementRevisionId = replacement
-                    ? UUID.randomUUID().toString()
-                    : null;
-            beginStepFunctionsUpdate(
-                    r,
-                    existing,
-                    replacement,
-                    replacement ? desiredArn : null,
-                    replacementRevisionId);
-            if (replacement) {
-                sm = stepFunctionsService.createStateMachineWithRevisionId(
-                        name, definition, roleArn, type, region, tags,
-                        loggingConfiguration,
-                        tracingConfiguration,
-                        encryptionConfiguration,
-                        replacementRevisionId);
-                markStepFunctionsReplacementCreated(r, sm);
-            } else {
-                sm = existing;
-                if (configurationChanged) {
-                    sm = stepFunctionsService.updateStateMachine(
-                            existing.getStateMachineArn(),
-                            new StepFunctionsService.UpdateStateMachineRequest(
-                                    definition,
-                                    roleArn,
-                                    loggingConfiguration, true,
-                                    tracingConfiguration, true,
-                                    encryptionConfiguration, true,
-                                    false,
-                                    null)).stateMachine();
-                }
-                if (tagsChanged) {
-                    stepFunctionsService.replaceStateMachineTags(sm.getStateMachineArn(), tags);
-                    sm = stepFunctionsService.describeStateMachine(sm.getStateMachineArn());
-                }
-            }
-        }
 
-        r.setPhysicalId(sm.getStateMachineArn());
-        r.getAttributes().put("Arn", sm.getStateMachineArn());
-        r.getAttributes().put("Name", sm.getName());
-        r.getAttributes().put("StateMachineRevisionId", sm.getRevisionId());
-        r.getAttributes().put(SFN_NAME_MODE_ATTR, desiredNameMode);
-    }
 
-    /** Matches the non-ARN stub physical id the default provisioning arm writes, {@code <logicalId>-<8 hex>} (see :523). */
-    private static final Pattern STUB_PHYSICAL_ID = Pattern.compile("^[A-Za-z0-9]+-[0-9a-f]{8}$");
 
-    private static boolean isStubPhysicalId(String physicalId) {
-        return STUB_PHYSICAL_ID.matcher(physicalId).matches();
-    }
+
+
+
+
+
+
 
     /**
-     * Looks up a state machine by ARN, treating {@code StateMachineDoesNotExist} as "not found".
-     * An {@code InvalidArn} error is not swallowed here: every caller of this method reads an ARN
-     * this floci instance itself recorded (a cleanup or rollback snapshot), so a malformed value
-     * reaching {@code describeStateMachine} is a real anomaly, not a legitimate "not found" case.
-     */
-    private StateMachine findStateMachine(String stateMachineArn) {
-        if (stateMachineArn == null || stateMachineArn.isBlank()) {
-            return null;
-        }
-        try {
-            return stepFunctionsService.describeStateMachine(stateMachineArn);
-        } catch (AwsException e) {
-            if ("StateMachineDoesNotExist".equals(e.getErrorCode())) {
-                return null;
-            }
-            throw e;
-        }
-    }
-
-    /**
-     * Same as {@link #findStateMachine}, but additionally treats {@code InvalidArn} as "not found"
-     * when {@code physicalId} matches the stub shape a pre-SAM-expansion floci build wrote
-     * ({@code <logicalId>-<8 hex>}, produced at :523). A stack whose
-     * {@code AWS::Serverless::StateMachine} resource was provisioned before floci expanded SAM
-     * types carries that stub value into its next update; without this, {@code describeStateMachine}
-     * throws {@code InvalidArn} for it and the update fails instead of creating the real resource.
-     * Used only at the provisioning entry point, where that upgrade path is legitimate: unlike
-     * {@link #findStateMachine}'s other callers, a stub here is expected, not an anomaly.
-     */
-    private StateMachine findExistingOrStubbedStateMachine(String physicalId) {
-        if (physicalId == null || physicalId.isBlank()) {
-            return null;
-        }
-        try {
-            return stepFunctionsService.describeStateMachine(physicalId);
-        } catch (AwsException e) {
-            if ("StateMachineDoesNotExist".equals(e.getErrorCode())
-                    || ("InvalidArn".equals(e.getErrorCode()) && isStubPhysicalId(physicalId))) {
-                return null;
-            }
-            throw e;
-        }
-    }
-
-    private String inferStepFunctionsNameMode(
-            StateMachine existing, String stackName, String logicalId) {
-        String base = stackName + "-" + logicalId;
-        int keep = STEP_FUNCTIONS_NAME_MAX_LENGTH - GENERATED_NAME_SUFFIX_LENGTH - 1;
-        String prefix = base.substring(0, Math.min(base.length(), keep));
-        while (prefix.endsWith("-")) {
-            prefix = prefix.substring(0, prefix.length() - 1);
-        }
-        String generatedPrefix = prefix.isEmpty() ? "" : prefix + "-";
-        String name = existing.getName();
-        if (name == null || !name.startsWith(generatedPrefix)) {
-            return NAME_MODE_EXPLICIT;
-        }
-        String suffix = name.substring(generatedPrefix.length());
-        boolean generatedSuffix = suffix.length() == GENERATED_NAME_SUFFIX_LENGTH
-                && suffix.chars().allMatch(c -> c >= '0' && c <= '9' || c >= 'a' && c <= 'f');
-        return generatedSuffix
-                ? NAME_MODE_GENERATED
-                : NAME_MODE_EXPLICIT;
-    }
-
-    private boolean stateMachineConfigurationMatches(
-            StateMachine existing,
-            String definition,
-            String roleArn,
-            JsonNode loggingConfiguration,
-            JsonNode tracingConfiguration,
-            JsonNode encryptionConfiguration) {
-        return Objects.equals(existing.getDefinition(), definition)
-                && Objects.equals(existing.getRoleArn(), roleArn)
-                && Objects.equals(
-                        effectiveLoggingConfiguration(existing.getLoggingConfiguration()),
-                        loggingConfiguration)
-                && Objects.equals(
-                        effectiveTracingConfiguration(existing.getTracingConfiguration()),
-                        tracingConfiguration)
-                && Objects.equals(
-                        effectiveEncryptionConfiguration(existing.getEncryptionConfiguration()),
-                        encryptionConfiguration);
-    }
-
-    private JsonNode effectiveLoggingConfiguration(JsonNode configuration) {
-        return configuration != null ? configuration : defaultStateMachineLoggingConfiguration();
-    }
-
-    private JsonNode effectiveTracingConfiguration(JsonNode configuration) {
-        return configuration != null ? configuration : defaultStateMachineTracingConfiguration();
-    }
-
-    private JsonNode effectiveEncryptionConfiguration(JsonNode configuration) {
-        return configuration != null ? configuration : defaultStateMachineEncryptionConfiguration();
-    }
-
-    private JsonNode resolveStateMachineLoggingConfiguration(
-            JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("LoggingConfiguration")
-                || props.get("LoggingConfiguration").isNull()) {
-            return defaultStateMachineLoggingConfiguration();
-        }
-        JsonNode source = engine.resolveNode(props.get("LoggingConfiguration"));
-        if (!source.isObject()) {
-            throw new AwsException("ValidationError",
-                    "LoggingConfiguration must be an object", 400);
-        }
-
-        ObjectNode result = objectMapper.createObjectNode();
-        JsonNode level = source.get("Level");
-        if (level != null && !level.isTextual()) {
-            throw new AwsException("ValidationError",
-                    "LoggingConfiguration.Level must be a string", 400);
-        }
-        result.put("level", level != null ? level.asText() : "OFF");
-
-        JsonNode includeExecutionData = source.get("IncludeExecutionData");
-        if (includeExecutionData != null && !includeExecutionData.isBoolean()) {
-            throw new AwsException("ValidationError",
-                    "LoggingConfiguration.IncludeExecutionData must be a boolean", 400);
-        }
-        result.put("includeExecutionData",
-                includeExecutionData != null && includeExecutionData.asBoolean());
-
-        ArrayNode destinations = result.putArray("destinations");
-        JsonNode sourceDestinations = source.get("Destinations");
-        if (sourceDestinations != null) {
-            if (!sourceDestinations.isArray()) {
-                throw new AwsException("ValidationError",
-                        "LoggingConfiguration.Destinations must be an array", 400);
-            }
-            for (JsonNode destination : sourceDestinations) {
-                JsonNode logGroupArn = destination.path("CloudWatchLogsLogGroup").get("LogGroupArn");
-                if (logGroupArn == null || !logGroupArn.isTextual()) {
-                    throw new AwsException("ValidationError",
-                            "LoggingConfiguration destination LogGroupArn must be a string", 400);
-                }
-                destinations.addObject()
-                        .putObject("cloudWatchLogsLogGroup")
-                        .put("logGroupArn", logGroupArn.asText());
-            }
-        }
-        return result;
-    }
-
-    private ObjectNode defaultStateMachineLoggingConfiguration() {
-        ObjectNode result = objectMapper.createObjectNode();
-        result.put("level", "OFF");
-        result.put("includeExecutionData", false);
-        result.putArray("destinations");
-        return result;
-    }
-
-    private JsonNode resolveStateMachineTracingConfiguration(
-            JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("TracingConfiguration")
-                || props.get("TracingConfiguration").isNull()) {
-            return defaultStateMachineTracingConfiguration();
-        }
-        JsonNode source = engine.resolveNode(props.get("TracingConfiguration"));
-        if (!source.isObject()) {
-            throw new AwsException("ValidationError",
-                    "TracingConfiguration must be an object", 400);
-        }
-        JsonNode enabled = source.get("Enabled");
-        if (enabled != null && !enabled.isBoolean()) {
-            throw new AwsException("ValidationError",
-                    "TracingConfiguration.Enabled must be a boolean", 400);
-        }
-        return objectMapper.createObjectNode()
-                .put("enabled", enabled != null && enabled.asBoolean());
-    }
-
-    private ObjectNode defaultStateMachineTracingConfiguration() {
-        return objectMapper.createObjectNode().put("enabled", false);
-    }
-
-    private JsonNode resolveStateMachineEncryptionConfiguration(
-            JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("EncryptionConfiguration")
-                || props.get("EncryptionConfiguration").isNull()) {
-            return defaultStateMachineEncryptionConfiguration();
-        }
-        JsonNode source = engine.resolveNode(props.get("EncryptionConfiguration"));
-        if (!source.isObject()) {
-            throw new AwsException("ValidationError",
-                    "EncryptionConfiguration must be an object", 400);
-        }
-
-        JsonNode type = source.get("Type");
-        if (type == null || !type.isTextual() || type.asText().isBlank()) {
-            throw new AwsException("ValidationError",
-                    "EncryptionConfiguration.Type is required and must be a string", 400);
-        }
-        ObjectNode result = objectMapper.createObjectNode().put("type", type.asText());
-
-        JsonNode keyId = source.get("KmsKeyId");
-        if (keyId != null) {
-            if (!keyId.isTextual()) {
-                throw new AwsException("ValidationError",
-                        "EncryptionConfiguration.KmsKeyId must be a string", 400);
-            }
-            result.put("kmsKeyId", keyId.asText());
-        }
-
-        JsonNode reusePeriod = source.get("KmsDataKeyReusePeriodSeconds");
-        if (reusePeriod != null) {
-            if (!reusePeriod.isIntegralNumber()) {
-                throw new AwsException("ValidationError",
-                        "EncryptionConfiguration.KmsDataKeyReusePeriodSeconds must be an integer", 400);
-            }
-            result.put("kmsDataKeyReusePeriodSeconds", reusePeriod.intValue());
-        }
-        return result;
-    }
-
-    private ObjectNode defaultStateMachineEncryptionConfiguration() {
-        return objectMapper.createObjectNode().put("type", "AWS_OWNED_KEY");
-    }
-
-    private void beginStepFunctionsUpdate(
-            StackResource resource,
-            StateMachine existing,
-            boolean replacement,
-            String replacementArn,
-            String replacementRevisionId) {
-        if (resource.getAttributes().containsKey(SFN_UPDATE_SNAPSHOT_ATTR)) {
-            return;
-        }
-        ObjectNode snapshot = objectMapper.createObjectNode();
-        snapshot.put("physicalId", resource.getPhysicalId());
-        snapshot.put("replacement", replacement);
-        if (replacementArn != null) {
-            snapshot.put("replacementArn", replacementArn);
-        }
-        if (replacementRevisionId != null) {
-            snapshot.put("replacementRevisionId", replacementRevisionId);
-        }
-        snapshot.put("replacementCreated", false);
-        snapshot.put("cleanupAttempts", 0);
-        snapshot.set("stateMachine", objectMapper.valueToTree(existing));
-        ObjectNode attributes = snapshot.putObject("attributes");
-        resource.getAttributes().forEach(attributes::put);
-        resource.getAttributes().put(SFN_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
-    }
-
-    private void markStepFunctionsReplacementCreated(
-            StackResource resource, StateMachine replacement) {
-        String rawSnapshot = resource.getAttributes().get(SFN_UPDATE_SNAPSHOT_ATTR);
-        if (rawSnapshot == null) {
-            throw new IllegalStateException(
-                    "Step Functions replacement metadata is missing for "
-                            + resource.getLogicalId());
-        }
-        try {
-            ObjectNode snapshot = (ObjectNode) objectMapper.readTree(rawSnapshot);
-            snapshot.put("replacementCreated", true);
-            snapshot.put("replacementArn", replacement.getStateMachineArn());
-            snapshot.put("replacementRevisionId", replacement.getRevisionId());
-            resource.getAttributes().put(
-                    SFN_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
-        } catch (Exception e) {
-            throw new IllegalStateException(
-                    "Could not record Step Functions replacement ownership for "
-                            + resource.getLogicalId(), e);
-        }
-    }
-
-    /**
-     * One attempt at deleting what this update's replacement displaced. A resource type with an
-     * extracted provisioner owns its own cleanup; only the types still living in this class fall
-     * through to the Step Functions arm below.
+     * One attempt at deleting what this update's replacement displaced, delegated to the
+     * provisioner that owns the type. Step Functions was the last type answering here without an
+     * extracted provisioner, so this is now pure delegation.
      */
     UpdateCleanupResult completeUpdate(StackResource resource) {
-        Optional<CfnResourceProvisioner> owner =
-                resourceRegistry.forType(resource.getResourceType());
-        if (owner.isPresent()) {
-            UpdateCleanupResult ownResult = owner.get().completeUpdate(resource);
-            if (ownResult.applicable()) {
-                return ownResult;
-            }
-        }
-        String rawSnapshot = resource.getAttributes().get(SFN_UPDATE_SNAPSHOT_ATTR);
-        if (rawSnapshot == null) {
-            return UpdateCleanupResult.notApplicable();
-        }
-        try {
-            JsonNode snapshot = objectMapper.readTree(rawSnapshot);
-            String previousArn = snapshot.path("physicalId").asText(null);
-            if (!snapshot.path("replacement").asBoolean(false)
-                    || previousArn == null
-                    || Objects.equals(previousArn, resource.getPhysicalId())) {
-                return new UpdateCleanupResult(true, true, previousArn, 0, null);
-            }
-            if ("Retain".equals(resource.getUpdateReplacePolicy())) {
-                return new UpdateCleanupResult(true, true, previousArn, 0, null);
-            }
-
-            int attempts = snapshot.path("cleanupAttempts").asInt(0);
-            String failureReason = snapshot.path("cleanupFailureReason").asText(null);
-            if (attempts >= 3) {
-                return new UpdateCleanupResult(
-                        true, false, previousArn, attempts, failureReason);
-            }
-
-            try {
-                String previousRevisionId = snapshot.path("stateMachine")
-                        .path("revisionId")
-                        .asText(null);
-                StateMachine cleanupTarget = findStateMachine(previousArn);
-                if (cleanupTarget != null
-                        && !stepFunctionsService.deleteStateMachineIfRevisionMatches(
-                                previousArn, previousRevisionId)) {
-                    throw new IllegalStateException(
-                            "The old state machine no longer matches the replacement snapshot");
-                }
-                return new UpdateCleanupResult(
-                        true, true, previousArn, attempts, null);
-            } catch (Exception e) {
-                attempts++;
-                ((ObjectNode) snapshot).put("cleanupAttempts", attempts);
-                ((ObjectNode) snapshot).put("cleanupFailureReason", e.getMessage());
-                resource.getAttributes().put(
-                        SFN_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
-                return new UpdateCleanupResult(
-                        true, false, previousArn, attempts, e.getMessage());
-            }
-        } catch (Exception e) {
-            throw new IllegalStateException(
-                    "Could not finalize Step Functions state machine "
-                            + resource.getLogicalId(), e);
-        }
+        return resourceRegistry.forType(resource.getResourceType())
+                .map(owner -> owner.completeUpdate(resource))
+                .filter(UpdateCleanupResult::applicable)
+                .orElseGet(UpdateCleanupResult::notApplicable);
     }
-
     /**
      * The physical id this update displaced, announced as DELETE_IN_PROGRESS before the stack
-     * update closes. An extracted provisioner answers for its own types; the rest fall through to
-     * the Step Functions arm.
+     * update closes. A type whose {@code UpdateReplacePolicy} is {@code Retain} owes no cleanup.
      */
     String updateCleanupPhysicalId(StackResource resource) {
-        Optional<CfnResourceProvisioner> owner =
-                resourceRegistry.forType(resource.getResourceType());
-        if (owner.isPresent()) {
-            String ownCleanupPhysicalId = owner.get().updateCleanupPhysicalId(resource);
-            if (ownCleanupPhysicalId != null) {
-                return ownCleanupPhysicalId;
-            }
-        }
         if ("Retain".equals(resource.getUpdateReplacePolicy())) {
             return null;
         }
-        String rawSnapshot = resource.getAttributes().get(SFN_UPDATE_SNAPSHOT_ATTR);
-        if (rawSnapshot == null) {
-            return null;
-        }
-        try {
-            JsonNode snapshot = objectMapper.readTree(rawSnapshot);
-            if (!snapshot.path("replacement").asBoolean(false)) {
-                return null;
-            }
-            return snapshot.path("physicalId").asText(null);
-        } catch (Exception e) {
-            throw new IllegalStateException(
-                    "Could not read Step Functions cleanup metadata for "
-                            + resource.getLogicalId(), e);
-        }
+        return resourceRegistry.forType(resource.getResourceType())
+                .map(owner -> owner.updateCleanupPhysicalId(resource))
+                .orElse(null);
     }
-
     /**
      * Whether this update replaced the resource's physical entity, so the stack has cleanup
-     * pending. An extracted provisioner answers for its own types; the rest fall through to the
-     * Step Functions arm.
+     * pending.
      */
     boolean hasReplacementUpdate(StackResource resource) {
-        Optional<CfnResourceProvisioner> owner =
-                resourceRegistry.forType(resource.getResourceType());
-        if (owner.isPresent() && owner.get().hasReplacementUpdate(resource)) {
-            return true;
-        }
-        String rawSnapshot = resource.getAttributes().get(SFN_UPDATE_SNAPSHOT_ATTR);
-        if (rawSnapshot == null) {
-            return false;
-        }
-        try {
-            return objectMapper.readTree(rawSnapshot).path("replacement").asBoolean(false);
-        } catch (Exception e) {
-            throw new IllegalStateException(
-                    "Could not read Step Functions update metadata for "
-                            + resource.getLogicalId(), e);
-        }
+        return resourceRegistry.forType(resource.getResourceType())
+                .map(owner -> owner.hasReplacementUpdate(resource))
+                .orElse(false);
     }
-
-    /**
-     * Drops the cleanup bookkeeping this update left on the resource. An extracted provisioner
-     * drops its own; the Step Functions snapshot below is dropped for the types still living here.
-     */
+    /** Drops the cleanup bookkeeping this update left on the resource. */
     void clearUpdate(StackResource resource) {
         resourceRegistry.forType(resource.getResourceType())
                 .ifPresent(owner -> owner.clearUpdate(resource));
-        resource.getAttributes().remove(SFN_UPDATE_SNAPSHOT_ATTR);
     }
 
+    /**
+     * Puts the physical entity back to its pre-update configuration when a later resource fails
+     * the stack update, delegated to the provisioner that owns the type.
+     */
     boolean rollbackUpdate(StackResource resource) {
-        // A resource type with an extracted provisioner owns its own restore; only the types still
-        // living in this class fall through to the Step Functions arm below.
-        Optional<CfnResourceProvisioner> owner =
-                resourceRegistry.forType(resource.getResourceType());
-        if (owner.isPresent() && owner.get().rollbackUpdate(resource)) {
-            return true;
-        }
-        String rawSnapshot = resource.getAttributes().get(SFN_UPDATE_SNAPSHOT_ATTR);
-        if (rawSnapshot == null) {
-            return false;
-        }
-        try {
-            JsonNode snapshot = objectMapper.readTree(rawSnapshot);
-            String previousArn = snapshot.path("physicalId").asText(null);
-            String replacementArn = snapshot.path("replacementArn").asText(
-                    resource.getPhysicalId());
-            String replacementRevisionId = snapshot.path("replacementRevisionId")
-                    .asText(null);
-            if (snapshot.path("replacement").asBoolean(false)
-                    && replacementArn != null
-                    && !Objects.equals(previousArn, replacementArn)) {
-                stepFunctionsService.deleteStateMachineIfRevisionMatches(
-                        replacementArn, replacementRevisionId);
-            }
-
-            StateMachine previous = objectMapper.treeToValue(
-                    snapshot.path("stateMachine"), StateMachine.class);
-            StateMachine current = findStateMachine(previousArn);
-            String restoredRevisionId = null;
-            if (current == null) {
-                throw new IllegalStateException(
-                        "The original state machine no longer exists: " + previousArn);
-            }
-            if (!snapshot.path("replacement").asBoolean(false)) {
-                if (!stateMachineConfigurationMatches(
-                        current,
-                        previous.getDefinition(),
-                        previous.getRoleArn(),
-                        previous.getLoggingConfiguration(),
-                        previous.getTracingConfiguration(),
-                        previous.getEncryptionConfiguration())) {
-                    stepFunctionsService.updateStateMachine(
-                            previousArn,
-                            new StepFunctionsService.UpdateStateMachineRequest(
-                                    previous.getDefinition(),
-                                    previous.getRoleArn(),
-                                    previous.getLoggingConfiguration(), true,
-                                    previous.getTracingConfiguration(), true,
-                                    previous.getEncryptionConfiguration(), true,
-                                    false,
-                                    null));
-                }
-                StateMachine restored = stepFunctionsService.describeStateMachine(previousArn);
-                restoredRevisionId = restored.getRevisionId();
-                if (!Objects.equals(restored.getTags(), previous.getTags())) {
-                    stepFunctionsService.replaceStateMachineTags(
-                            previousArn, previous.getTags());
-                }
-            }
-
-            resource.setPhysicalId(previousArn);
-            resource.getAttributes().clear();
-            JsonNode previousAttributes = snapshot.path("attributes");
-            previousAttributes.fields().forEachRemaining(entry ->
-                    resource.getAttributes().put(entry.getKey(), entry.getValue().asText()));
-            if (restoredRevisionId != null) {
-                resource.getAttributes().put(
-                        "StateMachineRevisionId", restoredRevisionId);
-            }
-            resource.setStatus("UPDATE_COMPLETE");
-            resource.setStatusReason(null);
-            return true;
-        } catch (Exception e) {
-            throw new IllegalStateException(
-                    "Could not roll back Step Functions state machine "
-                            + resource.getLogicalId(), e);
-        }
+        return resourceRegistry.forType(resource.getResourceType())
+                .map(owner -> owner.rollbackUpdate(resource))
+                .orElse(false);
     }
 
-    private String resolveStateMachineDefinition(JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null) {
-            throw new AwsException(
-                    "ValidationError",
-                    "A state machine definition is required",
-                    400);
-        }
-
-        boolean hasDefinitionString =
-                props.has("DefinitionString")
-                        && !props.get("DefinitionString").isNull();
-        boolean hasDefinition =
-                props.has("Definition")
-                        && !props.get("Definition").isNull();
-        boolean hasS3Location =
-                props.has("DefinitionS3Location")
-                        && !props.get("DefinitionS3Location").isNull();
-        int sourceCount = (hasDefinitionString ? 1 : 0)
-                + (hasDefinition ? 1 : 0)
-                + (hasS3Location ? 1 : 0);
-        if (sourceCount != 1) {
-            throw new AwsException(
-                    "ValidationError",
-                    "Specify exactly one of Definition, DefinitionString, or DefinitionS3Location",
-                    400);
-        }
-
-        boolean definitionFromS3 = false;
-        String definition;
-        if (hasDefinitionString) {
-            definition = resolveOptional(props, "DefinitionString", engine);
-        } else if (hasDefinition) {
-            definition = engine.resolveJsonAttribute(props.get("Definition"));
-        } else {
-            JsonNode location = engine.resolveNode(props.get("DefinitionS3Location"));
-            String bucket = location.path("Bucket").asText(null);
-            String key = location.path("Key").asText(null);
-            String version = location.path("Version").asText(null);
-            if (bucket == null || bucket.isBlank() || key == null || key.isBlank()) {
-                throw new AwsException(
-                        "ValidationError",
-                        "DefinitionS3Location requires Bucket and Key",
-                        400);
-            }
-            S3Object object = s3Service.getObject(bucket, key, version);
-            definition = new String(object.getData(), StandardCharsets.UTF_8);
-            definitionFromS3 = true;
-        }
-
-        JsonNode subsNode = props.get("DefinitionSubstitutions");
-        if (subsNode != null && !subsNode.isNull()) {
-            JsonNode resolvedSubs = engine.resolveNode(subsNode);
-            Iterator<Map.Entry<String, JsonNode>> entries = resolvedSubs.fields();
-            while (entries.hasNext()) {
-                Map.Entry<String, JsonNode> entry = entries.next();
-                String placeholder = "${" + entry.getKey() + "}";
-                String value = entry.getValue().isTextual()
-                        ? entry.getValue().asText()
-                        : entry.getValue().toString();
-                definition = definition.replace(placeholder, value);
-            }
-        }
-
-        if (definitionFromS3) {
-            try {
-                definition = new CloudFormationYamlParser(objectMapper)
-                        .parse(definition)
-                        .toString();
-            } catch (Exception e) {
-                throw new AwsException(
-                        "ValidationError",
-                        "DefinitionS3Location contains invalid JSON or YAML: "
-                                + e.getMessage(),
-                        400);
-            }
-        }
-
-        return definition;
-    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -4264,6 +2382,7 @@ public class CloudFormationResourceProvisioner {
         if (authorizerId != null) {
             req.put("authorizerId", authorizerId);
         }
+        req.put("apiKeyRequired", Boolean.parseBoolean(resolveOrDefault(props, "ApiKeyRequired", engine, "false")));
 
         apiGatewayService.putMethod(region, apiId, resourceId, httpMethod, req);
         r.setPhysicalId(apiId + "-" + resourceId + "-" + httpMethod);
@@ -5509,179 +3628,14 @@ public class CloudFormationResourceProvisioner {
 
     // ── CloudFront ────────────────────────────────────────────────────────────
 
-    /**
-     * Provisions an {@code AWS::CloudFront::Distribution} by translating its {@code DistributionConfig}
-     * property tree into a {@link DistributionConfig} and creating or updating the distribution.
-     * {@code Ref} returns the distribution id; {@code Fn::GetAtt} exposes {@code Id} and
-     * {@code DomainName} (closes #1147, where {@code Fn::GetAtt DomainName} previously returned an
-     * unresolved token).
-     */
-    private void provisionCloudFrontDistribution(StackResource r, JsonNode props,
-                                                 CloudFormationTemplateEngine engine) {
-        JsonNode dc = props != null ? props.path("DistributionConfig") : null;
-        DistributionConfig config = new DistributionConfig();
-        if (dc != null && !dc.isMissingNode() && !dc.isNull()) {
-            config.setEnabled(cfnBool(dc, "Enabled", engine, true));
-            config.setComment(cfnText(dc, "Comment", engine));
-            config.setDefaultRootObject(cfnText(dc, "DefaultRootObject", engine));
-            config.setHttpVersion(cfnTextOrDefault(dc, "HttpVersion", engine, "http2"));
-            config.setPriceClass(cfnTextOrDefault(dc, "PriceClass", engine, "PriceClass_All"));
-            config.setAliases(cfnStringList(dc.path("Aliases"), engine));
-            config.setOrigins(cfnOrigins(dc, engine));
-            config.setDefaultCacheBehavior(cfnDefaultCacheBehavior(dc.path("DefaultCacheBehavior"), engine));
-            config.setCacheBehaviors(cfnCacheBehaviors(dc, engine));
-            config.setCustomErrorResponses(cfnCustomErrorResponses(dc, engine));
-        }
 
-        Distribution dist = new Distribution();
-        dist.setConfig(config);
-        if (r.getPhysicalId() == null || r.getPhysicalId().isBlank()) {
-            dist = cloudFrontService.createDistribution(dist, Map.of());
-        } else {
-            Distribution existing = cloudFrontService.getDistribution(r.getPhysicalId());
-            dist = cloudFrontService.updateDistribution(
-                    existing.getId(), existing.getEtag(), dist);
-        }
 
-        r.setPhysicalId(dist.getId());
-        r.getAttributes().put("Id", dist.getId());
-        r.getAttributes().put("DomainName", dist.getDomainName());
-        r.getAttributes().put("Arn", dist.getArn());
-    }
 
-    private List<Origin> cfnOrigins(JsonNode dc, CloudFormationTemplateEngine engine) {
-        List<Origin> origins = new ArrayList<>();
-        JsonNode items = dc.path("Origins");
-        if (items.isArray()) {
-            for (JsonNode node : items) {
-                Origin origin = new Origin();
-                origin.setId(cfnText(node, "Id", engine));
-                origin.setDomainName(cfnText(node, "DomainName", engine));
-                String originPath = cfnText(node, "OriginPath", engine);
-                if (!originPath.isEmpty()) {
-                    origin.setOriginPath(originPath);
-                }
-                String originAccessControlId =
-                        cfnText(node, "OriginAccessControlId", engine);
-                if (!originAccessControlId.isEmpty()) {
-                    origin.setOriginAccessControlId(originAccessControlId);
-                }
-                JsonNode originCustomHeaders = node.path("OriginCustomHeaders");
-                if (originCustomHeaders.isArray()) {
-                    List<Map<String, String>> customHeaders = new ArrayList<>();
-                    for (JsonNode customHeader : originCustomHeaders) {
-                        Map<String, String> mapped = new LinkedHashMap<>();
-                        mapped.put("HeaderName", cfnText(customHeader, "HeaderName", engine));
-                        mapped.put("HeaderValue", cfnText(customHeader, "HeaderValue", engine));
-                        customHeaders.add(mapped);
-                    }
-                    origin.setCustomHeaders(customHeaders);
-                }
-                JsonNode s3 = node.path("S3OriginConfig");
-                JsonNode custom = node.path("CustomOriginConfig");
-                if (!custom.isMissingNode() && !custom.isNull()) {
-                    Map<String, Object> coc = new LinkedHashMap<>();
-                    coc.put("HTTPPort", cfnTextOrDefault(custom, "HTTPPort", engine, "80"));
-                    coc.put("HTTPSPort", cfnTextOrDefault(custom, "HTTPSPort", engine, "443"));
-                    coc.put("OriginProtocolPolicy",
-                            cfnTextOrDefault(custom, "OriginProtocolPolicy", engine, "https-only"));
-                    origin.setCustomOriginConfig(coc);
-                } else {
-                    // No CustomOriginConfig => S3 origin (S3OriginConfig may be present or defaulted).
-                    Map<String, String> s3c = new LinkedHashMap<>();
-                    s3c.put("OriginAccessIdentity",
-                            s3.isMissingNode() || s3.isNull() ? "" : cfnText(s3, "OriginAccessIdentity", engine));
-                    origin.setS3OriginConfig(s3c);
-                }
-                origins.add(origin);
-            }
-        }
-        return origins;
-    }
 
-    private DefaultCacheBehavior cfnDefaultCacheBehavior(JsonNode node, CloudFormationTemplateEngine engine) {
-        DefaultCacheBehavior dcb = new DefaultCacheBehavior();
-        if (node != null && !node.isMissingNode() && !node.isNull()) {
-            dcb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
-            dcb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
-            dcb.setResponseHeadersPolicyId(cfnText(node, "ResponseHeadersPolicyId", engine));
-            List<String> trustedKeyGroups = cfnStringList(node.path("TrustedKeyGroups"), engine);
-            if (!trustedKeyGroups.isEmpty()) {
-                dcb.setTrustedKeyGroups(trustedKeyGroups);
-            }
-        }
-        return dcb;
-    }
 
-    private List<CacheBehavior> cfnCacheBehaviors(JsonNode dc, CloudFormationTemplateEngine engine) {
-        List<CacheBehavior> behaviors = new ArrayList<>();
-        JsonNode items = dc.path("CacheBehaviors");
-        if (items.isArray()) {
-            for (JsonNode node : items) {
-                CacheBehavior cb = new CacheBehavior();
-                cb.setPathPattern(cfnText(node, "PathPattern", engine));
-                cb.setTargetOriginId(cfnText(node, "TargetOriginId", engine));
-                cb.setViewerProtocolPolicy(cfnTextOrDefault(node, "ViewerProtocolPolicy", engine, "allow-all"));
-                cb.setResponseHeadersPolicyId(cfnText(node, "ResponseHeadersPolicyId", engine));
-                List<String> trustedKeyGroups = cfnStringList(node.path("TrustedKeyGroups"), engine);
-                if (!trustedKeyGroups.isEmpty()) {
-                    cb.setTrustedKeyGroups(trustedKeyGroups);
-                }
-                behaviors.add(cb);
-            }
-        }
-        return behaviors;
-    }
 
-    private List<Map<String, Object>> cfnCustomErrorResponses(JsonNode dc, CloudFormationTemplateEngine engine) {
-        List<Map<String, Object>> result = new ArrayList<>();
-        JsonNode items = dc.path("CustomErrorResponses");
-        if (items.isArray()) {
-            for (JsonNode node : items) {
-                Map<String, Object> cer = new LinkedHashMap<>();
-                cer.put("ErrorCode", cfnText(node, "ErrorCode", engine));
-                putIfPresent(cer, "ResponseCode", cfnText(node, "ResponseCode", engine));
-                putIfPresent(cer, "ResponsePagePath", cfnText(node, "ResponsePagePath", engine));
-                putIfPresent(cer, "ErrorCachingMinTTL", cfnText(node, "ErrorCachingMinTTL", engine));
-                result.add(cer);
-            }
-        }
-        return result;
-    }
 
-    private static void putIfPresent(Map<String, Object> map, String key, String value) {
-        if (value != null && !value.isEmpty()) {
-            map.put(key, value);
-        }
-    }
 
-    private List<String> cfnStringList(JsonNode arrayNode, CloudFormationTemplateEngine engine) {
-        List<String> result = new ArrayList<>();
-        if (arrayNode != null && arrayNode.isArray()) {
-            for (JsonNode item : arrayNode) {
-                String value = engine.resolve(item);
-                if (value != null && !value.isEmpty()) {
-                    result.add(value);
-                }
-            }
-        }
-        return result;
-    }
-
-    private String cfnText(JsonNode parent, String field, CloudFormationTemplateEngine engine) {
-        return parent == null ? "" : engine.resolve(parent.path(field));
-    }
-
-    private String cfnTextOrDefault(JsonNode parent, String field, CloudFormationTemplateEngine engine,
-                                    String dflt) {
-        String value = cfnText(parent, field, engine);
-        return value.isEmpty() ? dflt : value;
-    }
-
-    private boolean cfnBool(JsonNode parent, String field, CloudFormationTemplateEngine engine, boolean dflt) {
-        String value = cfnText(parent, field, engine);
-        return value.isEmpty() ? dflt : "true".equalsIgnoreCase(value);
-    }
 
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(name) || props.get(name).isNull()) {
@@ -5900,16 +3854,6 @@ public class CloudFormationResourceProvisioner {
         resource.getAttributes().remove(INLINE_CLEANUP_GROUP_TARGETS_ATTR);
     }
 
-    private void deleteSecretSafe(String secretId, String region) {
-        try {
-            secretsManagerService.deleteSecret(secretId, null, true, region);
-        } catch (AwsException e) {
-            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("Secret already gone, treating as deleted: {0}", secretId);
-        }
-    }
 
     /**
      * Generate an AWS-like physical name: {stackName}-{logicalId}-{randomSuffix}.

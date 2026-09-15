@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.services.wafv2.model.IpSet;
 import io.github.hectorvent.floci.services.wafv2.model.RegexPatternSet;
 import io.github.hectorvent.floci.services.wafv2.model.RuleGroup;
@@ -84,9 +85,7 @@ public class WafV2Handler {
                         .build();
             };
         } catch (AwsException e) {
-            return Response.status(e.getHttpStatus())
-                    .entity(new AwsErrorResponse(e.jsonType(), e.getMessage()))
-                    .build();
+            return JsonErrorResponseUtils.createErrorResponse(e);
         } catch (Exception e) {
             LOG.errorv("WAFv2 error processing action {0}: {1}", action, e.getMessage());
             return Response.status(500)

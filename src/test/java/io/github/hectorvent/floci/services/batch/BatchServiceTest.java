@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.batch.model.BatchComputeEnvironment;
 import io.github.hectorvent.floci.services.batch.model.BatchJob;
 import io.github.hectorvent.floci.services.batch.model.BatchJobDefinition;
 import io.github.hectorvent.floci.services.batch.model.BatchJobQueue;
+import io.github.hectorvent.floci.services.batch.model.BatchNodeExecution;
 import io.github.hectorvent.floci.services.batch.model.BatchRunResult;
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -446,6 +448,349 @@ class BatchServiceTest {
                 {"computeEnvironment":"delete-ce"}
                 """));
         assertEquals(0, repeated.size());
+    }
+
+    @Test
+    void submitArrayJobFansOutChildrenAndAggregatesStatus() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        String computeArn = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"array-ce","type":"MANAGED"}
+                """), REGION).path("computeEnvironmentArn").asText();
+        String queueArn = service.createJobQueue(json("""
+                {
+                  "jobQueueName":"array-queue",
+                  "priority":1,
+                  "computeEnvironmentOrder":[{"order":1,"computeEnvironment":"%s"}]
+                }
+                """.formatted(computeArn)), REGION).path("jobQueueArn").asText();
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"array-job",
+                  "type":"container",
+                  "containerProperties":{"image":"public.ecr.aws/example/job:latest"}
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+
+        JsonNode submitted = service.submitJob(json("""
+                {
+                  "jobName":"array-submit",
+                  "jobQueue":"%s",
+                  "jobDefinition":"%s",
+                  "arrayProperties":{"size":3}
+                }
+                """.formatted(queueArn, definitionArn)), REGION);
+        String parentId = submitted.path("jobId").asText();
+
+        JsonNode parent = service.describeJobs(json("""
+                {"jobs":["%s"]}
+                """.formatted(parentId))).path("jobs").get(0);
+        assertEquals("SUCCEEDED", parent.path("status").asText());
+        assertEquals(3, parent.path("arrayProperties").path("size").asInt());
+        assertEquals(3, parent.path("arrayProperties").path("statusSummary").path("SUCCEEDED").asInt());
+        assertEquals(0, parent.path("container").size());
+
+        JsonNode child = service.describeJobs(json("""
+                {"jobs":["%s:1"]}
+                """.formatted(parentId))).path("jobs").get(0);
+        assertEquals("SUCCEEDED", child.path("status").asText());
+        assertEquals(1, child.path("arrayProperties").path("index").asInt());
+        assertEquals("array-submit", child.path("jobName").asText());
+
+        JsonNode childList = service.listJobs(json("""
+                {"arrayJobId":"%s"}
+                """.formatted(parentId))).path("jobSummaryList");
+        assertEquals(3, childList.size());
+        for (int i = 0; i < 3; i++) {
+            assertEquals(i, childList.get(i).path("arrayProperties").path("index").asInt());
+        }
+
+        JsonNode queueList = service.listJobs(json("""
+                {"jobQueue":"%s","jobStatus":"SUCCEEDED"}
+                """.formatted(queueArn))).path("jobSummaryList");
+        long matchingParents = 0;
+        for (JsonNode summary : queueList) {
+            if (parentId.equals(summary.path("jobId").asText())) {
+                matchingParents++;
+            }
+            assertEquals(false, summary.path("jobId").asText().contains(":"));
+        }
+        assertEquals(1, matchingParents);
+    }
+
+    @Test
+    void submitArrayJobRejectsSizeOutOfBounds() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"array-bounds-job",
+                  "type":"container",
+                  "containerProperties":{"image":"public.ecr.aws/example/job:latest"}
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+
+        AwsException tooSmall = assertThrows(AwsException.class, () -> service.submitJob(json("""
+                {"jobName":"too-small","jobQueue":"%s","jobDefinition":"%s","arrayProperties":{"size":1}}
+                """.formatted(queueArn, definitionArn)), REGION));
+        assertEquals("ClientException", tooSmall.getErrorCode());
+
+        AwsException tooBig = assertThrows(AwsException.class, () -> service.submitJob(json("""
+                {"jobName":"too-big","jobQueue":"%s","jobDefinition":"%s","arrayProperties":{"size":10001}}
+                """.formatted(queueArn, definitionArn)), REGION));
+        assertEquals("ClientException", tooBig.getErrorCode());
+    }
+
+    @Test
+    void listJobsRequiresExactlyOneSelector() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        String queueArn = arrayReadyQueue(service);
+
+        AwsException none = assertThrows(AwsException.class, () -> service.listJobs(json("{}")));
+        assertEquals("ClientException", none.getErrorCode());
+
+        AwsException both = assertThrows(AwsException.class, () -> service.listJobs(json("""
+                {"jobQueue":"%s","arrayJobId":"some-id"}
+                """.formatted(queueArn))));
+        assertEquals("ClientException", both.getErrorCode());
+    }
+
+    @Test
+    void registerMultiNodeJobDefinitionValidatesRangeCoverage() {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"gap-def",
+                  "type":"multinode",
+                  "nodeProperties":{
+                    "numNodes":3,
+                    "mainNode":0,
+                    "nodeRangeProperties":[
+                      {"targetNodes":"0:0","container":{"image":"main:latest"}}
+                    ]
+                  }
+                }
+                """), REGION));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void registerMultiNodeJobDefinitionRejectsContainerProperties() {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"mixed-def",
+                  "type":"multinode",
+                  "containerProperties":{"image":"solo:latest"},
+                  "nodeProperties":{
+                    "numNodes":2,
+                    "mainNode":0,
+                    "nodeRangeProperties":[{"targetNodes":"0:1","container":{"image":"worker:latest"}}]
+                  }
+                }
+                """), REGION));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void submitMultiNodeJobRunsAllNodesAndSucceeds() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"mnp-job",
+                  "type":"multinode",
+                  "nodeProperties":{
+                    "numNodes":2,
+                    "mainNode":0,
+                    "nodeRangeProperties":[
+                      {"targetNodes":"0:0","container":{"image":"main:latest"}},
+                      {"targetNodes":"1:1","container":{"image":"worker:latest"}}
+                    ]
+                  }
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+
+        String jobId = service.submitJob(json("""
+                {"jobName":"mnp-submit","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(queueArn, definitionArn)), REGION).path("jobId").asText();
+
+        JsonNode job = waitForJobStatus(service, jobId, "SUCCEEDED");
+        assertNotNull(job);
+        assertEquals(2, job.path("nodeProperties").path("numNodes").asInt());
+        assertEquals(0, job.path("nodeProperties").path("mainNode").asInt());
+        assertEquals(1, job.path("attempts").size());
+        assertEquals(0, job.path("container").size());
+
+        JsonNode nodes = service.listJobs(json("""
+                {"multiNodeJobId":"%s"}
+                """.formatted(jobId))).path("jobSummaryList");
+        assertEquals(2, nodes.size());
+        assertEquals(0, nodes.get(0).path("nodeProperties").path("nodeIndex").asInt());
+        assertEquals(true, nodes.get(0).path("nodeProperties").path("isMainNode").asBoolean());
+        assertEquals(1, nodes.get(1).path("nodeProperties").path("nodeIndex").asInt());
+        assertEquals(false, nodes.get(1).path("nodeProperties").path("isMainNode").asBoolean());
+    }
+
+    @Test
+    void submitMultiNodeJobSucceedsWhenOnlyAChildNodeFails() throws Exception {
+        // AWS determines the job's outcome solely from the main node, per the MNP user guide.
+        BatchDockerRunner runner = mock(BatchDockerRunner.class);
+        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class)))
+                .thenAnswer(invocation -> {
+                    BatchNodeExecution node = invocation.getArgument(2);
+                    return node.getNodeIndex() == 1
+                            ? new BatchRunResult(3, "worker crashed", "log-1", 1L, 2L, false)
+                            : new BatchRunResult(0, null, "log-0", 1L, 2L, false);
+                });
+        BatchService service = dockerService(runner);
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"mnp-child-fail-job",
+                  "type":"multinode",
+                  "nodeProperties":{
+                    "numNodes":2,
+                    "mainNode":0,
+                    "nodeRangeProperties":[{"targetNodes":"0:1","container":{"image":"worker:latest"}}]
+                  }
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+
+        String jobId = service.submitJob(json("""
+                {"jobName":"mnp-child-fail-submit","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(queueArn, definitionArn)), REGION).path("jobId").asText();
+
+        JsonNode job = waitForJobStatus(service, jobId, "SUCCEEDED");
+        assertNotNull(job);
+        verify(runner, times(2)).run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class));
+
+        JsonNode nodes = service.listJobs(json("""
+                {"multiNodeJobId":"%s"}
+                """.formatted(jobId))).path("jobSummaryList");
+        assertEquals(3, nodes.get(1).path("container").path("exitCode").asInt());
+    }
+
+    @Test
+    void submitMultiNodeJobFailsWhenTheMainNodeFails() throws Exception {
+        BatchDockerRunner runner = mock(BatchDockerRunner.class);
+        when(runner.run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class)))
+                .thenAnswer(invocation -> {
+                    BatchNodeExecution node = invocation.getArgument(2);
+                    return node.isMainNode()
+                            ? new BatchRunResult(3, "main crashed", "log-0", 1L, 2L, false)
+                            : new BatchRunResult(0, null, "log-1", 1L, 2L, false);
+                });
+        BatchService service = dockerService(runner);
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"mnp-main-fail-job",
+                  "type":"multinode",
+                  "nodeProperties":{
+                    "numNodes":2,
+                    "mainNode":0,
+                    "nodeRangeProperties":[{"targetNodes":"0:1","container":{"image":"worker:latest"}}]
+                  }
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+
+        String jobId = service.submitJob(json("""
+                {"jobName":"mnp-main-fail-submit","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(queueArn, definitionArn)), REGION).path("jobId").asText();
+
+        JsonNode job = waitForJobStatus(service, jobId, "FAILED");
+        assertNotNull(job);
+        assertEquals("main crashed", job.path("statusReason").asText());
+        verify(runner, times(2)).run(any(BatchJob.class), anyInt(), any(BatchNodeExecution.class));
+    }
+
+    @Test
+    void submitMultiNodeJobRejectsContainerOverrides() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"mnp-overrides-job",
+                  "type":"multinode",
+                  "nodeProperties":{
+                    "numNodes":1,
+                    "mainNode":0,
+                    "nodeRangeProperties":[{"targetNodes":"0:0","container":{"image":"main:latest"}}]
+                  }
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.submitJob(json("""
+                {
+                  "jobName":"mnp-overrides-submit","jobQueue":"%s","jobDefinition":"%s",
+                  "containerOverrides":{"command":["nope"]}
+                }
+                """.formatted(queueArn, definitionArn)), REGION));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void submitJobRejectsArrayPropertiesForMultiNodeJobDefinition() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"mnp-array-job",
+                  "type":"multinode",
+                  "nodeProperties":{
+                    "numNodes":1,
+                    "mainNode":0,
+                    "nodeRangeProperties":[{"targetNodes":"0:0","container":{"image":"main:latest"}}]
+                  }
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.submitJob(json("""
+                {"jobName":"mnp-array-submit","jobQueue":"%s","jobDefinition":"%s","arrayProperties":{"size":2}}
+                """.formatted(queueArn, definitionArn)), REGION));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    @Test
+    void nodeOverridesNumNodesRequiresAnOpenEndedRange() throws Exception {
+        BatchService service = immediateService(new InMemoryStorage<String, BatchJob>());
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"mnp-closed-range-job",
+                  "type":"multinode",
+                  "nodeProperties":{
+                    "numNodes":2,
+                    "mainNode":0,
+                    "nodeRangeProperties":[{"targetNodes":"0:1","container":{"image":"worker:latest"}}]
+                  }
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.submitJob(json("""
+                {
+                  "jobName":"mnp-closed-range-submit","jobQueue":"%s","jobDefinition":"%s",
+                  "nodeOverrides":{"numNodes":4}
+                }
+                """.formatted(queueArn, definitionArn)), REGION));
+        assertEquals("ClientException", e.getErrorCode());
+    }
+
+    private String arrayReadyQueue(BatchService service) throws Exception {
+        String suffix = UUID.randomUUID().toString();
+        String computeArn = service.createComputeEnvironment(json("""
+                {"computeEnvironmentName":"ce-%s","type":"MANAGED"}
+                """.formatted(suffix)), REGION).path("computeEnvironmentArn").asText();
+        return service.createJobQueue(json("""
+                {
+                  "jobQueueName":"queue-%s",
+                  "priority":1,
+                  "computeEnvironmentOrder":[{"order":1,"computeEnvironment":"%s"}]
+                }
+                """.formatted(suffix, computeArn)), REGION).path("jobQueueArn").asText();
     }
 
     private BatchService dockerService(BatchDockerRunner runner) {

@@ -27,12 +27,40 @@ class PreSignedUrlFilterTest {
         return (String) method.invoke(filter, accessKeyId);
     }
 
+    private static String resolveSecretKey(
+            PreSignedUrlFilter filter, String accessKeyId, String sessionToken) throws Exception {
+        Method method = PreSignedUrlFilter.class.getDeclaredMethod(
+                "resolveSecretKey", String.class, String.class);
+        method.setAccessible(true);
+        return (String) method.invoke(filter, accessKeyId, sessionToken);
+    }
+
     @Test
     void resolveSecretKeyRejectsUnregisteredNumericAccessKeyId() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDUNRELATED", "unrelated-secret");
         PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
 
         assertNull(resolveSecretKey(filter, "123456789012"));
+    }
+
+    @Test
+    void temporaryCredentialRequiresMatchingSessionToken() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
+                "ASIAS3EXAMPLE", "temporary-secret", "issued-token", java.time.Instant.now().plusSeconds(3600));
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+
+        assertEquals("temporary-secret", resolveSecretKey(filter, "ASIAS3EXAMPLE", "issued-token"));
+        assertNull(resolveSecretKey(filter, "ASIAS3EXAMPLE", null));
+        assertNull(resolveSecretKey(filter, "ASIAS3EXAMPLE", "wrong-token"));
+    }
+
+    @Test
+    void temporaryCredentialIsRejectedAfterExpiration() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
+                "ASIAS3EXPIRED", "temporary-secret", "issued-token", java.time.Instant.now().minusSeconds(1));
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+
+        assertNull(resolveSecretKey(filter, "ASIAS3EXPIRED", "issued-token"));
     }
 
     private static MultivaluedMap<String, String> params() {

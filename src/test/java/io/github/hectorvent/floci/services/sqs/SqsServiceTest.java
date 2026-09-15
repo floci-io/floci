@@ -2,26 +2,33 @@ package io.github.hectorvent.floci.services.sqs;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import io.github.hectorvent.floci.testing.MutableClock;
+import jakarta.enterprise.context.ContextNotActiveException;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class SqsServiceTest {
 
@@ -56,6 +63,192 @@ class SqsServiceTest {
         Queue queue = sqsService.createQueue("test-queue",
                 Map.of("VisibilityTimeout", "60"), "eu-west-1");
         assertEquals("60", queue.getAttributes().get("VisibilityTimeout"));
+    }
+
+    @Test
+    void getQueueAttributes_defaultsMatchAws() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("defaults-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("1048576", attrs.get("MaximumMessageSize"),
+                "MaximumMessageSize must default to the AWS value of 1048576 bytes");
+        assertEquals("true", attrs.get("SqsManagedSseEnabled"),
+                "A queue without a KMS key reports SSE-SQS enabled");
+        assertEquals("30", attrs.get("VisibilityTimeout"));
+        assertEquals("345600", attrs.get("MessageRetentionPeriod"));
+        assertEquals("0", attrs.get("DelaySeconds"));
+        assertEquals("0", attrs.get("ReceiveMessageWaitTimeSeconds"));
+        assertNotNull(attrs.get("QueueArn"));
+        assertNotNull(attrs.get("CreatedTimestamp"));
+        assertNotNull(attrs.get("LastModifiedTimestamp"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessages"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessagesDelayed"));
+        assertFalse(attrs.containsKey("Policy"), "Policy is only returned once set");
+        assertFalse(attrs.containsKey("RedrivePolicy"), "RedrivePolicy is only returned once set");
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseDisabledWhenKmsKeyIsSet() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-queue", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("false", attrs.get("SqsManagedSseEnabled"),
+                "A KMS master key takes over from SSE-SQS");
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseDisabledWhenQueueIsCreatedWithAKmsKey() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-at-create-queue",
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+
+        assertEquals("false",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region)
+                        .get("SqsManagedSseEnabled"));
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseReturnsToTheDefaultWhenTheKmsKeyIsCleared() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-cleared-queue",
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+        assertEquals("false",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region)
+                        .get("SqsManagedSseEnabled"));
+
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("KmsMasterKeyId", ""), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertFalse(attrs.containsKey("KmsMasterKeyId"), "An empty value clears the attribute");
+        assertEquals("true", attrs.get("SqsManagedSseEnabled"),
+                "Nothing derived from the KMS key may outlive it");
+    }
+
+    @Test
+    void getQueueAttributes_explicitSqsManagedSseFalseSurvivesAnUnrelatedUpdate() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sse-off-queue",
+                Map.of("SqsManagedSseEnabled", "false"), region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("DelaySeconds", "5"), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("false", attrs.get("SqsManagedSseEnabled"),
+                "A value the user set is intent, not derived state, and has to survive");
+        assertEquals("5", attrs.get("DelaySeconds"));
+    }
+
+    @Test
+    void getQueueAttributes_selectsSqsManagedSseEnabledByName() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sse-named-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("SqsManagedSseEnabled"), region);
+        assertEquals(Map.of("SqsManagedSseEnabled", "true"), attrs);
+    }
+
+    @Test
+    void createQueue_rejectsMaximumMessageSizeOutsideAwsRange() {
+        for (String invalid : List.of("1048577", "1023", "0", "-1", "abc")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> sqsService.createQueue("range-queue-" + invalid,
+                            Map.of("MaximumMessageSize", invalid), "eu-west-1"),
+                    "MaximumMessageSize " + invalid + " must be rejected");
+            assertEquals("InvalidAttributeValue", ex.getErrorCode());
+            assertTrue(ex.getMessage().contains("MaximumMessageSize"), ex.getMessage());
+        }
+    }
+
+    @Test
+    void createQueue_acceptsMaximumMessageSizeRangeBounds() {
+        String region = "eu-west-1";
+        for (String valid : List.of("1024", "1048576")) {
+            Queue queue = sqsService.createQueue("bounds-queue-" + valid,
+                    Map.of("MaximumMessageSize", valid), region);
+            assertEquals(valid,
+                    sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                            .get("MaximumMessageSize"));
+        }
+    }
+
+    @Test
+    void createQueue_acceptsTheAwsCeilingWhenTheConfiguredMaximumIsLower() {
+        String region = "eu-west-1";
+        var service = new SqsService(new InMemoryStorage<>(), 30, 131072, BASE_URL, clock);
+
+        Queue defaulted = service.createQueue("lowered-config-default-queue", null, region);
+        assertEquals("131072",
+                service.getQueueAttributes(defaulted.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "The configured maximum is what a new queue defaults to");
+
+        Queue raised = service.createQueue("lowered-config-raised-queue",
+                Map.of("MaximumMessageSize", "1048576"), region);
+        assertEquals("1048576",
+                service.getQueueAttributes(raised.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "Lowering the configured maximum moves the default, not the ceiling AWS accepts");
+        assertDoesNotThrow(
+                () -> service.sendMessage(raised.getQueueUrl(), "x".repeat(1_000_000), 0, region),
+                "The accepted ceiling and the enforced ceiling have to agree");
+    }
+
+    @Test
+    void getQueueAttributes_clampsAStoredMaximumMessageSizeAboveTheCeiling() {
+        String region = "us-east-1";
+        var store = new InMemoryStorage<String, Queue>();
+        var service = new SqsService(store, 30, 1048576, BASE_URL, clock);
+        Queue queue = service.createQueue("legacy-size-queue", null, region);
+
+        // A queue persisted by a build that allowed 2 MB, which no validation path can produce.
+        String storageKey = store.keys().iterator().next();
+        Queue stored = store.get(storageKey).orElseThrow();
+        stored.getAttributes().put("MaximumMessageSize", "2097152");
+        store.put(storageKey, stored);
+
+        assertEquals("1048576",
+                service.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "A stored value above the ceiling must be reported as the size actually enforced");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.sendMessage(queue.getQueueUrl(), "x".repeat(1_200_000), 0, region),
+                "The reported size and the enforced size have to agree");
+        assertTrue(ex.getMessage().contains("1048576"), ex.getMessage());
+    }
+
+    @Test
+    void setQueueAttributes_rejectsMaximumMessageSizeOutsideAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("set-range-queue", null, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.setQueueAttributes(queue.getQueueUrl(),
+                        Map.of("MaximumMessageSize", "1048577"), region));
+        assertEquals("InvalidAttributeValue", ex.getErrorCode());
+        assertEquals("1048576",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "A rejected SetQueueAttributes must leave the stored value untouched");
+    }
+
+    @Test
+    void setQueueAttributes_acceptsMaximumMessageSizeWithinAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("set-valid-range-queue", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("MaximumMessageSize", "2048"), region);
+
+        assertEquals("2048",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), "x".repeat(3000), 0, region));
+        assertTrue(ex.getMessage().contains("2048"), ex.getMessage());
     }
 
     @Test
@@ -861,6 +1054,175 @@ class SqsServiceTest {
     }
 
     @Test
+    void startMessageMoveTask_withoutDestinationKeepsMessageWithoutOriginalSource() throws Exception {
+        Queue dlq = sqsService.createQueue("orphan-dlq", null, "us-east-1");
+        String dlqArn = queueArn("orphan-dlq");
+        sqsService.createQueue("orphan-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        sqsService.sendMessage(dlq.getQueueUrl(), "orphan", 0, null, null, "us-east-1");
+        sqsService.sendMessage(dlq.getQueueUrl(), "next", 0, null, null, "us-east-1");
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, null, 0, "us-east-1");
+
+        awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of("orphan", "next"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void startMessageMoveTask_withoutDestinationKeepsMessageWhoseOriginalSourceWasDeleted() throws Exception {
+        Queue dlq = sqsService.createQueue("gone-dlq", null, "us-east-1");
+        String dlqArn = queueArn("gone-dlq");
+        Queue source = sqsService.createQueue("gone-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        // A sibling keeps the DLQ referenced by a redrive policy after the original source is gone.
+        sqsService.createQueue("gone-sibling", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        sqsService.sendMessage(source.getQueueUrl(), "stranded", 0, null, null, "us-east-1");
+        // Receiving past maxReceiveCount redrives the message into the DLQ with its original source recorded.
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(0, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(List.of("stranded"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+        sqsService.deleteQueue(source.getQueueUrl(), "us-east-1");
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, null, 0, "us-east-1");
+
+        awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of("stranded"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void startMessageMoveTask_movesEveryMessageOfANonDefaultAccountQueue() throws Exception {
+        String account = "111111111111";
+        RequestContext requestContext = new RequestContext();
+        requestContext.setAccountId(account);
+        Thread caller = Thread.currentThread();
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requestContextInstance = mock(Instance.class);
+        // Only the calling thread has a request scope; the move worker runs outside any request.
+        when(requestContextInstance.get()).thenAnswer(invocation -> {
+            if (Thread.currentThread() != caller) {
+                throw new ContextNotActiveException();
+            }
+            return requestContext;
+        });
+        SqsService service = new SqsService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"),
+                null, null, 30, 1048576, BASE_URL, new RegionResolver("us-east-1", account), false, null, clock);
+        String dlqArn = "arn:aws:sqs:us-east-1:" + account + ":acct-dlq";
+        Queue dlq = service.createQueue("acct-dlq", null, "us-east-1");
+        service.createQueue("acct-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        Queue replay = service.createQueue("acct-replay", null, "us-east-1");
+        for (String body : List.of("one", "two", "three")) {
+            service.sendMessage(dlq.getQueueUrl(), body, 0, null, null, "us-east-1");
+        }
+
+        String taskHandle = service.startMessageMoveTask(
+                dlqArn, "arn:aws:sqs:us-east-1:" + account + ":acct-replay", 0, "us-east-1");
+
+        awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of("one", "two", "three"), bodies(service.peekMessages(replay.getQueueUrl(), "us-east-1")));
+        assertEquals(List.of(), bodies(service.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void startMessageMoveTask_failedDeliveryLeavesSourceQueueOrderIntact() throws Exception {
+        AtomicBoolean destinationStoreDown = new AtomicBoolean();
+        SqsService service = serviceWithMessageStoreFailingFor("fail-replay", destinationStoreDown);
+        Queue dlq = service.createQueue("fail-dlq", null, "us-east-1");
+        String dlqArn = queueArn("fail-dlq");
+        service.createQueue("fail-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        service.createQueue("fail-replay", null, "us-east-1");
+        for (String body : List.of("first", "second", "third")) {
+            service.sendMessage(dlq.getQueueUrl(), body, 0, null, null, "us-east-1");
+        }
+        destinationStoreDown.set(true);
+
+        String taskHandle = service.startMessageMoveTask(dlqArn, queueArn("fail-replay"), 0, "us-east-1");
+
+        awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of("first", "second", "third"), bodies(service.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void startMessageMoveTask_failedDeliveryRestoresTheSourceMessageUnchanged() throws Exception {
+        AtomicBoolean destinationStoreDown = new AtomicBoolean();
+        SqsService service = serviceWithMessageStoreFailingFor("held-replay", destinationStoreDown);
+        Queue dlq = service.createQueue("held-dlq", null, "us-east-1");
+        String dlqArn = queueArn("held-dlq");
+        service.createQueue("held-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        service.createQueue("held-replay", null, "us-east-1");
+        service.sendMessage(dlq.getQueueUrl(), "held", 0, null, null, "us-east-1");
+        service.sendMessage(dlq.getQueueUrl(), "next", 0, null, null, "us-east-1");
+        // A consumer holds the head message when the redrive starts.
+        Message held = service.receiveMessage(dlq.getQueueUrl(), 1, 30, 0, "us-east-1").getFirst();
+        String messageId = held.getMessageId();
+        String receiptHandle = held.getReceiptHandle();
+        Instant firstReceive = held.getFirstReceiveTimestamp();
+        Instant visibleAt = held.getVisibleAt();
+        assertEquals(1, held.getReceiveCount());
+        destinationStoreDown.set(true);
+
+        String taskHandle = service.startMessageMoveTask(dlqArn, queueArn("held-replay"), 0, "us-east-1");
+
+        awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
+        List<Message> dlqMessages = service.peekMessages(dlq.getQueueUrl(), "us-east-1");
+        assertEquals(List.of("held", "next"), bodies(dlqMessages));
+        Message restored = dlqMessages.getFirst();
+        assertEquals(messageId, restored.getMessageId());
+        assertEquals(1, restored.getReceiveCount());
+        assertEquals(firstReceive, restored.getFirstReceiveTimestamp());
+        assertEquals(receiptHandle, restored.getReceiptHandle());
+        assertEquals(visibleAt, restored.getVisibleAt());
+        Map<String, String> attributes = service.getQueueAttributes(dlq.getQueueUrl(),
+                List.of("ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"), "us-east-1");
+        assertEquals("1", attributes.get("ApproximateNumberOfMessages"));
+        assertEquals("1", attributes.get("ApproximateNumberOfMessagesNotVisible"));
+    }
+
+    @Test
+    void startMessageMoveTask_failedDeliveryLeavesNoCopyInTheDestination() throws Exception {
+        AtomicBoolean destinationStoreDown = new AtomicBoolean();
+        SqsService service = serviceWithMessageStoreFailingFor("dup-replay", destinationStoreDown);
+        Queue dlq = service.createQueue("dup-dlq", null, "us-east-1");
+        String dlqArn = queueArn("dup-dlq");
+        service.createQueue("dup-source", Map.of("RedrivePolicy", redrivePolicy(dlqArn)), "us-east-1");
+        Queue replay = service.createQueue("dup-replay", null, "us-east-1");
+        for (String body : List.of("first", "second", "third")) {
+            service.sendMessage(dlq.getQueueUrl(), body, 0, null, null, "us-east-1");
+        }
+        destinationStoreDown.set(true);
+
+        String taskHandle = service.startMessageMoveTask(dlqArn, queueArn("dup-replay"), 0, "us-east-1");
+
+        awaitMoveTaskStatus(service, dlqArn, taskHandle, "COMPLETED");
+        assertEquals(List.of(), bodies(service.peekMessages(replay.getQueueUrl(), "us-east-1")));
+        assertEquals("0", service.getQueueAttributes(replay.getQueueUrl(),
+                List.of("ApproximateNumberOfMessages"), "us-east-1").get("ApproximateNumberOfMessages"));
+        assertTrue(service.receiveMessage(replay.getQueueUrl(), 10, 0, 0, "us-east-1").isEmpty());
+        assertEquals(List.of("first", "second", "third"), bodies(service.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    /** A service whose message store rejects writes for {@code queueName} while {@code down} is set. */
+    private SqsService serviceWithMessageStoreFailingFor(String queueName, AtomicBoolean down) {
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, List<Message> value) {
+                if (down.get() && key.endsWith("/" + queueName)) {
+                    throw new IllegalStateException("destination store unavailable");
+                }
+                super.put(key, value);
+            }
+        };
+        return new SqsService(new InMemoryStorage<>(), messageStore, null, 30, 1048576, BASE_URL,
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
+    }
+
+    private static String redrivePolicy(String dlqArn) {
+        return "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
+    }
+
+    private static List<String> bodies(List<Message> messages) {
+        return messages.stream().map(Message::getBody).toList();
+    }
+
+    @Test
     void startMessageMoveTask_sourceIsNotDeadLetterQueue_throwsInvalidParameterValue() {
         sqsService.createQueue("just-a-queue", null, "us-east-1");
         sqsService.createQueue("dest", null, "us-east-1");
@@ -1058,8 +1420,13 @@ class SqsServiceTest {
     }
 
     private void awaitMoveTaskStatus(String sourceArn, String taskHandle, String expectedStatus) throws Exception {
+        awaitMoveTaskStatus(sqsService, sourceArn, taskHandle, expectedStatus);
+    }
+
+    private static void awaitMoveTaskStatus(SqsService service, String sourceArn, String taskHandle,
+                                            String expectedStatus) throws Exception {
         for (int attempt = 0; attempt < 100; attempt++) {
-            boolean reachedStatus = sqsService.listMessageMoveTasks(sourceArn, "us-east-1").stream()
+            boolean reachedStatus = service.listMessageMoveTasks(sourceArn, "us-east-1").stream()
                     .anyMatch(task -> task.taskHandle().equals(taskHandle)
                             && expectedStatus.equals(task.status()));
             if (reachedStatus) {

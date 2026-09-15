@@ -9,6 +9,8 @@ name: Release
 #            public.ecr.aws/floci/floci:1.2.3        public.ecr.aws/floci/floci:latest
 #   Cedar:   floci/floci:1.2.3-cedar floci/floci:latest-cedar
 #            public.ecr.aws/floci/floci:1.2.3-cedar public.ecr.aws/floci/floci:latest-cedar
+#   Baseline: floci/floci:1.2.3-baseline floci/floci:latest-baseline
+#             public.ecr.aws/floci/floci:1.2.3-baseline public.ecr.aws/floci/floci:latest-baseline
 #   Compat:  floci/floci:1.2.3-compat floci/floci:latest-compat
 #            public.ecr.aws/floci/floci:1.2.3-compat public.ecr.aws/floci/floci:latest-compat
 #
@@ -100,10 +102,42 @@ jobs:
           if-no-files-found: warn
           retention-days: 1
 
+  # ── Build baseline native artifact — arm64 only ─────────────────────────
+  build-native-arm64-baseline:
+    name: Build baseline native artifact (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2 # v1
+        with:
+          java-version: '25'
+          distribution: 'mandrel'
+          cache: maven
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build ARMv8.0 baseline native executable
+        # Keep the normal arm64 artifact optimized as before. This additional release-only build
+        # targets ARMv8.0 explicitly so older cores such as Raspberry Pi 4's Cortex-A72 do not
+        # inherit optional AArch64 features (notably LSE) from the GitHub-hosted build runner.
+        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=armv8-a,-H:-AOTSingleCallsiteInline"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-arm64-baseline
+          path: |
+            target/*-runner
+            target/*.properties
+            target/*.so
+          if-no-files-found: warn
+          retention-days: 1
+
   # ── Push native + compat Docker images ───────────────────────────────────
   push-native:
     name: Push native and compat Docker images
-    needs: [build-native-amd64, build-native-arm64]
+    needs: [build-native-amd64, build-native-arm64, build-native-arm64-baseline]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -131,6 +165,11 @@ jobs:
         with:
           name: native-arm64
           path: native/arm64/
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-arm64-baseline
+          path: native-baseline/arm64/
 
       - name: Stage binaries under a fixed name
         run: |
@@ -183,6 +222,47 @@ jobs:
             vcs-ref=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Ordering matters: this step wipes native/ and replaces it with the arm64-only
+      # baseline binary. It is safe only because it runs AFTER the multi-arch image
+      # above has been pushed, and nothing that follows reads native/ from the build
+      # context: the Cedar sidecar builds from sidecars/cedar/ only, and the compat
+      # image pulls its base (BASE_IMAGE) from the registry. Moving this step above
+      # the multi-arch push would silently publish `latest` from the baseline binary.
+      - name: Stage ARMv8.0 baseline artifact under the native package path
+        run: |
+          rm -rf native/amd64 native/arm64
+          mkdir -p native/arm64
+          cp -a native-baseline/arm64/. native/arm64/
+          mv native/arm64/*-runner native/arm64/application
+
+      - name: Build and push ARMv8.0 baseline image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
+        with:
+          context: .
+          file: docker/Dockerfile.native-package
+          platforms: linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: |
+            floci/floci:${{ steps.version.outputs.version }}-baseline
+            floci/floci:latest-baseline
+            public.ecr.aws/floci/floci:${{ steps.version.outputs.version }}-baseline
+            public.ecr.aws/floci/floci:latest-baseline
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.created.outputs.created }}
+            version=${{ steps.version.outputs.version }}
+            build-date=${{ steps.created.outputs.created }}
+            vcs-ref=${{ github.sha }}
+          cache-from: type=gha,scope=floci-arm64-baseline
+          cache-to: type=gha,scope=floci-arm64-baseline,mode=max
 
       - name: Build and push Cedar sidecar multi-arch image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

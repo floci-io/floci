@@ -13,6 +13,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -52,10 +53,20 @@ public class PostgresProtocolHandler {
      * An authenticated client connection ready to be bridged. {@code iamRole} is the role an IAM
      * token named and the session was handed over to, or {@code null} for every other login.
      */
-    public record AuthenticatedSession(Socket client, String iamRole) {}
+    public record AuthenticatedSession(Socket client, Socket backend, String iamRole) {}
 
     /** The username/password the proxy opens the backend PostgreSQL connection with. */
     record BackendLogin(String user, String password) {}
+
+    /**
+     * Opens the backend connection. Called only once the client's startup message and credentials
+     * have been validated, so an unauthenticated or malformed client never causes a backend
+     * connection attempt.
+     */
+    @FunctionalInterface
+    public interface BackendConnector {
+        Socket connect() throws IOException;
+    }
 
     /**
      * Picks the backend login: the cluster master whenever the proxy is the authority for this
@@ -74,14 +85,17 @@ public class PostgresProtocolHandler {
         return new BackendLogin(clientUsername, clientPassword);
     }
 
-    public static AuthenticatedSession authenticate(Socket client, Socket backend,
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
                                       String masterUsername, String masterPassword, String dbName,
                                       boolean iamEnabled, RdsSigV4Validator sigV4,
                                       RdsProxyTlsCertificates tlsCertificates,
-                                      PasswordValidator passwordValidator) throws IOException {
+                                      PasswordValidator passwordValidator,
+                                      int handshakeTimeoutMillis) throws IOException {
+
+        client.setSoTimeout(handshakeTimeoutMillis);
 
         // Phase 1: Read client startup message (possibly preceded by SSL request)
-        StartupMessage startup = readStartupMessage(client, tlsCertificates);
+        StartupMessage startup = readStartupMessage(client, tlsCertificates, handshakeTimeoutMillis);
         if (startup == null) {
             closeQuietly(client);
             return null;
@@ -119,7 +133,6 @@ public class PostgresProtocolHandler {
                         "password authentication failed for user \"" + clientUsername + "\"");
                 clientOut.flush();
                 closeQuietly(client);
-                closeQuietly(backend);
                 return null;
             }
         } else {
@@ -129,84 +142,106 @@ public class PostgresProtocolHandler {
                         "password authentication failed for user \"" + clientUsername + "\"");
                 clientOut.flush();
                 closeQuietly(client);
-                closeQuietly(backend);
                 return null;
             }
         }
 
-        // Phase 5: Connect to backend PostgreSQL.
-        // IAM and master: use master credentials — the backend has the original container password
-        // and is never updated directly, so the proxy always authenticates as master.
-        // Non-master: forward the client's own credentials so the backend enforces its own ACLs,
-        // unless the proxy vouched for the client (MASTER_EQUIVALENT).
-        InputStream backendIn = backend.getInputStream();
-        OutputStream backendOut = backend.getOutputStream();
-
-        String effectiveDbName = resolveEffectiveDbName(startup.database(), dbName);
-        BackendLogin backendLogin = resolveBackendLogin(isMaster, isIam, authResult,
-                masterUsername, masterPassword, clientUsername, clientPassword);
-        String backendUser = backendLogin.user();
-        String backendPass = backendLogin.password();
-        sendStartupToBackend(backendOut, backendUser, effectiveDbName);
-        backendOut.flush();
-
-        if (!authenticateWithBackend(backendIn, backendOut, backendUser, backendPass)) {
-            sendErrorResponse(clientOut, "FATAL", "08006",
-                    "Backend database authentication failed");
+        // Phase 5: Connect to backend PostgreSQL, now that the client's startup message and
+        // credentials have been validated. IAM and master: use master credentials. The backend
+        // has the original container password and is never updated directly, so the proxy always
+        // authenticates as master. Non-master: forward the client's own credentials so the backend
+        // enforces its own ACLs, unless the proxy vouched for the client (MASTER_EQUIVALENT).
+        Socket backend;
+        try {
+            backend = backendConnector.connect();
+        } catch (IOException e) {
+            sendErrorResponse(clientOut, "FATAL", "08006", "could not connect to backend database");
             clientOut.flush();
             closeQuietly(client);
-            closeQuietly(backend);
             return null;
         }
 
-        // Buffer all backend messages until ReadyForQuery ('Z')
-        List<byte[]> bufferedMessages = readUntilReadyForQuery(backendIn);
+        try {
+            // The backend accepted the TCP connection but may never answer (or answer only
+            // partially); bound every blocking backend read during the handshake so a silent
+            // backend cannot pin this handler thread and its connection permit forever.
+            backend.setSoTimeout(handshakeTimeoutMillis);
 
-        String iamRole = null;
+            InputStream backendIn = backend.getInputStream();
+            OutputStream backendOut = backend.getOutputStream();
 
-        // Phase 5b: An IAM token is issued for one specific database role, so the session must run
-        // as that role even though the backend connection was opened as master. Handing it over
-        // gives the session the role's own privileges and object ownership, and refuses a token
-        // naming a role the database does not have instead of silently granting a master session.
-        if (isIam && !isMaster && !endsWithErrorResponse(bufferedMessages)) {
-            List<byte[]> roleSwitch = assumeSessionRole(backendIn, backendOut, clientUsername);
-            if (endsWithErrorResponse(roleSwitch)) {
-                sendErrorResponse(clientOut, "FATAL", "28000",
-                        errorMessage(roleSwitch.get(roleSwitch.size() - 1),
-                                "role \"" + clientUsername + "\" does not exist"));
+            String effectiveDbName = resolveEffectiveDbName(startup.database(), dbName);
+            BackendLogin backendLogin = resolveBackendLogin(isMaster, isIam, authResult,
+                    masterUsername, masterPassword, clientUsername, clientPassword);
+            String backendUser = backendLogin.user();
+            String backendPass = backendLogin.password();
+            sendStartupToBackend(backendOut, backendUser, effectiveDbName);
+            backendOut.flush();
+
+            if (!authenticateWithBackend(backendIn, backendOut, backendUser, backendPass)) {
+                sendErrorResponse(clientOut, "FATAL", "08006",
+                        "Backend database authentication failed");
                 clientOut.flush();
                 closeQuietly(client);
                 closeQuietly(backend);
                 return null;
             }
-            bufferedMessages = applyParameterStatusUpdates(bufferedMessages, roleSwitch);
-            iamRole = clientUsername;
-        }
 
-        // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
-        if (endsWithErrorResponse(bufferedMessages)) {
+            // Buffer all backend messages until ReadyForQuery ('Z')
+            List<byte[]> bufferedMessages = readUntilReadyForQuery(backendIn);
+
+            String iamRole = null;
+
+            // Phase 5b: An IAM token is issued for one specific database role, so the session must
+            // run as that role even though the backend connection was opened as master. Handing it
+            // over gives the session the role's own privileges and object ownership, and refuses a
+            // token naming a role the database does not have instead of silently granting a master
+            // session.
+            if (isIam && !isMaster && !endsWithErrorResponse(bufferedMessages)) {
+                List<byte[]> roleSwitch = assumeSessionRole(backendIn, backendOut, clientUsername);
+                if (endsWithErrorResponse(roleSwitch)) {
+                    sendErrorResponse(clientOut, "FATAL", "28000",
+                            errorMessage(roleSwitch.get(roleSwitch.size() - 1),
+                                    "role \"" + clientUsername + "\" does not exist"));
+                    clientOut.flush();
+                    closeQuietly(client);
+                    closeQuietly(backend);
+                    return null;
+                }
+                bufferedMessages = applyParameterStatusUpdates(bufferedMessages, roleSwitch);
+                iamRole = clientUsername;
+            }
+
+            // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
+            if (endsWithErrorResponse(bufferedMessages)) {
+                for (byte[] msg : bufferedMessages) {
+                    clientOut.write(msg);
+                }
+                clientOut.flush();
+                closeQuietly(client);
+                closeQuietly(backend);
+                return null;
+            }
+
+            sendMessage(clientOut, 'R', intBytes(0)); // AuthenticationOK
             for (byte[] msg : bufferedMessages) {
                 clientOut.write(msg);
             }
             clientOut.flush();
-            closeQuietly(client);
+
+            client.setSoTimeout(0);
+            backend.setSoTimeout(0);
+            return new AuthenticatedSession(client, backend, iamRole);
+        } catch (IOException | RuntimeException e) {
             closeQuietly(backend);
-            return null;
+            throw e;
         }
-
-        sendMessage(clientOut, 'R', intBytes(0)); // AuthenticationOK
-        for (byte[] msg : bufferedMessages) {
-            clientOut.write(msg);
-        }
-        clientOut.flush();
-
-        return new AuthenticatedSession(client, iamRole);
     }
 
     // ── Startup ───────────────────────────────────────────────────────────────
 
-    private static StartupMessage readStartupMessage(Socket socket, RdsProxyTlsCertificates tlsCertificates)
-            throws IOException {
+    private static StartupMessage readStartupMessage(Socket socket, RdsProxyTlsCertificates tlsCertificates,
+            int handshakeTimeoutMillis) throws IOException {
         Socket currentSocket = socket;
         while (true) {
             InputStream in = currentSocket.getInputStream();
@@ -218,6 +253,9 @@ public class PostgresProtocolHandler {
                 out.write('S');
                 out.flush();
                 currentSocket = acceptSsl(currentSocket, tlsCertificates);
+                // acceptSsl wraps the socket in a new SSLSocket; re-apply the handshake timeout
+                // since it is not guaranteed to be inherited from the underlying socket.
+                currentSocket.setSoTimeout(handshakeTimeoutMillis);
                 continue;
             }
 
@@ -715,8 +753,9 @@ public class PostgresProtocolHandler {
      * that whatever SQL produced it; the session is then terminated, since a handover that already
      * happened cannot be taken back.
      */
-    public static void bridge(AuthenticatedSession session, Socket backend) {
+    public static void bridge(AuthenticatedSession session) {
         Socket client = session.client();
+        Socket backend = session.backend();
         InputStream clientIn, backendIn;
         OutputStream clientOut, backendOut;
         try {

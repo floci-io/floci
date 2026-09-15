@@ -16,6 +16,11 @@
 | `PublishStateMachineVersion` | - |
 | `ListStateMachineVersions` | - |
 | `DeleteStateMachineVersion` | - |
+| `CreateStateMachineAlias` | - |
+| `DescribeStateMachineAlias` | - |
+| `ListStateMachineAliases` | - |
+| `UpdateStateMachineAlias` | - |
+| `DeleteStateMachineAlias` | - |
 | `ValidateStateMachineDefinition` | Validate an ASL definition without creating a state machine |
 | `StartExecution` | Start a new execution |
 | `StartSyncExecution` | - |
@@ -118,6 +123,24 @@ omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline
 Results remain in input order even when iterations finish out of order. If an iteration fails,
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
 iterations.
+
+## Distributed Map ItemBatcher
+
+`ItemBatcher` hands each child execution a batch of items instead of a single item. The child input
+is `{"BatchInput": ..., "Items": [...]}`, with `BatchInput` present only when the state declares it.
+`ItemSelector` still runs per item, before the items are grouped.
+
+A batch closes on `MaxItemsPerBatch`, on `MaxInputBytesPerBatch`, or on the 256 KiB child-input
+ceiling AWS applies whether or not a byte limit is declared. Either limit may be given as a
+`...Path` field, or as an expression in a JSONata state machine. With neither declared, items fill
+one batch up to that ceiling. The size measured is the serialized child payload, envelope and
+`BatchInput` included, not the items alone. An item that would exceed the ceiling on its own can
+never start a child execution, so the state fails with `States.DataLimitExceeded` rather than
+building a batch AWS would reject: reduce the item with `ItemSelector` first.
+
+`MaxConcurrency` then bounds concurrent batches, and the Map result has one entry per batch rather
+than per item. `DescribeMapRun` reports items under `itemCounts` and batches under
+`executionCounts`.
 
 ## Retry policies
 

@@ -200,13 +200,34 @@ architecture. `Marker` is opaque and signed with a key generated at startup, so 
 edited or previous-run token is rejected with `InvalidParameterValueException` rather than
 applied as a cursor. One divergence: a parameter sent with an empty value
 (`?CompatibleRuntime=`) is treated as absent rather than rejected, because RESTEasy binds an
-empty query value as null. `CreateFunction`/`UpdateFunctionConfiguration`
-validate each `Layers` ARN eagerly against that storage, matching real AWS - an unresolvable ARN
-is rejected with `InvalidParameterValueException`, not silently accepted. Only resolves layers
-published into this same local Floci instance; a real AWS-owned layer ARN (e.g. the AWS AppConfig
-Extension or a Datadog-published layer) can never resolve here, since there's no mechanism in
-Floci for fetching real AWS content - publish your own copy of the layer's content locally under
-a name you control and reference that ARN instead.
+empty query value as null. Resolution honours the ARN's
+account and partition: an ARN naming another account resolves to nothing rather than to a
+same-named layer of the caller's own, matching the live service, which answers that case with
+`AccessDeniedException` and never substitutes. `CreateFunction`/`UpdateFunctionConfiguration`
+validate each `Layers` ARN in the caller's own account eagerly against that storage, matching
+real AWS - an unresolvable one is rejected with `InvalidParameterValueException: Layer version
+... does not exist.`, not silently accepted.
+
+An ARN naming another account or another partition is answered on the live service by the layer's
+resource policy: an AWS-managed public layer resolves, and everything else is
+`AccessDeniedException`. Measured on `CreateFunction` in ap-southeast-1, a foreign-account ARN and
+a cross-partition ARN return the same `AccessDeniedException`, so Floci returns that for both.
+Floci implements no layer permissions and cannot fetch real AWS content, so it cannot tell a
+public layer from a private one; refusing is the faithful default, being the answer AWS gives to
+every foreign ARN except a public one.
+
+Set `floci.services.lambda.accept-external-layer-arns: true`
+(`FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS`) to record a same-partition foreign ARN on the
+function instead of refusing it, which is what a stack attaching Powertools, the AppConfig
+extension or a vendor-published layer needs. The trade is explicit: with it on, Floci also accepts
+an ARN AWS would refuse with `AccessDeniedException`, so a typo or a private third-party layer
+passes here and fails on deploy. The content is never mounted at `/opt` either way, and a warning
+is logged at attach time and again at invoke; publish your own copy of the content locally under a
+name you control if the handler needs it at runtime.
+
+A layer ARN outside the `aws` partition is refused whatever that setting says. Partitions are
+isolated, so no resource policy can ever make such a layer readable, and `GetLayerVersionByArn`
+rejects one outright with `InvalidParameterValueException: Invalid layer version ...`.
 
 ## Not Implemented
 

@@ -157,6 +157,8 @@ public class AwsQueryController {
             "CreateKeyPair", "DescribeKeyPairs", "DeleteKeyPair", "ImportKeyPair",
             "DescribeImages", "RegisterImage", "DeregisterImage", "CreateImage", "CopyImage",
             "DescribeSnapshots",
+            "EnableSnapshotBlockPublicAccess", "DisableSnapshotBlockPublicAccess",
+            "GetSnapshotBlockPublicAccessState",
             "CreateTags", "DeleteTags", "DescribeTags",
             "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
             "AttachInternetGateway", "DetachInternetGateway",

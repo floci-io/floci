@@ -28,31 +28,36 @@ quarkus:
       require-localhost: false
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
-  datasource:
-    active: false
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
   native:
+    # quarkus-jdbc-mysql used to force this. Without it the image has only UTF-8, UTF-16,
+    # ISO-8859-1 and US-ASCII, which breaks latin1 MySQL columns and non-UTF-8 mail bodies.
+    add-all-charsets: true
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), IAM reads its AWS managed-policy
-      # catalog (iam/managed-policies.yaml, iam/managed-policy-documents.json and
-      # iam/managed-policy-versions.json), AppSync's GraphQL parser reads its
+      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
       # message bundles, and API Gateway's Velocity engine reads its default
-      # properties at runtime via
-      # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
-      # cannot detect these dynamically-built paths, so they are registered
-      # explicitly to ensure GraalVM includes every file in the native image.
+      # properties at runtime via ClassLoader#getResourceAsStream. Quarkus's
+      # static resource analysis cannot detect these dynamically-built paths,
+      # so they are registered explicitly to ensure GraalVM includes every
+      # file in the native image.
+      # The IAM managed-policy catalog (iam/*) is not listed on purpose.
+      # AwsManagedPolicies parses it while the image is built and the parsed
+      # catalog lives in the image heap, so the 3.5 MB of source files would
+      # only be a second copy of the same data.
       includes:
         - pricing-snapshots/**
         - ui/*.html
         - ec2/*.yaml
-        - iam/*.yaml
-        - iam/*.json
         - i18n/*.properties
         - org/apache/velocity/runtime/defaults/*.properties
+        # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
+        # driver reads its time zone table at connect time.
+        - META-INF/services/java.sql.Driver
+        - com/mysql/cj/util/TimeZoneMapping.properties
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
       # for the running platform loads, so 23 are dropped. Linux x86_64 and
       # aarch64 cover the published images, Mac covers a local native build.
@@ -87,6 +92,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEventService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
@@ -99,6 +105,12 @@ quarkus:
       # bundled JNI library from the static initializers of these two classes.
       - --initialize-at-run-time=org.xerial.snappy.Snappy
       - --initialize-at-run-time=org.xerial.snappy.SnappyLoader
+      - --initialize-at-run-time=org.postgresql.util.PasswordUtil$SecureRandomHolder
+      - --initialize-at-run-time=org.postgresql.util.LazyCleanerImpl
+      # Build-time property. The MySQL driver's AbandonedConnectionCleanupThread starts an
+      # executor thread in its static initializer unless this is set, and a started thread
+      # in the image heap fails the build.
+      - -J-Dcom.mysql.cj.disableAbandonedConnectionCleanup=true
 
 
 floci:
@@ -144,7 +156,7 @@ floci:
       lambda:
         flush-interval-ms: 5000
       cloudwatchlogs:
-        flush-interval-ms: 5000
+        flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
       secretsmanager:
@@ -295,6 +307,7 @@ floci:
       container-idle-timeout-seconds: 300
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
+      accept-external-layer-arns: false       # FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS - accept a Layers ARN from another account (content is never mounted). AWS answers these through the layer resource policy, which Floci does not model, so the default refuses them like AWS refuses a non-public one. Turn on to attach public layers such as Powertools.
       # aws-config-path:                      # Host path to bind-mount (read-only) at /opt/aws-config for real credential discovery
       # extra-hosts:                          # Extra /etc/hosts entries for Lambda containers, "hostname:ip" ("host-gateway" allowed as ip)
       # container-name-prefix: floci          # FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX — base name prefix for spawned containers and code volumes ([A-Za-z0-9][A-Za-z0-9_.-]*; invalid values fall back to "floci")
@@ -360,6 +373,9 @@ floci:
       proxy-max-port: 7199
       default-credential-duration-seconds: 900   # GetClusterCredentials default lifetime (900-3600)
       # endpoint-host: localhost                 # Hostname clients use; empty -> DockerHostResolver
+      proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
+      proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
+      proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
@@ -371,6 +387,9 @@ floci:
       # default-postgres-image: "registry.example.com/postgres:16-alpine"
       # default-mysql-image: "registry.example.com/mysql:8.0"
       # default-mariadb-image: "registry.example.com/mariadb:11"
+      proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
+      proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
+      proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
@@ -397,6 +416,7 @@ floci:
     cloudwatchlogs:
       enabled: true
       max-events-per-query: 10000
+      max-stored-events: 20000
     cloudwatchmetrics:
       enabled: true
     secretsmanager:
@@ -494,6 +514,8 @@ floci:
     ecs:
       enabled: true
       mock: false
+      host-volume-roots: []
+      allow-unsafe-host-volumes: false
     appconfig:
       enabled: true
     appconfigdata:
@@ -518,6 +540,18 @@ floci:
       # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
       # Set an absolute http:// or https:// URL here only to override that derivation.
       insecure-skip-tls-verify: false
+      # The console-contract keys below are deliberately unset. Floci reads the console's own
+      # io.floci.console.* image labels first, then a built-in profile, then the contract defaults
+      # (/api/health, port 4500, status: ok). Setting a value here overrides all of that, so only
+      # do it for a console that describes itself neither way. See docs/ui/console-contract.md.
+      # internal-port: 4500
+      # endpoint-env: AWS_ENDPOINT_URL
+      # status-path: /api/health
+      # status-ready-field: status      # "none" means any 200 counts as ready
+      # status-ready-value: ok
+      # status-unavailable-value: unavailable
+      # extra-env:                     # PORT and AWS_ENDPOINT_URL are ignored here: use
+      #   - MY_CONSOLE_FLAG=true       # internal-port and endpoint above instead
     bedrock:
       enabled: true
     bedrock-runtime:
@@ -606,9 +640,13 @@ floci:
       enabled: true
       emit-mode: synchronous
       staging-bucket: floci-cur-staging
+    bcm-pricing-calculator:
+      enabled: true
     bcm-data-exports:
       enabled: true
       emit-mode: synchronous
+    oam:
+      enabled: true
     cloudtrail:
       enabled: true
     lightsail:
@@ -718,6 +756,8 @@ floci:
       enabled: true
       # invoke-response: '{"output":"yes"}'   # Body returned by InvokeAgentRuntime
       # validate-runtime-exists: false        # true = reject unknown runtime ARNs
+      # harness-echo-prefix: 'You said: '      # Prefix on the reply InvokeHarness streams back
+      # harness-empty-reply: 'No user message was supplied.'
     bedrock-agent-core-control:
       enabled: true
     servicequotas:

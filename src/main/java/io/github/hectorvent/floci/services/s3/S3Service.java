@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -55,7 +56,15 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
 public class S3Service implements Resettable, ResourceProvider {
-    private String ownerId() { return regionResolver != null ? regionResolver.getAccountId() : "000000000000"; }
+    private String ownerId() {
+        if (regionResolver != null) {
+            return regionResolver.getAccountId();
+        }
+        if (bucketStore instanceof AccountAwareStorageBackend<?> aware) {
+            return aware.accountId();
+        }
+        return "000000000000";
+    }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
@@ -71,10 +80,16 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(S3Service.class);
 
-    record RequestAuthorization(boolean signed, String accessKeyId) {
+    record RequestAuthorization(boolean signed, String accessKeyId, String sessionToken) {
         static RequestAuthorization unsigned() {
-            return new RequestAuthorization(false, null);
+            return new RequestAuthorization(false, null, null);
         }
+    }
+
+    record SignedPrincipalResourcePolicyEvaluation(
+            ResourcePolicyDecision decision,
+            String resourceOwnerAccountId
+    ) {
     }
 
     private final StorageBackend<String, Bucket> bucketStore;
@@ -483,24 +498,35 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object storeObject(String bucketName, String key, byte[] data,
                                  String contentType, Map<String, String> metadata,
                                  S3Checksum checksum, List<Part> parts, PutObjectOptions options) {
-        Bucket bucket = resolveBucket(bucketName)
+        return storeObject(bucketName, key, data, contentType, metadata, checksum, parts, options, null);
+    }
+
+    private S3Object storeObject(String bucketName, String key, byte[] data,
+                                 String contentType, Map<String, String> metadata,
+                                 S3Checksum checksum, List<Part> parts, PutObjectOptions options, String eTag) {
+        AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+        Bucket bucket = ownedBucket.value();
         synchronized (bucket) {
-            return storeObjectInternal(bucket, bucketName, key, data, contentType, metadata, checksum, parts, options);
+            return storeObjectInternal(ownedBucket.account(), bucket, bucketName, key, data,
+                    contentType, metadata, checksum, parts, options, eTag);
         }
     }
 
-    private S3Object storeObjectInternal(Bucket bucket, String bucketName, String key, byte[] data,
+    private S3Object storeObjectInternal(String bucketOwnerAccount, Bucket bucket,
+                                         String bucketName, String key, byte[] data,
                                          String contentType, Map<String, String> metadata,
-                                         S3Checksum checksum, List<Part> parts, PutObjectOptions options) {
+                                         S3Checksum checksum, List<Part> parts, PutObjectOptions options,
+                                         String eTag) {
         PutObjectOptions effectiveOptions = options != null ? options : new PutObjectOptions();
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
         SseCustomerKey sseCustomerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(), effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
-        S3Object object = new S3Object(bucketName, key, data, contentType);
+        S3Object object = new S3Object(bucketName, key, data, contentType,
+                eTag != null ? eTag : computeETag(data));
         if (metadata != null) {
             object.getMetadata().putAll(metadata);
         }
@@ -522,7 +548,8 @@ public class S3Service implements Resettable, ResourceProvider {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
             object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
         }
-        object.setAcl(resolveObjectAclXml(effectiveOptions.getAcl(), effectiveOptions.getGrantRead(),
+        object.setAcl(resolveObjectAclXml(bucketOwnerAccount,
+                effectiveOptions.getAcl(), effectiveOptions.getGrantRead(),
                 effectiveOptions.getGrantWrite(), effectiveOptions.getGrantFullControl(),
                 effectiveOptions.getGrantReadAcp(), effectiveOptions.getGrantWriteAcp()));
         if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
@@ -543,13 +570,14 @@ public class S3Service implements Resettable, ResourceProvider {
             // object key and would be left unreachable by the new version. Cleanup is deferred
             // until the replacement body is on disk, so a failed write does not drop them.
             boolean[] dropPreVersioningAnnotations = {false};
-            objectStore.get(latestKey).ifPresent(prev -> {
+            resolveObjectForAccount(bucketOwnerAccount, latestKey).ifPresent(prev -> {
                 if (prev.isLatest() && !prev.isDeleteMarker() && bucket.isObjectLockEnabled()) {
                     checkLockProtection(prev, false);
                 }
                 if (prev.getVersionId() != null) {
                     prev.setLatest(false);
-                    objectStore.put(versionedKey(bucketName, key, prev.getVersionId()), prev);
+                    putObjectForAccount(bucketOwnerAccount,
+                            versionedKey(bucketName, key, prev.getVersionId()), prev);
                 } else {
                     dropPreVersioningAnnotations[0] = true;
                 }
@@ -569,8 +597,8 @@ public class S3Service implements Resettable, ResourceProvider {
             // versioned write fails, the canonical file - which unlocked GETs already associate
             // with the still-unpublished previous generation - is never touched, so a concurrent
             // GET can't observe corrupted "latest" bytes paired with the old metadata.
-            writeVersionedFile(bucketName, key, versionId, data);
-            writeFile(bucketName, key, data);
+            writeVersionedFile(bucketOwnerAccount, bucketName, key, versionId, data);
+            writeFile(bucketOwnerAccount, bucketName, key, data);
             // Deferred pre-versioning annotation cleanup: only after the replacement body is on
             // disk, so a failed write keeps the old body and its annotations together.
             if (dropPreVersioningAnnotations[0]) {
@@ -581,11 +609,12 @@ public class S3Service implements Resettable, ResourceProvider {
             // it (copyObject reads getData() without any lock) and race this null-out otherwise.
             object.setData(null);
             // Store versioned copy and update latest pointer
-            objectStore.put(versionedKey(bucketName, key, versionId), object);
-            objectStore.put(latestKey, object);
+            putObjectForAccount(bucketOwnerAccount, versionedKey(bucketName, key, versionId), object);
+            putObjectForAccount(bucketOwnerAccount, latestKey, object);
             LOG.debugv("Put versioned object: {0}/{1} v={2} ({3} bytes)", bucketName, key, versionId, data.length);
         } else {
-            S3Object prev = objectStore.get(objectKey(bucketName, key)).orElse(null);
+            S3Object prev = resolveObjectForAccount(
+                    bucketOwnerAccount, objectKey(bucketName, key)).orElse(null);
             // Check lock protection on the existing object before overwriting
             if (bucket.isObjectLockEnabled() && prev != null && !prev.isDeleteMarker()) {
                 checkLockProtection(prev, false);
@@ -604,7 +633,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
             // Write the body before publishing metadata - see the comment in the versioned
             // branch above; the same ordering requirement applies here.
-            writeFile(bucketName, key, data);
+            writeFile(bucketOwnerAccount, bucketName, key, data);
             // An overwrite replaces the object's annotations (AWS drops them on overwrite).
             // The cleanup runs only after the body write succeeds, so a failed PUT keeps the
             // old body together with its annotations; and before the new metadata is published,
@@ -613,7 +642,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // Release the cached payload before publishing - see the comment in the versioned
             // branch above; the same race applies here.
             object.setData(null);
-            objectStore.put(objectKey(bucketName, key), object);
+            putObjectForAccount(bucketOwnerAccount, objectKey(bucketName, key), object);
             LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, data.length);
         }
         return object;
@@ -764,6 +793,20 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
     }
 
+    /**
+     * CreateBucket is never anonymous on AWS: there is no bucket policy to consult yet, so an
+     * unsigned request is denied outright and a signed one only needs a known access key.
+     */
+    void authorizeCreateBucket(RequestAuthorization authorization) {
+        if (!enforceAuth) {
+            return;
+        }
+        authorizeSignedRequest(authorization);
+        if (isUnsignedRequest(authorization)) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+    }
+
     void authorizeBucketWrite(String bucketName, String action, RequestAuthorization authorization) {
         if (!enforceAuth) {
             return;
@@ -779,6 +822,12 @@ public class S3Service implements Resettable, ResourceProvider {
 
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        // AWS lets only an identity in the bucket owner's account manage the bucket policy; the
+        // policy itself can never grant PutBucketPolicy or DeleteBucketPolicy to an anonymous caller.
+        if (isBucketPolicyAction(action)) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
 
         String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
@@ -852,7 +901,7 @@ public class S3Service implements Resettable, ResourceProvider {
         RequestAuthorization requestAuthorization = authorization != null
                 ? authorization
                 : RequestAuthorization.unsigned();
-        if (requestAuthorization.signed() && !isKnownAccessKey(requestAuthorization.accessKeyId())) {
+        if (requestAuthorization.signed() && !isKnownAccessKey(requestAuthorization)) {
             throw new AwsException("InvalidAccessKeyId",
                     "The AWS Access Key Id you provided does not exist in our records.", 403);
         }
@@ -878,11 +927,13 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
 
         if (requestAuthorization.signed()) {
-            if (isKnownAccessKey(requestAuthorization.accessKeyId())) {
-                return;
+            if (!isKnownAccessKey(requestAuthorization)) {
+                throw new AwsException("InvalidAccessKeyId",
+                        "The AWS Access Key Id you provided does not exist in our records.", 403);
             }
-            throw new AwsException("InvalidAccessKeyId",
-                    "The AWS Access Key Id you provided does not exist in our records.", 403);
+            authorizeSignedPrincipalPolicyDeny(
+                    bucketName, action, resourceArn, requestAuthorization);
+            return;
         }
 
         Bucket bucket = bucketStore.get(bucketName)
@@ -904,6 +955,55 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         throw new AwsException("AccessDenied", "Access Denied", 403);
+    }
+
+    private void authorizeSignedPrincipalPolicyDeny(
+            String bucketName,
+            String action,
+            String resourceArn,
+            RequestAuthorization authorization) {
+        if (signedPrincipalResourcePolicyDecision(
+                bucketName, action, resourceArn, authorization)
+                .decision() == ResourcePolicyDecision.EXPLICIT_DENY) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+    }
+
+    SignedPrincipalResourcePolicyEvaluation signedPrincipalResourcePolicyDecision(
+            String bucketName,
+            String action,
+            String resourceArn,
+            RequestAuthorization authorization) {
+        if (authorization == null || !authorization.signed()
+                || LEGACY_ACCESS_KEY_ID.equals(authorization.accessKeyId()) || iamService == null) {
+            return new SignedPrincipalResourcePolicyEvaluation(ResourcePolicyDecision.NEUTRAL, null);
+        }
+
+        Optional<String> principalArn = iamService.resolveCallerArn(authorization.accessKeyId());
+        if (principalArn.isEmpty()) {
+            return new SignedPrincipalResourcePolicyEvaluation(ResourcePolicyDecision.NEUTRAL, null);
+        }
+
+        AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
+                .orElseThrow(() -> new AwsException(
+                        "NoSuchBucket", "The specified bucket does not exist.", 404));
+        S3PublicAccessEvaluator.PrincipalPolicyEvaluation policyEvaluation =
+                S3PublicAccessEvaluator.principalPolicyEvaluation(
+                        objectMapper,
+                        ownedBucket.value().getPolicy(),
+                        "AWS",
+                        principalArn.get(),
+                        action,
+                        resourceArn,
+                        Map.of("aws:PrincipalArn", principalArn.get()));
+        ResourcePolicyDecision decision = switch (policyEvaluation.decision()) {
+            case ALLOW -> policyEvaluation.directPrincipalAllow() && principalArn.get().contains(":user/")
+                    ? ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
+                    : ResourcePolicyDecision.ALLOW;
+            case DENY -> ResourcePolicyDecision.EXPLICIT_DENY;
+            case NEUTRAL -> ResourcePolicyDecision.NEUTRAL;
+        };
+        return new SignedPrincipalResourcePolicyEvaluation(decision, ownedBucket.account());
     }
 
     private boolean readableObjectExists(String bucketName, String key) {
@@ -931,18 +1031,24 @@ public class S3Service implements Resettable, ResourceProvider {
         return "s3:PutObject".equals(action);
     }
 
+    private static boolean isBucketPolicyAction(String action) {
+        return "s3:PutBucketPolicy".equals(action) || "s3:DeleteBucketPolicy".equals(action);
+    }
+
     private static boolean isUnsignedRequest(RequestAuthorization authorization) {
         return authorization == null || !authorization.signed();
     }
 
-    private boolean isKnownAccessKey(String accessKeyId) {
+    private boolean isKnownAccessKey(RequestAuthorization authorization) {
+        String accessKeyId = authorization != null ? authorization.accessKeyId() : null;
         if (accessKeyId == null || accessKeyId.isBlank()) {
             return false;
         }
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return true;
         }
-        return iamService != null && iamService.findSecretKey(accessKeyId).isPresent();
+        return iamService != null
+                && iamService.findSecretKey(accessKeyId, authorization.sessionToken()).isPresent();
     }
 
     private boolean publicBucketAclAllowsRead(Bucket bucket) {
@@ -1019,8 +1125,12 @@ public class S3Service implements Resettable, ResourceProvider {
         if (versionId != null) {
             // An explicit version's file is immutable once written (see storeObjectInternal) and
             // never reused by a later PUT, so this pairing can never race a concurrent overwrite.
+            String bucketOwnerAccount = resolveBucketEntry(bucketName)
+                    .orElseThrow(() -> new AwsException("NoSuchBucket",
+                            "The specified bucket does not exist.", 404))
+                    .account();
             S3Object obj = getObjectMetadata(bucketName, key, versionId);
-            obj.setData(readVersionedFile(bucketName, key, versionId));
+            obj.setData(readVersionedFile(bucketOwnerAccount, bucketName, key, versionId));
             return obj;
         }
         return getLatestObject(bucketName, key);
@@ -1046,18 +1156,20 @@ public class S3Service implements Resettable, ResourceProvider {
      * token is only ever observed when untouched, and untouched means nothing to race against.
      */
     private S3Object getLatestObject(String bucketName, String key) {
-        Bucket bucket = resolveBucket(bucketName)
+        AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+        Bucket bucket = ownedBucket.value();
+        String bucketOwnerAccount = ownedBucket.account();
         String storeKey = objectKey(bucketName, key);
         // A genuine race only ever needs a retry or two; this bound exists so a resolution bug
         // (the recheck disagreeing with getObjectMetadata about where this key lives) fails loudly
         // with a clear error instead of spinning forever re-reading the file and exhausting the heap.
         for (int attempt = 0; attempt < 10_000; attempt++) {
             S3Object obj = getObjectMetadata(bucketName, key, null);
-            byte[] data = readFile(bucketName, key);
+            byte[] data = readFile(bucketOwnerAccount, bucketName, key);
             synchronized (bucket) {
-                S3Object current = resolveObject(storeKey).orElse(null);
+                S3Object current = resolveObjectForAccount(bucketOwnerAccount, storeKey).orElse(null);
                 if (current != null && !current.isDeleteMarker()
                         && Objects.equals(current.getDataGeneration(), obj.getDataGeneration())) {
                     obj.setData(data);
@@ -1098,10 +1210,14 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public InputStream openObjectStream(String bucketName, String key, String versionId) {
         getObjectMetadata(bucketName, key, versionId);
+        String bucketOwnerAccount = resolveBucketEntry(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404))
+                .account();
         if (inMemory) {
             byte[] data = versionId != null
-                    ? memoryDataStore.get(physicalVersionedKey(bucketName, key, versionId))
-                    : memoryDataStore.get(physicalKey(bucketName, key));
+                    ? memoryDataStore.get(physicalVersionedKey(bucketOwnerAccount, bucketName, key, versionId))
+                    : memoryDataStore.get(physicalKey(bucketOwnerAccount, bucketName, key));
             if (data == null) {
                 throw new IllegalStateException("S3 object data is missing for " + bucketName + "/" + key);
             }
@@ -1109,8 +1225,8 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         try {
             Path path = versionId != null
-                    ? resolveVersionedPathForRead(bucketName, key, versionId)
-                    : resolveObjectPathForRead(bucketName, key);
+                    ? resolveVersionedPathForRead(bucketOwnerAccount, bucketName, key, versionId)
+                    : resolveObjectPathForRead(bucketOwnerAccount, bucketName, key);
             return Files.newInputStream(path);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to open S3 object stream", e);
@@ -1150,17 +1266,24 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private S3Object getStoredObject(String bucketName, String key, String versionId) {
-        ensureBucketExists(bucketName);
+        return getStoredObjectEntry(bucketName, key, versionId).value();
+    }
+
+    private AccountAwareStorageBackend.OwnedEntry<S3Object> getStoredObjectEntry(
+            String bucketName, String key, String versionId) {
+        AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
 
         String storeKey = versionId != null ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
-        S3Object object = resolveObject(storeKey)
+        S3Object object = resolveObjectForAccount(ownedBucket.account(), storeKey)
                 .orElseThrow(() -> versionId != null
                         ? new AwsException("NoSuchVersion", "The specified version does not exist.", 404)
                         : new AwsException("NoSuchKey", "The specified key does not exist.", 404));
         if (object.isDeleteMarker()) {
             throw new AwsException("NoSuchKey", "The specified key does not exist.", 404);
         }
-        return object;
+        return new AccountAwareStorageBackend.OwnedEntry<>(ownedBucket.account(), object);
     }
 
     // AWS lists part-level checksums only for composite objects; a full-object multipart object
@@ -1309,6 +1432,25 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Returns whether the requested object version is currently protected by an active
+     * GOVERNANCE retention period. The bypass permission is only relevant for those versions;
+     * an {@code x-amz-bypass-governance-retention} header on an otherwise unprotected batch
+     * entry must not make that entry require {@code s3:BypassGovernanceRetention}.
+     */
+    public boolean isGovernanceRetentionActive(String bucketName, String key, String versionId) {
+        ensureBucketExists(bucketName);
+        S3Object object = (versionId != null
+                ? objectStore.get(versionedKey(bucketName, key, versionId))
+                : objectStore.get(objectKey(bucketName, key)))
+                .orElse(null);
+        return object != null
+                && !object.isDeleteMarker()
+                && "GOVERNANCE".equals(object.getObjectLockMode())
+                && object.getRetainUntilDate() != null
+                && Instant.now().isBefore(object.getRetainUntilDate());
+    }
+
     public record ListObjectsResult(List<S3Object> objects, List<String> commonPrefixes, boolean isTruncated, String nextContinuationToken) {}
 
     public List<S3Object> listObjects(String bucketName, String prefix, String delimiter, int maxKeys) {
@@ -1379,7 +1521,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // see https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
         boolean isTruncated = false;
         String nextContinuationToken = null;
-        if (maxKeys > 0) {
+        if (maxKeys >= 0) {
             List<S3Object> limitedObjects = new ArrayList<>();
             List<String> limitedPrefixes = new ArrayList<>();
             int count = 0;
@@ -1398,7 +1540,10 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
                 count++;
             }
-            isTruncated = directObjectCount < allObjects.size() || commonPrefixCount < commonPrefixes.size();
+            // max-keys=0 is a valid request for an empty page: AWS answers it with IsTruncated=false
+            // and no continuation token even when the bucket has more objects.
+            isTruncated = maxKeys > 0
+                    && (directObjectCount < allObjects.size() || commonPrefixCount < commonPrefixes.size());
             if (isTruncated) {
                 nextContinuationToken = lastEmittedKey;
             }
@@ -1613,7 +1758,7 @@ public class S3Service implements Resettable, ResourceProvider {
         boolean isTruncated = false;
         String nextKeyMarker = null;
         String nextVersionIdMarker = null;
-        if (maxKeys > 0) {
+        if (maxKeys >= 0) {
             List<S3Object> pageVersions = new ArrayList<>();
             List<String> pagePrefixes = new ArrayList<>();
             int vIdx = 0;
@@ -1639,7 +1784,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
             }
 
-            isTruncated = vIdx < versions.size() || cpIdx < commonPrefixes.size();
+            isTruncated = maxKeys > 0 && (vIdx < versions.size() || cpIdx < commonPrefixes.size());
             if (!isTruncated) {
                 nextKeyMarker = null;
                 nextVersionIdMarker = null;
@@ -1682,17 +1827,24 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public DeleteObjectsResult deleteObjects(String bucketName, List<XmlParser.KeyVersion> entries) {
+        return deleteObjects(bucketName, entries, false);
+    }
+
+    public DeleteObjectsResult deleteObjects(String bucketName, List<XmlParser.KeyVersion> entries,
+                                             boolean bypassGovernance) {
         ensureBucketExists(bucketName);
         List<DeleteResult> deleted = new ArrayList<>();
         List<DeleteError> errors = new ArrayList<>();
         for (XmlParser.KeyVersion entry : entries) {
             try {
-                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId());
+                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId(), bypassGovernance);
                 if (result != null && result.isDeleteMarker()) {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), true, result.getVersionId()));
                 } else {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), false, null));
                 }
+            } catch (AwsException e) {
+                errors.add(new DeleteError(entry.key(), e.getErrorCode(), e.getMessage()));
             } catch (Exception e) {
                 errors.add(new DeleteError(entry.key(), "InternalError", e.getMessage()));
             }
@@ -1703,30 +1855,25 @@ public class S3Service implements Resettable, ResourceProvider {
     // --- Object Tagging ---
 
     public void putObjectTagging(String bucketName, String key, Map<String, String> tags) {
-        ensureBucketExists(bucketName);
-        S3Object obj = objectStore.get(objectKey(bucketName, key))
-                .orElseThrow(() -> new AwsException("NoSuchKey",
-                        "The specified key does not exist.", 404));
+        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                getStoredObjectEntry(bucketName, key, null);
+        S3Object obj = ownedObject.value();
         obj.setTags(tags != null ? tags : new java.util.HashMap<>());
-        objectStore.put(objectKey(bucketName, key), obj);
+        putObjectForAccount(ownedObject.account(), objectKey(bucketName, key), obj);
         LOG.debugv("Put tags on object: {0}/{1}", bucketName, key);
     }
 
     public Map<String, String> getObjectTagging(String bucketName, String key) {
-        ensureBucketExists(bucketName);
-        S3Object obj = objectStore.get(objectKey(bucketName, key))
-                .orElseThrow(() -> new AwsException("NoSuchKey",
-                        "The specified key does not exist.", 404));
+        S3Object obj = getStoredObject(bucketName, key, null);
         return obj.getTags() != null ? obj.getTags() : Map.of();
     }
 
     public void deleteObjectTagging(String bucketName, String key) {
-        ensureBucketExists(bucketName);
-        S3Object obj = objectStore.get(objectKey(bucketName, key))
-                .orElseThrow(() -> new AwsException("NoSuchKey",
-                        "The specified key does not exist.", 404));
+        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                getStoredObjectEntry(bucketName, key, null);
+        S3Object obj = ownedObject.value();
         obj.setTags(new java.util.HashMap<>());
-        objectStore.put(objectKey(bucketName, key), obj);
+        putObjectForAccount(ownedObject.account(), objectKey(bucketName, key), obj);
         LOG.debugv("Deleted tags from object: {0}/{1}", bucketName, key);
     }
 
@@ -2720,13 +2867,12 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void putObjectRetention(String bucketName, String key, String versionId,
                                    String mode, Instant retainUntil, boolean bypassGovernance) {
-        ensureBucketExists(bucketName);
+        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                getStoredObjectEntry(bucketName, key, versionId);
         String storeKey = versionId != null
                 ? versionedKey(bucketName, key, versionId)
                 : objectKey(bucketName, key);
-        S3Object obj = objectStore.get(storeKey)
-                .orElseThrow(() -> new AwsException("NoSuchKey",
-                        "The specified key does not exist.", 404));
+        S3Object obj = ownedObject.value();
 
         boolean activeComplianceRetention = "COMPLIANCE".equals(obj.getObjectLockMode())
                 && obj.getRetainUntilDate() != null
@@ -2760,41 +2906,28 @@ public class S3Service implements Resettable, ResourceProvider {
 
         obj.setObjectLockMode(mode);
         obj.setRetainUntilDate(retainUntil);
-        objectStore.put(storeKey, obj);
+        putObjectForAccount(ownedObject.account(), storeKey, obj);
         LOG.debugv("Set retention on {0}/{1}: mode={2}, until={3}", bucketName, key, mode, retainUntil);
     }
 
     public S3Object getObjectRetention(String bucketName, String key, String versionId) {
-        ensureBucketExists(bucketName);
-        String storeKey = versionId != null
-                ? versionedKey(bucketName, key, versionId)
-                : objectKey(bucketName, key);
-        return objectStore.get(storeKey)
-                .orElseThrow(() -> new AwsException("NoSuchKey",
-                        "The specified key does not exist.", 404));
+        return getStoredObject(bucketName, key, versionId);
     }
 
     public void putObjectLegalHold(String bucketName, String key, String versionId, String status) {
-        ensureBucketExists(bucketName);
+        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                getStoredObjectEntry(bucketName, key, versionId);
         String storeKey = versionId != null
                 ? versionedKey(bucketName, key, versionId)
                 : objectKey(bucketName, key);
-        S3Object obj = objectStore.get(storeKey)
-                .orElseThrow(() -> new AwsException("NoSuchKey",
-                        "The specified key does not exist.", 404));
+        S3Object obj = ownedObject.value();
         obj.setLegalHoldStatus(status);
-        objectStore.put(storeKey, obj);
+        putObjectForAccount(ownedObject.account(), storeKey, obj);
         LOG.debugv("Set legal hold on {0}/{1}: {2}", bucketName, key, status);
     }
 
     public S3Object getObjectLegalHold(String bucketName, String key, String versionId) {
-        ensureBucketExists(bucketName);
-        String storeKey = versionId != null
-                ? versionedKey(bucketName, key, versionId)
-                : objectKey(bucketName, key);
-        return objectStore.get(storeKey)
-                .orElseThrow(() -> new AwsException("NoSuchKey",
-                        "The specified key does not exist.", 404));
+        return getStoredObject(bucketName, key, versionId);
     }
 
     // --- Multipart Upload Operations ---
@@ -3062,13 +3195,12 @@ public class S3Service implements Resettable, ResourceProvider {
                             .withServerSideEncryption(upload.getServerSideEncryption())
                             .withSseKmsKeyId(upload.getSseKmsKeyId())
                             .withAcl(upload.getAcl())
-                            .withTagging(upload.getTagging()));
+                            .withTagging(upload.getTagging()),
+                    compositeETag);
             if (upload.getSseCustomerAlgorithm() != null) {
                 object.setSseCustomerAlgorithm(upload.getSseCustomerAlgorithm());
                 object.setSseCustomerKeyMd5(upload.getSseCustomerKeyMd5());
             }
-            // Override the ETag with the composite multipart ETag
-            object.setETag(compositeETag);
             objectStore.put(objectKey(bucket, key), object);
 
             // Cleanup
@@ -3326,24 +3458,32 @@ public class S3Service implements Resettable, ResourceProvider {
                               String grantWrite, String grantFullControl, String grantReadAcp, String grantWriteAcp) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        String resolvedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
+        String resolvedAcl = resolveObjectAclXml(
+                cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
         bucket.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
         bucketStore.put(bucketName, bucket);
     }
 
     public String getObjectAcl(String bucketName, String key, String versionId) {
-        S3Object obj = getObject(bucketName, key, versionId);
-        return obj.getAcl() != null ? obj.getAcl() : defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
+        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                getStoredObjectEntry(bucketName, key, versionId);
+        S3Object obj = ownedObject.value();
+        return obj.getAcl() != null
+                ? obj.getAcl()
+                : defaultAclXml(ownedObject.account(), DEFAULT_OWNER_DISPLAY_NAME);
     }
 
     public void putObjectAcl(String bucketName, String key, String versionId, String bodyAcl, String cannedAcl,
                               String grantRead, String grantWrite, String grantFullControl,
                               String grantReadAcp, String grantWriteAcp) {
-        S3Object obj = getObject(bucketName, key, versionId);
-        String resolvedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
+        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                getStoredObjectEntry(bucketName, key, versionId);
+        S3Object obj = ownedObject.value();
+        String resolvedAcl = resolveObjectAclXml(ownedObject.account(), cannedAcl, grantRead,
+                grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
         obj.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
         String storeKey = (versionId != null) ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
-        objectStore.put(storeKey, obj);
+        putObjectForAccount(ownedObject.account(), storeKey, obj);
     }
 
     /**
@@ -3679,21 +3819,29 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     String resolveObjectAclXml(String cannedAcl, String grantRead, String grantWrite,
                                 String grantFullControl, String grantReadAcp, String grantWriteAcp) {
+        return resolveObjectAclXml(ownerId(), cannedAcl, grantRead, grantWrite,
+                grantFullControl, grantReadAcp, grantWriteAcp);
+    }
+
+    private String resolveObjectAclXml(String ownerAccount, String cannedAcl,
+                                       String grantRead, String grantWrite,
+                                       String grantFullControl, String grantReadAcp,
+                                       String grantWriteAcp) {
         if (cannedAcl != null && !cannedAcl.isBlank()) {
-            return cannedObjectAclXml(cannedAcl);
+            return cannedObjectAclXml(ownerAccount, cannedAcl);
         }
         if (isBlank(grantRead) && isBlank(grantWrite) && isBlank(grantFullControl)
                 && isBlank(grantReadAcp) && isBlank(grantWriteAcp)) {
             return null;
         }
         List<String> grants = new ArrayList<>();
-        grants.add(ownerFullControlGrant());
+        grants.add(ownerFullControlGrant(ownerAccount));
         appendGrantHeader(grants, grantRead, "READ");
         appendGrantHeader(grants, grantWrite, "WRITE");
         appendGrantHeader(grants, grantFullControl, "FULL_CONTROL");
         appendGrantHeader(grants, grantReadAcp, "READ_ACP");
         appendGrantHeader(grants, grantWriteAcp, "WRITE_ACP");
-        return objectAclXml(grants.toArray(new String[0]));
+        return objectAclXml(ownerAccount, grants.toArray(new String[0]));
     }
 
     private static boolean isBlank(String value) {
@@ -3732,30 +3880,34 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     String cannedObjectAclXml(String cannedAcl) {
+        return cannedObjectAclXml(ownerId(), cannedAcl);
+    }
+
+    private String cannedObjectAclXml(String ownerAccount, String cannedAcl) {
         if (cannedAcl == null || cannedAcl.isBlank()) {
             return null;
         }
         return switch (cannedAcl) {
             case "private", "bucket-owner-read", "bucket-owner-full-control" ->
-                    defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
+                    defaultAclXml(ownerAccount, DEFAULT_OWNER_DISPLAY_NAME);
             // Floci currently runs as a single synthetic account, so there is no distinct EC2 bundle-reader
             // principal to represent in GetObjectAcl responses yet.
-            case "aws-exec-read" -> defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
-            case "public-read" -> objectAclXml(
-                    ownerFullControlGrant(),
+            case "aws-exec-read" -> defaultAclXml(ownerAccount, DEFAULT_OWNER_DISPLAY_NAME);
+            case "public-read" -> objectAclXml(ownerAccount,
+                    ownerFullControlGrant(ownerAccount),
                     groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "READ"));
-            case "public-read-write" -> objectAclXml(
-                    ownerFullControlGrant(),
+            case "public-read-write" -> objectAclXml(ownerAccount,
+                    ownerFullControlGrant(ownerAccount),
                     groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "READ"),
                     groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "WRITE"));
-            case "authenticated-read" -> objectAclXml(
-                    ownerFullControlGrant(),
+            case "authenticated-read" -> objectAclXml(ownerAccount,
+                    ownerFullControlGrant(ownerAccount),
                     groupGrant(AUTHENTICATED_USERS_GROUP_URI, "READ"));
             // Standard canned ACL used by S3 server-access-logging (and Terraform's
             // aws_s3_bucket_acl / access-logging modules) to grant the S3 log-delivery service
             // group permission to write log objects into this bucket and read their own ACL.
-            case "log-delivery-write" -> objectAclXml(
-                    ownerFullControlGrant(),
+            case "log-delivery-write" -> objectAclXml(ownerAccount,
+                    ownerFullControlGrant(ownerAccount),
                     groupGrant(LOG_DELIVERY_GROUP_URI, "WRITE"),
                     groupGrant(LOG_DELIVERY_GROUP_URI, "READ_ACP"));
             default -> throw new AwsException("InvalidArgument",
@@ -3876,8 +4028,8 @@ public class S3Service implements Resettable, ResourceProvider {
         static final SseCustomerHeaders EMPTY = new SseCustomerHeaders(null, null, null);
     }
 
-    private String ownerFullControlGrant() {
-        return canonicalUserGrant(ownerId(), DEFAULT_OWNER_DISPLAY_NAME, "FULL_CONTROL");
+    private static String ownerFullControlGrant(String ownerAccount) {
+        return canonicalUserGrant(ownerAccount, DEFAULT_OWNER_DISPLAY_NAME, "FULL_CONTROL");
     }
 
     private static String canonicalUserGrant(String id, String displayName, String permission) {
@@ -3903,11 +4055,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 .build();
     }
 
-    private String objectAclXml(String... grants) {
+    private static String objectAclXml(String ownerAccount, String... grants) {
         XmlBuilder xml = new XmlBuilder()
                 .start("AccessControlPolicy")
                 .start("Owner")
-                .elem("ID", ownerId())
+                .elem("ID", ownerAccount)
                 .elem("DisplayName", DEFAULT_OWNER_DISPLAY_NAME)
                 .end("Owner")
                 .start("AccessControlList");
@@ -4280,12 +4432,17 @@ public class S3Service implements Resettable, ResourceProvider {
      * checks (CreateBucket, delete) intentionally do not use this — they remain account-scoped.
      */
     private Optional<Bucket> resolveBucket(String bucketName) {
+        return resolveBucketEntry(bucketName).map(AccountAwareStorageBackend.OwnedEntry::value);
+    }
+
+    private Optional<AccountAwareStorageBackend.OwnedEntry<Bucket>> resolveBucketEntry(String bucketName) {
         if (globalBucketNamespace && bucketStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<Bucket> typed = (AccountAwareStorageBackend<Bucket>) aware;
-            return typed.findAnyAccount(bucketName);
+            return typed.findAnyAccountEntry(bucketName);
         }
-        return bucketStore.get(bucketName);
+        return bucketStore.get(bucketName)
+                .map(bucket -> new AccountAwareStorageBackend.OwnedEntry<>(ownerId(), bucket));
     }
 
     /**
@@ -4333,6 +4490,25 @@ public class S3Service implements Resettable, ResourceProvider {
         return objectStore.get(storeKey);
     }
 
+    private Optional<S3Object> resolveObjectForAccount(String accountId, String storeKey) {
+        if (objectStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
+            return typed.getForAccount(accountId, storeKey);
+        }
+        return objectStore.get(storeKey);
+    }
+
+    private void putObjectForAccount(String accountId, String storeKey, S3Object object) {
+        if (objectStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
+            typed.putForAccount(accountId, storeKey, object);
+            return;
+        }
+        objectStore.put(storeKey, object);
+    }
+
     private String objectKey(String bucketName, String key) {
         return bucketName + "/" + key;
     }
@@ -4351,15 +4527,27 @@ public class S3Service implements Resettable, ResourceProvider {
     // Unlike bucketStore/objectStore, object bytes get no automatic account prefixing — two
     // accounts can own a bucket named "orders" and would collide here without this scoping.
     private String physicalKey(String bucketName, String key) {
-        return ownerId() + "/" + objectKey(bucketName, key);
+        return physicalKey(ownerId(), bucketName, key);
+    }
+
+    private String physicalKey(String accountId, String bucketName, String key) {
+        return accountId + "/" + objectKey(bucketName, key);
     }
 
     private String physicalVersionedKey(String bucketName, String key, String versionId) {
-        return ownerId() + "/" + versionedKey(bucketName, key, versionId);
+        return physicalVersionedKey(ownerId(), bucketName, key, versionId);
+    }
+
+    private String physicalVersionedKey(String accountId, String bucketName, String key, String versionId) {
+        return accountId + "/" + versionedKey(bucketName, key, versionId);
     }
 
     private Path resolveObjectPath(String bucketName, String key) {
-        Path bucketDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(bucketName).normalize();
+        return resolveObjectPath(ownerId(), bucketName, key);
+    }
+
+    private Path resolveObjectPath(String accountId, String bucketName, String key) {
+        Path bucketDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(accountId).resolve(bucketName).normalize();
 
         String safeKey = key;
         while (safeKey.startsWith("/")) {
@@ -4389,13 +4577,21 @@ public class S3Service implements Resettable, ResourceProvider {
      * its own copy.
      */
     private Path resolveObjectPathForRead(String bucketName, String key) {
-        Path resolved = resolveObjectPath(bucketName, key);
+        return resolveObjectPathForRead(ownerId(), bucketName, key);
+    }
+
+    private Path resolveObjectPathForRead(String accountId, String bucketName, String key) {
+        Path resolved = resolveObjectPath(accountId, bucketName, key);
         copyLegacyFileIfPresent(legacyObjectPath(bucketName, key), resolved);
         return resolved;
     }
 
     private Path resolveVersionedPath(String bucketName, String key, String versionId) {
-        Path baseDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(".versions").resolve(bucketName).normalize();
+        return resolveVersionedPath(ownerId(), bucketName, key, versionId);
+    }
+
+    private Path resolveVersionedPath(String accountId, String bucketName, String key, String versionId) {
+        Path baseDir = dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(accountId).resolve(".versions").resolve(bucketName).normalize();
 
         String safeKey = key;
         while (safeKey.startsWith("/")) {
@@ -4420,7 +4616,11 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /** Read-only counterpart of {@link #resolveObjectPathForRead} for versioned objects. */
     private Path resolveVersionedPathForRead(String bucketName, String key, String versionId) {
-        Path resolved = resolveVersionedPath(bucketName, key, versionId);
+        return resolveVersionedPathForRead(ownerId(), bucketName, key, versionId);
+    }
+
+    private Path resolveVersionedPathForRead(String accountId, String bucketName, String key, String versionId) {
+        Path resolved = resolveVersionedPath(accountId, bucketName, key, versionId);
         copyLegacyFileIfPresent(legacyVersionedPath(bucketName, key, versionId), resolved);
         return resolved;
     }
@@ -4466,11 +4666,16 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void writeVersionedFile(String bucketName, String key, String versionId, byte[] data) {
+        writeVersionedFile(ownerId(), bucketName, key, versionId, data);
+    }
+
+    private void writeVersionedFile(
+            String accountId, String bucketName, String key, String versionId, byte[] data) {
         if (inMemory) {
-            memoryDataStore.put(physicalVersionedKey(bucketName, key, versionId), data);
+            memoryDataStore.put(physicalVersionedKey(accountId, bucketName, key, versionId), data);
             return;
         }
-        Path filePath = resolveVersionedPath(bucketName, key, versionId);
+        Path filePath = resolveVersionedPath(accountId, bucketName, key, versionId);
         ReentrantLock lock = diskFileLock(filePath);
         lock.lock();
         try {
@@ -4483,22 +4688,30 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private byte[] readVersionedFile(String bucketName, String key, String versionId) {
+        return readVersionedFile(ownerId(), bucketName, key, versionId);
+    }
+
+    private byte[] readVersionedFile(String accountId, String bucketName, String key, String versionId) {
         if (inMemory) {
-            return memoryDataStore.get(physicalVersionedKey(bucketName, key, versionId));
+            return memoryDataStore.get(physicalVersionedKey(accountId, bucketName, key, versionId));
         }
         try {
-            return Files.readAllBytes(resolveVersionedPathForRead(bucketName, key, versionId));
+            return Files.readAllBytes(resolveVersionedPathForRead(accountId, bucketName, key, versionId));
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read versioned S3 object file", e);
         }
     }
 
     private void writeFile(String bucketName, String key, byte[] data) {
+        writeFile(ownerId(), bucketName, key, data);
+    }
+
+    private void writeFile(String accountId, String bucketName, String key, byte[] data) {
         if (inMemory) {
-            memoryDataStore.put(physicalKey(bucketName, key), data);
+            memoryDataStore.put(physicalKey(accountId, bucketName, key), data);
             return;
         }
-        Path filePath = resolveObjectPath(bucketName, key);
+        Path filePath = resolveObjectPath(accountId, bucketName, key);
         ReentrantLock lock = diskFileLock(filePath);
         lock.lock();
         try {
@@ -4539,11 +4752,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private byte[] readFile(String bucketName, String key) {
+        return readFile(ownerId(), bucketName, key);
+    }
+
+    private byte[] readFile(String accountId, String bucketName, String key) {
         if (inMemory) {
-            return memoryDataStore.get(physicalKey(bucketName, key));
+            return memoryDataStore.get(physicalKey(accountId, bucketName, key));
         }
         try {
-            return Files.readAllBytes(resolveObjectPathForRead(bucketName, key));
+            return Files.readAllBytes(resolveObjectPathForRead(accountId, bucketName, key));
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read S3 object file", e);
         }

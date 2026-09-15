@@ -56,6 +56,7 @@ duplicate override IDs.
 | **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
+| **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
@@ -174,19 +175,80 @@ handling; a hand-rolled signer must include it.
 > signed, known caller is let through. `principalOrgId` and `cognitoIdentity` are always null -
 > Organizations membership and identity-pool federation are not modelled.
 
+### Gateway Responses
+
+A REST API's gateway responses customise what the gateway itself answers when it, rather than
+the integration, produces the response. All 21 AWS response types are accepted, keyed by
+`responseType`; `GetGatewayResponses` lists every type, reporting the ones never customised with
+`defaultResponse: true`, their AWS default `statusCode`, and the default
+`{"message":$context.error.messageString}` template. `PutGatewayResponse` is an upsert,
+`UpdateGatewayResponse` accepts `add`/`replace`/`remove` on `/statusCode`,
+`/responseParameters/<name>` and `/responseTemplates/<content-type>` (JSON-pointer escaped, e.g.
+`application~1json`), and `DeleteGatewayResponse` restores the default. The
+`x-amazon-apigateway-gateway-responses` OpenAPI extension is imported by `ImportRestApi` and
+`PutRestApi`, and `AWS::ApiGateway::GatewayResponse` is provisioned by CloudFormation.
+
+On the execute plane every gateway-generated answer resolves the customisation for its type,
+then for `DEFAULT_4XX` / `DEFAULT_5XX`, and applies the configured `statusCode`, the
+`gatewayresponse.header.*` parameters (`'static'`, `method.request.header.*`,
+`method.request.querystring.*`, `method.request.path.*`, `context.*`, `stageVariables.*`) and the
+`responseTemplates` (selected by the request's `Accept` header, falling back to
+`application/json`), with `$context.error.message`, `$context.error.messageString`,
+`$context.error.responseType` and `$context.error.validationErrorString` available to the template.
+This is what lets a browser read a `401`/`403`/`400` as such instead of as a CORS failure once
+`DEFAULT_4XX` maps `Access-Control-Allow-Origin`, exactly as the console's "Enable CORS" does.
+
+| Gateway-generated answer | `responseType` |
+|---|---|
+| No resource matches the path, or none declares the method (`403 Missing Authentication Token`) | `MISSING_AUTHENTICATION_TOKEN` |
+| `AWS_IAM` method without a signature | `MISSING_AUTHENTICATION_TOKEN` |
+| `AWS_IAM` signature malformed or mismatching | `INVALID_SIGNATURE` |
+| `AWS_IAM` signature outside the 5-minute window, or a presigned URL past its expiry | `EXPIRED_TOKEN` |
+| `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` |
+| Lambda authorizer returns `Deny` | `ACCESS_DENIED` |
+| Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` |
+| Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` |
+| Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` |
+| `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` |
+| Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` |
+| Lambda proxy function error, malformed proxy payload, or missing function | `INTEGRATION_FAILURE` |
+
+A customised `statusCode` overrides the status Floci would otherwise send. Throttling, quota, request size and WAF answers are not produced on the execute plane, so
+`THROTTLED`, `QUOTA_EXCEEDED`, `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be configured but never
+fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than treated as a gateway
+response.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
 - Authorizer testing: `TestInvokeAuthorizer`
 - Model templates: `GetModelTemplate`
-- Gateway Responses (the entire family: `PutGatewayResponse`, `GetGatewayResponse`, etc.)
 - Documentation parts and versions (the entire family, 10 operations)
 - VPC Links (5 operations)
 - Client Certificates (5 operations)
 - `GetExport` / `ImportDocumentationParts`
 
-The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports `AWS_PROXY` (Lambda proxy), `AWS` (Lambda with VTL request/response templates), and `MOCK` integrations; other integration types return an error. A `MOCK` integration renders its request template and uses the `statusCode` it produces to pick the integration response, exactly as AWS does: the first response whose `selectionPattern` matches wins, otherwise the response without a pattern (the default) answers. This is what makes CORS preflights declared with a `204` response (CDK's `addCorsPreflight`) carry their `Access-Control-*` headers.
+The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports these integration types; others return an error:
+
+| Type | Support |
+| --- | --- |
+| `AWS_PROXY` (Lambda proxy) | ✅ |
+| `AWS` (Lambda / AWS service with VTL request/response templates) | ✅ |
+| `HTTP_PROXY` (passthrough to an arbitrary HTTP backend) | ✅ |
+| `HTTP` (non-proxy, with VTL request/response templates) | ✅ |
+| `MOCK` | ✅ |
+
+A `MOCK` integration renders its request template and uses the `statusCode` it produces to pick the integration response, exactly as AWS does: the first response whose `selectionPattern` matches wins, otherwise the response without a pattern (the default) answers. This is what makes CORS preflights declared with a `204` response (CDK's `addCorsPreflight`) carry their `Access-Control-*` headers.
+
+`HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`.
+
+Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` reaches the backend as two `tag` parameters rather than one `tag=a,b`, a header sent twice arrives twice, and a backend that returns two `Set-Cookie` headers relays two to the caller. Comma-joining them would not be reversible, since a cookie's `Expires` attribute contains a comma of its own. An explicit `integration.request.header.X` or `integration.request.querystring.X` mapping overwrites, so it replaces any repeated inbound values with the single mapped one.
+
+`HTTP` (non-proxy) transforms in both directions instead:
+
+- **Request** — the body is the rendered `requestTemplates` entry selected by the incoming `Content-Type` (falling back to the type without its charset), subject to `passthroughBehavior` (`NEVER` and `WHEN_NO_TEMPLATES` return `415`). Only headers and query parameters named by `integration.request.*` mappings are forwarded; unmapped inbound headers are **not** passed through — that passthrough is `HTTP_PROXY`'s job.
+- **Response** — the backend's reply runs through the method's integration responses. As in AWS, `selectionPattern` is matched against the backend's **HTTP status code** (for `AWS`/Lambda integrations it is matched against the error message instead), so `"5\\d{2}"` on a `502` integration response remaps any backend `5xx` to `502`. The matched response's `responseTemplates` render the body, `responseParameters` map `integration.response.header.*` (case-insensitively) or `integration.response.body.<jsonpath>` onto `method.response.header.*`, and `$context.responseOverride` assignments take precedence. With no integration responses configured, the backend's status and body are relayed as-is.
 
 ### Examples
 

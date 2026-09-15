@@ -276,8 +276,16 @@ public class AwsJson11Controller {
 
         JsonNode request;
         try {
-            request = strictBodyReader.readTree(body);
+            // No payload is how an operation without input goes over the wire, so it reads as {}.
+            request = body == null || body.isBlank()
+                    ? objectMapper.createObjectNode()
+                    : strictBodyReader.readTree(body);
         } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+        // Input is always a structure: a bare null, array or scalar parses but is still a
+        // client serialization error rather than something every handler must guard against.
+        if (!request.isObject()) {
             return JsonErrorResponseUtils.createSerializationErrorResponse();
         }
 

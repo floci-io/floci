@@ -93,10 +93,13 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 
 ### SMTP Relay
 
-When `smtp-host` is configured, `SendEmail` and `SendRawEmail` forward
-emails to the specified SMTP server in addition to storing them in the
-local inspection endpoint. This enables integration testing with tools
-like [Mailpit](https://mailpit.axllent.org/) or any standard SMTP server.
+When `smtp-host` is configured, every send operation forwards the email
+to the specified SMTP server in addition to storing it in the local
+inspection endpoint: `SendEmail` (simple, raw, and templated content),
+`SendRawEmail`, `SendTemplatedEmail`, `SendBulkTemplatedEmail`,
+`SendBulkEmail`, and `SendCustomVerificationEmail`. This enables
+integration testing with tools like
+[Mailpit](https://mailpit.axllent.org/) or any standard SMTP server.
 
 ```yaml
 # docker-compose.yml
@@ -120,13 +123,95 @@ networks:
   floci:
 ```
 
-- Emails are always stored locally regardless of relay — the
+- Emails are always stored locally regardless of relay: the
   `/_aws/ses` inspection endpoint works with or without SMTP.
 - Relay failures are logged but do not affect the API response.
-- Raw MIME messages are parsed with Apache Mime4j to extract common
-  fields (From, To, Cc, Subject, text/plain and text/html parts) and
-  relayed as a reconstructed message. Arbitrary headers, attachments,
-  and complex multipart structures are not preserved in the relay.
+- Recipients on the suppression list are filtered out before the relay.
+  A send whose recipients are all suppressed is still stored, but never
+  reaches the SMTP server.
+
+#### Raw message fidelity
+
+Raw MIME messages are parsed with Apache Mime4j and relayed as a
+re-encoded message that preserves the original content:
+
+- The first `text/plain` and `text/html` parts become the message body.
+- Attachments are preserved with their filename, content type,
+  disposition, and description. Parts carrying a `Content-ID` are
+  relayed as inline attachments, so `cid:` references in an HTML body
+  still resolve. An embedded `message/rfc822` part is relayed whole.
+- Custom top-level headers are copied through. The MIME structural
+  headers (`MIME-Version`, `Content-Type`, `Content-Transfer-Encoding`)
+  are regenerated for the re-encoded message, and the address, subject,
+  and `Return-Path` headers are applied to the outgoing message
+  directly rather than copied.
+- `Date` and `Message-ID` are replaced rather than copied, matching the
+  [SES header fields reference](https://docs.aws.amazon.com/ses/latest/dg/header-fields.html):
+  AWS overrides a caller's `Date` with the time it accepted the message,
+  and a caller's `Message-ID` with the id it assigned.
+- Display names on addresses are kept, so
+  `Alice <alice@example.com>` is delivered as written. The bare
+  addresses are what the SMTP envelope, the suppression checks, and the
+  published events use.
+- `RawMessage.Data` / `Content.Raw.Data` is accepted either
+  base64-encoded (what the AWS SDKs send) or as plain RFC 5322 text.
+
+#### Envelope sender
+
+AWS routes bounce and complaint notifications to the address in the
+`Return-Path` header. Floci resolves that address in the order:
+
+1. The `Return-Path` header on a raw MIME message
+2. The `ReturnPath` request field (v1) or
+   `FeedbackForwardingEmailAddress` (v2)
+3. The source address
+
+The resolved value is used as the SMTP `MAIL FROM` address, which is
+where a receiving mail server routes bounces, and is recorded as
+`ReturnPath` on the stored message so the inspection endpoint shows it.
+
+!!! note "Deviations"
+    On AWS the delivered message carries a `Return-Path` that differs
+    from the one you supplied, because AWS routes bounces through its
+    own address and forwards them on. Floci has no bounce-handling
+    pipeline, so it puts the resolved address directly in `MAIL FROM`
+    instead, which is the closest local equivalent.
+
+    Floci also does not deliver bounce and complaint notifications to
+    the return path at all. Notification targets are resolved from the
+    identity (`SetIdentityNotificationTopic`) and from the configuration
+    set's event destinations instead.
+
+#### Message-ID
+
+AWS overrides any caller-supplied `Message-ID` with the id it assigned,
+which is the `MessageId` returned by the API. Floci does the same,
+stamping `<{MessageId}@email.amazonses.com>`.
+
+!!! note
+    The local part is the returned `MessageId`, which is the documented
+    part of this behaviour. The `email.amazonses.com` domain is not
+    specified in the AWS documentation and follows observed SES output.
+
+#### X-SES control headers
+
+On a raw send, Floci honours the SES control headers and strips them
+from the relayed message rather than forwarding them:
+
+| Header | Effect |
+|---|---|
+| `X-SES-CONFIGURATION-SET` | Names the configuration set to apply when the request does not specify one |
+| `X-SES-MESSAGE-TAGS` | Comma-separated `name=value` message tags, used for event publishing |
+
+Per
+[Step 3: Specify your configuration set](https://docs.aws.amazon.com/ses/latest/dg/event-publishing-send-email.html),
+when message tags are supplied both as a request field and as a header,
+AWS uses only the request field's tags and does not join the two sets.
+Floci matches this: header tags apply only when the request passes none.
+
+All other `X-SES-*` headers, including the sending-authorization headers
+`X-SES-SOURCE-ARN`, `X-SES-FROM-ARN`, and `X-SES-RETURN-PATH-ARN`, are
+stripped from the relayed message without being acted on.
 
 ## Local Inspection Endpoint
 
@@ -137,6 +222,10 @@ For test assertions and debugging, Floci exposes a LocalStack-compatible mailbox
 - `DELETE /_aws/ses` clears the captured mailbox
 
 Messages are stored locally by Floci and can be persisted when SES storage is backed by persistent or hybrid storage.
+
+Alongside the LocalStack fields, each captured message carries a
+`ReturnPath` holding the resolved envelope sender described under
+[SMTP Relay](#smtp-relay).
 
 ## Examples
 

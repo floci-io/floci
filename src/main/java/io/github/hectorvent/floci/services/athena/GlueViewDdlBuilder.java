@@ -87,6 +87,7 @@ public class GlueViewDdlBuilder {
                         ? location.substring(0, location.length() - 1)
                         : location;
                 String readFn = inferReadFunction(t);
+                String readPath = PartitionProjection.readPath(t, normalizedLocation);
                 String target = qualified
                         ? quote(schemaOrNull) + "." + quote(t.getName())
                         : quote(t.getName());
@@ -95,7 +96,7 @@ public class GlueViewDdlBuilder {
                   .append(" AS SELECT ")
                   .append(buildProjection(t))
                   .append(" FROM ")
-                  .append(readExpression(readFn, normalizedLocation))
+                  .append(readExpression(readFn, readPath))
                   .append(";\n");
             } catch (Exception e) {
                 LOG.debugv("skip Glue table {0}.{1}: {2}", schemaOrNull, t != null ? t.getName() : "unknown", e.getMessage());

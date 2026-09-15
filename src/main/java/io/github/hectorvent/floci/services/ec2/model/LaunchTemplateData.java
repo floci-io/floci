@@ -45,6 +45,8 @@ public class LaunchTemplateData {
     private MaintenanceOptions maintenanceOptions;
     private PrivateDnsNameOptions privateDnsNameOptions;
     private CapacityReservationSpecification capacityReservationSpecification;
+    private InstanceMarketOptions instanceMarketOptions;
+    private InstanceRequirements instanceRequirements;
     private List<String> securityGroupIds = new ArrayList<>();
     private List<BlockDeviceMapping> blockDeviceMappings = new ArrayList<>();
     private List<NetworkInterface> networkInterfaces = new ArrayList<>();
@@ -75,6 +77,8 @@ public class LaunchTemplateData {
         this.maintenanceOptions = source.maintenanceOptions;
         this.privateDnsNameOptions = source.privateDnsNameOptions;
         this.capacityReservationSpecification = source.capacityReservationSpecification;
+        this.instanceMarketOptions = source.instanceMarketOptions;
+        this.instanceRequirements = source.instanceRequirements;
         this.securityGroupIds = new ArrayList<>(source.securityGroupIds);
         this.blockDeviceMappings = new ArrayList<>(source.blockDeviceMappings);
         this.networkInterfaces = new ArrayList<>(source.networkInterfaces);
@@ -150,6 +154,12 @@ public class LaunchTemplateData {
         }
         if (override.capacityReservationSpecification != null) {
             merged.capacityReservationSpecification = override.capacityReservationSpecification;
+        }
+        if (override.instanceMarketOptions != null) {
+            merged.instanceMarketOptions = override.instanceMarketOptions;
+        }
+        if (override.instanceRequirements != null) {
+            merged.instanceRequirements = override.instanceRequirements;
         }
         if (!override.securityGroupIds.isEmpty()) {
             merged.securityGroupIds = new ArrayList<>(override.securityGroupIds);
@@ -242,6 +252,16 @@ public class LaunchTemplateData {
     }
     public void setCapacityReservationSpecification(CapacityReservationSpecification capacityReservationSpecification) {
         this.capacityReservationSpecification = capacityReservationSpecification;
+    }
+
+    public InstanceMarketOptions getInstanceMarketOptions() { return instanceMarketOptions; }
+    public void setInstanceMarketOptions(InstanceMarketOptions instanceMarketOptions) {
+        this.instanceMarketOptions = instanceMarketOptions;
+    }
+
+    public InstanceRequirements getInstanceRequirements() { return instanceRequirements; }
+    public void setInstanceRequirements(InstanceRequirements instanceRequirements) {
+        this.instanceRequirements = instanceRequirements;
     }
 
     public List<String> getSecurityGroupIds() { return securityGroupIds; }
@@ -497,6 +517,7 @@ public class LaunchTemplateData {
         private Integer secondaryPrivateIpAddressCount;
         private String subnetId;
         private Integer networkCardIndex;
+        private ConnectionTrackingSpecification connectionTrackingSpecification;
         private List<String> groups = new ArrayList<>();
 
         public Boolean getAssociatePublicIpAddress() { return associatePublicIpAddress; }
@@ -541,10 +562,41 @@ public class LaunchTemplateData {
         public Integer getNetworkCardIndex() { return networkCardIndex; }
         public void setNetworkCardIndex(Integer networkCardIndex) { this.networkCardIndex = networkCardIndex; }
 
+        public ConnectionTrackingSpecification getConnectionTrackingSpecification() {
+            return connectionTrackingSpecification;
+        }
+        public void setConnectionTrackingSpecification(ConnectionTrackingSpecification spec) {
+            this.connectionTrackingSpecification = spec;
+        }
+
         public List<String> getGroups() { return groups; }
         public void setGroups(List<String> groups) {
             this.groups = groups != null ? new ArrayList<>(groups) : new ArrayList<>();
         }
+    }
+
+    /**
+     * The idle-timeout overrides EC2 applies to an interface's connection tracking. Sent as
+     * {@code ConnectionTrackingSpecificationRequest} and read back as
+     * {@code ConnectionTrackingSpecification}; both carry the same three members.
+     */
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class ConnectionTrackingSpecification {
+        private Integer tcpEstablishedTimeout;
+        private Integer udpTimeout;
+        private Integer udpStreamTimeout;
+
+        public Integer getTcpEstablishedTimeout() { return tcpEstablishedTimeout; }
+        public void setTcpEstablishedTimeout(Integer tcpEstablishedTimeout) {
+            this.tcpEstablishedTimeout = tcpEstablishedTimeout;
+        }
+
+        public Integer getUdpTimeout() { return udpTimeout; }
+        public void setUdpTimeout(Integer udpTimeout) { this.udpTimeout = udpTimeout; }
+
+        public Integer getUdpStreamTimeout() { return udpStreamTimeout; }
+        public void setUdpStreamTimeout(Integer udpStreamTimeout) { this.udpStreamTimeout = udpStreamTimeout; }
     }
 
     @RegisterForReflection
@@ -728,6 +780,256 @@ public class LaunchTemplateData {
         public String getCapacityReservationResourceGroupArn() { return capacityReservationResourceGroupArn; }
         public void setCapacityReservationResourceGroupArn(String capacityReservationResourceGroupArn) {
             this.capacityReservationResourceGroupArn = capacityReservationResourceGroupArn;
+        }
+    }
+
+    /**
+     * Attribute-based instance type selection. Every member of the service model's
+     * {@code InstanceRequirementsRequest} is carried, including the nested
+     * {@code BaselinePerformanceFactors}.
+     */
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class InstanceRequirements {
+        private IntRange vCpuCount;
+        private IntRange memoryMiB;
+        private List<String> cpuManufacturers = new ArrayList<>();
+        private DoubleRange memoryGiBPerVCpu;
+        private List<String> excludedInstanceTypes = new ArrayList<>();
+        private List<String> instanceGenerations = new ArrayList<>();
+        private Integer spotMaxPricePercentageOverLowestPrice;
+        private Integer onDemandMaxPricePercentageOverLowestPrice;
+        private String bareMetal;
+        private String burstablePerformance;
+        private Boolean requireHibernateSupport;
+        private IntRange networkInterfaceCount;
+        private String localStorage;
+        private List<String> localStorageTypes = new ArrayList<>();
+        private DoubleRange totalLocalStorageGB;
+        private IntRange baselineEbsBandwidthMbps;
+        private List<String> acceleratorTypes = new ArrayList<>();
+        private IntRange acceleratorCount;
+        private List<String> acceleratorManufacturers = new ArrayList<>();
+        private List<String> acceleratorNames = new ArrayList<>();
+        private IntRange acceleratorTotalMemoryMiB;
+        private DoubleRange networkBandwidthGbps;
+        private List<String> allowedInstanceTypes = new ArrayList<>();
+        private Integer maxSpotPriceAsPercentageOfOptimalOnDemandPrice;
+        private BaselinePerformanceFactors baselinePerformanceFactors;
+        private Boolean requireEncryptionInTransit;
+
+        public IntRange getVCpuCount() { return vCpuCount; }
+        public void setVCpuCount(IntRange vCpuCount) { this.vCpuCount = vCpuCount; }
+
+        public IntRange getMemoryMiB() { return memoryMiB; }
+        public void setMemoryMiB(IntRange memoryMiB) { this.memoryMiB = memoryMiB; }
+
+        public List<String> getCpuManufacturers() { return cpuManufacturers; }
+        public void setCpuManufacturers(List<String> cpuManufacturers) {
+            this.cpuManufacturers = cpuManufacturers != null ? new ArrayList<>(cpuManufacturers) : new ArrayList<>();
+        }
+
+        public DoubleRange getMemoryGiBPerVCpu() { return memoryGiBPerVCpu; }
+        public void setMemoryGiBPerVCpu(DoubleRange memoryGiBPerVCpu) { this.memoryGiBPerVCpu = memoryGiBPerVCpu; }
+
+        public List<String> getExcludedInstanceTypes() { return excludedInstanceTypes; }
+        public void setExcludedInstanceTypes(List<String> excludedInstanceTypes) {
+            this.excludedInstanceTypes = excludedInstanceTypes != null ? new ArrayList<>(excludedInstanceTypes) : new ArrayList<>();
+        }
+
+        public List<String> getInstanceGenerations() { return instanceGenerations; }
+        public void setInstanceGenerations(List<String> instanceGenerations) {
+            this.instanceGenerations = instanceGenerations != null ? new ArrayList<>(instanceGenerations) : new ArrayList<>();
+        }
+
+        public Integer getSpotMaxPricePercentageOverLowestPrice() { return spotMaxPricePercentageOverLowestPrice; }
+        public void setSpotMaxPricePercentageOverLowestPrice(Integer spotMaxPricePercentageOverLowestPrice) { this.spotMaxPricePercentageOverLowestPrice = spotMaxPricePercentageOverLowestPrice; }
+
+        public Integer getOnDemandMaxPricePercentageOverLowestPrice() { return onDemandMaxPricePercentageOverLowestPrice; }
+        public void setOnDemandMaxPricePercentageOverLowestPrice(Integer onDemandMaxPricePercentageOverLowestPrice) { this.onDemandMaxPricePercentageOverLowestPrice = onDemandMaxPricePercentageOverLowestPrice; }
+
+        public String getBareMetal() { return bareMetal; }
+        public void setBareMetal(String bareMetal) { this.bareMetal = bareMetal; }
+
+        public String getBurstablePerformance() { return burstablePerformance; }
+        public void setBurstablePerformance(String burstablePerformance) { this.burstablePerformance = burstablePerformance; }
+
+        public Boolean getRequireHibernateSupport() { return requireHibernateSupport; }
+        public void setRequireHibernateSupport(Boolean requireHibernateSupport) { this.requireHibernateSupport = requireHibernateSupport; }
+
+        public IntRange getNetworkInterfaceCount() { return networkInterfaceCount; }
+        public void setNetworkInterfaceCount(IntRange networkInterfaceCount) { this.networkInterfaceCount = networkInterfaceCount; }
+
+        public String getLocalStorage() { return localStorage; }
+        public void setLocalStorage(String localStorage) { this.localStorage = localStorage; }
+
+        public List<String> getLocalStorageTypes() { return localStorageTypes; }
+        public void setLocalStorageTypes(List<String> localStorageTypes) {
+            this.localStorageTypes = localStorageTypes != null ? new ArrayList<>(localStorageTypes) : new ArrayList<>();
+        }
+
+        public DoubleRange getTotalLocalStorageGB() { return totalLocalStorageGB; }
+        public void setTotalLocalStorageGB(DoubleRange totalLocalStorageGB) { this.totalLocalStorageGB = totalLocalStorageGB; }
+
+        public IntRange getBaselineEbsBandwidthMbps() { return baselineEbsBandwidthMbps; }
+        public void setBaselineEbsBandwidthMbps(IntRange baselineEbsBandwidthMbps) { this.baselineEbsBandwidthMbps = baselineEbsBandwidthMbps; }
+
+        public List<String> getAcceleratorTypes() { return acceleratorTypes; }
+        public void setAcceleratorTypes(List<String> acceleratorTypes) {
+            this.acceleratorTypes = acceleratorTypes != null ? new ArrayList<>(acceleratorTypes) : new ArrayList<>();
+        }
+
+        public IntRange getAcceleratorCount() { return acceleratorCount; }
+        public void setAcceleratorCount(IntRange acceleratorCount) { this.acceleratorCount = acceleratorCount; }
+
+        public List<String> getAcceleratorManufacturers() { return acceleratorManufacturers; }
+        public void setAcceleratorManufacturers(List<String> acceleratorManufacturers) {
+            this.acceleratorManufacturers = acceleratorManufacturers != null ? new ArrayList<>(acceleratorManufacturers) : new ArrayList<>();
+        }
+
+        public List<String> getAcceleratorNames() { return acceleratorNames; }
+        public void setAcceleratorNames(List<String> acceleratorNames) {
+            this.acceleratorNames = acceleratorNames != null ? new ArrayList<>(acceleratorNames) : new ArrayList<>();
+        }
+
+        public IntRange getAcceleratorTotalMemoryMiB() { return acceleratorTotalMemoryMiB; }
+        public void setAcceleratorTotalMemoryMiB(IntRange acceleratorTotalMemoryMiB) { this.acceleratorTotalMemoryMiB = acceleratorTotalMemoryMiB; }
+
+        public DoubleRange getNetworkBandwidthGbps() { return networkBandwidthGbps; }
+        public void setNetworkBandwidthGbps(DoubleRange networkBandwidthGbps) { this.networkBandwidthGbps = networkBandwidthGbps; }
+
+        public List<String> getAllowedInstanceTypes() { return allowedInstanceTypes; }
+        public void setAllowedInstanceTypes(List<String> allowedInstanceTypes) {
+            this.allowedInstanceTypes = allowedInstanceTypes != null ? new ArrayList<>(allowedInstanceTypes) : new ArrayList<>();
+        }
+
+        public Integer getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice() { return maxSpotPriceAsPercentageOfOptimalOnDemandPrice; }
+        public void setMaxSpotPriceAsPercentageOfOptimalOnDemandPrice(Integer maxSpotPriceAsPercentageOfOptimalOnDemandPrice) { this.maxSpotPriceAsPercentageOfOptimalOnDemandPrice = maxSpotPriceAsPercentageOfOptimalOnDemandPrice; }
+
+        public BaselinePerformanceFactors getBaselinePerformanceFactors() { return baselinePerformanceFactors; }
+        public void setBaselinePerformanceFactors(BaselinePerformanceFactors baselinePerformanceFactors) { this.baselinePerformanceFactors = baselinePerformanceFactors; }
+
+        public Boolean getRequireEncryptionInTransit() { return requireEncryptionInTransit; }
+        public void setRequireEncryptionInTransit(Boolean requireEncryptionInTransit) { this.requireEncryptionInTransit = requireEncryptionInTransit; }
+    }
+
+    /** {@code VCpuCountRangeRequest} and the other whole-number Min/Max ranges. */
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class IntRange {
+        private Integer min;
+        private Integer max;
+
+        public IntRange() {}
+
+        public IntRange(Integer min, Integer max) {
+            this.min = min;
+            this.max = max;
+        }
+
+        public Integer getMin() { return min; }
+        public void setMin(Integer min) { this.min = min; }
+
+        public Integer getMax() { return max; }
+        public void setMax(Integer max) { this.max = max; }
+    }
+
+    /** {@code MemoryGiBPerVCpuRequest} and the other fractional Min/Max ranges. */
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class DoubleRange {
+        private Double min;
+        private Double max;
+
+        public DoubleRange() {}
+
+        public DoubleRange(Double min, Double max) {
+            this.min = min;
+            this.max = max;
+        }
+
+        public Double getMin() { return min; }
+        public void setMin(Double min) { this.min = min; }
+
+        public Double getMax() { return max; }
+        public void setMax(Double max) { this.max = max; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class BaselinePerformanceFactors {
+        private CpuPerformanceFactor cpu;
+
+        public CpuPerformanceFactor getCpu() { return cpu; }
+        public void setCpu(CpuPerformanceFactor cpu) { this.cpu = cpu; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class CpuPerformanceFactor {
+        private List<PerformanceFactorReference> references = new ArrayList<>();
+
+        public List<PerformanceFactorReference> getReferences() { return references; }
+        public void setReferences(List<PerformanceFactorReference> references) {
+            this.references = references != null ? new ArrayList<>(references) : new ArrayList<>();
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class PerformanceFactorReference {
+        private String instanceFamily;
+
+        public PerformanceFactorReference() {}
+
+        public PerformanceFactorReference(String instanceFamily) {
+            this.instanceFamily = instanceFamily;
+        }
+
+        public String getInstanceFamily() { return instanceFamily; }
+        public void setInstanceFamily(String instanceFamily) { this.instanceFamily = instanceFamily; }
+    }
+
+    /** The spot request block. Sent as {@code LaunchTemplateInstanceMarketOptionsRequest}. */
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class InstanceMarketOptions {
+        private String marketType;
+        private SpotOptions spotOptions;
+
+        public String getMarketType() { return marketType; }
+        public void setMarketType(String marketType) { this.marketType = marketType; }
+
+        public SpotOptions getSpotOptions() { return spotOptions; }
+        public void setSpotOptions(SpotOptions spotOptions) { this.spotOptions = spotOptions; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class SpotOptions {
+        private String maxPrice;
+        private String spotInstanceType;
+        private Integer blockDurationMinutes;
+        private String validUntil;
+        private String instanceInterruptionBehavior;
+
+        public String getMaxPrice() { return maxPrice; }
+        public void setMaxPrice(String maxPrice) { this.maxPrice = maxPrice; }
+
+        public String getSpotInstanceType() { return spotInstanceType; }
+        public void setSpotInstanceType(String spotInstanceType) { this.spotInstanceType = spotInstanceType; }
+
+        public Integer getBlockDurationMinutes() { return blockDurationMinutes; }
+        public void setBlockDurationMinutes(Integer blockDurationMinutes) {
+            this.blockDurationMinutes = blockDurationMinutes;
+        }
+
+        public String getValidUntil() { return validUntil; }
+        public void setValidUntil(String validUntil) { this.validUntil = validUntil; }
+
+        public String getInstanceInterruptionBehavior() { return instanceInterruptionBehavior; }
+        public void setInstanceInterruptionBehavior(String instanceInterruptionBehavior) {
+            this.instanceInterruptionBehavior = instanceInterruptionBehavior;
         }
     }
 }

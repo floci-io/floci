@@ -22,6 +22,13 @@ state use Floci's configured storage backend.
 Stages execute in declaration order. Actions with the same `runOrder` execute in parallel.
 `SUPERSEDED`, `QUEUED`, and `PARALLEL` execution modes are recognized, with `QUEUED` and
 `PARALLEL` restricted to V2 pipelines.
+A `QUEUED` or `PARALLEL` pipeline holds at most 50 active executions, as on AWS;
+`StartPipelineExecution` beyond that returns `ConcurrentPipelineExecutionsLimitExceededException`.
+
+S3 source actions poll for source changes by default, matching AWS when `PollForSourceChanges` is
+omitted or set to `true`. Floci establishes a baseline for the configured object and starts one new
+execution when its version ID or ETag changes, recording `PollForSourceChanges` as the execution
+trigger. Set `PollForSourceChanges` to `false` to disable this polling path.
 
 The following providers execute against local Floci services:
 

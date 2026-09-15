@@ -37,6 +37,37 @@ class Ipv4CidrsTest {
     }
 
     @Test
+    void isSubnetReservedCoversTheFirstFourAddressesAndTheLast() {
+        for (String reserved : List.of("10.0.1.0", "10.0.1.1", "10.0.1.2", "10.0.1.3", "10.0.1.255")) {
+            assertTrue(Ipv4Cidrs.isSubnetReserved("10.0.1.0/24", reserved + "/32"), reserved);
+        }
+        assertFalse(Ipv4Cidrs.isSubnetReserved("10.0.1.0/24", "10.0.1.4/32"));
+        assertFalse(Ipv4Cidrs.isSubnetReserved("10.0.1.0/24", "10.0.1.254/32"));
+        assertFalse(Ipv4Cidrs.isSubnetReserved("10.0.1.0/24", "10.0.2.1/32"),
+                "an address outside the block is not reserved by it");
+    }
+
+    @Test
+    void isSubnetReservedLeavesTheHostsOfASmallSubnetAlone() {
+        // A /28 is the smallest subnet AWS accepts: five reserved, eleven usable.
+        assertTrue(Ipv4Cidrs.isSubnetReserved("10.0.1.16/28", "10.0.1.19/32"));
+        assertTrue(Ipv4Cidrs.isSubnetReserved("10.0.1.16/28", "10.0.1.31/32"));
+        assertFalse(Ipv4Cidrs.isSubnetReserved("10.0.1.16/28", "10.0.1.20/32"));
+        assertFalse(Ipv4Cidrs.isSubnetReserved("10.0.1.16/28", "10.0.1.30/32"));
+        // A /29 keeps three hosts between the two reserved ends.
+        assertFalse(Ipv4Cidrs.isSubnetReserved("10.0.1.8/29", "10.0.1.12/32"));
+        assertTrue(Ipv4Cidrs.isSubnetReserved("10.0.1.8/29", "10.0.1.15/32"));
+    }
+
+    @Test
+    void isSubnetReservedClaimsEveryAddressOfABlockTooSmallToHoldAHost() {
+        for (String address : List.of("10.0.1.0", "10.0.1.1", "10.0.1.2", "10.0.1.3")) {
+            assertTrue(Ipv4Cidrs.isSubnetReserved("10.0.1.0/30", address + "/32"), address);
+        }
+        assertTrue(Ipv4Cidrs.isSubnetReserved("10.0.1.0/32", "10.0.1.0/32"));
+    }
+
+    @Test
     void firstFreeBlockSkipsOccupiedSpaceInOrder() {
         assertEquals("10.0.1.0/24",
                 Ipv4Cidrs.firstFreeBlock(List.of("10.0.0.0/16"), List.of("10.0.0.0/24"), 24));
