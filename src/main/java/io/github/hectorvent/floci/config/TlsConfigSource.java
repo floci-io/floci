@@ -45,6 +45,8 @@ public class TlsConfigSource implements ConfigSource {
 
     private static final Logger LOG = Logger.getLogger(TlsConfigSource.class);
 
+    static final String NAME = "FlociTlsConfigSource";
+
     /**
      * Internal ports Quarkus binds when TLS is enabled. {@link TlsProxyServer} listens on the
      * public Floci port and routes to these by protocol, so the two classes must agree; they are
@@ -169,7 +171,7 @@ public class TlsConfigSource implements ConfigSource {
 
     @Override
     public String getName() {
-        return "FlociTlsConfigSource";
+        return NAME;
     }
 
     /**

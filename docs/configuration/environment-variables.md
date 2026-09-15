@@ -23,6 +23,21 @@ Floci is configured exclusively through environment variables. Every option belo
 | `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | When `true`, verifies S3 presigned URL signatures |
 | `FLOCI_AUTH_PRESIGN_SECRET` | `local-emulator-secret` | Secret used to sign and verify pre-signed URLs |
 
+## Network Exposure
+
+| Variable | Default | Description |
+|---|---|---|
+| `QUARKUS_HTTP_HOST` | `127.0.0.1` | Address Floci listens on. With TLS enabled, the proxy serving HTTP and HTTPS on `FLOCI_PORT` listens here |
+| `FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE` | `false` | Allow listening outside loopback (`127.0.0.0/8`, `::1`, `localhost`). Without it, Floci refuses to start on any other address |
+
+Anyone who can reach Floci's port can call its APIs. The Docker images listen on `0.0.0.0` inside the container and pass both settings in their default command, so who can reach Floci depends on how you publish the port. Publish it on loopback unless other machines need it:
+
+```bash
+docker run --rm -p 127.0.0.1:4566:4566 floci/floci:latest
+```
+
+Running Floci directly on a Linux host (not in a container) with services that start containers, such as Lambda functions or ECS tasks, needs a non-loopback address. Those containers reach Floci through `host.docker.internal`, which resolves to the Docker bridge gateway (`172.17.0.1` by default) rather than to the host's loopback. Set `QUARKUS_HTTP_HOST=0.0.0.0` and `FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true`, and keep port 4566 closed to other networks with a firewall. See also [Lambda on native Linux Docker](../getting-started/quick-start.md#lambda-on-native-linux-docker-ufw).
+
 ## Browser CORS
 
 | Variable | Default | Description |

@@ -159,7 +159,8 @@ class ContainerCaBundleDockerIntegrationTest {
                     "quarkus.tls.key-store.pem.0.cert", CERT_FILE.toString(),
                     "quarkus.tls.key-store.pem.0.key", KEY_FILE.toString(),
                     "quarkus.http.insecure-requests", "enabled",
-                    "quarkus.http.host", "0.0.0.0");
+                    "quarkus.http.host", "0.0.0.0",
+                    "floci.security.allow-unsafe-network-exposure", "true");
         }
     }
 }
