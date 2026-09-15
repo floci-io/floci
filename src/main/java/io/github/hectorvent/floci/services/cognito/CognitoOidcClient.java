@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Function;
 
 @ApplicationScoped
 public class CognitoOidcClient {
@@ -49,11 +50,11 @@ public class CognitoOidcClient {
         form.put("code", code);
         form.put("redirect_uri", redirectUri);
 
-        HttpRequest request = requestBuilder(tokenEndpoint, provider.getProviderName(), "token")
+        HttpRequest request = buildRequest(tokenEndpoint, provider.getProviderName(), "token", builder -> builder
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(formEncode(form)))
-                .build();
+                .build());
         return send(request, "token exchange");
     }
 
@@ -63,11 +64,11 @@ public class CognitoOidcClient {
             throw new AwsException("NotAuthorizedException", "Identity provider did not return an access token", 400);
         }
 
-        HttpRequest request = requestBuilder(claimsEndpoint, provider.getProviderName(), "claims")
+        HttpRequest request = buildRequest(claimsEndpoint, provider.getProviderName(), "claims", builder -> builder
                 .header("Accept", "application/json")
                 .header("Authorization", "Bearer " + accessToken)
                 .GET()
-                .build();
+                .build());
         return send(request, "claims request");
     }
 
@@ -100,9 +101,15 @@ public class CognitoOidcClient {
         return endpoint;
     }
 
-    private HttpRequest.Builder requestBuilder(String endpoint, String providerName, String endpointName) {
+    private HttpRequest buildRequest(String endpoint, String providerName, String endpointName,
+                                     Function<HttpRequest.Builder, HttpRequest> requestFactory) {
         try {
-            return HttpRequest.newBuilder(URI.create(endpoint)).timeout(REQUEST_TIMEOUT);
+            URI uri = URI.create(endpoint);
+            if (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())) {
+                throw new IllegalArgumentException("Unsupported URI scheme");
+            }
+            HttpRequest.Builder builder = HttpRequest.newBuilder(uri).timeout(REQUEST_TIMEOUT);
+            return requestFactory.apply(builder);
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", "Identity provider " + providerName
                     + " has an invalid " + endpointName + " endpoint", 400);

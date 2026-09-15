@@ -192,6 +192,36 @@ class CognitoFederationServiceTest {
     }
 
     @Test
+    void completeAuthorizationRejectsUnsupportedTokenEndpointScheme() {
+        createProvider(Map.of(
+                "client_id", "provider-client",
+                "authorize_url", "https://provider.example.test/authorize",
+                "token_url", "ftp://provider.example.test/token",
+                "attributes_url", endpoint("/userinfo")), Map.of());
+        String state = beginAuthorization();
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> federationService.completeAuthorization(state, "provider-code"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void completeAuthorizationRejectsUnsupportedClaimsEndpointScheme() {
+        createProvider(Map.of(
+                "client_id", "provider-client",
+                "authorize_url", "https://provider.example.test/authorize",
+                "token_url", endpoint("/token"),
+                "attributes_url", "ftp://provider.example.test/userinfo"), Map.of());
+        String state = beginAuthorization();
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> federationService.completeAuthorization(state, "provider-code"));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
     void completeAuthorizationRejectsFailedTokenExchange() {
         createDefaultProvider();
         tokenStatus = 400;
