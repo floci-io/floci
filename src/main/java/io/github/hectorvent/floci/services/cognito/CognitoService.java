@@ -2034,6 +2034,59 @@ public class CognitoService implements ResourceProvider {
         return MAPPER.createArrayNode();
     }
 
+    public Optional<CognitoUser> findFederatedUser(String userPoolId, String providerName, String subject) {
+        describeUserPool(userPoolId);
+        String prefix = userPoolId + "::";
+        return userStore.scan(key -> key.startsWith(prefix)).stream()
+                .filter(user -> providerName.equals(user.getFederatedProviderName())
+                        && subject.equals(user.getFederatedSubject()))
+                .findFirst();
+    }
+
+    public CognitoUser provisionFederatedUser(String userPoolId, IdentityProvider provider, String subject,
+                                               String issuer, Map<String, String> mappedAttributes) {
+        describeUserPool(userPoolId);
+        synchronized (identityLinkLock) {
+            CognitoUser user = findFederatedUser(userPoolId, provider.getProviderName(), subject).orElse(null);
+            if (user == null) {
+                user = new CognitoUser();
+                user.setUsername(provider.getProviderName() + "_" + UUID.randomUUID());
+                user.setUserPoolId(userPoolId);
+                user.getAttributes().put("sub", UUID.randomUUID().toString());
+            }
+            user.getAttributes().putAll(mappedAttributes);
+            user.setFederatedProviderName(provider.getProviderName());
+            user.setFederatedSubject(subject);
+            updateFederatedIdentity(user, provider, subject, issuer);
+            user.setEnabled(true);
+            user.setUserStatus("CONFIRMED");
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(userPoolId, user.getUsername()), user);
+            LOG.infov("Reconciled federated user {0} from provider {1} in pool {2}",
+                    user.getUsername(), provider.getProviderName(), userPoolId);
+            return user;
+        }
+    }
+
+    private void updateFederatedIdentity(CognitoUser user, IdentityProvider provider, String subject, String issuer) {
+        ArrayNode identities = readIdentities(user);
+        ArrayNode reconciled = MAPPER.createArrayNode();
+        for (JsonNode identity : identities) {
+            if (!provider.getProviderName().equals(identity.path("providerName").asText())
+                    || !subject.equals(identity.path("userId").asText())) {
+                reconciled.add(identity);
+            }
+        }
+        reconciled.addObject()
+                .put("userId", subject)
+                .put("providerName", provider.getProviderName())
+                .put("providerType", provider.getProviderType())
+                .put("issuer", issuer)
+                .put("primary", false)
+                .put("dateCreated", System.currentTimeMillis());
+        user.getAttributes().put(IDENTITIES_ATTRIBUTE, reconciled.toString());
+    }
+
     public List<CognitoUser> listUsers(String userPoolId, String filter) {
         describeUserPool(userPoolId);
         String prefix = userPoolId + "::";
