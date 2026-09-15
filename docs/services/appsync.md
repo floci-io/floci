@@ -215,9 +215,9 @@ Both mapping templates are required. Request template output must be a JSON obje
 | Data source | Supported request |
 |---|---|
 | `NONE` | Optional `payload`; the response template receives it as `$ctx.result` |
-| `AMAZON_DYNAMODB` | `GetItem` and `PutItem`, including conditional `PutItem` expressions |
+| `AMAZON_DYNAMODB` | `GetItem` and `PutItem`, including conditional `PutItem` expressions; requires a `serviceRoleArn` trusted for `appsync.amazonaws.com` with permission for the operation and table |
 
-DynamoDB attribute values are converted to plain GraphQL values before the response template runs. For `PutItem`, key attributes override the same names in `attributeValues`, which supports Amplify-generated templates that include the ID in both maps. `consistentRead`, `condition.equalsIgnore`, `condition.consistentRead`, `projection`, and `_version` are currently accepted without changing execution.
+DynamoDB attribute values are converted to plain GraphQL values before the response template runs. For `PutItem`, key attributes override the same names in `attributeValues`, which supports Amplify-generated templates that include the ID in both maps. `consistentRead`, `condition.equalsIgnore`, `condition.consistentRead`, and `_version` are currently accepted without changing execution. A `GetItem` request containing `projection` returns `UnsupportedOperation` until projection expressions are implemented.
 
 Pipeline resolvers, APPSYNC_JS resolvers, unsupported data-source types, and deferred DynamoDB operations return a field-level `UnsupportedOperation` error. The `2017-02-28` mapping-template version returns `MappingTemplate` because its null and error semantics differ from `2018-05-29`.
 
@@ -295,7 +295,7 @@ This matches AWS behavior where deleting an API removes its entire configuration
 These AWS AppSync capabilities are not yet implemented and are tracked in future phases:
 
 - **Resolver execution**: pipeline resolvers, APPSYNC_JS, and `2017-02-28` mapping templates
-- **DynamoDB resolver operations**: `UpdateItem`, `DeleteItem`, `Query`, `Scan`, batch, transaction, and sync operations
+- **DynamoDB resolver operations**: `UpdateItem`, `DeleteItem`, `Query`, `Scan`, batch, transaction, and sync operations; `GetItem` projection expressions
 - **Additional data source adapters**: Lambda, HTTP, EventBridge, OpenSearch, RDS, and other connectors
 - **Guardrails** (Phase 10): query depth / complexity limits and related errors
 - **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions

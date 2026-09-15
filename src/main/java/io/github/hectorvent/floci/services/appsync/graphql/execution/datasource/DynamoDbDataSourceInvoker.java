@@ -22,8 +22,9 @@ import java.util.Set;
  * implemented; the remaining operations raise {@link UnsupportedDataSourceOperationException}.
  *
  * <p>The table is resolved under the request context's account, which the caller has already
- * switched to the API owner. {@code consistentRead}, {@code condition.equalsIgnore},
- * {@code condition.consistentRead} and {@code projection} are accepted and ignored.
+ * switched to the API owner. Access is authorized through the data source's service role.
+ * {@code consistentRead}, {@code condition.equalsIgnore} and {@code condition.consistentRead} are
+ * accepted and ignored.
  */
 @ApplicationScoped
 public class DynamoDbDataSourceInvoker implements DataSourceInvoker {
@@ -37,11 +38,14 @@ public class DynamoDbDataSourceInvoker implements DataSourceInvoker {
 
     private final DynamoDbService dynamoDbService;
     private final ObjectMapper objectMapper;
+    private final AppSyncDataSourceRoleAuthorizer roleAuthorizer;
 
     @Inject
-    public DynamoDbDataSourceInvoker(DynamoDbService dynamoDbService, ObjectMapper objectMapper) {
+    public DynamoDbDataSourceInvoker(DynamoDbService dynamoDbService, ObjectMapper objectMapper,
+                                     AppSyncDataSourceRoleAuthorizer roleAuthorizer) {
         this.dynamoDbService = dynamoDbService;
         this.objectMapper = objectMapper;
+        this.roleAuthorizer = roleAuthorizer;
     }
 
     @Override
@@ -68,8 +72,8 @@ public class DynamoDbDataSourceInvoker implements DataSourceInvoker {
 
         try {
             return switch (operation) {
-                case "GetItem" -> getItem(tableName, request, region);
-                case "PutItem" -> putItem(tableName, request, region);
+                case "GetItem" -> getItem(dataSource, tableName, request, region, context);
+                case "PutItem" -> putItem(dataSource, tableName, request, region, context);
                 default -> throw new InvalidRequestDocumentException("Unsupported operation '" + operation + "'");
             };
         } catch (ConditionalCheckFailedException e) {
@@ -85,13 +89,24 @@ public class DynamoDbDataSourceInvoker implements DataSourceInvoker {
         }
     }
 
-    private DataSourceResult getItem(String tableName, Map<String, Object> request, String region) {
+    private DataSourceResult getItem(DataSource dataSource, String tableName, Map<String, Object> request,
+                                     String region, GraphQlRequestContext context) {
+        if (request.containsKey("projection")) {
+            throw new UnsupportedDataSourceOperationException(
+                    "DynamoDB GetItem projection is not yet supported by Floci");
+        }
         JsonNode key = objectMapper.valueToTree(requireObject(request, "key"));
+        var denied = roleAuthorizer.authorizeDynamoDb(
+                dataSource, "dynamodb:GetItem", tableName, region, context);
+        if (denied.isPresent()) {
+            return DataSourceResult.error(denied.get());
+        }
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
         return DataSourceResult.of(DynamoDbAttributeValues.toPlainItem(item));
     }
 
-    private DataSourceResult putItem(String tableName, Map<String, Object> request, String region) {
+    private DataSourceResult putItem(DataSource dataSource, String tableName, Map<String, Object> request,
+                                     String region, GraphQlRequestContext context) {
         Map<String, Object> key = requireObject(request, "key");
         Map<String, Object> attributeValues = optionalObject(request, "attributeValues");
 
@@ -118,6 +133,11 @@ public class DynamoDbDataSourceInvoker implements DataSourceInvoker {
             values = exprValues != null ? objectMapper.valueToTree(exprValues) : null;
         }
 
+        var denied = roleAuthorizer.authorizeDynamoDb(
+                dataSource, "dynamodb:PutItem", tableName, region, context);
+        if (denied.isPresent()) {
+            return DataSourceResult.error(denied.get());
+        }
         dynamoDbService.putItem(tableName, itemNode, expression, names, values, region, "ALL_OLD");
         return DataSourceResult.of(DynamoDbAttributeValues.toPlainItem(itemNode));
     }

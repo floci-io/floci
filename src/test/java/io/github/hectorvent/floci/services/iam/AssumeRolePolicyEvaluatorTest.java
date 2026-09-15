@@ -197,6 +197,29 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void allowsMatchingServicePrincipal() {
+        assertTrue(evaluator.allowsService(
+                trust("{\"Service\":\"appsync.amazonaws.com\"}"), "appsync.amazonaws.com"));
+        assertTrue(evaluator.allowsService(
+                trust("{\"Service\":[\"lambda.amazonaws.com\",\"appsync.amazonaws.com\"]}"),
+                "appsync.amazonaws.com"));
+    }
+
+    @Test
+    void servicePrincipalFailsClosedAndHonoursExplicitDeny() {
+        assertFalse(evaluator.allowsService(
+                trust("{\"Service\":\"lambda.amazonaws.com\"}"), "appsync.amazonaws.com"));
+        assertFalse(evaluator.allowsService(
+                trust("{\"AWS\":\"*\"}"), "appsync.amazonaws.com"));
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"Service":"appsync.amazonaws.com"},"Action":"sts:AssumeRole"},
+              {"Effect":"Deny","Principal":{"Service":"appsync.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+            """;
+        assertFalse(evaluator.allowsService(doc, "appsync.amazonaws.com"));
+    }
+
+    @Test
     void deniesBlankOrMalformedDocument() {
         assertFalse(evaluator.allows(null, CALLER_ARN, CALLER_ACCOUNT));
         assertFalse(evaluator.allows("", CALLER_ARN, CALLER_ACCOUNT));

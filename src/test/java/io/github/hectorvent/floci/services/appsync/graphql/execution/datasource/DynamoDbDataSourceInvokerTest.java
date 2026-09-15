@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.execution.datasource
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.appsync.graphql.execution.FieldError;
 import io.github.hectorvent.floci.services.appsync.graphql.execution.GraphQlRequestContext;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
@@ -16,6 +17,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -25,7 +27,9 @@ class DynamoDbDataSourceInvokerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
-    private final DynamoDbDataSourceInvoker invoker = new DynamoDbDataSourceInvoker(dynamoDb, mapper);
+    private final AppSyncDataSourceRoleAuthorizer roleAuthorizer = mock(AppSyncDataSourceRoleAuthorizer.class);
+    private final DynamoDbDataSourceInvoker invoker = new DynamoDbDataSourceInvoker(
+            dynamoDb, mapper, roleAuthorizer);
     private final GraphQlRequestContext ctx = new GraphQlRequestContext(
             "api", "000000000000", "eu-west-1", "API Key Authorization", null, Map.of(), Map.of());
 
@@ -33,9 +37,12 @@ class DynamoDbDataSourceInvokerTest {
 
     @BeforeEach
     void setUp() {
+        lenient().when(roleAuthorizer.authorizeDynamoDb(any(), any(), any(), any(), any()))
+                .thenReturn(Optional.empty());
         table = new DataSource();
         table.setName("todos");
         table.setType(DataSourceType.AMAZON_DYNAMODB);
+        table.setServiceRoleArn("arn:aws:iam::000000000000:role/AppSyncDataSource");
         table.setDynamodbConfig(new HashMap<>(Map.of("tableName", "Todos", "awsRegion", "us-east-1")));
     }
 
@@ -77,6 +84,29 @@ class DynamoDbDataSourceInvokerTest {
         when(dynamoDb.getItem(any(), any(), any())).thenReturn(null);
         invoker.invoke(table, request("GetItem", Map.of("key", Map.of("id", Map.of("S", "x")))), ctx);
         verify(dynamoDb).getItem(eq("Todos"), any(), eq("eu-west-1"));
+    }
+
+    @Test
+    void projectionIsRejectedBeforeCallingDynamoDb() {
+        assertThrows(UnsupportedDataSourceOperationException.class, () -> invoker.invoke(table,
+                request("GetItem", Map.of(
+                        "key", Map.of("id", Map.of("S", "1")),
+                        "projection", Map.of("expression", "id"))), ctx));
+
+        verifyNoInteractions(dynamoDb);
+    }
+
+    @Test
+    void deniedServiceRoleDoesNotCallDynamoDb() {
+        when(roleAuthorizer.authorizeDynamoDb(
+                table, "dynamodb:GetItem", "Todos", "us-east-1", ctx))
+                .thenReturn(Optional.of(FieldError.of("DynamoDB:AccessDeniedException", "denied")));
+
+        DataSourceResult result = invoker.invoke(table,
+                request("GetItem", Map.of("key", Map.of("id", Map.of("S", "1")))), ctx);
+
+        assertEquals("DynamoDB:AccessDeniedException", result.error().errorType());
+        verifyNoInteractions(dynamoDb);
     }
 
     @Test
