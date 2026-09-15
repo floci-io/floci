@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.RdsFamilyQuerySupport;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
@@ -1411,38 +1412,7 @@ public class RdsQueryHandler {
     }
 
     private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
-        // Global clusters are not modeled. Both providers read this on every cluster read, and
-        // DocumentDB signs with the "rds" scope, so this handler answers for either service.
-        // MaxRecords is rejected before the identifier is looked up, and a marker after it —
-        // the order a live account applies them in.
-        String maxRecords = params.getFirst("MaxRecords");
-        if (maxRecords != null && !maxRecords.isBlank()) {
-            int max = -1;
-            try {
-                max = Integer.parseInt(maxRecords.trim());
-            } catch (NumberFormatException e) {
-                LOG.debugv("Non-numeric MaxRecords {0} on DescribeGlobalClusters", maxRecords);
-            }
-            if (max < 20 || max > 100) {
-                throw new AwsException("InvalidParameterValue",
-                        "Invalid value " + maxRecords + " for MaxRecords. Must be between 20 and 100", 400);
-            }
-        }
-        String identifier = params.getFirst("GlobalClusterIdentifier");
-        if (identifier != null && !identifier.isBlank()) {
-            // Naming one is a different question from listing none, and AWS errors on it.
-            throw new AwsException("GlobalClusterNotFoundFault",
-                    "Global cluster '" + identifier + "' not found", 404);
-        }
-        // No page is ever handed out, so any marker a caller presents came from somewhere else.
-        String marker = params.getFirst("Marker");
-        if (marker != null && !marker.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "The request token is invalid.", 400);
-        }
-        // Filters are not validated: the answer is empty for every name AWS accepts, and a partial
-        // list of accepted names would reject filters a live account allows.
-        String result = new XmlBuilder().start("GlobalClusters").end("GlobalClusters").build();
-        return Response.ok(AwsQueryResponse.envelope("DescribeGlobalClusters", AwsNamespaces.RDS, result)).build();
+        return RdsFamilyQuerySupport.handleDescribeGlobalClusters(LOG, params);
     }
 
     private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
