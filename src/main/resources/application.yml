@@ -536,6 +536,18 @@ floci:
       # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
       # Set an absolute http:// or https:// URL here only to override that derivation.
       insecure-skip-tls-verify: false
+      # The console-contract keys below are deliberately unset. Floci reads the console's own
+      # io.floci.console.* image labels first, then a built-in profile, then the contract defaults
+      # (/api/health, port 4500, status: ok). Setting a value here overrides all of that, so only
+      # do it for a console that describes itself neither way. See docs/ui/console-contract.md.
+      # internal-port: 4500
+      # endpoint-env: AWS_ENDPOINT_URL
+      # status-path: /api/health
+      # status-ready-field: status      # "none" means any 200 counts as ready
+      # status-ready-value: ok
+      # status-unavailable-value: unavailable
+      # extra-env:                     # PORT and AWS_ENDPOINT_URL are ignored here: use
+      #   - MY_CONSOLE_FLAG=true       # internal-port and endpoint above instead
     bedrock:
       enabled: true
     bedrock-runtime:
