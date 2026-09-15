@@ -23,6 +23,7 @@ import org.jboss.logging.Logger;
 
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -64,12 +65,13 @@ public class ScheduleInvoker {
         this.baseUrl = config.baseUrl();
     }
 
-    public void invoke(Target target, String region) {
+    public String invoke(Target target, String region) {
         if (target == null || target.getArn() == null) {
-            return;
+            return "{}";
         }
         String arn = target.getArn();
         String payload = target.getInput() != null ? target.getInput() : "{}";
+        String requestBody = materializeRequest(target, region);
 
         // Universal targets (arn:aws:scheduler:::aws-sdk:<service>:<action>) carry the
         // real resource identifiers inside Input, not in the target ARN. Detect and
@@ -78,7 +80,7 @@ public class ScheduleInvoker {
         int sdkIdx = arn.indexOf(":aws-sdk:");
         if (sdkIdx >= 0) {
             invokeUniversalTarget(arn.substring(sdkIdx + ":aws-sdk:".length()), payload, region);
-            return;
+            return requestBody;
         }
 
         String targetRegion = extractRegion(arn, region);
@@ -101,7 +103,49 @@ public class ScheduleInvoker {
             deliverToEventBridge(target, payload, targetRegion);
             LOG.debugv("Scheduler delivered to EventBridge: {0}", arn);
         } else {
-            LOG.warnv("Scheduler: unsupported target ARN type: {0}", arn);
+            throw new UnsupportedOperationException("Scheduler: unsupported target ARN type: " + arn);
+        }
+        return requestBody;
+    }
+
+    /** Returns the JSON request sent to the target service, for invocation diagnostics and DLQs. */
+    public String materializeRequest(Target target, String region) {
+        if (target == null || target.getArn() == null) {
+            return "{}";
+        }
+        String arn = target.getArn();
+        String payload = target.getInput() != null ? target.getInput() : "{}";
+        int sdkIdx = arn.indexOf(":aws-sdk:");
+        if (sdkIdx >= 0) {
+            return validJsonOrString(payload);
+        }
+        if (arn.contains(":sqs:")) {
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("MessageBody", payload);
+            request.put("QueueUrl", AwsArnUtils.arnToQueueUrl(arn, baseUrl));
+            if (target.getSqsParameters() != null
+                    && target.getSqsParameters().getMessageGroupId() != null) {
+                request.put("MessageGroupId", target.getSqsParameters().getMessageGroupId());
+            }
+            return writeJson(request);
+        }
+        return validJsonOrString(payload);
+    }
+
+    private String validJsonOrString(String payload) {
+        try {
+            objectMapper.readTree(payload);
+            return payload;
+        } catch (Exception e) {
+            return writeJson(Map.of("Input", payload));
+        }
+    }
+
+    private String writeJson(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception e) {
+            return "{}";
         }
     }
 
@@ -152,16 +196,16 @@ public class ScheduleInvoker {
     /**
      * Dispatches an EventBridge Scheduler universal target ({@code aws-sdk:<service>:<action>}),
      * reading the call parameters from the target's {@code Input} payload. Supports the
-     * common {@code sns:publish} and {@code sqs:sendMessage} actions; other actions are
-     * logged as unsupported.
+     * common {@code sns:publish} and {@code sqs:sendMessage} actions; other actions fail
+     * as unsupported.
      */
     private void invokeUniversalTarget(String serviceAction, String input, String region) {
         JsonNode params;
         try {
             params = objectMapper.readTree(input == null || input.isBlank() ? "{}" : input);
         } catch (Exception e) {
-            LOG.warnv("Scheduler: universal target {0} has unparseable Input: {1}", serviceAction, e.getMessage());
-            return;
+            throw new AwsException("InvalidParameterValue",
+                    "Universal target Input is not valid JSON", 400);
         }
         switch (serviceAction) {
             case "sns:publish" -> {
@@ -188,7 +232,8 @@ public class ScheduleInvoker {
                         messageAttributes, region);
                 LOG.debugv("Scheduler delivered to SQS (universal target): {0}", queueUrl);
             }
-            default -> LOG.warnv("Scheduler: unsupported universal target action: {0}", serviceAction);
+            default -> throw new UnsupportedOperationException(
+                    "Scheduler: unsupported universal target action: " + serviceAction);
         }
     }
 
