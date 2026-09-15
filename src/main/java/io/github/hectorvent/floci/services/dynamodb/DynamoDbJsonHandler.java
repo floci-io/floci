@@ -1691,6 +1691,9 @@ public class DynamoDbJsonHandler {
                 DynamoDbExpressionSize.checkRead(op.path("UpdateExpression").textValue(), "UpdateExpression");
                 DynamoDbExpressionSize.checkReadWithSize(op.path("ConditionExpression").textValue(),
                         "ConditionExpression");
+                ExpressionEvaluator.validateExpression(op.path("ConditionExpression").textValue(),
+                        "ConditionExpression", op.get("ExpressionAttributeNames"),
+                        op.get("ExpressionAttributeValues"));
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
             }
         }

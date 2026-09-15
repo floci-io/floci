@@ -1408,6 +1408,47 @@ class DynamoDbIntegrationTest {
             .body("TableDescription.TableStatus", equalTo("ACTIVE"));
     }
 
+    @Test
+    @Order(26)
+    void transactWriteItemsRejectsRedundantConditionParentheses() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Put": {
+                            "TableName": "TestTable",
+                            "Item": {"pk": {"S": "transaction-parens"}, "sk": {"S": "row"}},
+                            "ConditionExpression": "((attribute_not_exists(pk)))"
+                        }
+                    }]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(
+                    "Invalid ConditionExpression: The expression has redundant parentheses;"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "Key": {"pk": {"S": "transaction-parens"}, "sk": {"S": "row"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item", nullValue());
+    }
+
     // --- Cleanup ---
 
     @Test
