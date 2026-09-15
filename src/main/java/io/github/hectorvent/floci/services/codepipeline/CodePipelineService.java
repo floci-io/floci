@@ -1243,7 +1243,7 @@ public class CodePipelineService {
         stored.set("job", job);
         storeItem(execution.getAccountId(), execution.getRegion(), "job", jobId, "Created", stored);
         state.setExternalExecutionId(jobId);
-        while (!execution.isStopRequested()) {
+        while (!(execution.isStopRequested() && execution.isAbandon())) {
             CodePipelineStoredItem current = requireItem(
                     execution.getAccountId(), execution.getRegion(), "job", jobId, "JobNotFoundException");
             if ("Succeeded".equals(current.getStatus())) {
@@ -1255,14 +1255,20 @@ public class CodePipelineService {
                 return;
             }
             if ("Failed".equals(current.getStatus())) {
-                throw new AwsException("ActionExecutionFailed",
-                        current.getData().path("result").path("failureDetails").path("message")
-                                .asText("Custom action failed"), 400);
+                String message = current.getData().path("result").path("failureDetails").path("message")
+                        .asText("Custom action failed");
+                if (execution.isStopRequested()) {
+                    state.setStatus("Failed");
+                    state.setSummary(message);
+                    state.setErrorDetails(Map.of("code", "ActionExecutionFailed", "message", message));
+                    return;
+                }
+                throw new AwsException("ActionExecutionFailed", message, 400);
             }
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
         }
-        state.setStatus(execution.isAbandon() ? "Abandoned" : "Stopped");
-        state.setSummary(execution.isAbandon() ? "Action abandoned." : "Action stopped.");
+        state.setStatus("Abandoned");
+        state.setSummary("Action abandoned.");
     }
 
     private void applyExecutionMode(CodePipelineExecution execution) {
