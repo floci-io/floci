@@ -4,6 +4,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.List;
+import java.util.Set;
+
 
 /**
  * The storage and backup settings of a DB instance as a request carries them: a null member is
@@ -15,7 +18,33 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  Integer backupRetentionPeriod,
                                  String preferredBackupWindow,
                                  String preferredMaintenanceWindow,
-                                 Boolean copyTagsToSnapshot) {
+                                 Boolean copyTagsToSnapshot,
+                                 Integer monitoringInterval,
+                                 String monitoringRoleArn,
+                                 Boolean performanceInsightsEnabled,
+                                 Integer performanceInsightsRetentionPeriod,
+                                 String engineLifecycleSupport,
+                                 List<String> enabledCloudwatchLogsExports,
+                                 Integer maxAllocatedStorage) {
+
+    /** The settings a caller that touches none of the monitoring members gives. */
+    public DbInstanceSettings(Boolean storageEncrypted,
+                              String kmsKeyId,
+                              Integer backupRetentionPeriod,
+                              String preferredBackupWindow,
+                              String preferredMaintenanceWindow,
+                              Boolean copyTagsToSnapshot) {
+        this(storageEncrypted, kmsKeyId, backupRetentionPeriod, preferredBackupWindow,
+                preferredMaintenanceWindow, copyTagsToSnapshot, null, null, null, null, null,
+                null, null);
+    }
+
+    /** MonitoringInterval documents these as its valid values. */
+    private static final Set<Integer> MONITORING_INTERVALS = Set.of(0, 1, 5, 10, 15, 30, 60);
+
+    public static final String ENGINE_LIFECYCLE_SUPPORT_ENABLED = "open-source-rds-extended-support";
+    public static final String ENGINE_LIFECYCLE_SUPPORT_DISABLED =
+            "open-source-rds-extended-support-disabled";
 
     /** Where AWS picks a random 30-minute window, Floci picks these. */
     public static final String DEFAULT_BACKUP_WINDOW = BackupWindows.DEFAULT_BACKUP_WINDOW;
@@ -46,6 +75,34 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         if (preferredMaintenanceWindow != null) {
             BackupWindows.parseMaintenanceWindow(preferredMaintenanceWindow);
         }
+        if (monitoringInterval != null && !MONITORING_INTERVALS.contains(monitoringInterval)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid monitoring interval: " + monitoringInterval
+                            + ". Valid values are 0, 1, 5, 10, 15, 30, 60.", 400);
+        }
+        if (performanceInsightsRetentionPeriod != null
+                && !validPerformanceInsightsRetention(performanceInsightsRetentionPeriod)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid Performance Insights retention period: "
+                            + performanceInsightsRetentionPeriod
+                            + ". Valid values are 7, 731, or a multiple of 31 up to 713.", 400);
+        }
+        if (engineLifecycleSupport != null
+                && !ENGINE_LIFECYCLE_SUPPORT_ENABLED.equals(engineLifecycleSupport)
+                && !ENGINE_LIFECYCLE_SUPPORT_DISABLED.equals(engineLifecycleSupport)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid engine lifecycle support: " + engineLifecycleSupport
+                            + ". Valid values are " + ENGINE_LIFECYCLE_SUPPORT_ENABLED + ", "
+                            + ENGINE_LIFECYCLE_SUPPORT_DISABLED + ".", 400);
+        }
+    }
+
+    /**
+     * 7 days, 731 days, or month * 31 for a whole number of months from 1 to 23, which is what
+     * the member documents. A period outside that set, 94 for instance, is an error on AWS.
+     */
+    private static boolean validPerformanceInsightsRetention(int days) {
+        return days == 7 || days == 731 || (days % 31 == 0 && days / 31 >= 1 && days / 31 <= 23);
     }
 
     /** Whether a daily backup window and a weekly maintenance window share any minute. */
@@ -84,9 +141,21 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         return BackupWindows.overlapping();
     }
 
+    /** The same settings with the windows the service resolved, leaving every other member alone. */
+    public DbInstanceSettings withWindows(String backupWindow, String maintenanceWindow) {
+        return new DbInstanceSettings(storageEncrypted, kmsKeyId, backupRetentionPeriod,
+                backupWindow, maintenanceWindow, copyTagsToSnapshot,
+                monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
+                performanceInsightsRetentionPeriod, engineLifecycleSupport,
+                enabledCloudwatchLogsExports, maxAllocatedStorage);
+    }
+
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
         return new DbInstanceSettings(storageEncrypted, resolvedKmsKeyId, backupRetentionPeriod,
-                preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot);
+                preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot,
+                monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
+                performanceInsightsRetentionPeriod, engineLifecycleSupport,
+                enabledCloudwatchLogsExports, maxAllocatedStorage);
     }
 
     public void applyTo(DbInstance instance) {
@@ -107,6 +176,27 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (copyTagsToSnapshot != null) {
             instance.setCopyTagsToSnapshot(copyTagsToSnapshot);
+        }
+        if (monitoringInterval != null) {
+            instance.setMonitoringInterval(monitoringInterval);
+        }
+        if (monitoringRoleArn != null && !monitoringRoleArn.isBlank()) {
+            instance.setMonitoringRoleArn(monitoringRoleArn);
+        }
+        if (performanceInsightsEnabled != null) {
+            instance.setPerformanceInsightsEnabled(performanceInsightsEnabled);
+        }
+        if (performanceInsightsRetentionPeriod != null) {
+            instance.setPerformanceInsightsRetentionPeriod(performanceInsightsRetentionPeriod);
+        }
+        if (engineLifecycleSupport != null && !engineLifecycleSupport.isBlank()) {
+            instance.setEngineLifecycleSupport(engineLifecycleSupport);
+        }
+        if (enabledCloudwatchLogsExports != null) {
+            instance.setEnabledCloudwatchLogsExports(List.copyOf(enabledCloudwatchLogsExports));
+        }
+        if (maxAllocatedStorage != null) {
+            instance.setMaxAllocatedStorage(maxAllocatedStorage);
         }
     }
 }

@@ -1625,8 +1625,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
             throw DbInstanceSettings.overlappingWindows();
         }
-        return new DbInstanceSettings(settings.storageEncrypted(), settings.kmsKeyId(),
-                settings.backupRetentionPeriod(), backup, maintenance, settings.copyTagsToSnapshot());
+        return settings.withWindows(backup, maintenance);
     }
 
     /**
