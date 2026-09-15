@@ -36,6 +36,10 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `PutSubscriptionFilter` | Create or update a subscription filter (stored only, see note below) |
 | `DescribeSubscriptionFilters` | List subscription filters on a log group |
 | `DeleteSubscriptionFilter` | Delete a subscription filter |
+| `PutMetricFilter` | Create or replace a metric filter on a log group (see [Metric filters](#metric-filters)) |
+| `DescribeMetricFilters` | List metric filters by log group and name prefix, or by metric name and namespace |
+| `DeleteMetricFilter` | Delete a metric filter |
+| `TestMetricFilter` | Run a filter pattern over sample messages and return the matches with their extracted values |
 | `PutResourcePolicy` | Create or update an account-level resource policy |
 | `DescribeResourcePolicies` | List account-level resource policies |
 | `PutDestination` | Create or update a cross-account subscription destination |
@@ -51,7 +55,7 @@ Log group deletion protection defaults to disabled and is persisted with the log
 enabled, `DeleteLogGroup` returns `ValidationException` until protection is explicitly disabled
 with `PutLogGroupDeletionProtection`.
 
-Two actions are currently simplified:
+Three actions are currently simplified:
 
 - **`PutSubscriptionFilter`** stores the filter so that `DescribeSubscriptionFilters`
   returns it, but log events are **not** forwarded to the destination ARN. Lambda,
@@ -59,6 +63,58 @@ Two actions are currently simplified:
 - **`GetDataProtectionPolicy`** does not model data-protection policies. It returns
   HTTP 200 with the resolved `logGroupIdentifier` and no `policyDocument` — including for
   a log group that does not exist, where real AWS returns `ResourceNotFoundException`.
+- **`FilterLogEvents`** matches `filterPattern` as a plain substring of the message. The full
+  filter pattern syntax described below is applied by metric filters.
+
+### Metric filters {#metric-filters}
+
+A metric filter turns log events into a CloudWatch metric as they are written. On every
+`PutLogEvents`, each filter on the log group runs its pattern over the stored events and publishes
+one value per match, at the event's timestamp: the literal `metricValue`, or the field it names
+(`$.latency` in a JSON event, `$size` in a space-delimited one). Dimensions take their values from
+fields the same way, and a dimension whose field the event lacks is left out. The metric is then
+readable with `GetMetricStatistics` and `GetMetricData`, and alarms on it evaluate as usual.
+
+A `defaultValue` belongs to a one-minute period rather than to a `PutLogEvents` call, as it does on
+AWS: a minute that ingested logs without a match reports the default once, a minute holding any
+match reports no default, and a minute that ingested nothing reports nothing. A period is settled
+when a later one arrives, so the last minute before ingestion stops keeps its default value until
+traffic resumes, where AWS reports it when the minute ends.
+
+The filter pattern syntax follows the AWS reference:
+
+- Terms: `ERROR ARGUMENTS` (all present), `?ERROR ?ARGUMENTS` (any present), `ERROR -ARGUMENTS`
+  (exclusion), `"exact phrase"`. Terms are case-sensitive substrings of the message.
+- Regular expressions between percent signs, `%^[hc]at%`, with the operators and escapes AWS
+  allows. Parentheses and characters outside ASCII are rejected, as on AWS.
+- JSON patterns: `{ $.eventType = "UpdateTrail" && $.code >= 400 }`, with `=`, `!=`, `<`, `<=`,
+  `>`, `>=`, `IS NULL`, `IS TRUE`, `IS FALSE`, `NOT EXISTS`, `&&`, `||`, parentheses, array indexes,
+  `[*]` and `.*` wildcards, and `$.['a.b']` for a property with a dot in its name. AWS's wildcard
+  quotas apply: one per property selector and three per pattern.
+- Space-delimited patterns: `[ip, ..., status_code = 4*, bytes]`, with named fields, `...` for any
+  number of fields, conditions on any field, `w1`/`w2` indicators, and `%regex%` values. Text
+  between double quotes or square brackets is one field.
+
+`PutMetricFilter` applies the rules AWS applies: the log group must exist, the pattern must parse,
+at most two regular expressions per pattern, exactly one transformation whose `metricValue` is a
+number or a field the pattern can supply, at most three dimensions, only on JSON or space-delimited
+patterns and not together with a `defaultValue`, 100 filters per log group, and five regular expressions per
+log group, counted over the group's metric and subscription filters together and beside the two a
+single pattern may hold. `TestMetricFilter` reports matches with the extracted values as AWS does: named
+fields as `$name`, the others by position as `$1`, `$2` and so on.
+
+`fieldSelectionCriteria` selects which batches a filter processes from the system fields
+`@aws.account` and `@aws.region`, with `=`, `!=`, `IN`, `NOT IN` and the `AND` and `OR` the API
+documents, as in `@aws.account IN ["111111111111"]`. Both fields describe the ingested batch rather
+than the individual event, so one evaluation decides the batch. A criterion that does not parse is
+rejected when the filter is stored.
+
+`emitSystemFieldDimensions` adds `@aws.account` and `@aws.region` as dimensions on the values the
+filter publishes. They count toward the same limit of three dimensions AWS applies.
+
+`applyOnTransformedLogs` is stored and returned unchanged. It selects the transformed view of a log
+group that has a log transformer; Floci has no transformers, so there is no view that differs from
+the ingested events, and the Logs API documents no error for setting it without one.
 
 ### Logs Insights {#logs-insights}
 

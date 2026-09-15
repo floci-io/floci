@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
@@ -48,6 +49,15 @@ public class CloudWatchMetricsService {
     }
 
     public void putMetricData(String namespace, List<MetricDatum> datums, String region) {
+        putMetricDataForAccount(null, namespace, datums, region);
+    }
+
+    /**
+     * Stores the datums in {@code accountId}'s partition rather than the caller's, for writers that
+     * run outside a request, such as a metric filter publishing for a log batch a container
+     * streamed on another account's behalf. A null account is the caller's own.
+     */
+    public void putMetricDataForAccount(String accountId, String namespace, List<MetricDatum> datums, String region) {
         long nowSeconds = Instant.now().getEpochSecond();
         for (MetricDatum datum : datums) {
             datum.setNamespace(namespace);
@@ -66,7 +76,13 @@ public class CloudWatchMetricsService {
             String key = region + "::" + namespace + "::" + datum.getMetricName()
                     + "::" + dimKey + "::"
                     + String.format("%013d", datum.getTimestamp()) + "::" + UUID.randomUUID();
-            metricStore.put(key, datum);
+            if (accountId != null && metricStore instanceof AccountAwareStorageBackend<?> rawAware) {
+                @SuppressWarnings("unchecked")
+                AccountAwareStorageBackend<MetricDatum> aware = (AccountAwareStorageBackend<MetricDatum>) rawAware;
+                aware.putForAccount(accountId, key, datum);
+            } else {
+                metricStore.put(key, datum);
+            }
         }
         LOG.debugv("PutMetricData: {0} datums for namespace {1}", datums.size(), namespace);
     }

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.model.ResourcePolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -59,6 +60,12 @@ public class CloudWatchLogsService implements ResourceProvider {
     private final StorageBackend<String, SubscriptionFilter> subscriptionFilterStore;
     private final StorageBackend<String, ResourcePolicy> resourcePolicyStore;
     private final RegionResolver regionResolver;
+    /**
+     * What ingestion and group deletion tell the rest of the emulator, so features AWS drives from
+     * them (metric filters) stay out of this class. Null when built by the test constructors.
+     */
+    private final Event<LogEventsIngested> logEventsIngested;
+    private final Event<LogGroupDeleted> logGroupDeleted;
     private final int maxEventsPerQuery;
     /** Ceiling on stored events across every group in an account; the oldest are evicted first once exceeded. */
     private final int maxStoredEvents;
@@ -94,7 +101,9 @@ public class CloudWatchLogsService implements ResourceProvider {
     @Inject
     public CloudWatchLogsService(StorageFactory storageFactory,
                                   EmulatorConfig config,
-                                  RegionResolver regionResolver) {
+                                  RegionResolver regionResolver,
+                                  Event<LogEventsIngested> logEventsIngested,
+                                  Event<LogGroupDeleted> logGroupDeleted) {
         this(
                 storageFactory.create("cloudwatchlogs", "cwlogs-groups.json",
                         new TypeReference<>() {}),
@@ -110,7 +119,9 @@ public class CloudWatchLogsService implements ResourceProvider {
                 config.services().cloudwatchlogs().maxStoredEvents(),
                 regionResolver,
                 config.services().cloudwatchlogs().queryCompletionDelayMs(),
-                System::currentTimeMillis
+                System::currentTimeMillis,
+                logEventsIngested,
+                logGroupDeleted
         );
     }
 
@@ -157,6 +168,22 @@ public class CloudWatchLogsService implements ResourceProvider {
                            RegionResolver regionResolver,
                            long queryCompletionDelayMs,
                            LongSupplier clock) {
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, resourcePolicyStore,
+                maxEventsPerQuery, maxStoredEvents, regionResolver, queryCompletionDelayMs, clock, null, null);
+    }
+
+    CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
+                           StorageBackend<String, LogStream> streamStore,
+                           StorageBackend<String, LogEvent> eventStore,
+                           StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           StorageBackend<String, ResourcePolicy> resourcePolicyStore,
+                           int maxEventsPerQuery,
+                           int maxStoredEvents,
+                           RegionResolver regionResolver,
+                           long queryCompletionDelayMs,
+                           LongSupplier clock,
+                           Event<LogEventsIngested> logEventsIngested,
+                           Event<LogGroupDeleted> logGroupDeleted) {
         this.groupStore = groupStore;
         this.streamStore = streamStore;
         this.eventStore = eventStore;
@@ -173,6 +200,8 @@ public class CloudWatchLogsService implements ResourceProvider {
         // A negative delay is meaningless; treat it as instant completion.
         this.queryCompletionDelayMs = Math.max(0, queryCompletionDelayMs);
         this.clock = clock;
+        this.logEventsIngested = logEventsIngested;
+        this.logGroupDeleted = logGroupDeleted;
     }
 
     // ──────────────────────────── Log Groups ────────────────────────────
@@ -255,6 +284,9 @@ public class CloudWatchLogsService implements ResourceProvider {
         }
         groupStore.delete(key);
         LOG.infov("Deleted log group: {0}", name);
+        if (logGroupDeleted != null) {
+            logGroupDeleted.fire(new LogGroupDeleted(region, name));
+        }
     }
 
     public boolean logGroupExists(String name, String region) {
@@ -556,6 +588,7 @@ public class CloudWatchLogsService implements ResourceProvider {
         long totalBytes = 0;
         Long minTs = null;
         Long maxTs = null;
+        List<LogEvent> stored = new ArrayList<>(events.size());
 
         for (Map<String, Object> evt : events) {
             long ts = toLong(evt.get("timestamp"), now);
@@ -570,6 +603,7 @@ public class CloudWatchLogsService implements ResourceProvider {
 
             String eventKey = eventKey(region, groupName, streamName, ts, logEvent.getEventId());
             putForAccount(eventStore, accountId, eventKey, logEvent);
+            stored.add(logEvent);
 
             totalBytes += msg.getBytes().length + 26; // approx overhead
             if (minTs == null || ts < minTs) { minTs = ts; }
@@ -594,6 +628,9 @@ public class CloudWatchLogsService implements ResourceProvider {
         stream.setUploadSequenceToken(nextToken);
         putForAccount(streamStore, accountId, streamKey, stream);
 
+        if (logEventsIngested != null && !stored.isEmpty()) {
+            logEventsIngested.fire(new LogEventsIngested(accountId, region, groupName, streamName, List.copyOf(stored)));
+        }
         return nextToken;
     }
 
