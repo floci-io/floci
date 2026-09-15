@@ -849,21 +849,21 @@ class AppSyncVtlEngineTest {
 
         @Test
         void ctxArgsAliasesArguments() {
-            var ctx = ctxWith(b -> b.arguments(Map.of("id", "42")));
-            var result = engine.evaluate("$ctx.args.id/$context.args.id/$ctx.arguments.id", ctx);
+            AppSyncVtlContext ctx = ctxWith(b -> b.arguments(Map.of("id", "42")));
+            AppSyncVtlResult result = engine.evaluate("$ctx.args.id/$context.args.id/$ctx.arguments.id", ctx);
             assertEquals("42/42/42", result.output());
         }
 
         @Test
         void ctxErrorExposesDataSourceError() {
-            var ctx = ctxWith(b -> b.error(Map.of("message", "failed", "type", "DynamoDB:ConditionalCheckFailedException")));
-            var result = engine.evaluate("#if($ctx.error)$ctx.error.type|$ctx.error.message#end", ctx);
+            AppSyncVtlContext ctx = ctxWith(b -> b.error(Map.of("message", "failed", "type", "DynamoDB:ConditionalCheckFailedException")));
+            AppSyncVtlResult result = engine.evaluate("#if($ctx.error)$ctx.error.type|$ctx.error.message#end", ctx);
             assertEquals("DynamoDB:ConditionalCheckFailedException|failed", result.output());
         }
 
         @Test
         void ctxErrorIsNullByDefault() {
-            var result = engine.evaluate("#if($ctx.error)yes#{else}no#end", defaultCtx());
+            AppSyncVtlResult result = engine.evaluate("#if($ctx.error)yes#{else}no#end", defaultCtx());
             assertEquals("no", result.output());
         }
 
@@ -879,7 +879,7 @@ class AppSyncVtlEngineTest {
         void returnedFlagIsSetOnlyByReturnDirective() {
             assertTrue(engine.evaluate("#return(\"x\")", defaultCtx()).returned());
             assertTrue(engine.evaluate("#return", defaultCtx()).returned());
-            var rendered = engine.evaluate("x", defaultCtx());
+            AppSyncVtlResult rendered = engine.evaluate("x", defaultCtx());
             assertFalse(rendered.returned());
             assertEquals("x", rendered.output());
             assertFalse(engine.evaluate("", defaultCtx()).returned());
