@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
@@ -1542,6 +1543,245 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_COMPLETE", r.getStatus());
         verify(rdsService, never()).deleteDbCluster(any(), any());
         verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, "us-east-1");
+    }
+
+    // ── the remaining createOnlyProperties of AWS::RDS::DBCluster ──
+
+    private static final String CREATE_ONLY_ATTR = "__FlociDbClusterCreateOnly";
+    private static final String CREATE_ONLY_PRIOR_ATTR = "__FlociDbClusterCreateOnlyPrior";
+
+    /**
+     * A CreateStack of the template, leaving the cluster on file under a generated physical id
+     * and the resource carrying the createOnly record the next update compares against.
+     */
+    private StackResource createUnnamedCluster(String json) {
+        createDbClusterEchoesRequestedId();
+        StackResource created = provision("Cluster", "AWS::RDS::DBCluster", json);
+        assertEquals("CREATE_COMPLETE", created.getStatus(), created.getStatusReason());
+        DbCluster existing = mock(DbCluster.class);
+        when(rdsService.getDbCluster(any())).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn(created.getPhysicalId());
+        when(rdsService.modifyDbCluster(eq(created.getPhysicalId()), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+        return created;
+    }
+
+    private StackResource updateCluster(StackResource committed, String json) {
+        return provisionExisting("Cluster", "AWS::RDS::DBCluster", json, "us-east-1",
+                committed.getPhysicalId(), committed.getAttributes());
+    }
+
+    /** A template with {@code Engine} and one more property, quoted unless it is a boolean. */
+    private static String clusterTemplate(String property, String value) {
+        String literal = "true".equals(value) || "false".equals(value) ? value : "\"" + value + "\"";
+        return "{\"Engine\":\"aurora-postgresql\",\"" + property + "\":" + literal + "}";
+    }
+
+    @Test
+    void updateStackReplacesDbClusterWhenDatabaseNameChanges() {
+        // DatabaseName is createOnly and the cluster on file records it, so the change is read
+        // from the cluster like EngineMode and StorageEncrypted.
+        DbCluster existing = priorUnnamedCluster("provisioned", false);
+        when(existing.getDatabaseName()).thenReturn("appdb");
+        createDbClusterEchoesRequestedId();
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","DatabaseName":"reports"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        String replacement = r.getPhysicalId();
+        assertNotEquals(PRIOR_CLUSTER, replacement);
+        verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null, null, null,
+                "reports", false, null, null, null, false, "us-east-1");
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "KmsKeyId, alias/aws/rds, arn:aws:kms:us-east-1:000000000000:key/11111111-2222-3333-4444-555555555555",
+            "DBSubnetGroupName, private-subnets, public-subnets",
+            "DBSystemId, rdsCustomOracle, rdsCustomOracle2",
+            "PubliclyAccessible, false, true",
+            "ClusterScalabilityType, standard, limitless",
+            "SnapshotIdentifier, nightly-1, nightly-2",
+            "SourceDBClusterIdentifier, source-a, source-b",
+            "SourceDbClusterResourceId, cluster-AAAA, cluster-BBBB",
+            "SourceRegion, us-west-2, eu-west-1",
+            "RestoreType, full-copy, copy-on-write",
+            "RestoreToTime, 2026-01-01T00:00:00Z, 2026-02-01T00:00:00Z",
+            "UseLatestRestorableTime, false, true"
+    })
+    void updateStackReplacesDbClusterWhenARecordedCreateOnlyPropertyChanges(
+            String property, String before, String after) {
+        // Nothing on the cluster on file records these, so the change is read against what the
+        // template said when the cluster was created: the same replacement lifecycle as EngineMode,
+        // with the prior cluster owed a delete only after the update commits.
+        StackResource created = createUnnamedCluster(clusterTemplate(property, before));
+        String prior = created.getPhysicalId();
+        assertTrue(created.getAttributes().get(CREATE_ONLY_ATTR).contains("\"" + property + "\""));
+        assertFalse(created.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR),
+                "a create has no record to roll back to");
+
+        StackResource r = updateCluster(created, clusterTemplate(property, after));
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        assertNotEquals(prior, r.getPhysicalId());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        assertTrue(r.getAttributes().get(CREATE_ONLY_ATTR).contains(after));
+        assertEquals(prior, provisioner.updateCleanupPhysicalId(r));
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        assertTrue(cleanup.complete());
+        verify(rdsService).deleteDbCluster(prior, "us-east-1");
+        assertFalse(r.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR),
+                "the committed update drops the record it replaced");
+    }
+
+    @Test
+    void updateStackKeepsDbClusterWhenRecordedCreateOnlyPropertiesUnchanged() {
+        // The same values, a boolean with a fixed default omitted instead of written as false, and
+        // a changed mutable property describe the same cluster: it is modified in place and the
+        // record stands.
+        StackResource created = createUnnamedCluster("""
+                {"Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds","UseLatestRestorableTime":false,
+                 "DBSubnetGroupName":"private-subnets","MasterUserPassword":"secret"}
+                """);
+        String record = created.getAttributes().get(CREATE_ONLY_ATTR);
+
+        StackResource r = updateCluster(created, """
+                {"Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds",
+                 "DBSubnetGroupName":"private-subnets","MasterUserPassword":"rotated"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        assertEquals(created.getPhysicalId(), r.getPhysicalId());
+        verify(rdsService).modifyDbCluster(created.getPhysicalId(), "rotated", false,
+                null, null, null, "us-east-1");
+        verify(rdsService, times(1)).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        assertEquals(record, r.getAttributes().get(CREATE_ONLY_ATTR));
+        assertFalse(r.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void updateStackReplacesDbClusterWhenPubliclyAccessibleIsSpelledOutAfterBeingOmitted(String value) {
+        // PubliclyAccessible has no fixed default: AWS makes an omitted one true or false depending
+        // on the subnet group, so a cluster created without it may well be public, and a template
+        // that later writes either value is a change CloudFormation replaces on. Absent stays
+        // absent in the record rather than being read as false.
+        StackResource created = createUnnamedCluster("""
+                {"Engine":"aurora-postgresql","DBSubnetGroupName":"private-subnets"}
+                """);
+        String prior = created.getPhysicalId();
+        assertFalse(created.getAttributes().get(CREATE_ONLY_ATTR).contains("PubliclyAccessible"));
+
+        StackResource r = updateCluster(created, """
+                {"Engine":"aurora-postgresql","DBSubnetGroupName":"private-subnets",
+                 "PubliclyAccessible":%s}
+                """.formatted(value));
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        assertNotEquals(prior, r.getPhysicalId());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        assertEquals(prior, provisioner.updateCleanupPhysicalId(r));
+        assertTrue(r.getAttributes().get(CREATE_ONLY_ATTR).contains("\"PubliclyAccessible\":\"" + value + "\""));
+
+        // And the other way round: dropping it again is a change too.
+        provisioner.completeUpdate(r);
+        StackResource dropped = updateCluster(r, """
+                {"Engine":"aurora-postgresql","DBSubnetGroupName":"private-subnets"}
+                """);
+        assertEquals("CREATE_COMPLETE", dropped.getStatus(), dropped.getStatusReason());
+        assertNotEquals(r.getPhysicalId(), dropped.getPhysicalId());
+    }
+
+    @Test
+    void updateStackRecordsCreateOnlyPropertiesOfAClusterProvisionedBeforeTheyWereTracked() {
+        // A resource from before the record existed says nothing about what its cluster was
+        // created with, so the first update keeps the cluster and records the template; the update
+        // after that is compared against the record.
+        priorUnnamedCluster("provisioned", false);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn(PRIOR_CLUSTER);
+        when(rdsService.modifyDbCluster(eq(PRIOR_CLUSTER), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+
+        StackResource first = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", first.getStatus(), first.getStatusReason());
+        assertEquals(PRIOR_CLUSTER, first.getPhysicalId());
+        verify(rdsService).modifyDbCluster(PRIOR_CLUSTER, null, false, null, null, null, "us-east-1");
+        assertTrue(first.getAttributes().get(CREATE_ONLY_ATTR).contains("alias/aws/rds"));
+        assertEquals("", first.getAttributes().get(CREATE_ONLY_PRIOR_ATTR),
+                "a rollback of this update drops the record again");
+        provisioner.clearUpdate(first);
+        assertFalse(first.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR));
+
+        createDbClusterEchoesRequestedId();
+        StackResource second = updateCluster(first, """
+                {"Engine":"aurora-postgresql","KmsKeyId":"alias/other"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", second.getStatus(), second.getStatusReason());
+        assertNotEquals(PRIOR_CLUSTER, second.getPhysicalId());
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(second));
+    }
+
+    @Test
+    void failedLaterUpdateRollsBackTheCreateOnlyRecordWithTheDbCluster() {
+        // The record follows the cluster: rolled back to the prior cluster, the resource compares
+        // the next template against what that cluster was created with, not the replacement.
+        StackResource created = createUnnamedCluster(clusterTemplate("KmsKeyId", "alias/aws/rds"));
+        String prior = created.getPhysicalId();
+        String priorRecord = created.getAttributes().get(CREATE_ONLY_ATTR);
+        StackResource r = updateCluster(created, clusterTemplate("KmsKeyId", "alias/other"));
+        String replacement = r.getPhysicalId();
+        assertNotEquals(prior, replacement);
+        assertEquals(priorRecord, r.getAttributes().get(CREATE_ONLY_PRIOR_ATTR));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(prior, r.getPhysicalId());
+        assertEquals(priorRecord, r.getAttributes().get(CREATE_ONLY_ATTR));
+        assertFalse(r.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR));
+        verify(rdsService).deleteDbCluster(replacement, "us-east-1");
+        verify(rdsService, never()).deleteDbCluster(prior, "us-east-1");
+
+        StackResource again = updateCluster(r, clusterTemplate("KmsKeyId", "alias/aws/rds"));
+
+        assertEquals("CREATE_COMPLETE", again.getStatus(), again.getStatusReason());
+        assertEquals(prior, again.getPhysicalId(), "the rolled-back template describes the prior cluster");
+        verify(rdsService).modifyDbCluster(prior, null, false, null, null, null, "us-east-1");
+        verify(rdsService, times(2)).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void customNamedDbClusterRefusesRecordedCreateOnlyPropertyChange() {
+        createDbClusterEchoesRequestedId();
+        StackResource created = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds"}
+                """);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(mock(DbCluster.class));
+
+        StackResource r = updateCluster(created, """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","KmsKeyId":"alias/other"}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains(
+                "custom-named resource requires replacing. Rename mycluster and update the stack again."));
+        assertEquals("mycluster", r.getPhysicalId());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
