@@ -220,5 +220,6 @@ nav:
     - Java: testcontainers/java.md
     - Node.js / TypeScript: testcontainers/nodejs.md
     - Python: testcontainers/python.md
+    - .NET: testcontainers/dotnet.md
     - Go: testcontainers/go.md
   - Contributing: contributing.md
