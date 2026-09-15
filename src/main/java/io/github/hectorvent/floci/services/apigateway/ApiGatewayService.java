@@ -392,14 +392,6 @@ public class ApiGatewayService {
             "method.request.querystring.", "method.request.header.", "method.request.path.");
 
     /**
-     * Validates the names in a method's {@code requestParameters} map, which are of the form
-     * {@code method.request.<location>.<name>}. A name may itself contain dots ({@code filter.a}),
-     * so everything after the location prefix is the name. Keys that do not carry a recognised
-     * prefix are left alone: AWS rejects those with a different message that is not measured here.
-     *
-     * @throws AwsException if any parameter name falls outside {@link #REQUEST_PARAMETER_NAME}
-     */
-    /**
      * Rethrows a parameter-name rejection using the envelope an import reports it under. Direct
      * {@code PutMethod} surfaces the bare message; {@code ImportRestApi}/{@code PutRestApi} name the
      * method and path first, both measured against real AWS.
@@ -411,6 +403,14 @@ public class ApiGatewayService {
                 400);
     }
 
+    /**
+     * Validates the names in a method's {@code requestParameters} map, which are of the form
+     * {@code method.request.<location>.<name>}. A name may itself contain dots ({@code filter.a}),
+     * so everything after the location prefix is the name. Keys that do not carry a recognised
+     * prefix are left alone: AWS rejects those with a different message that is not measured here.
+     *
+     * @throws AwsException if any parameter name falls outside {@link #REQUEST_PARAMETER_NAME}
+     */
     private static void validateRequestParameterNames(Map<String, ?> requestParameters) {
         if (requestParameters == null) return;
         for (String key : requestParameters.keySet()) {
