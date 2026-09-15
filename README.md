@@ -319,7 +319,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Lambda | Real Docker | Runtime environment, execution model, warm container pool, aliases, Function URLs |
 | API Gateway REST | In-process | Resources, methods, stages, Lambda proxy, MOCK integrations, AWS integrations |
 | API Gateway v2 | In-process | HTTP APIs, routes, integrations, JWT authorizers, stages |
-| AppSync | In-process | GraphQL API management API, schema registry, AWS scalars, domain names, channel namespaces |
+| AppSync | In-process | GraphQL API management and execution, VTL unit resolvers, NONE and DynamoDB GetItem/PutItem data sources, authentication, AWS scalars |
 | IAM | In-process | Users, roles, groups, policies, instance profiles, access keys; STS AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
 | Cognito | In-process | User pools, app clients, auth flows, JWKS and OpenID well-known endpoints |
 | KMS | In-process | Encrypt, decrypt, sign, verify, data keys, aliases |

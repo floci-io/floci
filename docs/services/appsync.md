@@ -3,7 +3,7 @@
 **Protocol:** REST JSON
 **Endpoint:** `http://localhost:4566/v1/apis/...`
 
-Floci implements the AWS AppSync Management API, providing local emulation of GraphQL API configuration, schema management, data source binding, resolver mapping, API key provisioning, custom domains, and channel namespaces.
+Floci implements the AWS AppSync Management API and HTTP GraphQL data plane, including schema execution, VTL unit resolvers, authentication, API key provisioning, custom domains, and channel namespaces.
 
 ## OIDC issuer network policy
 
@@ -198,7 +198,7 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 
 | Case | HTTP | Notes |
 |---|---|---|
-| Query / introspection / validation / syntax (incl. blank `query`) | 200 | Nullable fields may be `null` until DataFetchers (Phase 8) |
+| Query / mutation / introspection / validation / syntax (incl. blank `query`) | 200 | Fields with unit resolvers execute their VTL mapping templates and supported data source operation |
 | HTTP subscription operation | 200 | `OperationNotSupported` (realtime WebSocket is a later phase) |
 | Empty body / `{}` / `[]` / unparseable JSON / bad Content-Type | 400 | `MalformedHttpRequestException` |
 | Missing `operationName` with multiple operations | 400 | `BadRequestException` — `Missing operation name.` |
@@ -209,6 +209,27 @@ Responses are `application/json` with AWS AppSync wire shapes (`data` / `errors[
 | Field directive mismatch, Cognito group miss, Lambda `deniedFields`, IAM field DENY | **200** | Field is `null` and `errors[]` contains `Unauthorized` — `Not Authorized to access {field} on type {type}` (no `x-amzn-errortype`) |
 
 **Evidence for data-plane statuses** (empty/`[]`/`{}` → 400; missing schema → 502): AppSync team sample in [graphql/graphql-over-http#81](https://github.com/graphql/graphql-over-http/issues/81) (@robzhu). The management API Reference lists `GraphQLSchemaException` as HTTP 400 for “schema not valid” on management operations — a different surface than the GraphQL execute data plane.
+
+### Resolver execution
+
+Floci executes VTL `UNIT` resolvers using the AppSync `2018-05-29` request and response mapping-template flow:
+
+1. Evaluate the request template with `$ctx.args`, `$ctx.source`, `$ctx.identity`, `$ctx.request.headers`, `$ctx.info`, `$ctx.stash`, and `$util`.
+2. Invoke the configured data source.
+3. Evaluate the response template with the data-source result in `$ctx.result` and any data-source error in `$ctx.error`.
+
+Both mapping templates are required. Request template output must be a JSON object with `"version": "2018-05-29"`. `$util.error`, `$util.appendError`, and `#return` follow AppSync response-template behavior; error `data` is filtered to the query selection set while `errorInfo` is preserved.
+
+| Data source | Supported request |
+|---|---|
+| `NONE` | Optional `payload`; the response template receives it as `$ctx.result` |
+| `AMAZON_DYNAMODB` | `GetItem` and `PutItem`, including conditional `PutItem` expressions |
+
+DynamoDB attribute values are converted to plain GraphQL values before the response template runs. For `PutItem`, key attributes override the same names in `attributeValues`, which supports Amplify-generated templates that include the ID in both maps. `consistentRead`, `condition.equalsIgnore`, `condition.consistentRead`, `projection`, and `_version` are currently accepted without changing execution.
+
+Pipeline resolvers, APPSYNC_JS resolvers, unsupported data-source types, and deferred DynamoDB operations return a field-level `UnsupportedOperation` error. The `2017-02-28` mapping-template version returns `MappingTemplate` because its null and error semantics differ from `2018-05-29`.
+
+When `introspectionConfig` is `DISABLED`, `__schema` and `__type` return graphql-java's `IntrospectionDisabled` error; `__typename` remains available.
 
 ### Execute authentication
 
@@ -281,8 +302,9 @@ This matches AWS behavior where deleting an API removes its entire configuration
 
 These AWS AppSync capabilities are not yet implemented and are tracked in future phases:
 
-- **DataFetcher / resolver dispatch** (Phase 8): resolver mapping templates and field resolution with non-null values
-- **Data source adapters** (Phase 9): DynamoDB, Lambda, HTTP, EventBridge, OpenSearch, RDS connectors
+- **Resolver execution**: pipeline resolvers, APPSYNC_JS, and `2017-02-28` mapping templates
+- **DynamoDB resolver operations**: `UpdateItem`, `DeleteItem`, `Query`, `Scan`, batch, transaction, and sync operations
+- **Additional data source adapters**: Lambda, HTTP, EventBridge, OpenSearch, RDS, and other connectors
 - **Guardrails** (Phase 10): query depth / complexity limits and related errors
 - **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions
 - **Caching**: API-level and per-resolver caching
