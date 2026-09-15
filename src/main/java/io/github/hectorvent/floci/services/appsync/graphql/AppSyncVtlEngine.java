@@ -34,7 +34,7 @@ public class AppSyncVtlEngine {
 
     public AppSyncVtlResult evaluate(String template, AppSyncVtlContext ctx) {
         if (template == null || template.isEmpty()) {
-            return new AppSyncVtlResult("", null, List.of());
+            return new AppSyncVtlResult("", false, null, List.of());
         }
 
         VelocityContext vc = new VelocityContext();
@@ -55,19 +55,22 @@ public class AppSyncVtlEngine {
         try {
             engine.evaluate(vc, writer, "appsync-template", template);
         } catch (ReturnSignal signal) {
-            return new AppSyncVtlResult(signal.getValue(), null, ctx.getAppendedErrors());
+            return new AppSyncVtlResult(signal.getValue(), true, null, ctx.getAppendedErrors());
         } catch (Exception e) {
             Throwable cause = e;
             while (cause != null) {
                 if (cause instanceof VtlErrorSignal signal) {
-                    return new AppSyncVtlResult("", signal, ctx.getAppendedErrors());
+                    return new AppSyncVtlResult("", false, signal, ctx.getAppendedErrors());
+                }
+                if (cause instanceof ReturnSignal signal) {
+                    return new AppSyncVtlResult(signal.getValue(), true, null, ctx.getAppendedErrors());
                 }
                 cause = cause.getCause();
             }
             throw new RuntimeException("VTL evaluation failed", e);
         }
 
-        return new AppSyncVtlResult(writer.toString(), null, ctx.getAppendedErrors());
+        return new AppSyncVtlResult(writer.toString(), false, null, ctx.getAppendedErrors());
     }
 
 }

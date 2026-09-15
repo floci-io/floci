@@ -70,7 +70,7 @@ class AppSyncExecutionControllerTest {
     void unexpectedExecutorFailureReturns500InternalFailure() {
         GraphqlApi api = new GraphqlApi();
         api.setApiId("api-1");
-        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(appSyncService.findGraphqlApiAnyAccount("api-1")).thenReturn(Optional.of(api));
         when(authMiddleware.authenticate(any(), any(), any())).thenReturn(authContext(api));
         when(schemaRegistry.getGraphQL("api-1")).thenReturn(Optional.of(mock(GraphQL.class)));
         when(queryExecutor.execute(any(GraphQL.class), eq("{ hello }"), isNull(), isNull(), any()))
@@ -105,8 +105,7 @@ class AppSyncExecutionControllerTest {
 
     @Test
     void unknownApiReturns404WithErrorTypeHeader() {
-        when(appSyncService.getGraphqlApi("missing"))
-                .thenThrow(new AwsException("NotFoundException", "API not found", 404));
+        when(appSyncService.findGraphqlApiAnyAccount("missing")).thenReturn(Optional.empty());
 
         Response response = controller.execute("missing", jsonHeaders, "{\"query\":\"{ hello }\"}");
 
@@ -121,7 +120,7 @@ class AppSyncExecutionControllerTest {
 
     @Test
     void non404AwsExceptionFromLookupReturnsDataPlaneInternalFailure() {
-        when(appSyncService.getGraphqlApi("api-1"))
+        when(appSyncService.findGraphqlApiAnyAccount("api-1"))
                 .thenThrow(new AwsException("BadRequestException", "unexpected management error", 400));
 
         Response response = controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
@@ -141,7 +140,7 @@ class AppSyncExecutionControllerTest {
     void authFailureReturns401WithoutCallingExecutor() {
         GraphqlApi api = new GraphqlApi();
         api.setApiId("api-1");
-        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(appSyncService.findGraphqlApiAnyAccount("api-1")).thenReturn(Optional.of(api));
         when(authMiddleware.authenticate(any(), any(), any())).thenThrow(AppSyncAuth.unauthorized());
 
         Response response = controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
