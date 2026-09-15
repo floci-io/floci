@@ -48,16 +48,18 @@ public class SesQueryHandler {
     private final SesReceiptRuleService receiptRuleService;
     private final SesIdentityService identityService;
     private final SesTemplateService templateService;
+    private final SesCvetService cvetService;
     private final ObjectMapper objectMapper;
 
     @Inject
     public SesQueryHandler(SesService sesService, SesReceiptRuleService receiptRuleService,
                            SesIdentityService identityService, SesTemplateService templateService,
-                           ObjectMapper objectMapper) {
+                           SesCvetService cvetService, ObjectMapper objectMapper) {
         this.sesService = sesService;
         this.receiptRuleService = receiptRuleService;
         this.identityService = identityService;
         this.templateService = templateService;
+        this.cvetService = cvetService;
         this.objectMapper = objectMapper;
     }
 
@@ -621,7 +623,7 @@ public class SesQueryHandler {
     }
 
     private Response handleGetCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
-        CustomVerificationEmailTemplate t = sesService.getCustomVerificationEmailTemplate(
+        CustomVerificationEmailTemplate t = cvetService.getCustomVerificationEmailTemplate(
                 requireParam(params, "TemplateName"), region);
         String xml = new XmlBuilder()
                 .elem("TemplateName", t.getTemplateName())
@@ -637,7 +639,9 @@ public class SesQueryHandler {
 
     private Response handleListCustomVerificationEmailTemplates(String region) {
         XmlBuilder xml = new XmlBuilder().start("CustomVerificationEmailTemplates");
-        for (CustomVerificationEmailTemplate t : sesService.listCustomVerificationEmailTemplates(region)) {
+        List<CustomVerificationEmailTemplate> templates =
+                cvetService.listCustomVerificationEmailTemplates(region);
+        for (CustomVerificationEmailTemplate t : templates) {
             xml.start("member")
                     .elem("TemplateName", t.getTemplateName())
                     .elem("FromEmailAddress", t.getFromEmailAddress())
@@ -652,7 +656,8 @@ public class SesQueryHandler {
     }
 
     private Response handleDeleteCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
-        sesService.deleteCustomVerificationEmailTemplate(requireParam(params, "TemplateName"), region);
+        cvetService.deleteCustomVerificationEmailTemplate(requireParam(params, "TemplateName"),
+                region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "DeleteCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
     }

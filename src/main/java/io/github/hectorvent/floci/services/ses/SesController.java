@@ -10,7 +10,6 @@ import io.github.hectorvent.floci.services.ses.model.GuardianOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
-import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
@@ -738,80 +737,6 @@ public class SesController {
     // ──────────────── Custom verification email templates ────────────────
 
     @POST
-    @Path("/custom-verification-email-templates")
-    public Response createCustomVerificationEmailTemplate(@Context HttpHeaders headers, String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode request = objectMapper.readTree(body);
-            CustomVerificationEmailTemplate t = parseCvet(request);
-            // Tags exist only on the create request; UpdateCustomVerificationEmailTemplate has no
-            // Tags member and preserves the stored ones.
-            t.setTags(parseTagsArray(request.path("Tags")));
-            sesService.createCustomVerificationEmailTemplate(t, region);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
-    }
-
-    @GET
-    @Path("/custom-verification-email-templates")
-    public Response listCustomVerificationEmailTemplates(@Context HttpHeaders headers) {
-        String region = regionResolver.resolveRegion(headers);
-        ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode items = result.putArray("CustomVerificationEmailTemplates");
-        for (CustomVerificationEmailTemplate t : sesService.listCustomVerificationEmailTemplates(region)) {
-            items.add(cvetJson(t, false));
-        }
-        return Response.ok(result).build();
-    }
-
-    @GET
-    @Path("/custom-verification-email-templates/{templateName}")
-    public Response getCustomVerificationEmailTemplate(@Context HttpHeaders headers,
-                                                       @PathParam("templateName") String templateName) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            return Response.ok(
-                    cvetJson(sesService.getCustomVerificationEmailTemplate(templateName, region), true)).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        }
-    }
-
-    @PUT
-    @Path("/custom-verification-email-templates/{templateName}")
-    public Response updateCustomVerificationEmailTemplate(@Context HttpHeaders headers,
-                                                          @PathParam("templateName") String templateName, String body) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            CustomVerificationEmailTemplate t = parseCvet(objectMapper.readTree(body));
-            t.setTemplateName(templateName);
-            sesService.updateCustomVerificationEmailTemplate(t, region);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
-        }
-    }
-
-    @DELETE
-    @Path("/custom-verification-email-templates/{templateName}")
-    public Response deleteCustomVerificationEmailTemplate(@Context HttpHeaders headers,
-                                                          @PathParam("templateName") String templateName) {
-        String region = regionResolver.resolveRegion(headers);
-        try {
-            sesService.deleteCustomVerificationEmailTemplate(templateName, region);
-            return Response.ok(objectMapper.createObjectNode()).build();
-        } catch (AwsException e) {
-            throw remapV1Exception(e);
-        }
-    }
-
-    @POST
     @Path("/outbound-custom-verification-emails")
     public Response sendCustomVerificationEmail(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
@@ -841,32 +766,6 @@ public class SesController {
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
-    }
-
-    private CustomVerificationEmailTemplate parseCvet(JsonNode request) {
-        requireJsonObject(request);
-        CustomVerificationEmailTemplate t = new CustomVerificationEmailTemplate();
-        t.setTemplateName(request.path("TemplateName").asText(null));
-        t.setFromEmailAddress(request.path("FromEmailAddress").asText(null));
-        t.setTemplateSubject(request.path("TemplateSubject").asText(null));
-        t.setTemplateContent(request.path("TemplateContent").asText(null));
-        t.setSuccessRedirectionURL(request.path("SuccessRedirectionURL").asText(null));
-        t.setFailureRedirectionURL(request.path("FailureRedirectionURL").asText(null));
-        return t;
-    }
-
-    // List omits TemplateContent (matches AWS); Get includes it.
-    private ObjectNode cvetJson(CustomVerificationEmailTemplate t, boolean includeContent) {
-        ObjectNode o = objectMapper.createObjectNode();
-        o.put("TemplateName", t.getTemplateName());
-        o.put("FromEmailAddress", t.getFromEmailAddress());
-        o.put("TemplateSubject", t.getTemplateSubject());
-        if (includeContent) {
-            o.put("TemplateContent", t.getTemplateContent());
-        }
-        o.put("SuccessRedirectionURL", t.getSuccessRedirectionURL());
-        o.put("FailureRedirectionURL", t.getFailureRedirectionURL());
-        return o;
     }
 
     // ──────────────────────────── Tenants (multi-tenancy) ────────────────────────────

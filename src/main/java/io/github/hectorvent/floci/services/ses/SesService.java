@@ -89,8 +89,9 @@ public class SesService {
     // Identity (sending authorization) policy storage, extracted to SesPolicyService.
     // The facade keeps the identity-existence check and delegates the rest.
     private final SesPolicyService policyService;
-    // Custom verification email templates: storage extracted to SesCvetService. The
-    // facade keeps the identity-dependent validation and the send path; the service owns the store.
+    // Custom verification email templates: storage extracted to SesCvetService, which the v2
+    // controller and the v1 handler call directly for get/list/delete. The facade keeps create and
+    // update for the identity-dependent validation, plus the send path and the tag dispatch.
     private final SesCvetService cvetService;
     // Tenants (multi-tenancy) live in SesTenantService. The facade delegates.
     private final SesTenantService tenantService;
@@ -727,23 +728,11 @@ public class SesService {
         cvetService.createCustomVerificationEmailTemplate(template, region);
     }
 
-    public CustomVerificationEmailTemplate getCustomVerificationEmailTemplate(String templateName, String region) {
-        return cvetService.getCustomVerificationEmailTemplate(templateName, region);
-    }
-
-    public List<CustomVerificationEmailTemplate> listCustomVerificationEmailTemplates(String region) {
-        return cvetService.listCustomVerificationEmailTemplates(region);
-    }
-
     public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
         // Validate (including the From-verified identity check and the required-field checks) before
         // delegating the storage update, matching createCustomVerificationEmailTemplate.
         validateCustomVerificationTemplate(template, region);
         cvetService.updateCustomVerificationEmailTemplate(template, region);
-    }
-
-    public void deleteCustomVerificationEmailTemplate(String templateName, String region) {
-        cvetService.deleteCustomVerificationEmailTemplate(templateName, region);
     }
 
     // AWS appends this exact disclaimer to the end of every custom verification email and it cannot
