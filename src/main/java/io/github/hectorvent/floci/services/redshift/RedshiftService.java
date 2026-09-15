@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.redshift.model.Integration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
@@ -54,6 +55,11 @@ public class RedshiftService {
     private static final int MIN_INTEGRATION_RECORDS = 20;
     private static final int MAX_INTEGRATION_RECORDS = 100;
     private static final int MAX_INTEGRATION_DESCRIPTION = 1000;
+    private static final int MAX_INTEGRATION_NAME = 63;
+    // Modelled constraint on CreateIntegration.IntegrationName: a letter first, then alphanumeric
+    // groups joined by single hyphens. No leading digit, underscore, or trailing hyphen.
+    private static final String INTEGRATION_NAME_PATTERN = "^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*$";
+    private static final Pattern INTEGRATION_NAME = Pattern.compile(INTEGRATION_NAME_PATTERN);
 
     private final AccountAwareStorageBackend<Integration> integrations;
     private final RedshiftContainerManager containerManager;
@@ -222,6 +228,12 @@ public class RedshiftService {
                                                       Map<String, String> tags, String region) {
         if (integrationName == null || integrationName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "IntegrationName is required.", 400);
+        }
+        if (integrationName.length() > MAX_INTEGRATION_NAME
+                || !INTEGRATION_NAME.matcher(integrationName).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "IntegrationName must match " + INTEGRATION_NAME_PATTERN
+                            + " and be at most " + MAX_INTEGRATION_NAME + " characters.", 400);
         }
         if (sourceArn == null || sourceArn.isBlank()) {
             throw new AwsException("InvalidParameterValue", "SourceArn is required.", 400);

@@ -125,6 +125,37 @@ class RedshiftIntegrationsIntegrationTest {
     }
 
     @Test
+    void anIntegrationNameOutsideTheModelledPatternIsRejected() {
+        // CreateIntegration.IntegrationName is modelled as
+        // ^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*$: a letter first, then alphanumeric groups joined
+        // by single hyphens. A leading digit or hyphen, an underscore, a doubled hyphen and a
+        // trailing hyphen are each outside it, so AWS refuses names floci used to accept.
+        for (String name : new String[] {"1zetl", "-zetl", "zetl_name", "zetl--name", "zetl-"}) {
+            query("Action", "CreateIntegration", "IntegrationName", name,
+                    "SourceArn", SOURCE, "TargetArn", TARGET)
+                    .then().statusCode(400)
+                    .body(containsString("InvalidParameterValue"))
+                    .body(containsString("IntegrationName"));
+        }
+    }
+
+    @Test
+    void anIntegrationNameOverTheModelledLengthIsRejected() {
+        query("Action", "CreateIntegration", "IntegrationName", "z".repeat(64),
+                "SourceArn", SOURCE, "TargetArn", TARGET)
+                .then().statusCode(400)
+                .body(containsString("InvalidParameterValue"));
+    }
+
+    @Test
+    void anIntegrationNameAtTheModelledLengthIsAccepted() {
+        // 63 characters is the documented maximum, so the boundary itself must still create.
+        String atLimit = "zetl" + "a".repeat(59);
+        assertEquals(63, atLimit.length());
+        createIntegration(atLimit);
+    }
+
+    @Test
     void createRequiresSourceAndTarget() {
         query("Action", "CreateIntegration", "IntegrationName", "zetl-missing")
                 .then().statusCode(400)
