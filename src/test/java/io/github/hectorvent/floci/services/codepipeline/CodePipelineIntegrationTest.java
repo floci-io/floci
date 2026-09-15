@@ -852,20 +852,142 @@ class CodePipelineIntegrationTest {
     }
 
     @Test
-    void stoppingCustomActionMarksTheActionStopped() throws Exception {
+    void stoppingCustomActionWaitsForWorkerSuccess() throws Exception {
+        String provider = "StopWaitSuccessWorker";
+        String pipelineName = "custom-worker-stop-wait-success";
+        createCustomWorkerPipeline(provider, pipelineName);
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().extract().path("pipelineExecutionId");
+        String jobId = waitForJob(provider).path("jobs[0].id");
+
+        post("StopPipelineExecution", """
+                {
+                    "pipelineName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "reason": "Wait for the custom worker"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200);
+
+        assertCustomWorkerIsStopping(pipelineName);
+        post("PutJobSuccessResult", """
+                {
+                    "jobId": "%s",
+                    "executionDetails": {
+                        "summary": "worker completed after stop request",
+                        "externalExecutionId": "stop-wait-success",
+                        "percentComplete": 100
+                    }
+                }
+                """.formatted(jobId)).then().statusCode(200);
+
+        waitForExecution(pipelineName, executionId, "Stopped");
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.status", equalTo("Stopped"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates[1].latestExecution", nullValue());
+
+        deleteCustomWorkerPipeline(provider, pipelineName);
+    }
+
+    @Test
+    void stoppingCustomActionWaitsForWorkerFailure() throws Exception {
+        String provider = "StopWaitFailureWorker";
+        String pipelineName = "custom-worker-stop-wait-failure";
+        createCustomWorkerPipeline(provider, pipelineName);
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().extract().path("pipelineExecutionId");
+        String jobId = waitForJob(provider).path("jobs[0].id");
+
+        post("StopPipelineExecution", """
+                {
+                    "pipelineName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "reason": "Wait for the failing custom worker"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200);
+
+        assertCustomWorkerIsStopping(pipelineName);
+        post("PutJobFailureResult", """
+                {
+                    "jobId": "%s",
+                    "failureDetails": {
+                        "type": "JobFailed",
+                        "message": "worker failed after stop request",
+                        "externalExecutionId": "stop-wait-failure"
+                    }
+                }
+                """.formatted(jobId)).then().statusCode(200);
+
+        waitForExecution(pipelineName, executionId, "Stopped");
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.status", equalTo("Failed"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Failed"))
+                .body("stageStates[1].latestExecution", nullValue());
+
+        deleteCustomWorkerPipeline(provider, pipelineName);
+    }
+
+    @Test
+    void abandoningCustomActionStopsWaitingImmediately() throws Exception {
+        String provider = "AbandonWorker";
+        String pipelineName = "custom-worker-stop-abandon";
+        createCustomWorkerPipeline(provider, pipelineName);
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().extract().path("pipelineExecutionId");
+        waitForJob(provider);
+
+        post("StopPipelineExecution", """
+                {
+                    "pipelineName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "abandon": true,
+                    "reason": "Abandon the custom worker"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200);
+
+        waitForExecution(pipelineName, executionId, "Stopped");
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.status", equalTo("Stopped"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Abandoned"))
+                .body("stageStates[1].latestExecution", nullValue());
+
+        deleteCustomWorkerPipeline(provider, pipelineName);
+    }
+
+    private void createCustomWorkerPipeline(String provider, String pipelineName) {
         post("CreateCustomActionType", """
                 {
                     "category": "Build",
-                    "provider": "StopAwareWorker",
+                    "provider": "%s",
                     "version": "1",
                     "inputArtifactDetails": {"minimumCount": 0, "maximumCount": 0},
                     "outputArtifactDetails": {"minimumCount": 0, "maximumCount": 0}
                 }
-                """)
+                """.formatted(provider))
                 .then()
                 .statusCode(200);
 
-        String pipelineName = "custom-worker-stop-pipeline";
         post("CreatePipeline", pipeline(pipelineName, """
                 {
                     "name": "Build",
@@ -874,7 +996,7 @@ class CodePipelineIntegrationTest {
                         "actionTypeId": {
                             "category": "Build",
                             "owner": "Custom",
-                            "provider": "StopAwareWorker",
+                            "provider": "%s",
                             "version": "1"
                         }
                     }]
@@ -891,38 +1013,27 @@ class CodePipelineIntegrationTest {
                         }
                     }]
                 }
-                """)).then().statusCode(200);
+                """.formatted(provider))).then().statusCode(200);
+    }
 
-        String executionId = post("StartPipelineExecution", """
-                {"name": "%s"}
-                """.formatted(pipelineName)).then().extract().path("pipelineExecutionId");
-        waitForJob("StopAwareWorker");
-
-        post("StopPipelineExecution", """
-                {
-                    "pipelineName": "%s",
-                    "pipelineExecutionId": "%s",
-                    "reason": "Verify custom action stop status"
-                }
-                """.formatted(pipelineName, executionId))
-                .then()
-                .statusCode(200);
-
-        waitForExecution(pipelineName, executionId, "Stopped");
+    private void assertCustomWorkerIsStopping(String pipelineName) {
         post("GetPipelineState", """
                 {"name": "%s"}
                 """.formatted(pipelineName))
                 .then()
                 .statusCode(200)
-                .body("stageStates[0].latestExecution.status", equalTo("Stopped"))
-                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Stopped"));
+                .body("stageStates[0].latestExecution.status", equalTo("Stopping"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("InProgress"))
+                .body("stageStates[1].latestExecution", nullValue());
+    }
 
+    private void deleteCustomWorkerPipeline(String provider, String pipelineName) {
         post("DeletePipeline", """
                 {"name": "%s"}
                 """.formatted(pipelineName)).then().statusCode(200);
         post("DeleteCustomActionType", """
-                {"category": "Build", "provider": "StopAwareWorker", "version": "1"}
-                """).then().statusCode(200);
+                {"category": "Build", "provider": "%s", "version": "1"}
+                """.formatted(provider)).then().statusCode(200);
     }
 
     @Test
