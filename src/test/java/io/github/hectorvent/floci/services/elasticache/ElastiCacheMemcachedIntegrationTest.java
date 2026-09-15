@@ -97,10 +97,13 @@ class ElastiCacheMemcachedIntegrationTest {
     @Test
     @Order(3)
     void createCacheClusterWithInvalidEngineReturnsError() {
+        // Engine=redis used to be refused here. It is a valid single-node cache cluster on AWS and
+        // is now accepted (see ElastiCacheRedisClusterIntegrationTest), so the refusal is asserted
+        // with an engine ElastiCache really does not have.
         given()
             .formParam("Action", "CreateCacheCluster")
-            .formParam("CacheClusterId", "redis-attempt")
-            .formParam("Engine", "redis")
+            .formParam("CacheClusterId", "mongodb-attempt")
+            .formParam("Engine", "mongodb")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
