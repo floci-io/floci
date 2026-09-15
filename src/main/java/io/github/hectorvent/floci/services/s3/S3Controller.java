@@ -370,7 +370,7 @@ public class S3Controller {
                 return handlePutBucketInventoryConfiguration(bucket, uriInfo, body);
             }
 
-            // Phát hiện request thực chất là PutObject lọt vào do virtual host chưa được rewrite
+            // Detect a PutObject request that reached this handler before virtual-host rewriting.
             if (isMisplacedObjectPut(httpHeaders, body, bucket)) {
                 String actualBucket = resolveActualBucket(httpHeaders, uriInfo);
                 if (actualBucket != null && !actualBucket.equalsIgnoreCase(bucket)) {
