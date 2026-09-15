@@ -1842,6 +1842,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .or(() -> currentSession(accessKeyId).map(SessionCredential::getSecretAccessKey));
     }
 
+    /** Resolves a long-term access key in an explicit caller account. */
+    public Optional<String> findSecretKeyForAccount(String accountId, String accessKeyId) {
+        return accessKeyForAccount(accountId, accessKeyId)
+                .filter(accessKey -> "Active".equals(accessKey.getStatus()))
+                .map(AccessKey::getSecretAccessKey)
+                .or(() -> currentSession(accessKeyId).map(SessionCredential::getSecretAccessKey));
+    }
+
     /** Returns a temporary session secret only when the issued session token also matches. */
     public Optional<String> findSecretKey(String accessKeyId, String sessionToken) {
         return activeAccessKeySecret(accessKeyId).or(() -> currentSession(accessKeyId)
@@ -2107,12 +2115,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
      */
     public CallerContext resolveCallerContext(String accessKeyId) {
+        return resolveCallerContextForAccount(regionResolver.getAccountId(), accessKeyId);
+    }
+
+    /** Resolves caller policies from an explicit account even when request scope has switched owners. */
+    public CallerContext resolveCallerContextForAccount(String accountId, String accessKeyId) {
         // Check user access keys
-        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        Optional<AccessKey> akOpt = accessKeyForAccount(accountId, accessKeyId);
         if (akOpt.isPresent()) {
             String userName = akOpt.get().getUserName();
-            List<String> identityPolicies = collectUserPolicies(userName);
-            String boundaryDoc = resolveUserBoundaryDocument(userName);
+            Optional<IamUser> user = findUser(accountId, userName);
+            if (user.isEmpty()) {
+                return null;
+            }
+            List<String> identityPolicies = collectUserPoliciesForAccount(accountId, user.get());
+            String boundaryDoc = resolvePolicyForAccount(accountId, user.get().getPermissionsBoundaryArn())
+                    .map(IamPolicy::getDefaultDocument)
+                    .orElse(null);
             return new CallerContext(identityPolicies, null, boundaryDoc);
         }
 
@@ -2167,14 +2186,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Optional<String> resolveCallerArn(String accessKeyId) {
+        return resolveCallerArnForAccount(regionResolver.getAccountId(), accessKeyId);
+    }
+
+    /** Resolves a caller ARN from an explicit account after another resource owner was installed. */
+    public Optional<String> resolveCallerArnForAccount(String accountId, String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
             return Optional.empty();
         }
 
-        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        Optional<AccessKey> akOpt = accessKeyForAccount(accountId, accessKeyId);
         if (akOpt.isPresent()) {
             String userName = akOpt.get().getUserName();
-            return users.get(userName).map(IamUser::getArn);
+            return findUser(accountId, userName).map(IamUser::getArn);
         }
 
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
@@ -2189,11 +2213,59 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return Optional.empty();
             }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-            String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
-            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString());
+            String roleAccountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+            return Optional.of(AwsArnUtils.Arn.of("sts", "", roleAccountId,
+                    "assumed-role/" + roleName + "/floci-session").toString());
         }
 
         return Optional.empty();
+    }
+
+    private Optional<AccessKey> accessKeyForAccount(String accountId, String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+        if (accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware) {
+            return aware.getForAccount(accountId, accessKeyId);
+        }
+        return accessKeys.get(accessKeyId);
+    }
+
+    private List<String> collectUserPoliciesForAccount(String accountId, IamUser user) {
+        List<String> docs = new ArrayList<>(user.getInlinePolicies().values());
+        for (String arn : user.getAttachedPolicyArns()) {
+            resolvePolicyForAccount(accountId, arn)
+                    .map(IamPolicy::getDefaultDocument)
+                    .ifPresent(docs::add);
+        }
+        for (String groupName : user.getGroupNames()) {
+            Optional<IamGroup> group = groups instanceof AccountAwareStorageBackend<IamGroup> aware
+                    ? aware.getForAccount(accountId, groupName)
+                    : groups.get(groupName);
+            if (group.isEmpty()) {
+                continue;
+            }
+            docs.addAll(group.get().getInlinePolicies().values());
+            for (String arn : group.get().getAttachedPolicyArns()) {
+                resolvePolicyForAccount(accountId, arn)
+                        .map(IamPolicy::getDefaultDocument)
+                        .ifPresent(docs::add);
+            }
+        }
+        return docs;
+    }
+
+    private Optional<IamPolicy> resolvePolicyForAccount(String accountId, String arn) {
+        if (arn == null) {
+            return Optional.empty();
+        }
+        if (arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            return Optional.ofNullable(awsManagedPolicies.get(arn));
+        }
+        if (policies instanceof AccountAwareStorageBackend<IamPolicy> aware) {
+            return aware.getForAccount(accountId, arn);
+        }
+        return policies.get(arn);
     }
 
     /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */
