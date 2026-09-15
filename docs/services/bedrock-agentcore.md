@@ -109,8 +109,35 @@ rather than on stored events.
 `POST /runtimes/{agentRuntimeArn}/invocations` returns a fixed, configurable JSON
 body (default `{"output":"yes"}`) and echoes the
 `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. The request payload (opaque
-binary, up to 100 MB) is never parsed. Streaming responses are not emulated — a
-single non-streaming `200` is returned.
+binary, up to 100 MB) is never parsed. This operation returns a single non-streaming
+`200`; `InvokeHarness` below is the streaming one.
+
+## Data plane — `InvokeHarness`
+
+`POST /harnesses/invoke` returns an `application/vnd.amazon.eventstream` response, the same
+framing `ConverseStream` uses, so an SDK client's stream iterator works unchanged. The frames
+arrive in AWS's order: `messageStart`, `contentBlockStart`, one `contentBlockDelta` per chunk,
+`contentBlockStop`, `messageStop`, `metadata`.
+
+`harnessArn`, `runtimeSessionId` and `messages` are all required, and the first two are validated
+against their modelled shapes rather than merely checked for presence: a harness ARN ends in the
+same `name-<10 alphanumerics>` form AgentCore uses elsewhere, and a runtime session id is 33 to 100
+characters. `messages` may be an empty array, but omitting the member is a `ValidationException`.
+
+Note the wire bindings, which are easy to get wrong: `harnessArn` and `qualifier` are **query
+parameters**, `runtimeSessionId` and `runtimeUserId` are **headers**
+(`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` / `-User-Id`), and only `messages`, `model`,
+`tools` and friends travel in the JSON body. A missing `harnessArn` or `runtimeSessionId` is a
+`ValidationException`.
+
+There is no agent loop and no model. The assistant's reply **echoes the caller's last user
+message**, so a chat client visibly works end to end and a request that failed to parse is obvious
+rather than hidden behind a fixed string. A request whose `messages` array is present but empty, or
+carries no user turn, is legitimate and gets a canned reply rather than an error.
+
+The `harnessArn` is not resolved: the emulator models no harness resource, so there is nothing to
+look one up in. Tool execution, skills and multi-turn iteration are not emulated, so no tool-use
+block is ever produced even when a request supplies `tools`.
 
 ## Configuration
 
@@ -120,12 +147,15 @@ single non-streaming `200` is returned.
 | `FLOCI_SERVICES_BEDROCK_AGENT_CORE_ENABLED` | `true` | Enable/disable the data plane (invoke) |
 | `FLOCI_SERVICES_BEDROCK_AGENT_CORE_INVOKE_RESPONSE` | `{"output":"yes"}` | Canned `InvokeAgentRuntime` response body |
 | `FLOCI_SERVICES_BEDROCK_AGENT_CORE_VALIDATE_RUNTIME_EXISTS` | `false` | When `true`, `InvokeAgentRuntime` returns `ResourceNotFoundException` for an unknown runtime ARN instead of the canned response |
+| `FLOCI_SERVICES_BEDROCK_AGENT_CORE_HARNESS_ECHO_PREFIX` | `You said: ` | Prefix on the reply `InvokeHarness` streams back |
+| `FLOCI_SERVICES_BEDROCK_AGENT_CORE_HARNESS_EMPTY_REPLY` | `No user message was supplied.` | Reply used when a request carries no user message |
 
 > **Note on YAML config keys.** The status endpoint reports these services as
 > `bedrock-agentcore-control` and `bedrock-agentcore`, but the YAML property paths
 > use hyphenated words: `floci.services.bedrock-agent-core-control.enabled` and
 > `floci.services.bedrock-agent-core.enabled` (and `…bedrock-agent-core.invoke-response`,
-> `…bedrock-agent-core.validate-runtime-exists`). The `FLOCI_*` environment variables
+> `…bedrock-agent-core.validate-runtime-exists`, `…bedrock-agent-core.harness-echo-prefix`,
+> `…bedrock-agent-core.harness-empty-reply`). The `FLOCI_*` environment variables
 > above map to these paths directly and are the recommended way to configure the service.
 
 ## Behavior notes

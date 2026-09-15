@@ -1510,4 +1510,104 @@ class SsmIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
     }
+
+    @Test
+    @Order(20)
+    void describeParametersAppliesParameterFilters() {
+        putFilterFixture("/dpf/prod/db", "String", "");
+        putFilterFixture("/dpf/prod/api/key", "SecureString", "");
+        putFilterFixture("/dpf/dev/db", "String", ", \"Tags\": [{\"Key\": \"Team\", \"Value\": \"core\"}]");
+
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Path", "Values": ["/dpf/prod"] }] }
+                """)
+            .body("Parameters.Name", contains("/dpf/prod/db"));
+
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Path", "Option": "Recursive", "Values": ["/dpf/prod"] }] }
+                """)
+            .body("Parameters.Name", containsInAnyOrder("/dpf/prod/db", "/dpf/prod/api/key"));
+
+        describeParameters("""
+                { "ParameterFilters": [
+                    { "Key": "Name", "Option": "BeginsWith", "Values": ["/dpf/"] },
+                    { "Key": "Type", "Values": ["SecureString"] }
+                ] }
+                """)
+            .body("Parameters.Name", contains("/dpf/prod/api/key"));
+
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "tag:Team", "Values": ["core"] }] }
+                """)
+            .body("Parameters.Name", contains("/dpf/dev/db"));
+
+        describeParameters("""
+                { "Filters": [{ "Key": "Name", "Values": ["/dpf/dev/db"] }] }
+                """)
+            .body("Parameters.Name", contains("/dpf/dev/db"));
+    }
+
+    @Test
+    @Order(21)
+    void describeParametersPagesWithMaxResultsAndNextToken() {
+        String filter = "\"ParameterFilters\": [{ \"Key\": \"Name\", \"Option\": \"BeginsWith\", \"Values\": [\"/dpf/\"] }]";
+
+        String token = describeParameters("{ " + filter + ", \"MaxResults\": 2 }")
+            .body("Parameters.Name", contains("/dpf/dev/db", "/dpf/prod/api/key"))
+            .body("NextToken", notNullValue())
+            .extract().path("NextToken");
+
+        describeParameters("{ " + filter + ", \"MaxResults\": 2, \"NextToken\": \"" + token + "\" }")
+            .body("Parameters.Name", contains("/dpf/prod/db"))
+            .body("NextToken", nullValue());
+    }
+
+    @Test
+    @Order(22)
+    void describeParametersRejectsUnsupportedFilters() {
+        describeParametersError("""
+                { "ParameterFilters": [{ "Key": "Label", "Values": ["prod"] }] }
+                """, "InvalidFilterKey");
+        describeParametersError("""
+                { "ParameterFilters": [{ "Key": "Type", "Option": "Contains", "Values": ["String"] }] }
+                """, "InvalidFilterOption");
+        describeParametersError("""
+                { "ParameterFilters": [{ "Key": "Path", "Values": ["dpf"] }] }
+                """, "InvalidFilterValue");
+        describeParametersError("{ \"MaxResults\": 51 }", "ValidationException");
+    }
+
+    private void putFilterFixture(String name, String type, String extra) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"Value\": \"v\", \"Type\": \"" + type + "\"" + extra + " }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private io.restassured.response.ValidatableResponse describeParameters(String body) {
+        return given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private void describeParametersError(String body, String errorType) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo(errorType));
+    }
 }

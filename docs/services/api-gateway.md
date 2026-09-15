@@ -56,6 +56,7 @@ duplicate override IDs.
 | **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
+| **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
@@ -174,13 +175,55 @@ handling; a hand-rolled signer must include it.
 > signed, known caller is let through. `principalOrgId` and `cognitoIdentity` are always null -
 > Organizations membership and identity-pool federation are not modelled.
 
+### Gateway Responses
+
+A REST API's gateway responses customise what the gateway itself answers when it, rather than
+the integration, produces the response. All 21 AWS response types are accepted, keyed by
+`responseType`; `GetGatewayResponses` lists every type, reporting the ones never customised with
+`defaultResponse: true`, their AWS default `statusCode`, and the default
+`{"message":$context.error.messageString}` template. `PutGatewayResponse` is an upsert,
+`UpdateGatewayResponse` accepts `add`/`replace`/`remove` on `/statusCode`,
+`/responseParameters/<name>` and `/responseTemplates/<content-type>` (JSON-pointer escaped, e.g.
+`application~1json`), and `DeleteGatewayResponse` restores the default. The
+`x-amazon-apigateway-gateway-responses` OpenAPI extension is imported by `ImportRestApi` and
+`PutRestApi`, and `AWS::ApiGateway::GatewayResponse` is provisioned by CloudFormation.
+
+On the execute plane every gateway-generated answer resolves the customisation for its type,
+then for `DEFAULT_4XX` / `DEFAULT_5XX`, and applies the configured `statusCode`, the
+`gatewayresponse.header.*` parameters (`'static'`, `method.request.header.*`,
+`method.request.querystring.*`, `method.request.path.*`, `context.*`, `stageVariables.*`) and the
+`responseTemplates` (selected by the request's `Accept` header, falling back to
+`application/json`), with `$context.error.message`, `$context.error.messageString`,
+`$context.error.responseType` and `$context.error.validationErrorString` available to the template.
+This is what lets a browser read a `401`/`403`/`400` as such instead of as a CORS failure once
+`DEFAULT_4XX` maps `Access-Control-Allow-Origin`, exactly as the console's "Enable CORS" does.
+
+| Gateway-generated answer | `responseType` |
+|---|---|
+| No resource matches the path, or none declares the method (`403 Missing Authentication Token`) | `MISSING_AUTHENTICATION_TOKEN` |
+| `AWS_IAM` method without a signature | `MISSING_AUTHENTICATION_TOKEN` |
+| `AWS_IAM` signature malformed or mismatching | `INVALID_SIGNATURE` |
+| `AWS_IAM` signature outside the 5-minute window, or a presigned URL past its expiry | `EXPIRED_TOKEN` |
+| `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` |
+| Lambda authorizer returns `Deny` | `ACCESS_DENIED` |
+| Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` |
+| Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` |
+| Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` |
+| `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` |
+| Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` |
+| Lambda proxy function error, malformed proxy payload, or missing function | `INTEGRATION_FAILURE` |
+
+A customised `statusCode` overrides the status Floci would otherwise send. Throttling, quota, request size and WAF answers are not produced on the execute plane, so
+`THROTTLED`, `QUOTA_EXCEEDED`, `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be configured but never
+fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than treated as a gateway
+response.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
 - Authorizer testing: `TestInvokeAuthorizer`
 - Model templates: `GetModelTemplate`
-- Gateway Responses (the entire family: `PutGatewayResponse`, `GetGatewayResponse`, etc.)
 - Documentation parts and versions (the entire family, 10 operations)
 - VPC Links (5 operations)
 - Client Certificates (5 operations)

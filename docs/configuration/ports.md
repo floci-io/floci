@@ -5,6 +5,7 @@
 | Port / Range | Protocol | Purpose | docker-compose mapping required? |
 |---|---|---|---|
 | `4566` | HTTP | AWS APIs and ECR Docker Distribution | Yes |
+| `4500` | HTTP | Web console sidecar, bound directly by the console container | **No** (see note) |
 | `5100–5199` | HTTP | ECR Registry backing container, loopback-only implementation ports | No |
 | `5672–5699` | AMQP | Amazon MQ (RabbitMQ) AMQP listener, bound directly by each broker container | **No** |
 | `6379–6399` | TCP | ElastiCache Redis proxy (inside Floci) | Yes |
@@ -31,7 +32,7 @@ host:6379  →  [docker-compose ports mapping]  →  Floci container:6379  →  
 
 Because the listener is inside the Floci container, `ports:` in `docker-compose.yml` is required to make it reachable from the host.
 
-### Direct container binding (EKS, OpenSearch, Amazon MQ)
+### Direct container binding (web console, EKS, OpenSearch, Amazon MQ)
 
 Floci tells the Docker daemon to start a sidecar/service container and bind its port **directly on the host**. Floci itself communicates with the container via the shared Docker network (container name + internal port). The host port is bound by Docker, not by Floci.
 

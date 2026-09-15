@@ -580,6 +580,129 @@ class BatchIntegrationTest {
     }
 
     @Test
+    void submitArrayJobOverTheWireFansOutAndAggregates() {
+        String suffix = uniqueSuffix();
+        String queueArn = createQueue("batch-array-queue-" + suffix, createComputeEnvironment("batch-array-ce-" + suffix));
+        String definitionArn = registerJobDefinition("batch-array-job-" + suffix, "[\"ok\"]", "[]");
+
+        String parentId = givenJson("""
+                {
+                  "jobName": "batch-array-submit-%s",
+                  "jobQueue": "%s",
+                  "jobDefinition": "%s",
+                  "arrayProperties": {"size": 3}
+                }
+                """.formatted(suffix, queueArn, definitionArn))
+        .when()
+            .post("/v1/submitjob")
+        .then()
+            .statusCode(200)
+            .body("jobId", notNullValue())
+            .extract().path("jobId");
+
+        givenJson("{\"jobs\":[\"%s\"]}".formatted(parentId))
+        .when()
+            .post("/v1/describejobs")
+        .then()
+            .statusCode(200)
+            .body("jobs[0].status", equalTo("SUCCEEDED"))
+            .body("jobs[0].arrayProperties.size", equalTo(3))
+            .body("jobs[0].arrayProperties.statusSummary.SUCCEEDED", equalTo(3));
+
+        givenJson("{\"jobs\":[\"%s:0\",\"%s:1\",\"%s:2\"]}".formatted(parentId, parentId, parentId))
+        .when()
+            .post("/v1/describejobs")
+        .then()
+            .statusCode(200)
+            .body("jobs", hasSize(3))
+            .body("jobs[0].arrayProperties.index", equalTo(0))
+            .body("jobs[0].status", equalTo("SUCCEEDED"));
+
+        givenJson("{\"arrayJobId\":\"%s\"}".formatted(parentId))
+        .when()
+            .post("/v1/listjobs")
+        .then()
+            .statusCode(200)
+            .body("jobSummaryList", hasSize(3));
+
+        givenJson("{\"jobQueue\":\"%s\",\"jobStatus\":\"SUCCEEDED\"}".formatted(queueArn))
+        .when()
+            .post("/v1/listjobs")
+        .then()
+            .statusCode(200)
+            .body("jobSummaryList.findAll { it.jobId.startsWith('%s') }".formatted(parentId), hasSize(1));
+    }
+
+    @Test
+    void submitArrayJobRejectsSizeOutOfRange() {
+        String suffix = uniqueSuffix();
+        String queueArn = createQueue("batch-array-bad-queue-" + suffix, createComputeEnvironment("batch-array-bad-ce-" + suffix));
+        String definitionArn = registerJobDefinition("batch-array-bad-job-" + suffix, "[\"ok\"]", "[]");
+
+        givenJson("""
+                {"jobName":"array-too-small-%s","jobQueue":"%s","jobDefinition":"%s","arrayProperties":{"size":1}}
+                """.formatted(suffix, queueArn, definitionArn))
+        .when()
+            .post("/v1/submitjob")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ClientException"));
+    }
+
+    @Test
+    void submitMultiNodeJobOverTheWireRunsAllNodes() {
+        String suffix = uniqueSuffix();
+        String queueArn = createQueue("batch-mnp-queue-" + suffix, createComputeEnvironment("batch-mnp-ce-" + suffix));
+        String definitionArn = givenJson("""
+                {
+                  "jobDefinitionName": "batch-mnp-job-%s",
+                  "type": "multinode",
+                  "nodeProperties": {
+                    "numNodes": 2,
+                    "mainNode": 0,
+                    "nodeRangeProperties": [
+                      {"targetNodes": "0:0", "container": {"image": "public.ecr.aws/example/main:latest"}},
+                      {"targetNodes": "1:1", "container": {"image": "public.ecr.aws/example/worker:latest"}}
+                    ]
+                  }
+                }
+                """.formatted(suffix))
+        .when()
+            .post("/v1/registerjobdefinition")
+        .then()
+            .statusCode(200)
+            .extract().path("jobDefinitionArn");
+
+        String jobId = givenJson("""
+                {"jobName":"batch-mnp-submit-%s","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(suffix, queueArn, definitionArn))
+        .when()
+            .post("/v1/submitjob")
+        .then()
+            .statusCode(200)
+            .extract().path("jobId");
+
+        givenJson("{\"jobs\":[\"%s\"]}".formatted(jobId))
+        .when()
+            .post("/v1/describejobs")
+        .then()
+            .statusCode(200)
+            .body("jobs[0].status", equalTo("SUCCEEDED"))
+            .body("jobs[0].nodeProperties.numNodes", equalTo(2))
+            .body("jobs[0].nodeProperties.mainNode", equalTo(0))
+            .body("jobs[0].container", nullValue());
+
+        givenJson("{\"multiNodeJobId\":\"%s\"}".formatted(jobId))
+        .when()
+            .post("/v1/listjobs")
+        .then()
+            .statusCode(200)
+            .body("jobSummaryList", hasSize(2))
+            .body("jobSummaryList.find { it.nodeProperties.nodeIndex == 0 }.nodeProperties.isMainNode", equalTo(true))
+            .body("jobSummaryList.find { it.nodeProperties.nodeIndex == 1 }.nodeProperties.isMainNode", equalTo(false));
+    }
+
+    @Test
     void describeUnknownJobsReturnsEmptyList() {
         givenJson("{\"jobs\":[\"does-not-exist\"]}")
         .when()

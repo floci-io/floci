@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
+import io.github.hectorvent.floci.services.ssm.model.ParameterStringFilter;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmAssociation;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
@@ -911,5 +912,79 @@ class SsmServiceTest {
 
         ssmService.putParameter("/app/desc-test", "val2", "String", null, true, null, region);
         assertNull(ssmService.getParameter("/app/desc-test", region).getDescription());
+    }
+
+    @Test
+    void describeParametersWithoutFiltersListsOnlyTheRegion() {
+        ssmService.putParameter("/a", "v", "String", null, false, "us-east-1");
+        ssmService.putParameter("/b", "v", "String", null, false, "eu-west-1");
+
+        assertEquals(List.of("/a"), describedNames(List.of(), "us-east-1"));
+    }
+
+    @Test
+    void describeParametersPathDefaultsToOneLevel() {
+        String region = "us-east-1";
+        ssmService.putParameter("/app/a", "v", "String", null, false, region);
+        ssmService.putParameter("/app/nested/b", "v", "String", null, false, region);
+        ssmService.putParameter("/application/c", "v", "String", null, false, region);
+
+        assertEquals(Set.of("/app/a"),
+                Set.copyOf(describedNames(List.of(filter("Path", null, "/app/")), region)));
+        assertEquals(Set.of("/app/a", "/app/nested/b"),
+                Set.copyOf(describedNames(List.of(filter("Path", "Recursive", "/app")), region)));
+    }
+
+    @Test
+    void describeParametersMatchesNameOptionsAndOrsValues() {
+        String region = "us-east-1";
+        ssmService.putParameter("/svc/orders/url", "v", "String", null, false, region);
+        ssmService.putParameter("/svc/users/url", "v", "String", null, false, region);
+        ssmService.putParameter("/other", "v", "String", null, false, region);
+
+        assertEquals(Set.of("/svc/orders/url", "/svc/users/url"),
+                Set.copyOf(describedNames(List.of(filter("Name", "Contains", "/url")), region)));
+        assertEquals(Set.of("/svc/orders/url", "/other"),
+                Set.copyOf(describedNames(List.of(filter("Name", "Equals", "/svc/orders/url", "/other")), region)));
+    }
+
+    @Test
+    void describeParametersMatchesTypeKeyIdTierDataTypeAndTags() {
+        String region = "us-east-1";
+        ssmService.putParameter("/plain", "v", "String", null, false, region);
+        ssmService.putParameter("/secret", "v", "SecureString", null, false, Map.of("Env", "prod"), region);
+
+        assertEquals(List.of("/secret"), describedNames(List.of(filter("Type", null, "SecureString")), region));
+        assertEquals(List.of("/secret"), describedNames(List.of(filter("KeyId", null, "alias/aws/ssm")), region));
+        assertEquals(2, describedNames(List.of(filter("Tier", null, "Standard")), region).size());
+        assertEquals(2, describedNames(List.of(filter("DataType", null, "text")), region).size());
+        assertEquals(List.of("/secret"), describedNames(List.of(filter("tag:Env", "BeginsWith", "pr")), region));
+        assertEquals(List.of("/secret"),
+                describedNames(List.of(new ParameterStringFilter("tag:Env", null, List.of())), region));
+        assertTrue(describedNames(List.of(filter("tag:Env", null, "dev")), region).isEmpty());
+    }
+
+    @Test
+    void describeParametersRejectsInvalidFilters() {
+        assertFilterError("InvalidFilterKey", filter("Label", null, "prod"));
+        assertFilterError("InvalidFilterKey", filter("tag:", null, "x"));
+        assertFilterError("InvalidFilterOption", filter("Tier", "Contains", "Standard"));
+        assertFilterError("InvalidFilterOption", filter("Path", "Equals", "/app"));
+        assertFilterError("InvalidFilterValue", filter("Path", null, "app"));
+        assertFilterError("InvalidFilterValue", new ParameterStringFilter("Type", null, List.of()));
+    }
+
+    private List<String> describedNames(List<ParameterStringFilter> filters, String region) {
+        return ssmService.describeParameters(filters, region).stream().map(Parameter::getName).toList();
+    }
+
+    private static ParameterStringFilter filter(String key, String option, String... values) {
+        return new ParameterStringFilter(key, option, List.of(values));
+    }
+
+    private void assertFilterError(String errorCode, ParameterStringFilter filter) {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.describeParameters(List.of(filter), "us-east-1"));
+        assertEquals(errorCode, ex.getErrorCode());
     }
 }

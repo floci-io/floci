@@ -1992,6 +1992,16 @@ public interface EmulatorConfig {
         String emitMode();
     }
 
+    /**
+     * The web console Floci runs as a sidecar. Any console implementing the Floci console
+     * contract works with no configuration beyond {@link #image()}; these keys exist to run one
+     * that deviates from it. See {@code docs/ui/console-contract.md}.
+     *
+     * <p>Every contract key is optional on purpose. "Unset" is what lets Floci fall back to the
+     * image's own {@code io.floci.console.*} labels, then to a built-in profile, then to the
+     * contract defaults, so a value here is only ever needed for a console that describes itself
+     * neither way.
+     */
     interface UiServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -2006,21 +2016,78 @@ public interface EmulatorConfig {
         @WithDefault("4500")
         int port();
 
+        /**
+         * Port the console listens on <em>inside</em> its container, published as {@link #port()}.
+         * Env: {@code FLOCI_SERVICES_UI_INTERNAL_PORT}
+         *
+         * <p>Contract default 4500. The console is told the resolved value through {@code PORT},
+         * so this only needs setting for a console with a fixed port of its own that does not
+         * declare it as an {@code io.floci.console.port} label.
+         */
+        OptionalInt internalPort();
+
+        /**
+         * An <em>additional</em> environment variable the resolved Floci endpoint is repeated in.
+         * Env: {@code FLOCI_SERVICES_UI_ENDPOINT_ENV}
+         *
+         * <p>Every console already receives the endpoint as {@code AWS_ENDPOINT_URL} (the contract's
+         * canonical name) and as {@code FLOCI_ENDPOINT}, so this is only for a console that reads
+         * neither. The endpoint's <em>value</em> cannot be set by hand in the containerized case: it
+         * is Floci's own container IP, discovered at start time.
+         */
+        Optional<String> endpointEnv();
+
+        /**
+         * Extra environment entries for the console, each {@code KEY=VALUE}.
+         * Env: {@code FLOCI_SERVICES_UI_EXTRA_ENV} (comma-separated; escape a literal comma as
+         * {@code \,}).
+         *
+         * <p>Applied last, so an entry may also override one of the injected defaults.
+         */
+        Optional<List<String>> extraEnv();
+
+        /**
+         * Path the readiness probe requests on the console.
+         * Env: {@code FLOCI_SERVICES_UI_STATUS_PATH}
+         *
+         * <p>Contract default {@code /api/health}.
+         */
+        Optional<String> statusPath();
+
+        /**
+         * JSON field in the health response that says whether the console can reach Floci, and the
+         * values that mean it can and that it cannot.
+         * Env: {@code FLOCI_SERVICES_UI_STATUS_READY_FIELD},
+         * {@code FLOCI_SERVICES_UI_STATUS_READY_VALUE},
+         * {@code FLOCI_SERVICES_UI_STATUS_UNAVAILABLE_VALUE}
+         *
+         * <p>Contract defaults {@code status}, {@code ok} and {@code unavailable}. Set the field to
+         * {@code none} for a console whose health endpoint is a plain liveness check, which makes
+         * any {@code 200} count as ready. An empty value cannot express that: an environment
+         * variable set to nothing arrives as an absent property and would silently mean "use the
+         * default field".
+         */
+        Optional<String> statusReadyField();
+
+        Optional<String> statusReadyValue();
+
+        Optional<String> statusUnavailableValue();
+
         @WithDefault("false")
         boolean keepRunningOnShutdown();
 
         Optional<String> dockerNetwork();
 
         /**
-         * Overrides the Floci endpoint handed to the UI sidecar, instead of deriving it from
+         * Overrides the Floci endpoint handed to the console, instead of deriving it from
          * the resolved Docker host and {@link EmulatorConfig#tls()}.
          * Env: {@code FLOCI_SERVICES_UI_ENDPOINT}
          *
          * <p>The derived value is {@code https://<floci-container-ip>:<port>} when TLS is on,
-         * which the sidecar's Node/Bun proxy rejects: Floci's self-signed certificate carries no
+         * which a Node/Bun console's proxy rejects: Floci's self-signed certificate carries no
          * IP SAN for its own container IP, so verification fails with
          * {@code ERR_TLS_CERT_ALTNAME_INVALID} even when the CA is trusted. Floci's port does
-         * HTTP/HTTPS protocol detection, so pointing the sidecar at {@code http://<ip>:<port>}
+         * HTTP/HTTPS protocol detection, so pointing the console at {@code http://<ip>:<port>}
          * reaches the same server over the private container network with TLS left enabled.
          *
          * <p>Must be an absolute {@code http://} or {@code https://} URL. A blank or malformed
@@ -2029,12 +2096,13 @@ public interface EmulatorConfig {
         Optional<String> endpoint();
 
         /**
-         * Disables TLS certificate verification in the UI sidecar's Node/Bun proxy by injecting
-         * {@code NODE_TLS_REJECT_UNAUTHORIZED=0}. Env: {@code FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY}
+         * Disables TLS certificate verification in the console's HTTP client by injecting
+         * {@code FLOCI_TLS_SKIP_VERIFY=1} (and {@code NODE_TLS_REJECT_UNAUTHORIZED=0} for a
+         * Node/Bun console). Env: {@code FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY}
          *
          * <p>Trusting Floci's CA alone is not sufficient — it fixes the chain but not the missing
          * IP SAN — so this is the only trust knob that makes an {@code https://<container-ip>}
-         * endpoint work. Scoped to the sidecar's connection to Floci; it does not affect Floci's
+         * endpoint work. Scoped to the console's connection to Floci; it does not affect Floci's
          * own TLS. Prefer {@link #endpoint()} where an {@code http://} endpoint is acceptable.
          */
         @WithDefault("false")
@@ -2496,6 +2564,18 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean validateRuntimeExists();
+
+        /**
+         * Prefix on the assistant reply InvokeHarness streams back. The reply echoes the caller's
+         * last user message: there is no model, and echoing makes a chat UI visibly work while
+         * keeping a request that failed to parse obvious.
+         */
+        @WithDefault("You said: ")
+        String harnessEchoPrefix();
+
+        /** Reply used when a request carries no user message, which is a legitimate call. */
+        @WithDefault("No user message was supplied.")
+        String harnessEmptyReply();
     }
 
     /** Classic (2012-06-01) Elastic Load Balancing — a separate API from {@link ElbV2ServiceConfig}. */

@@ -4,7 +4,9 @@ import java.io.Closeable;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,6 +28,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
@@ -34,9 +38,14 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 /**
- * Manages the lifecycle of the {@code floci/floci-ui} sidecar container — the
- * browser-facing Floci web console. The container is started lazily on the first
- * {@code /_floci/ui} hit and reused across restarts (one per Floci instance).
+ * Manages the lifecycle of the web-console sidecar container, the browser-facing Floci console.
+ * The container is started lazily on the first {@code /_floci/ui} hit and reused across restarts
+ * (one per Floci instance).
+ *
+ * <p>The console is not required to be {@code floci/floci-ui}. Any image implementing the Floci
+ * console contract (listen on {@code PORT}, serve {@code GET /api/health}, reach Floci at
+ * {@code AWS_ENDPOINT_URL}) runs here unconfigured; {@link ConsoleProfileResolver} works out the
+ * rest from the image's labels, a built-in profile, or {@code floci.services.ui.*}.
  *
  * <p>Unlike other sidecars, a failed start (typically a missing/unavailable image)
  * is <em>not</em> fatal: it is recorded in {@link #status()} so the interstitial
@@ -46,10 +55,45 @@ import org.jboss.logging.Logger;
 public class FlociUiManager {
 
     private static final Logger LOG = Logger.getLogger(FlociUiManager.class);
-    private static final int CONTAINER_INTERNAL_PORT = 4500;
-    private static final String FLOCI_ENDPOINT_ENV = "FLOCI_ENDPOINT";
     private static final Pattern IPV4_LITERAL = Pattern.compile("^\\d{1,3}(\\.\\d{1,3}){3}$");
-    private static final String RUNTIME_STATUS_PATH = "/api/clouds/aws/status";
+
+    /**
+     * The contract's canonical endpoint variable. Every console receives the endpoint under this
+     * name, so it is also the one entry adoption compares to spot a sidecar left addressing a
+     * previous Floci.
+     */
+    static final String CANONICAL_ENDPOINT_ENV = "AWS_ENDPOINT_URL";
+
+    /** The port the console listens on. Structural: the port binding and the readiness probe use it too. */
+    static final String PORT_ENV = "PORT";
+
+    /**
+     * Environment entries {@code extra-env} must not set, because the manager has already used their
+     * values structurally and setting them here would change only the console's copy.
+     *
+     * <p>{@code PORT} decides where the console listens, but the Docker port binding and the
+     * readiness probe are both built from {@code profile.internalPort()}, so an override here
+     * produces a sidecar that listens on one port while Floci publishes and polls another.
+     * {@code AWS_ENDPOINT_URL} is the entry adoption compares to detect a sidecar left pointing at a
+     * previous Floci, so an override here reads as permanent drift and the container is recreated on
+     * every check.
+     *
+     * <p>Both have a supported key that feeds the structural path as well as the environment:
+     * {@code floci.services.ui.internal-port} and {@code floci.services.ui.endpoint}.
+     */
+    private static final Map<String, String> RESERVED_EXTRA_ENV = Map.of(
+            PORT_ENV, "floci.services.ui.internal-port",
+            CANONICAL_ENDPOINT_ENV, "floci.services.ui.endpoint");
+
+    /** Which emulator the console is talking to, so one console can serve several Floci flavours. */
+    private static final String FLOCI_CLOUD = "aws";
+
+    /**
+     * Credentials the console signs with. Passed explicitly rather than left to the baseline's
+     * fallback, which forwards Floci's <em>own</em> ambient AWS credentials into the container:
+     * acceptable for a workload the user wrote, not for a third-party console image.
+     */
+    private static final SessionCreds PLACEHOLDER_CREDENTIALS = new SessionCreds("test", "test", "test");
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -57,6 +101,7 @@ public class FlociUiManager {
     private final ContainerDetector containerDetector;
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final DockerHostResolver dockerHostResolver;
+    private final LaunchedContainerAwsEnv awsEnv;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -66,6 +111,8 @@ public class FlociUiManager {
     private volatile String containerId;
     private volatile Closeable logStream;
     private volatile String lastError;
+    /** Shape of the configured console, resolved once per start. */
+    private volatile ConsoleProfile profile = ConsoleProfileResolver.contractV1();
     /**
      * URL the readiness probe connects to, resolved from the Docker API at start time.
      * Published host ports (e.g. {@code -p 4500:4500}) only exist on the host's network
@@ -90,6 +137,7 @@ public class FlociUiManager {
                           ContainerDetector containerDetector,
                           CurrentContainerNetworkResolver currentContainerNetworkResolver,
                           DockerHostResolver dockerHostResolver,
+                          LaunchedContainerAwsEnv awsEnv,
                           EmulatorConfig config,
                           RegionResolver regionResolver,
                           ObjectMapper objectMapper) {
@@ -99,6 +147,7 @@ public class FlociUiManager {
         this.containerDetector = containerDetector;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.dockerHostResolver = dockerHostResolver;
+        this.awsEnv = awsEnv;
         this.config = config;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -116,7 +165,8 @@ public class FlociUiManager {
             return;
         }
         if (!config.services().ui().enabled()) {
-            this.lastError = "The Floci UI is disabled (set floci.services.ui.enabled=true to enable it).";
+            this.lastError = "The Floci web console is disabled "
+                    + "(set floci.services.ui.enabled=true to enable it).";
             return;
         }
         // Clear any error from a prior failed attempt so status() reports this retry
@@ -124,19 +174,23 @@ public class FlociUiManager {
         this.lastError = null;
         String image = config.services().ui().image();
         try {
+            this.profile = resolveProfile(image);
             String name = ContainerStorageHelper.dockerName(config, config.services().ui().containerName());
 
             Optional<Container> existing = lifecycleManager.findByName(name);
-            if (existing.isPresent() && !replaceIfEndpointDrifted(existing.get())) {
+            if (existing.isPresent()
+                    && !replaceIfNotRunning(existing.get())
+                    && !replaceIfEndpointDrifted(existing.get())) {
                 adoptExisting(existing.get());
                 return;
             }
 
             int chosenPort = config.services().ui().port();
+            int internalPort = profile.internalPort();
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                     .withName(name)
-                    .withEnv(injectedEnv())
-                    .withPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
+                    .withEnv(injectedEnv(profile))
+                    .withPortBinding(internalPort, chosenPort)
                     .withDockerNetwork(resolveDockerNetwork())
                     .withLogRotation();
             if (!containerDetector.isRunningInContainer()) {
@@ -145,13 +199,14 @@ public class FlociUiManager {
 
             ContainerSpec spec = specBuilder.build();
             ContainerInfo info = lifecycleManager.createAndStart(spec);
-            EndpointInfo endpoint = info.getEndpoint(CONTAINER_INTERNAL_PORT);
+            EndpointInfo endpoint = info.getEndpoint(internalPort);
             this.containerId = info.containerId();
             this.hostPort = resolveHostPort(endpoint, chosenPort);
-            this.probeUrl = resolveProbeUrl(endpoint, hostPort);
+            this.probeUrl = resolveProbeUrl(profile, endpoint, hostPort);
             this.started = true;
             this.lastError = null;
-            LOG.infov("Started floci-ui sidecar {0} on host port {1}", name, String.valueOf(hostPort));
+            LOG.infov("Started web console sidecar {0} from {1} on host port {2}",
+                    name, image, String.valueOf(hostPort));
             attachLogStream();
         } catch (IllegalStateException e) {
             // replaceIfEndpointDrifted() records its own specific message for a container with an
@@ -161,11 +216,25 @@ public class FlociUiManager {
             if (this.lastError == null) {
                 this.lastError = e.getMessage();
             }
-            LOG.errorv(e, "Failed to start floci-ui sidecar: {0}", e.getMessage());
+            LOG.errorv(e, "Failed to start the web console sidecar: {0}", e.getMessage());
         } catch (Exception e) {
             this.lastError = describeStartFailure(image, e);
-            LOG.errorv(e, "Failed to start floci-ui sidecar from image {0}", image);
+            LOG.errorv(e, "Failed to start the web console sidecar from image {0}", image);
         }
+    }
+
+    /**
+     * Works out the shape of the configured console: its labels first, then a built-in profile,
+     * then the contract defaults, with {@code floci.services.ui.*} winning over all of them.
+     *
+     * <p>Reading the labels needs the image present, which is why this runs on the starter thread
+     * and not at injection time. A label read that fails is not an error here: the pull is
+     * attempted again by {@code createAndStart}, which reports the failure properly.
+     */
+    ConsoleProfile resolveProfile(String image) {
+        String resolvedImage = containerBuilder.resolveImage(image);
+        Optional<Map<String, String>> labels = lifecycleManager.imageLabels(resolvedImage);
+        return ConsoleProfileResolver.resolve(resolvedImage, labels, config.services().ui());
     }
 
     /**
@@ -214,7 +283,7 @@ public class FlociUiManager {
         }
         RuntimeProbe probe = probeRuntime();
         if (!probe.ready() && shouldReArm(lifecycleManager.presenceOf(containerId))) {
-            LOG.infov("floci-ui sidecar {0} is gone — starting it again so the dashboard "
+            LOG.infov("The web console sidecar {0} is gone, starting it again so the console "
                     + "recovers without Floci being restarted", containerId);
             this.started = false;
             // ensureStartedAsync() only submits on kicked's false->true edge, but a prior
@@ -237,26 +306,85 @@ public class FlociUiManager {
             return;
         }
         if (config.services().ui().keepRunningOnShutdown()) {
-            LOG.infov("Leaving floci-ui sidecar {0} running for next start-up", containerId);
+            LOG.infov("Leaving the web console sidecar {0} running for next start-up", containerId);
             return;
         }
         lifecycleManager.stopAndRemove(containerId, logStream);
     }
 
-    List<String> injectedEnv() {
-        List<String> env = new ArrayList<>();
-        env.add(FLOCI_ENDPOINT_ENV + "=" + resolveFlociEndpoint());
+    /**
+     * The console contract's side of the bargain: what Floci hands every console it starts.
+     *
+     * <p>The AWS baseline is the same one Lambda, ECS and CodeBuild containers get, so a console
+     * built on any AWS SDK is configured by its ordinary credential and endpoint discovery, with no
+     * Floci-specific code. On top of it the console is told its listen port, which emulator it is
+     * talking to, and, only for a console that reads neither of the baseline endpoint names, the
+     * endpoint once more under a name of its own.
+     *
+     * <p>Ordered so the rendered list is stable, and keyed so a configured extra replaces the
+     * injected default rather than being appended as a second entry for the same variable, which
+     * runtimes resolve inconsistently.
+     */
+    List<String> injectedEnv(ConsoleProfile console) {
+        String endpoint = resolveFlociEndpoint();
+
+        LinkedHashMap<String, String> env = new LinkedHashMap<>();
+        for (String entry : awsEnv.sdkBaselineEnv(regionResolver.getDefaultRegion(), Optional.empty(),
+                endpoint, Optional.of(PLACEHOLDER_CREDENTIALS))) {
+            int split = entry.indexOf('=');
+            env.put(entry.substring(0, split), entry.substring(split + 1));
+        }
+        if (console.hasEndpointAlias() && !env.containsKey(console.endpointEnv())) {
+            env.put(console.endpointEnv(), endpoint);
+        }
+        env.put(PORT_ENV, String.valueOf(console.internalPort()));
+        env.put("FLOCI_CLOUD", FLOCI_CLOUD);
         if (config.services().ui().insecureSkipTlsVerify()) {
-            LOG.warn("floci.services.ui.insecure-skip-tls-verify=true — the Floci UI sidecar will "
+            LOG.warn("floci.services.ui.insecure-skip-tls-verify=true: the web console sidecar will "
                     + "not verify Floci's TLS certificate. Intended for Floci's self-signed "
                     + "certificate, which carries no IP SAN for its own container address.");
-            env.add("NODE_TLS_REJECT_UNAUTHORIZED=0");
+            env.put("FLOCI_TLS_SKIP_VERIFY", "1");
+            // The same instruction in the form a Node or Bun console's HTTP client already honours.
+            env.put("NODE_TLS_REJECT_UNAUTHORIZED", "0");
         }
-        env.add("AWS_REGION=" + regionResolver.getDefaultRegion());
-        env.add("AWS_ACCESS_KEY_ID=test");
-        env.add("AWS_SECRET_ACCESS_KEY=test");
-        env.add("PORT=" + CONTAINER_INTERNAL_PORT);
-        return env;
+        applyExtraEnv(env, config.services().ui().extraEnv());
+
+        List<String> rendered = new ArrayList<>(env.size());
+        env.forEach((key, value) -> rendered.add(key + "=" + value));
+        return rendered;
+    }
+
+    /**
+     * Merges operator-supplied {@code KEY=VALUE} entries over the injected defaults.
+     *
+     * <p>An entry without {@code =}, or with a blank key, is dropped with a warning rather than
+     * failing the start: a typo in one extra variable should not cost the whole console, and the
+     * warning is what tells the operator which entry was ignored. A value may itself contain
+     * {@code =} (a URL query, a base64 pad), so only the first one splits.
+     */
+    static void applyExtraEnv(LinkedHashMap<String, String> env, Optional<List<String>> extra) {
+        if (extra.isEmpty()) {
+            return;
+        }
+        for (String entry : extra.get()) {
+            if (entry == null || entry.isBlank()) {
+                continue;
+            }
+            int split = entry.indexOf('=');
+            String key = split < 0 ? "" : entry.substring(0, split).trim();
+            if (key.isEmpty()) {
+                LOG.warnv("Ignoring floci.services.ui.extra-env entry \"{0}\": expected KEY=VALUE.", entry);
+                continue;
+            }
+            String supportedKey = RESERVED_EXTRA_ENV.get(key);
+            if (supportedKey != null) {
+                LOG.warnv("Ignoring floci.services.ui.extra-env entry \"{0}\": {1} is set from the "
+                                + "console profile and is used by the port binding, the readiness probe "
+                                + "and adoption. Set {2} instead.", entry, key, supportedKey);
+                continue;
+            }
+            env.put(key, entry.substring(split + 1));
+        }
     }
 
     /**
@@ -401,21 +529,24 @@ public class FlociUiManager {
     }
 
     /**
-     * True when an adoption candidate's baked-in {@code FLOCI_ENDPOINT} no longer matches the
+     * True when an adoption candidate's baked-in endpoint variable no longer matches the
      * endpoint Floci would hand a freshly created sidecar.
      *
      * <p>The sidecar's endpoint is fixed at container-create time, but Floci's container IP
      * changes on every restart. A sidecar that outlives Floci therefore keeps addressing the
      * previous instance and polls a dead address forever. A missing endpoint counts as drift:
-     * unknown is not the same as correct, and adopting it would strand the UI just as badly.
+     * unknown is not the same as correct, and adopting it would strand the console just as badly.
+     * That is also what recreates, exactly once, a sidecar left by a Floci old enough to have
+     * injected only {@code FLOCI_ENDPOINT}.
      */
     static boolean endpointDrifted(List<String> existingEnv, String expected) {
         if (existingEnv == null) {
             return true;
         }
+        String prefix = CANONICAL_ENDPOINT_ENV + "=";
         return existingEnv.stream()
-                .filter(entry -> entry.startsWith(FLOCI_ENDPOINT_ENV + "="))
-                .map(entry -> entry.substring(FLOCI_ENDPOINT_ENV.length() + 1))
+                .filter(entry -> entry.startsWith(prefix))
+                .map(entry -> entry.substring(prefix.length()))
                 .findFirst()
                 .map(current -> !current.equals(expected))
                 .orElse(true);
@@ -454,11 +585,12 @@ public class FlociUiManager {
      * container (where the published host port is not reachable from inside).
      * Falls back to {@code localhost:hostPort} if the endpoint is unavailable.
      */
-    String resolveProbeUrl(EndpointInfo endpoint, int fallbackHostPort) {
+    String resolveProbeUrl(ConsoleProfile console, EndpointInfo endpoint, int fallbackHostPort) {
+        String path = console.healthPath();
         if (endpoint != null) {
-            return "http://" + endpoint.host() + ":" + endpoint.port() + RUNTIME_STATUS_PATH;
+            return "http://" + endpoint.host() + ":" + endpoint.port() + path;
         }
-        return "http://localhost:" + fallbackHostPort + RUNTIME_STATUS_PATH;
+        return "http://localhost:" + fallbackHostPort + path;
     }
 
     private record RuntimeProbe(boolean ready, String error) {
@@ -479,26 +611,64 @@ public class FlociUiManager {
             if (code != HttpURLConnection.HTTP_OK) {
                 return new RuntimeProbe(false, null);
             }
-            JsonNode status;
-            try (var input = conn.getInputStream()) {
-                status = objectMapper.readTree(input);
-            }
-            String runtime = status.path("runtime").asText("");
-            if ("reachable".equalsIgnoreCase(runtime)) {
+            ConsoleProfile console = this.profile;
+            if (!console.hasReadyField()) {
+                // A console whose health endpoint is a plain liveness check has nothing more to
+                // say than 200: reading a field that is not there would report it as never ready.
                 return new RuntimeProbe(true, null);
             }
-            if ("unavailable".equalsIgnoreCase(runtime)) {
-                return new RuntimeProbe(false, runtimeUnavailableMessage(status));
+            JsonNode health;
+            try (var input = conn.getInputStream()) {
+                health = objectMapper.readTree(input);
+            }
+            String reported = health.path(console.healthReadyField()).asText("");
+            if (console.healthReadyValue().equalsIgnoreCase(reported)) {
+                return new RuntimeProbe(true, null);
+            }
+            if (console.healthUnavailableValue().equalsIgnoreCase(reported)) {
+                return new RuntimeProbe(false, unavailableMessage(console, health));
             }
             return new RuntimeProbe(false, null);
         } catch (Exception e) {
-            LOG.debugv(e, "Failed to probe floci-ui runtime at {0}", url);
+            LOG.debugv(e, "Failed to probe the web console health endpoint at {0}", url);
             return new RuntimeProbe(false, null);
         } finally {
             if (conn != null) {
                 conn.disconnect();
             }
         }
+    }
+
+    /**
+     * Whether an adoption candidate must be recreated because it is not running.
+     *
+     * <p>Adopting an exited container leaves {@link #status()} in a loop: the probe fails, the
+     * container reads as gone, the re-arm calls back into here, and the same dead container is
+     * adopted again on every poll with nothing ever starting it. Recreating is the only exit, and
+     * it is also the right answer: a console that exited did so for a reason its next start will
+     * either clear or report.
+     *
+     * <p>Presence the runtime could not report is left alone, the same judgement
+     * {@link #shouldReArm} makes: acting on an unknown is how a transient hiccup destroys a
+     * healthy sidecar.
+     */
+    static boolean mustRecreate(ContainerPresence presence) {
+        return presence == ContainerPresence.STOPPED || presence == ContainerPresence.ABSENT;
+    }
+
+    private boolean replaceIfNotRunning(Container existing) {
+        if (!mustRecreate(lifecycleManager.presenceOf(existing.getId()))) {
+            return false;
+        }
+        LOG.infov("Existing web console sidecar {0} is not running, recreating it rather than "
+                + "adopting a container that would never answer", existing.getId());
+        try {
+            lifecycleManager.stopAndRemove(existing.getId(), null);
+        } catch (Exception e) {
+            LOG.warnv("Could not remove the stopped web console sidecar {0}: {1}",
+                    existing.getId(), e.getMessage());
+        }
+        return true;
     }
 
     /**
@@ -525,23 +695,29 @@ public class FlociUiManager {
         if (!shouldReplace(lifecycleManager.containerEnv(existing.getId()), expected)) {
             return false;
         }
-        LOG.infov("Existing floci-ui sidecar {0} points at a stale Floci endpoint (expected {1}) "
-                        + "— recreating it so the UI reconnects without touching Floci",
+        LOG.infov("Existing web console sidecar {0} points at a stale Floci endpoint (expected {1}) "
+                        + "recreating it so the console reconnects without touching Floci",
                 existing.getId(), expected);
         try {
             lifecycleManager.stopAndRemove(existing.getId(), null);
             return true;
         } catch (Exception e) {
-            LOG.warnv("Could not remove stale floci-ui sidecar {0}, adopting it instead: {1}",
+            LOG.warnv("Could not remove the stale web console sidecar {0}, adopting it instead: {1}",
                     existing.getId(), e.getMessage());
             return false;
         }
     }
 
-    private static String runtimeUnavailableMessage(JsonNode status) {
-        String endpoint = status.path("endpoint").asText("");
-        String error = status.path("error").asText("");
-        StringBuilder message = new StringBuilder("The Floci UI cannot reach Floci");
+    /**
+     * Turns a console's own "I cannot reach Floci" report into the message the interstitial shows.
+     * The contract asks for {@code endpoint} and {@code error} alongside the status; both are
+     * optional, and a console that omits them still gets a usable sentence.
+     */
+    private static String unavailableMessage(ConsoleProfile console, JsonNode health) {
+        String endpoint = health.path("endpoint").asText("");
+        String error = health.path("error").asText("");
+        StringBuilder message = new StringBuilder(capitalize(console.displayName()))
+                .append(" cannot reach Floci");
         if (!endpoint.isBlank()) {
             message.append(" at ").append(endpoint);
         }
@@ -551,20 +727,28 @@ public class FlociUiManager {
         return message.append('.').toString();
     }
 
+    private static String capitalize(String text) {
+        if (text == null || text.isEmpty()) {
+            return "The web console";
+        }
+        return Character.toUpperCase(text.charAt(0)) + text.substring(1);
+    }
+
     private void adoptExisting(Container existing) {
         this.containerId = existing.getId();
         try {
-            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT));
-            EndpointInfo endpoint = info.getEndpoint(CONTAINER_INTERNAL_PORT);
+            int internalPort = profile.internalPort();
+            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(internalPort));
+            EndpointInfo endpoint = info.getEndpoint(internalPort);
             this.hostPort = resolveHostPort(endpoint, config.services().ui().port());
-            this.probeUrl = resolveProbeUrl(endpoint, hostPort);
+            this.probeUrl = resolveProbeUrl(profile, endpoint, hostPort);
             this.started = true;
             this.lastError = null;
-            LOG.infov("Adopted existing floci-ui sidecar {0} on host port {1}",
+            LOG.infov("Adopted existing web console sidecar {0} on host port {1}",
                     containerId, String.valueOf(hostPort));
             attachLogStream();
         } catch (Exception e) {
-            LOG.warnv("Failed to adopt existing floci-ui sidecar: {0}", e.getMessage());
+            LOG.warnv("Failed to adopt the existing web console sidecar: {0}", e.getMessage());
             this.containerId = null;
         }
     }
@@ -588,7 +772,7 @@ public class FlociUiManager {
         try {
             previous.close();
         } catch (Exception e) {
-            LOG.debugv("Could not close the previous floci-ui log stream: {0}", e.getMessage());
+            LOG.debugv("Could not close the previous web console log stream: {0}", e.getMessage());
         }
     }
 
@@ -605,16 +789,18 @@ public class FlociUiManager {
     static String describeStartFailure(String image, Throwable e) {
         String detail = messageOf(e);
         if (isImageUnavailable(e)) {
-            return "Could not start the Floci UI: image '" + image + "' is unavailable (" + detail
-                    + "). Pull it with 'docker pull " + image + "', or build it from the floci-ui repo.";
+            return "Could not start the Floci web console: image '" + image + "' is unavailable ("
+                    + detail + "). Pull it with 'docker pull " + image
+                    + "', or build it from the console's repository.";
         }
         if (isRuntimeUnreachable(e)) {
-            return "Could not start the Floci UI: Floci could not reach the container runtime (" + detail
+            return "Could not start the Floci web console: Floci could not reach the container runtime ("
+                    + detail
                     + "). Check that the Docker/Podman socket is mounted into the Floci container and "
                     + "accessible — on SELinux hosts the socket bind-mount may need relabeling "
                     + "(e.g. ':z') or '--security-opt label=disable'.";
         }
-        return "Could not start the Floci UI from image '" + image + "': " + detail + ".";
+        return "Could not start the Floci web console from image '" + image + "': " + detail + ".";
     }
 
     /** True when the failure chain indicates the image itself is missing locally and in the registry. */

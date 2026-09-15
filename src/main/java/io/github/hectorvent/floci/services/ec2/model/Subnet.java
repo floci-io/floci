@@ -26,6 +26,7 @@ public class Subnet {
     private String region;
     private String subnetArn;
     private List<Tag> tags = new ArrayList<>();
+    private List<VpcIpv6CidrBlockAssociation> ipv6CidrBlockAssociationSet = new ArrayList<>();
 
     public Subnet() {}
 
@@ -76,4 +77,7 @@ public class Subnet {
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }
+
+    public List<VpcIpv6CidrBlockAssociation> getIpv6CidrBlockAssociationSet() { return ipv6CidrBlockAssociationSet; }
+    public void setIpv6CidrBlockAssociationSet(List<VpcIpv6CidrBlockAssociation> ipv6CidrBlockAssociationSet) { this.ipv6CidrBlockAssociationSet = ipv6CidrBlockAssociationSet; }
 }

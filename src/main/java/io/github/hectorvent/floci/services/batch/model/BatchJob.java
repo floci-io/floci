@@ -39,6 +39,11 @@ public class BatchJob {
     private String region;
     private String accountId;
     private String containerImage;
+    private String arrayJobId;
+    private Integer arrayIndex;
+    private Integer arraySize;
+    private BatchNodeProperties nodeProperties;
+    private List<BatchNodeExecution> nodeExecutions = new ArrayList<>();
 
     public String getJobId() {
         return jobId;
@@ -246,5 +251,45 @@ public class BatchJob {
 
     public void setContainerImage(String containerImage) {
         this.containerImage = containerImage;
+    }
+
+    public String getArrayJobId() {
+        return arrayJobId;
+    }
+
+    public void setArrayJobId(String arrayJobId) {
+        this.arrayJobId = arrayJobId;
+    }
+
+    public Integer getArrayIndex() {
+        return arrayIndex;
+    }
+
+    public void setArrayIndex(Integer arrayIndex) {
+        this.arrayIndex = arrayIndex;
+    }
+
+    public Integer getArraySize() {
+        return arraySize;
+    }
+
+    public void setArraySize(Integer arraySize) {
+        this.arraySize = arraySize;
+    }
+
+    public BatchNodeProperties getNodeProperties() {
+        return nodeProperties;
+    }
+
+    public void setNodeProperties(BatchNodeProperties nodeProperties) {
+        this.nodeProperties = nodeProperties;
+    }
+
+    public List<BatchNodeExecution> getNodeExecutions() {
+        return nodeExecutions;
+    }
+
+    public void setNodeExecutions(List<BatchNodeExecution> nodeExecutions) {
+        this.nodeExecutions = nodeExecutions != null ? nodeExecutions : new ArrayList<>();
     }
 }

@@ -595,6 +595,25 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /**
+     * Labels declared on an image, empty when they could not be read.
+     *
+     * <p>Ensures the image is present first, so the labels of an image that has never been pulled
+     * are still readable. A failure is reported as empty rather than thrown: labels are advisory
+     * metadata, and a caller that cannot read them must fall back to its own defaults rather than
+     * fail the start it was preparing.
+     */
+    public Optional<Map<String, String>> imageLabels(String image) {
+        try {
+            String resolved = imageCacheService.ensureImageExists(image);
+            Map<String, String> labels = dockerClient.inspectImageCmd(resolved).exec().getConfig().getLabels();
+            return Optional.of(labels == null ? Map.of() : Map.copyOf(labels));
+        } catch (Exception e) {
+            LOG.debugv("Could not read labels of image {0}: {1}", image, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     /** Whether a container exists and is running — distinguishing "gone" from "cannot tell". */
     public enum ContainerPresence {
         /** The container exists and is running. */
