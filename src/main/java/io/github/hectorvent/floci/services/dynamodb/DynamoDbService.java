@@ -1566,7 +1566,8 @@ public class DynamoDbService implements ResourceProvider {
         if (key == null) {
             return;
         }
-        TableDefinition table = describeTable(target.path("TableName").asText(), region);
+        String tableName = canonicalTableName(region, target.path("TableName").asText());
+        TableDefinition table = requireActiveTable(regionKey(region, tableName), tableName);
         List<String> keyNames = table.getSortKeyName() == null
                 ? List.of(table.getPartitionKeyName())
                 : List.of(table.getPartitionKeyName(), table.getSortKeyName());

@@ -1783,6 +1783,20 @@ class DynamoDbJsonHandlerTest {
         assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
     }
 
+    // Checked against DynamoDB in eu-west-2: a CREATING table is not found before any key is checked.
+    @Test
+    void transactWriteItemsAnswersResourceNotFoundForACreatingTableBeforeTheKeyCheck() {
+        createUsersTable("eu-west-1").setTableStatus("CREATING");
+        ObjectNode wrong = mapper.createObjectNode();
+        wrong.set("userId", attributeValue("N", "5"));
+        ObjectNode request = transactWriteOf(transactMember("Put", "Users", "Item", wrong));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("Requested resource not found", ex.getMessage());
+    }
+
     @Test
     void transactWriteItemsFailsTheRequestOnAnEmptyKeyAheadOfAKeyMismatch() {
         createUsersTable("eu-west-1");
