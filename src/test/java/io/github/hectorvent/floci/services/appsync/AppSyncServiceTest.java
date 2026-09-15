@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -82,6 +83,24 @@ class AppSyncServiceTest {
         assertTrue(service.validateApiKey(api.getApiId(), created.getId()).isPresent());
         assertTrue(service.validateApiKey(api.getApiId(), "da2-" + "x".repeat(26)).isEmpty());
         assertEquals(created.getId(), service.getApiKey(api.getApiId(), created.getId()).getId());
+    }
+
+    @Test
+    void crossAccountDataPlaneLookupDoesNotWriteIntoDefaultAccount() {
+        AccountAwareStorageBackend<GraphqlApi> apiStore = AccountAwareStorageBackend.inMemory("000000000000");
+        GraphqlApi api = new GraphqlApi();
+        api.setApiId("api-foreign");
+        api.setArn("arn:aws:appsync:us-east-1:111111111111:apis/api-foreign");
+        api.setUris(Map.of("GRAPHQL", "http://old-host/v1/apis/api-foreign/graphql"));
+        apiStore.putForAccount("111111111111", api.getApiId(), api);
+        service = newService(Clock.fixed(NOW, ZoneOffset.UTC), "http://new-host:4566", apiStore);
+
+        assertTrue(service.findGraphqlApiAnyAccount(api.getApiId()).isPresent());
+
+        assertFalse(apiStore.getForAccount("000000000000", api.getApiId()).isPresent());
+        assertEquals("http://old-host/v1/apis/api-foreign/graphql",
+                apiStore.getForAccount("111111111111", api.getApiId()).orElseThrow()
+                        .getUris().get("GRAPHQL"));
     }
 
     @Test
