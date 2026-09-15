@@ -31,6 +31,18 @@ class Ec2RunInstancesDryRunTest {
     }
 
     @Test
+    @DisplayName("A dry run with a missing subnet returns the launch validation error")
+    void missingSubnetIsValidatedDuringDryRun() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            Ec2Exception error = assertThrows(Ec2Exception.class, () -> ec2.runInstances(r ->
+                    r.imageId("ami-0abcdef1234567890").instanceType(InstanceType.T3_MICRO)
+                            .minCount(1).maxCount(1).subnetId("subnet-missing").dryRun(true)));
+            assertThat(error.statusCode()).isEqualTo(400);
+            assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidSubnetID.NotFound");
+        }
+    }
+
+    @Test
     @DisplayName("RunInstances dry run returns DryRunOperation without reserving an instance or client token")
     void dryRunHasNoLaunchSideEffects() {
         String marker = UUID.randomUUID().toString();

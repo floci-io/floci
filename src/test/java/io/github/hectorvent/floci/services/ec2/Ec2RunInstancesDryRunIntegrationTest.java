@@ -29,6 +29,22 @@ class Ec2RunInstancesDryRunIntegrationTest {
                 .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
     }
 
+    @ParameterizedTest
+    @CsvSource({"true,SubnetId,subnet-missing,InvalidSubnetID.NotFound",
+            "false,SubnetId,subnet-missing,InvalidSubnetID.NotFound",
+            "true,SecurityGroupId.1,sg-missing,InvalidGroup.NotFound",
+            "false,SecurityGroupId.1,sg-missing,InvalidGroup.NotFound",
+            "true,NetworkInterface.1.NetworkInterfaceId,eni-missing,InvalidNetworkInterfaceID.NotFound",
+            "false,NetworkInterface.1.NetworkInterfaceId,eni-missing,InvalidNetworkInterfaceID.NotFound"})
+    void invalidLaunchResourcesKeepTheirValidationError(boolean dryRun, String parameter,
+                                                       String value, String errorCode) {
+        given().header("Authorization", AUTH).formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
+                .formParam("DryRun", dryRun).formParam(parameter, value)
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo(errorCode));
+    }
+
     @Test
     void dryRunWithoutAnImageReturnsMissingParameter() {
         given().header("Authorization", AUTH).formParam("Action", "RunInstances")

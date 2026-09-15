@@ -767,17 +767,10 @@ public class Ec2QueryHandler {
             }
         }
 
-        if (imageId == null || imageId.isBlank()) {
-            throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
-        }
-        Ec2Service.validateMetadataOptions(metadataOptions);
-        Ec2Service.validateCreditSpecification(creditSpecificationCpuCredits);
-        checkDryRun(p);
-
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
-                creditSpecificationCpuCredits, userDataEncoded);
+                creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")));
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();

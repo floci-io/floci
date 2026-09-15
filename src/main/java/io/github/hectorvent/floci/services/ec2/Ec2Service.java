@@ -2487,6 +2487,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                     int networkInterfaceDeviceIndex, String availabilityZone,
                                     LaunchTemplateData.MetadataOptions metadataOptions,
                                     String creditSpecificationCpuCredits, String encodedUserData) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, false);
+    }
+
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -2596,6 +2611,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     dockerImage = new ResolvedAmiImage(captured, dockerImage.guestRuntime(),
                             dockerImage.cloudInit(), dockerImage.dockerPlatform());
                 }
+            }
+            if (dryRun) {
+                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
             for (int i = 0; i < count; i++) {
                 String instanceId = "i-" + randomHex(17);
@@ -3309,7 +3327,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return inst;
     }
 
-    static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
+    private static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
         if (options == null) {
             return;
         }
@@ -3334,7 +3352,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         + String.join(", ", allowed) + ".", 400);
     }
 
-    static void validateCreditSpecification(String cpuCredits) {
+    private static void validateCreditSpecification(String cpuCredits) {
         if (cpuCredits == null || "standard".equals(cpuCredits) || "unlimited".equals(cpuCredits)) {
             return;
         }
