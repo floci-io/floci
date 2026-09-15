@@ -33,13 +33,19 @@ class AppSyncGraphQlIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=111111111111/20260205/us-east-1/appsync/aws4_request";
     private static final String DYNAMODB_AUTH =
             "AWS4-HMAC-SHA256 Credential=111111111111/20260205/us-east-1/dynamodb/aws4_request";
+    private static final String IAM_AUTH =
+            "AWS4-HMAC-SHA256 Credential=111111111111/20260205/us-east-1/iam/aws4_request";
     private static final String TABLE = "GqlTodos";
+    private static final String ALLOWED_ROLE = "AppSyncGqlAllowedRole";
+    private static final String DENIED_ROLE = "AppSyncGqlDeniedRole";
+    private static final String ROLE_POLICY = "DynamoDbAccess";
 
     private static final String SCHEMA = """
             type Todo { id: ID! title: String owner: String secret: String @aws_iam child: Todo }
             type Query {
               hello(name: String): String
               getTodo(id: ID!): Todo
+              getTodoDenied(id: ID!): Todo
               failTodo: Todo
               partial: String
               echoReturn: String
@@ -85,6 +91,10 @@ class AppSyncGraphQlIntegrationTest {
 
     private static RequestSpecification signed() {
         return given().header("Authorization", AUTH).contentType("application/json");
+    }
+
+    private static RequestSpecification iamSigned() {
+        return given().header("Authorization", IAM_AUTH);
     }
 
     private static ValidatableResponse query(String query) {
@@ -134,6 +144,28 @@ class AppSyncGraphQlIntegrationTest {
                         """.formatted(TABLE))
                 .when().post("/").then().statusCode(200);
 
+        String trustPolicy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                 "Principal":{"Service":"appsync.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                """;
+        iamSigned().formParam("Action", "CreateRole")
+                .formParam("RoleName", ALLOWED_ROLE)
+                .formParam("AssumeRolePolicyDocument", trustPolicy)
+                .when().post("/").then().statusCode(200);
+        iamSigned().formParam("Action", "PutRolePolicy")
+                .formParam("RoleName", ALLOWED_ROLE)
+                .formParam("PolicyName", ROLE_POLICY)
+                .formParam("PolicyDocument", """
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                         "Action":["dynamodb:GetItem","dynamodb:PutItem"],
+                         "Resource":"arn:aws:dynamodb:us-east-1:111111111111:table/GqlTodos"}]}
+                        """)
+                .when().post("/").then().statusCode(200);
+        iamSigned().formParam("Action", "CreateRole")
+                .formParam("RoleName", DENIED_ROLE)
+                .formParam("AssumeRolePolicyDocument", trustPolicy)
+                .when().post("/").then().statusCode(200);
+
         apiId = signed().body(Map.of("name", "gql-vtl", "authenticationType", "API_KEY"))
                 .when().post("/v1/apis").then().statusCode(200)
                 .extract().path("graphqlApi.apiId");
@@ -148,6 +180,11 @@ class AppSyncGraphQlIntegrationTest {
         signed().body(Map.of("name", "none", "type", "NONE"))
                 .when().post("/v1/apis/" + apiId + "/datasources").then().statusCode(200);
         signed().body(Map.of("name", "todos", "type", "AMAZON_DYNAMODB",
+                        "serviceRoleArn", "arn:aws:iam::111111111111:role/" + ALLOWED_ROLE,
+                        "dynamodbConfig", Map.of("tableName", TABLE, "awsRegion", "us-east-1")))
+                .when().post("/v1/apis/" + apiId + "/datasources").then().statusCode(200);
+        signed().body(Map.of("name", "todosDenied", "type", "AMAZON_DYNAMODB",
+                        "serviceRoleArn", "arn:aws:iam::111111111111:role/" + DENIED_ROLE,
                         "dynamodbConfig", Map.of("tableName", TABLE, "awsRegion", "us-east-1")))
                 .when().post("/v1/apis/" + apiId + "/datasources").then().statusCode(200);
 
@@ -166,6 +203,10 @@ class AppSyncGraphQlIntegrationTest {
                         + "\"key\":{\"id\":$util.dynamodb.toDynamoDBJson($ctx.args.id)}}",
                 "#if($ctx.error)$util.error($ctx.error.message, $ctx.error.type)#end"
                         + "#if($util.isNull($ctx.result))#return#end$util.toJson($ctx.result)");
+        createResolver("Query", "getTodoDenied", "todosDenied",
+                "{\"version\":\"2018-05-29\",\"operation\":\"GetItem\","
+                        + "\"key\":{\"id\":$util.dynamodb.toDynamoDBJson($ctx.args.id)}}",
+                RERAISE_RESPONSE);
         createResolver("Query", "failTodo", "none",
                 "$util.error(\"Custom failure\", \"CustomError\", "
                         + "{\"id\":\"1\",\"title\":\"hidden\"}, {\"code\":42})",
@@ -238,6 +279,11 @@ class AppSyncGraphQlIntegrationTest {
                 .body("{\"TableName\":\"" + TABLE + "\",\"Key\":{\"id\":{\"S\":\"1\"}}}")
                 .when().post("/").then().statusCode(200)
                 .body("Item.title.S", equalTo("milk"));
+
+        query("query { getTodoDenied(id: \"1\") { id title } }")
+                .body("data.getTodoDenied", nullValue())
+                .body("errors[0].errorType", equalTo("DynamoDB:AccessDeniedException"))
+                .body("errors[0].message", containsString("dynamodb:GetItem"));
     }
 
     @Test
@@ -325,6 +371,16 @@ class AppSyncGraphQlIntegrationTest {
                 .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
                 .contentType("application/x-amz-json-1.0")
                 .body("{\"TableName\":\"" + TABLE + "\"}")
+                .when().post("/").then().statusCode(200);
+        iamSigned().formParam("Action", "DeleteRolePolicy")
+                .formParam("RoleName", ALLOWED_ROLE)
+                .formParam("PolicyName", ROLE_POLICY)
+                .when().post("/").then().statusCode(200);
+        iamSigned().formParam("Action", "DeleteRole")
+                .formParam("RoleName", ALLOWED_ROLE)
+                .when().post("/").then().statusCode(200);
+        iamSigned().formParam("Action", "DeleteRole")
+                .formParam("RoleName", DENIED_ROLE)
                 .when().post("/").then().statusCode(200);
     }
 }

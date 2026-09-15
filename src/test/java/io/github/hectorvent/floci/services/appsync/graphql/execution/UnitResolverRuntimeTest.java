@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.execution;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
+import io.github.hectorvent.floci.services.appsync.graphql.execution.datasource.AppSyncDataSourceRoleAuthorizer;
 import io.github.hectorvent.floci.services.appsync.graphql.execution.datasource.DynamoDbDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.execution.datasource.NoneDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
@@ -29,7 +30,8 @@ class UnitResolverRuntimeTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
     private final UnitResolverRuntime runtime = new UnitResolverRuntime(new AppSyncVtlEngine(), mapper,
-            new NoneDataSourceInvoker(), new DynamoDbDataSourceInvoker(dynamoDb, mapper));
+            new NoneDataSourceInvoker(), new DynamoDbDataSourceInvoker(
+                    dynamoDb, mapper, mock(AppSyncDataSourceRoleAuthorizer.class)));
 
     private final GraphQlRequestContext rc = new GraphQlRequestContext("api", "000000000000", "us-east-1",
             "API Key Authorization", null, Map.of("x-api-key", "da2-x"), Map.of("v", 1));

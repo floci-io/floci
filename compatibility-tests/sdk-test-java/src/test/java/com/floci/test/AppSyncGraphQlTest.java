@@ -2,6 +2,7 @@ package com.floci.test;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
@@ -13,6 +14,7 @@ import software.amazon.awssdk.services.dynamodb.model.BillingMode;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
 import software.amazon.awssdk.services.dynamodb.model.KeyType;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
+import software.amazon.awssdk.services.iam.IamClient;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -34,19 +36,23 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AppSyncGraphQlTest {
 
     private static final String TABLE = "sdk-gql-todos";
+    private static final String ROLE_POLICY = "AppSyncDynamoDbAccess";
     private static final ObjectMapper mapper = new ObjectMapper();
-    private static final HttpClient http = HttpClient.newHttpClient();
+    private static final HttpClient http = TestFixtures.emulatorHttpClient();
 
     private static AppSyncClient appSync;
     private static DynamoDbClient dynamoDb;
+    private static IamClient iam;
     private static String apiId;
     private static String graphqlUri;
     private static String apiKey;
+    private static String roleName;
 
     @BeforeAll
     static void setup() {
         appSync = TestFixtures.appSyncClient();
         dynamoDb = TestFixtures.dynamoDbClient();
+        iam = TestFixtures.iamClient();
     }
 
     @AfterAll
@@ -63,11 +69,22 @@ class AppSyncGraphQlTest {
         } catch (Exception e) {
             System.err.println("cleanup: failed to delete table " + TABLE + ": " + e.getMessage());
         }
+        if (roleName != null) {
+            try {
+                iam.deleteRolePolicy(r -> r.roleName(roleName).policyName(ROLE_POLICY));
+                iam.deleteRole(r -> r.roleName(roleName));
+            } catch (Exception e) {
+                System.err.println("cleanup: failed to delete IAM role " + roleName + ": " + e.getMessage());
+            }
+        }
         if (appSync != null) {
             appSync.close();
         }
         if (dynamoDb != null) {
             dynamoDb.close();
+        }
+        if (iam != null) {
+            iam.close();
         }
     }
 
@@ -81,7 +98,7 @@ class AppSyncGraphQlTest {
         }
         HttpResponse<String> resp = http.send(req.build(), HttpResponse.BodyHandlers.ofString());
         JsonNode json = mapper.readTree(resp.body());
-        ((com.fasterxml.jackson.databind.node.ObjectNode) json).put("_status", resp.statusCode());
+        ((ObjectNode) json).put("_status", resp.statusCode());
         return json;
     }
 
@@ -96,6 +113,16 @@ class AppSyncGraphQlTest {
                 .keySchema(KeySchemaElement.builder().attributeName("id").keyType(KeyType.HASH).build())
                 .attributeDefinitions(AttributeDefinition.builder().attributeName("id").attributeType(ScalarAttributeType.S).build())
                 .billingMode(BillingMode.PAY_PER_REQUEST));
+
+        roleName = TestFixtures.uniqueName("sdk-gql-appsync-role");
+        String roleArn = iam.createRole(r -> r.roleName(roleName).assumeRolePolicyDocument("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                 "Principal":{"Service":"appsync.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                """)).role().arn();
+        iam.putRolePolicy(r -> r.roleName(roleName).policyName(ROLE_POLICY).policyDocument("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                 "Action":["dynamodb:GetItem","dynamodb:PutItem"],"Resource":"*"}]}
+                """));
 
         GraphqlApi api = appSync.createGraphqlApi(r -> r.name("sdk-gql").authenticationType(AuthenticationType.API_KEY)).graphqlApi();
         apiId = api.apiId();
@@ -125,6 +152,7 @@ class AppSyncGraphQlTest {
         assertThat(status).isEqualTo(SchemaStatus.SUCCESS);
 
         appSync.createDataSource(r -> r.apiId(apiId).name("todos").type(DataSourceType.AMAZON_DYNAMODB)
+                .serviceRoleArn(roleArn)
                 .dynamodbConfig(d -> d.tableName(TABLE).awsRegion("us-east-1")));
 
         String reraise = "#if($ctx.error)$util.error($ctx.error.message, $ctx.error.type)#end$util.toJson($ctx.result)";
