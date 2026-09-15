@@ -10,7 +10,6 @@ Run with: pytest tools/docs -q  (or: make docs-test)
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 import pytest
 
