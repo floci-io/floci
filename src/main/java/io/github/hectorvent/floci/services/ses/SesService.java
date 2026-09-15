@@ -13,7 +13,6 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
-import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
@@ -24,7 +23,6 @@ import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.Topic;
-import io.github.hectorvent.floci.services.ses.model.TopicPreference;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
@@ -83,8 +81,9 @@ public class SesService {
     private final SesSuppressionService suppressionService;
     // Dedicated IP pools extracted to SesDedicatedIpService. The facade delegates.
     private final SesDedicatedIpService dedicatedIpService;
-    // Contact lists and contacts (two stores) extracted to SesContactService. The
-    // facade delegates, and its send-path list-management orchestration calls into the service.
+    // Contact lists and contacts (two stores) live in SesContactService, which the v2 controller
+    // and the unsubscribe endpoint call directly; the facade only reaches it from the send-path
+    // list-management orchestration and the ARN-dispatched tagging.
     private final SesContactService contactService;
     // Identity (sending authorization) policy storage, extracted to SesPolicyService.
     // The facade keeps the identity-existence check and delegates the rest.
@@ -1160,65 +1159,6 @@ public class SesService {
 
     public void deleteDedicatedIpPool(String poolName, String region) {
         dedicatedIpService.deleteDedicatedIpPool(poolName, region);
-    }
-
-
-    // Contact lists and contacts live in SesContactService; the facade forwards.
-    // Its send-path list-management (collectListManagementOptOuts) also calls into that service.
-
-    public ContactList createContactList(String name, String description, List<Topic> topics,
-                                         List<Tag> tags, String region) {
-        return contactService.createContactList(name, description, topics, tags, region);
-    }
-
-    public ContactList getContactList(String name, String region) {
-        return contactService.getContactList(name, region);
-    }
-
-    public List<ContactList> listContactLists(String region) {
-        return contactService.listContactLists(region);
-    }
-
-    public ContactList updateContactList(String name, String description, boolean descriptionPresent,
-                                         List<Topic> topics, String region) {
-        return contactService.updateContactList(name, description, descriptionPresent, topics, region);
-    }
-
-    public void deleteContactList(String name, String region) {
-        contactService.deleteContactList(name, region);
-    }
-
-    public Contact createContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
-                                 Boolean unsubscribeAll, String attributesData, String region) {
-        return contactService.createContact(listName, emailAddress, topicPreferences, unsubscribeAll,
-                attributesData, region);
-    }
-
-    public SesContactService.ContactWithList getContact(String listName, String emailAddress, String region) {
-        return contactService.getContact(listName, emailAddress, region);
-    }
-
-    public SesContactService.ContactsWithList listContacts(String listName, String region) {
-        return contactService.listContacts(listName, region);
-    }
-
-    public Contact updateContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
-                                 boolean topicPreferencesPresent, Boolean unsubscribeAll, String attributesData,
-                                 String region) {
-        return contactService.updateContact(listName, emailAddress, topicPreferences, topicPreferencesPresent,
-                unsubscribeAll, attributesData, region);
-    }
-
-    public void deleteContact(String listName, String emailAddress, String region) {
-        contactService.deleteContact(listName, emailAddress, region);
-    }
-
-    public List<TopicPreference> deriveTopicDefaultPreferences(Contact contact, ContactList list) {
-        return contactService.deriveTopicDefaultPreferences(contact, list);
-    }
-
-    public void unsubscribeContact(String listName, String emailAddress, String topicName, String region) {
-        contactService.unsubscribeContact(listName, emailAddress, topicName, region);
     }
 
     // ──────────────── Identity (sending authorization) policies ────────────────

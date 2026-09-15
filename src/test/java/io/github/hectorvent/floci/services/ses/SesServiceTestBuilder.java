@@ -57,6 +57,9 @@ final class SesServiceTestBuilder {
     private Route53Service route53Service = null;
     private ObjectMapper objectMapper = new ObjectMapper();
     private Clock clock = Clock.systemUTC();
+    // Built by build(); exposed so tests can seed contacts through the domain service now that the
+    // facade no longer forwards the contact CRUD.
+    private SesContactService contactService;
 
     static SesServiceTestBuilder create() {
         return new SesServiceTestBuilder();
@@ -112,7 +115,15 @@ final class SesServiceTestBuilder {
         return contactListStore;
     }
 
+    SesContactService contactService() {
+        if (contactService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return contactService;
+    }
+
     SesService build() {
+        contactService = new SesContactService(contactListStore, contactStore, clock);
         return new SesService(
                 new SesIdentityService(identityStore, route53Service, clock),
                 new SesSentEmailService(emailStore),
@@ -121,7 +132,7 @@ final class SesServiceTestBuilder {
                 new SesConfigurationSetService(configSetStore),
                 new SesSuppressionService(suppressionStore, accountSuppressionStore, new InMemoryStorage<>()),
                 new SesDedicatedIpService(dedicatedIpPoolStore),
-                new SesContactService(contactListStore, contactStore, clock),
+                contactService,
                 new SesPolicyService(policyStore, objectMapper),
                 new SesCvetService(cvetStore),
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
