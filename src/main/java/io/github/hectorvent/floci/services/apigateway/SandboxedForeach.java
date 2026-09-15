@@ -11,10 +11,10 @@ import java.io.Writer;
  * Drop-in replacement for Velocity's built-in {@code #foreach} directive that checks the current
  * thread's {@link VtlExecutionGuard} deadline before rendering each loop iteration.
  *
- * <p>Registered in place of {@code org.apache.velocity.runtime.directive.Foreach} via the
- * shadowed classpath resource {@code org/apache/velocity/runtime/defaults/directive.properties},
- * so it applies identically to every {@code #foreach} loop evaluated by either the API Gateway or
- * the AppSync VTL engine.
+ * <p>Registered in place of {@code org.apache.velocity.runtime.directive.Foreach} by
+ * {@link VtlSandbox#installSandboxedForeach(org.apache.velocity.app.VelocityEngine)}, so it applies
+ * identically to every {@code #foreach} loop evaluated by either the API Gateway or the AppSync
+ * VTL engine.
  */
 public class SandboxedForeach extends Foreach {
 
