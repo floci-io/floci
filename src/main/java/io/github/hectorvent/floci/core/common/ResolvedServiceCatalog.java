@@ -189,6 +189,11 @@ public class ResolvedServiceCatalog {
                         "redshift-data", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("RedshiftData."), Set.of("redshift-data"), Set.of(), Set.of()),
+                descriptor("redshift-serverless", "redshift-serverless",
+                        config.services().redshiftServerless().enabled(), true,
+                        "redshiftserverless", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("RedshiftServerless."), Set.of("redshift-serverless"), Set.of(), Set.of()),
 
                 descriptor("events", "eventbridge", config.services().eventbridge().enabled(), true,
                         "eventbridge", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,

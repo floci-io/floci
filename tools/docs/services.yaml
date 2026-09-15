@@ -281,6 +281,10 @@ services:
     # ExecuteSql / BatchExecuteSql are the deprecated pre-2020 operations: the handler
     # recognizes them only to return a ValidationException, they are not supported actions.
     exclude_actions: [ExecuteSql, BatchExecuteSql]
+  - service: redshiftserverless
+    doc: docs/services/redshift-serverless.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/redshiftserverless/RedshiftServerlessJsonHandler.java, mode: switch }
   - service: cognitoidentity
     doc: docs/services/cognitoidentity.md
     sources:

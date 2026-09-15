@@ -194,6 +194,8 @@ floci:
     redshift-data:
       enabled: true
       result-ttl-hours: 24
+    redshift-serverless:
+      enabled: true
     neptune:
       enabled: true
       proxy-base-port: 8182

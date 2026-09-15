@@ -259,12 +259,17 @@ When adding functionality:
 6. Obtain storage through `StorageFactory` and implement `Resettable`
 7. List any static `Random` or `SecureRandom` field under `--initialize-at-run-time` in
    `application.yml`
-8. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
-9. Document it: `docs/services/<svc>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in
+8. Check every timestamp member you emit for a `TimestampFormatTrait` before using the
+   epoch-seconds idiom. It is the awsJson1.1 default, but a model can override it per
+   member, and the mismatch is invisible to the AWS CLI because botocore coerces the
+   value, while strict SDKs (Go, Java) reject the whole response. `javap -c` on the SDK
+   model class shows the traits on each `SdkField`
+9. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
+10. Document it: `docs/services/<svc>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in
    `docs/services/index.md`, and a row in the README category table
-10. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and
+11. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and
     `make docs-check`
-11. Add a `TestFixtures` client factory and a `<Svc>Test` in `compatibility-tests/sdk-test-java`
+12. Add a `TestFixtures` client factory and a `<Svc>Test` in `compatibility-tests/sdk-test-java`
 
 ---
 
