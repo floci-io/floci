@@ -1968,6 +1968,70 @@ public interface EmulatorConfig {
         /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
         @WithDefault("30")
         int schemaWorkerShutdownTimeoutSeconds();
+
+        JsRuntimeConfig jsRuntime();
+    }
+
+    /**
+     * The Node sidecar that evaluates {@code APPSYNC_JS} resolver code.
+     *
+     * <p>A sidecar rather than an embedded engine because Floci's published image is a Mandrel
+     * native executable, and Mandrel carries no Truffle languages: there is no in-process
+     * JavaScript to embed. Running real Node also means a resolver bundle executes as written,
+     * ES modules included, instead of through a rewrite that only approximates AppSync.
+     *
+     * <p>Started lazily, on the first resolver that needs it, so an API with no JS resolvers, or
+     * a Floci with no Docker, costs nothing.
+     */
+    interface JsRuntimeConfig {
+        /**
+         * Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENABLED}. Turned off, a JS resolver fails
+         * with an explanatory error instead of silently resolving to null.
+         */
+        @WithDefault("true")
+        boolean enabled();
+
+        /** Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_IMAGE} */
+        @WithDefault("node:22-alpine")
+        String image();
+
+        /** Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_CONTAINER_NAME} */
+        @WithDefault("appsync-js-runtime")
+        String containerName();
+
+        /** Host port to publish, or 0 to let Docker choose one. */
+        @WithDefault("0")
+        int port();
+
+        /** Seconds to wait for the sidecar to answer its health probe. */
+        @WithDefault("60")
+        int startTimeoutSeconds();
+
+        /** Seconds a single resolver evaluation may take. */
+        @WithDefault("30")
+        int evaluationTimeoutSeconds();
+
+        /**
+         * Rejects resolver code that uses JavaScript the APPSYNC_JS runtime does not have, before
+         * evaluating it. Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENFORCE_APPSYNC_SUBSET}
+         *
+         * <p>On by default, because the sidecar is real Node and would otherwise accept async
+         * functions, promises, classes, try/catch, while loops and Node builtin imports, none of
+         * which AWS accepts. Running code locally that cannot deploy is the one failure an emulator
+         * must not have. Turn it off only if Floci rejects something AWS accepts, and please report
+         * it.
+         */
+        @WithDefault("true")
+        boolean enforceAppsyncSubset();
+
+        /**
+         * Keeps the sidecar running when Floci stops, so the next start reuses it and skips the
+         * Node boot. Off by default: a stopped Floci leaving containers behind is surprising.
+         */
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
+
+        Optional<String> dockerNetwork();
     }
 
     interface OamServiceConfig {
