@@ -4,7 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.appconfig.model.*;
+import io.github.hectorvent.floci.services.appconfig.model.Application;
+import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
+import io.github.hectorvent.floci.services.appconfig.model.Deployment;
+import io.github.hectorvent.floci.services.appconfig.model.DeploymentStrategy;
+import io.github.hectorvent.floci.services.appconfig.model.Environment;
+import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersion;
+import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersionSummary;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
@@ -226,6 +232,22 @@ public class AppConfigController {
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         Deployment deployment = service.startDeployment(appId, envId, request);
         return Response.status(201).entity(deployment).build();
+    }
+
+    @GET
+    @Path("/applications/{appId}/environments/{envId}/deployments")
+    public Response listDeployments(@PathParam("appId") String appId,
+                                     @PathParam("envId") String envId,
+                                     @QueryParam("max_results") Integer maxResults,
+                                     @QueryParam("next_token") String nextToken) {
+        AppConfigService.DeploymentPage page = service.listDeployments(appId, envId, maxResults, nextToken);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("Items");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
+        return Response.ok(root).build();
     }
 
     @GET

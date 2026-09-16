@@ -28,6 +28,8 @@ class AppConfigIntegrationTest {
     private static String emptyAppId;
     private static String emptyEnvId;
     private static String emptyProfileId;
+    private static String deploymentNextToken;
+    private static String secondDeploymentNextToken;
 
     @BeforeAll
     static void setup() {
@@ -370,6 +372,85 @@ class AppConfigIntegrationTest {
                 .statusCode(201)
                 .body("State", equalTo("COMPLETE"))
                 .body("DeploymentStrategyId", equalTo("AppConfig.AllAtOnce"));
+    }
+
+    @Test @Order(39)
+    void listDeploymentsReturnsDescendingFirstPage() {
+        deploymentNextToken = given()
+                .queryParam("max_results", 1)
+                .when().get("/applications/" + appId + "/environments/" + envId + "/deployments")
+                .then()
+                .statusCode(200)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].DeploymentNumber", equalTo(3))
+                .body("Items[0].ConfigurationProfileId", equalTo(profileId))
+                .body("Items[0].ConfigurationVersion", equalTo("1"))
+                .body("Items[0].State", equalTo("COMPLETE"))
+                .body("Items[0].ConfigurationName", equalTo("test-profile"))
+                .body("Items[0].Type", equalTo("AWS.Freeform"))
+                .extract().path("NextToken");
+    }
+
+    @Test @Order(40)
+    void listDeploymentsReturnsSecondPageAndConsumesFinalToken() {
+        secondDeploymentNextToken = given()
+                .queryParam("max_results", 1)
+                .queryParam("next_token", deploymentNextToken)
+                .when().get("/applications/" + appId + "/environments/" + envId + "/deployments")
+                .then()
+                .statusCode(200)
+                .body("Items.size()", equalTo(1))
+                .body("Items[0].DeploymentNumber", equalTo(2))
+                .body("NextToken", notNullValue())
+                .extract().path("NextToken");
+
+        given()
+                .queryParam("max_results", 1)
+                .queryParam("next_token", secondDeploymentNextToken)
+                .when().get("/applications/" + appId + "/environments/" + envId + "/deployments")
+                .then()
+                .statusCode(200)
+                .body("Items[0].DeploymentNumber", equalTo(1))
+                .body("NextToken", nullValue());
+
+        given()
+                .queryParam("next_token", secondDeploymentNextToken)
+                .when().get("/applications/" + appId + "/environments/" + envId + "/deployments")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test @Order(41)
+    void listDeploymentsRejectsInvalidPagination() {
+        given()
+                .queryParam("max_results", 0)
+                .when().get("/applications/" + appId + "/environments/" + envId + "/deployments")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        given()
+                .queryParam("max_results", 51)
+                .when().get("/applications/" + appId + "/environments/" + envId + "/deployments")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test @Order(42)
+    void listDeploymentsRejectsMissingResources() {
+        given()
+                .when().get("/applications/missing-app/environments/" + envId + "/deployments")
+                .then()
+                .statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        given()
+                .when().get("/applications/" + appId + "/environments/missing-env/deployments")
+                .then()
+                .statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
     }
 
     // ──────────────────────────── Application tagging ────────────────────────────
