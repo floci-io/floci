@@ -89,8 +89,8 @@ public class NeptuneGremlinProxy {
         Thread t2 = Thread.ofPlatform().daemon(true).name("neptune-relay-b2c-" + clusterId)
                 .start(() -> pipe(backend, client));
         try {
-            t1.join();
             t2.join();
+            t1.join(1_000);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
@@ -111,10 +111,24 @@ public class NeptuneGremlinProxy {
             }
         } catch (IOException ignored) {
             // Normal when either side closes the connection
+        } finally {
+            shutdownOutput(to);
+        }
+    }
+
+    private static void shutdownOutput(Socket s) {
+        try {
+            s.shutdownOutput();
+        } catch (IOException ignored) {
+            // The bridge closes both sockets after both relay directions finish.
         }
     }
 
     private static void closeQuietly(Socket s) {
-        try { s.close(); } catch (IOException ignored) {}
+        try {
+            s.close();
+        } catch (IOException ignored) {
+            // The peer may already have closed the socket.
+        }
     }
 }

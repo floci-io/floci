@@ -169,8 +169,8 @@ public abstract class AbstractRedisAuthProxy {
         Thread t2 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-b2c-" + resourceId)
                 .start(() -> relay(backend, client));
         try {
-            t1.join();
             t2.join();
+            t1.join(1_000);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
@@ -191,6 +191,16 @@ public abstract class AbstractRedisAuthProxy {
             }
         } catch (IOException ignored) {
             // Normal when either side closes the connection
+        } finally {
+            shutdownOutput(to);
+        }
+    }
+
+    private static void shutdownOutput(Socket socket) {
+        try {
+            socket.shutdownOutput();
+        } catch (IOException ignored) {
+            // The bridge closes both sockets after both relay directions finish.
         }
     }
 
