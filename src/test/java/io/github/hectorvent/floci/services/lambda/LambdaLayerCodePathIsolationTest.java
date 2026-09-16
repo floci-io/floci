@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
+import org.mockito.Answers;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -66,6 +67,15 @@ class LambdaLayerCodePathIsolationTest {
     }
 
     @Test
+    void allDotPathSegmentsUseTheSameSafePlaceholderAsCodeStore(@TempDir Path baseDir) throws Exception {
+        LambdaLayerVersion layer = serviceFor(baseDir, "...")
+                .publishLayerVersion("...", "...", request("dots"));
+
+        assertEquals(baseDir.resolve("layers/_/_/_/1").toAbsolutePath().normalize(),
+                Path.of(layer.getCodeLocalPath()).toAbsolutePath().normalize());
+    }
+
+    @Test
     void deletingLayerVersionInOneRegionKeepsTheOtherRegionsCode(@TempDir Path baseDir) throws Exception {
         LambdaLayerStore store = new LambdaLayerStore(AccountAwareStorageBackend.inMemory("111111111111"));
         LambdaLayerService service = serviceFor(baseDir, "111111111111", store);
@@ -112,7 +122,7 @@ class LambdaLayerCodePathIsolationTest {
     }
 
     private static LambdaLayerService serviceFor(Path baseDir, String account, LambdaLayerStore store) {
-        EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+        EmulatorConfig config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
         when(config.services().lambda().codePath()).thenReturn(baseDir.toString());
         when(config.services().lambda().zipMaxEntries()).thenReturn(100_000);
         when(config.services().lambda().executor()).thenReturn("docker");

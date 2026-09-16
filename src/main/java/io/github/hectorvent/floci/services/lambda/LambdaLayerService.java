@@ -585,9 +585,7 @@ public class LambdaLayerService {
     // Request region and configured account become path segments, so "." or ".." cannot navigate.
     private static String pathSegment(String value) {
         String sanitized = value.replaceAll("[^a-zA-Z0-9_\\-.]", "_");
-        return sanitized.isEmpty() || sanitized.equals(".") || sanitized.equals("..")
-                ? sanitized.replace('.', '_') + "_"
-                : sanitized;
+        return sanitized.isEmpty() || sanitized.chars().allMatch(c -> c == '.') ? "_" : sanitized;
     }
 
     private String computeSha256(byte[] data) {
