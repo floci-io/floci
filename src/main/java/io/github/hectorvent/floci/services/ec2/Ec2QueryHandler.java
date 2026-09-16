@@ -1205,8 +1205,17 @@ public class Ec2QueryHandler {
     private Response handleTerminateInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.terminateInstances(region, ids);
+        return xmlResponse(buildInstanceStateChangeXml("TerminateInstancesResponse", changes));
+    }
+
+    /**
+     * The shared {@code instancesSet}/{@code item}/{@code currentState}/{@code previousState}
+     * shape that {@code TerminateInstances}, {@code StartInstances}, and {@code StopInstances}
+     * each return, keyed only by the top-level response element name.
+     */
+    private String buildInstanceStateChangeXml(String responseElementName, List<Map<String, String>> changes) {
         XmlBuilder xml = new XmlBuilder()
-                .start("TerminateInstancesResponse", AwsNamespaces.EC2)
+                .start(responseElementName, AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("instancesSet");
         for (Map<String, String> c : changes) {
@@ -1222,8 +1231,8 @@ public class Ec2QueryHandler {
                     .end("previousState")
                     .end("item");
         }
-        xml.end("instancesSet").end("TerminateInstancesResponse");
-        return xmlResponse(xml.build());
+        xml.end("instancesSet").end(responseElementName);
+        return xml.build();
     }
 
     /**
@@ -1256,49 +1265,13 @@ public class Ec2QueryHandler {
     private Response handleStartInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.startInstances(region, ids);
-        XmlBuilder xml = new XmlBuilder()
-                .start("StartInstancesResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("instancesSet");
-        for (Map<String, String> c : changes) {
-            xml.start("item")
-                    .elem("instanceId", c.get("instanceId"))
-                    .start("currentState")
-                    .elem("code", c.get("currentCode"))
-                    .elem("name", c.get("currentState"))
-                    .end("currentState")
-                    .start("previousState")
-                    .elem("code", c.get("previousCode"))
-                    .elem("name", c.get("previousState"))
-                    .end("previousState")
-                    .end("item");
-        }
-        xml.end("instancesSet").end("StartInstancesResponse");
-        return xmlResponse(xml.build());
+        return xmlResponse(buildInstanceStateChangeXml("StartInstancesResponse", changes));
     }
 
     private Response handleStopInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.stopInstances(region, ids);
-        XmlBuilder xml = new XmlBuilder()
-                .start("StopInstancesResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("instancesSet");
-        for (Map<String, String> c : changes) {
-            xml.start("item")
-                    .elem("instanceId", c.get("instanceId"))
-                    .start("currentState")
-                    .elem("code", c.get("currentCode"))
-                    .elem("name", c.get("currentState"))
-                    .end("currentState")
-                    .start("previousState")
-                    .elem("code", c.get("previousCode"))
-                    .elem("name", c.get("previousState"))
-                    .end("previousState")
-                    .end("item");
-        }
-        xml.end("instancesSet").end("StopInstancesResponse");
-        return xmlResponse(xml.build());
+        return xmlResponse(buildInstanceStateChangeXml("StopInstancesResponse", changes));
     }
 
     private Response handleRebootInstances(MultivaluedMap<String, String> p, String region) {
