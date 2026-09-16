@@ -290,7 +290,7 @@ public class AwsQueryController {
             // the Query/XML wire — SDK parsers fail before they can surface anything useful.
             LOG.errorv(e, "Unhandled error dispatching Query action {0} for service {1}", action, service);
             return xmlErrorResponse("InternalFailure",
-                    "Unexpected error: " + e.getMessage(), 500, "Receiver");
+                    "Unexpected error: " + AwsErrorMessages.describe(e), 500, "Receiver");
         }
     }
 

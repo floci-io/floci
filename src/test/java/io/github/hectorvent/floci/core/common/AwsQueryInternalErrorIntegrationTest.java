@@ -40,6 +40,23 @@ class AwsQueryInternalErrorIntegrationTest {
             .body("ErrorResponse.Error.Message", containsString("simulated handler bug"));
     }
 
+    @Test
+    void messagelessHandlerExceptionNamesTheExceptionClass() {
+        // On the native image an NPE carries no message; "Unexpected error: null" is what the
+        // reporter of #3356 saw. The class name is the least a caller needs to file a report.
+        when(iamService.listUsers(any())).thenThrow(new NullPointerException());
+        given()
+            .formParam("Action", "ListUsers")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(500)
+            .body("ErrorResponse.Error.Code", equalTo("InternalFailure"))
+            .body("ErrorResponse.Error.Message", equalTo("Unexpected error: NullPointerException"));
+    }
+
     /**
      * The catch-all must not swallow AwsException. CloudWatch Metrics is the Query handler that
      * renders no error XML of its own, so its AwsException reaches the controller: it has to keep

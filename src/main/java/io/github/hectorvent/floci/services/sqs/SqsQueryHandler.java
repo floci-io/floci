@@ -44,7 +44,7 @@ public class SqsQueryHandler {
         } catch (Exception e) {
             LOG.errorv(e, "Unexpected error in SQS {0}", action);
             return AwsQueryResponse.error("InternalError",
-                    "Unexpected error: " + e.getMessage(), AwsNamespaces.SQS, 500);
+                    "Unexpected error: " + AwsErrorMessages.describe(e), AwsNamespaces.SQS, 500);
         }
     }
 

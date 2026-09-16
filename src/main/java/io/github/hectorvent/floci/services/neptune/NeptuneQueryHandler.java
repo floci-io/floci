@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.neptune;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
@@ -67,7 +68,7 @@ public class NeptuneQueryHandler {
         } catch (Exception e) {
             LOG.errorv(e, "Unexpected error in Neptune {0}", action);
             return AwsQueryResponse.error("InternalFailure",
-                    "Unexpected error: " + e.getMessage(), AwsNamespaces.RDS, 500);
+                    "Unexpected error: " + AwsErrorMessages.describe(e), AwsNamespaces.RDS, 500);
         }
     }
 
