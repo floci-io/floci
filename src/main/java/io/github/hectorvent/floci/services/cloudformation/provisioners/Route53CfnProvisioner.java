@@ -21,8 +21,10 @@ import java.util.UUID;
  * <p>A record set is a name-only resource here, as it was in the legacy
  * {@code CloudFormationResourceProvisioner} it moved out of: nothing is written to the zone,
  * {@code Ref} is the record name (or a generated {@code record-} id when the template gives
- * none), and {@code Fn::GetAtt Id}, the registry schema's only read-only property, resolves to
- * the same value. Writing the record through {@code ChangeResourceRecordSets} is a follow-up.
+ * none), and no {@code Fn::GetAtt} attribute is published. The registry schema lists {@code Id}
+ * as read-only, but the type has no registry handlers and the CloudFormation resource
+ * specification gives it no attributes, so {@code Ref} is its only reference. Writing the record
+ * through {@code ChangeResourceRecordSets} is a follow-up.
  */
 @ApplicationScoped
 public class Route53CfnProvisioner implements CfnResourceProvisioner {
@@ -57,7 +59,6 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         String name = ctx.resolveOptional(props, "Name");
         String id = name != null ? name : "record-" + UUID.randomUUID().toString().substring(0, 8);
         resource.setPhysicalId(id);
-        resource.getAttributes().put("Id", id);
     }
 
     private void provisionHostedZone(StackResource resource, JsonNode props, ProvisionContext ctx) {

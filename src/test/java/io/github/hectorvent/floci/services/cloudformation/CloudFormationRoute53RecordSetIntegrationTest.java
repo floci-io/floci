@@ -16,11 +16,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * {@code AWS::Route53::RecordSet} through the per-service provisioner: {@code Ref} is the record
- * name and {@code Fn::GetAtt Id}, the registry schema's only read-only property, resolves to the
- * same value. Both are read back through an SSM parameter the template writes, because a stack
- * status alone proves nothing: an unowned type is stubbed CREATE_COMPLETE with an
- * {@code arn:aws:stub} attribute and an unknown attribute resolves to the literal
- * {@code Logical.Attr}.
+ * name. It is read back through an SSM parameter the template writes, because a stack status
+ * alone proves nothing: an unowned type is stubbed CREATE_COMPLETE with an {@code arn:aws:stub}
+ * physical id, which the parameter would expose.
  */
 @QuarkusTest
 class CloudFormationRoute53RecordSetIntegrationTest {
@@ -38,7 +36,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
     }
 
     @Test
-    void recordSetRefAndGetAttIdResolveToTheRecordName() {
+    void recordSetRefResolvesToTheRecordName() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "r53-recordset-" + suffix;
         String recordName = "www." + suffix + ".cfn-it.example.com";
@@ -62,21 +60,15 @@ class CloudFormationRoute53RecordSetIntegrationTest {
                     "RefParam": {
                       "Type": "AWS::SSM::Parameter",
                       "Properties": {"Name": "/r53-recordset/%s/ref", "Type": "String", "Value": {"Ref": "Www"}}
-                    },
-                    "IdParam": {
-                      "Type": "AWS::SSM::Parameter",
-                      "Properties": {"Name": "/r53-recordset/%s/id", "Type": "String",
-                                     "Value": {"Fn::GetAtt": ["Www", "Id"]}}
                     }
                   }
                 }
-                """.formatted(suffix, recordName, suffix, suffix);
+                """.formatted(suffix, recordName, suffix);
 
         createStack(stackName, template);
         assertStackStatus(stackName, "CREATE_COMPLETE");
         try {
             assertEquals(recordName, parameterValue("/r53-recordset/" + suffix + "/ref"));
-            assertEquals(recordName, parameterValue("/r53-recordset/" + suffix + "/id"));
         } finally {
             deleteStack(stackName);
             awaitStackGone(stackName);

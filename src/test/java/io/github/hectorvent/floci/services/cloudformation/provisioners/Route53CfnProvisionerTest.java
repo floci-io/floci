@@ -370,7 +370,7 @@ class Route53CfnProvisionerTest {
     }
 
     @Test
-    void recordSetUsesItsNameAsRefAndIdAndWritesNothingToTheZone() {
+    void recordSetUsesItsNameAsRefPublishesNoAttributesAndWritesNothingToTheZone() {
         Route53Service service = mock(Route53Service.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode()
@@ -387,8 +387,7 @@ class Route53CfnProvisionerTest {
         new Route53CfnProvisioner(service).provision(resource, props, context);
 
         assertEquals("www.example.com", resource.getPhysicalId());
-        assertEquals(Set.of("Id"), resource.getAttributes().keySet());
-        assertEquals("www.example.com", resource.getAttributes().get("Id"));
+        assertEquals(Set.of(), resource.getAttributes().keySet());
         verifyNoInteractions(service);
     }
 
@@ -408,7 +407,7 @@ class Route53CfnProvisionerTest {
 
         assertNotNull(resource.getPhysicalId());
         assertTrue(resource.getPhysicalId().matches("record-[0-9a-f]{8}"), resource.getPhysicalId());
-        assertEquals(resource.getPhysicalId(), resource.getAttributes().get("Id"));
+        assertTrue(resource.getAttributes().isEmpty(), resource.getAttributes().toString());
         verifyNoInteractions(service);
     }
 

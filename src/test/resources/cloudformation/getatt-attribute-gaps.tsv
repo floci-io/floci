@@ -46,5 +46,6 @@ AWS::RDS::DBInstance	SecondaryAvailabilityZone	multi-AZ secondary placement is n
 AWS::RDS::DBInstance	StatusInfos	read-replica status detail is not emulated
 AWS::Redshift::Cluster	DeferMaintenanceIdentifier	Floci does not emulate deferred maintenance windows
 AWS::Redshift::Cluster	MasterPasswordSecretArn	only set when ManageMasterPassword is true, which Floci rejects
+AWS::Route53::RecordSet	Id	schema gives no description; Ref returns the record name and the legacy spec gives the type no attributes
 AWS::SQS::QueuePolicy	Id	schema gives no description; the policy has no backing entity to take an id from
 AWS::SecretsManager::Secret	Id	Fn::GetAtt Id on a secret is its ARN, which the provisioner already sets as the physical id and as Arn; closable, deferred to a follow-up PR to keep this one a pure move
