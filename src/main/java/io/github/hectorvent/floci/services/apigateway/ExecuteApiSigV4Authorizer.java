@@ -168,7 +168,7 @@ public class ExecuteApiSigV4Authorizer {
         // signed is /{stage}/{route}, identical across every API on this emulator. Without host in
         // the canonical request, a signature minted for one API replays against any other API that
         // happens to expose the same stage and route.
-        if (!containsHeader(signed.signedHeaders(), "host")) {
+        if (!SigV4RequestValidator.containsHeader(signed.signedHeaders(), "host")) {
             return Result.rejected(Failure.MALFORMED, "SignedHeaders does not cover host");
         }
 
@@ -497,35 +497,14 @@ public class ExecuteApiSigV4Authorizer {
                                String signedHeaders) throws Exception {
         String declared = headers == null ? null : headers.getHeaderString("x-amz-content-sha256");
         if (declared != null && !declared.isBlank()
-                && containsHeader(signedHeaders, "x-amz-content-sha256")
-                && !isSha256Hex(declared.trim())) {
+                && SigV4RequestValidator.containsHeader(signedHeaders, "x-amz-content-sha256")
+                && !SigV4RequestValidator.isSha256Hex(declared.trim())) {
             return declared.trim();
         }
         if (presigned) {
             return "UNSIGNED-PAYLOAD";
         }
         return SigV4RequestValidator.sha256Hex(body == null ? new byte[0] : body);
-    }
-
-    private static boolean containsHeader(String signedHeaders, String name) {
-        for (String header : signedHeaders.split(";")) {
-            if (name.equals(header)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isSha256Hex(String value) {
-        if (value.length() != 64) {
-            return false;
-        }
-        for (int index = 0; index < value.length(); index++) {
-            if (Character.digit(value.charAt(index), 16) < 0) {
-                return false;
-            }
-        }
-        return true;
     }
 
     // ──────────────────────────── Crypto and encoding helpers ────────────────────────────

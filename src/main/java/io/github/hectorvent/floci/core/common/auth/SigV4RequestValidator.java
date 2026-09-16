@@ -189,6 +189,29 @@ public final class SigV4RequestValidator {
         return value == null ? "" : value.trim().replaceAll("\\s+", " ");
     }
 
+    /** Whether {@code name} appears among the semicolon-separated headers of {@code SignedHeaders}. */
+    public static boolean containsHeader(String signedHeaders, String name) {
+        for (String header : signedHeaders.split(";")) {
+            if (name.equals(header)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code value} looks like a SHA-256 hex digest: 64 hex characters. */
+    public static boolean isSha256Hex(String value) {
+        if (value.length() != 64) {
+            return false;
+        }
+        for (int index = 0; index < value.length(); index++) {
+            if (Character.digit(value.charAt(index), 16) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * Public so other SigV4 verifiers with a different canonical-request shape (e.g. S3's real
      * REST request signing in {@code PreSignedUrlFilter}) can reuse the crypto primitives below
