@@ -23,11 +23,15 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -50,6 +54,7 @@ class EcsContainerManagerFirelensTest {
     private ContainerLifecycleManager lifecycleManager;
     private ContainerLogStreamer logStreamer;
     private DockerClient dockerClient;
+    private CopyArchiveToContainerCmd copyCmd;
     private EcsContainerManager manager;
 
     @BeforeEach
@@ -71,7 +76,7 @@ class EcsContainerManagerFirelensTest {
         when(dockerClient.inspectVolumeCmd(anyString())).thenReturn(inspectVolumeCmd);
         when(inspectVolumeCmd.exec()).thenReturn(volume);
         when(volume.getMountpoint()).thenReturn("/var/lib/docker/volumes/floci-ecs-firelens-abc123/_data");
-        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd("router-id")).thenReturn(copyCmd);
 
         logStreamer = mock(ContainerLogStreamer.class);
@@ -81,6 +86,7 @@ class EcsContainerManagerFirelensTest {
         RegionResolver regionResolver = mock(RegionResolver.class);
         LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
+        when(awsEnv.flociEndpoint()).thenReturn("http://host.docker.internal:4566");
         EcrRegistryManager ecrRegistryManager = mock(EcrRegistryManager.class);
         when(ecrRegistryManager.rewriteImageUri(anyString())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -125,9 +131,27 @@ class EcsContainerManagerFirelensTest {
         assertEquals("unix:///var/lib/docker/volumes/floci-ecs-firelens-abc123/_data/fluent.sock",
                 logConfig.getValue().getConfig().get("fluentd-address"));
         assertEquals("app-firelens-abc123", logConfig.getValue().getConfig().get("tag"));
+        assertEquals("true", logConfig.getValue().getConfig().get("fluentd-async"));
+        assertTrue(logConfig.getValue().getConfig().get("fluentd-async-connect") == null,
+                "fluentd-async-connect was removed by Docker 28");
 
         verify(logStreamer).attach(eq("router-id"), anyString(), anyString(), anyString(), anyString());
         verify(logStreamer, never()).attach(eq("app-id"), anyString(), anyString(), anyString(), anyString());
         assertTrue(handle.getFirelensVolumeName().contains("firelens"));
+
+        ArgumentCaptor<InputStream> configArchive = ArgumentCaptor.forClass(InputStream.class);
+        verify(copyCmd).withTarInputStream(configArchive.capture());
+        assertTrue(readFluentBitConf(configArchive.getValue()).contains(
+                "    Endpoint http://host.docker.internal:4566"));
+    }
+
+    private static String readFluentBitConf(InputStream archive) {
+        try (TarArchiveInputStream tar = new TarArchiveInputStream(archive)) {
+            tar.getNextEntry();
+            // TarArchiveInputStream.read stops at the end of the current entry.
+            return new String(tar.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

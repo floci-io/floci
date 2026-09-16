@@ -482,7 +482,7 @@ public class EcsContainerManager {
                 : NetworkMode.bridge.name();
         return new FirelensConfigGenerator.Context(
                 networkMode, metadata, cluster, task.getTaskArn(), familyRevision,
-                memoryMb, external, logOptions);
+                memoryMb, external, awsEnv.flociEndpoint(), logOptions);
     }
 
     private static String clusterName(String clusterArn) {
@@ -516,7 +516,7 @@ public class EcsContainerManager {
     private LogConfig awsFirelensLogConfig(ContainerDefinition def, String taskId, String socketAddress) {
         LinkedHashMap<String, String> opts = new LinkedHashMap<>();
         opts.put("fluentd-address", socketAddress);
-        opts.put("fluentd-async-connect", "true");
+        opts.put("fluentd-async", "true");
         opts.put("fluentd-sub-second-precision", "true");
         opts.put("tag", def.getName() + "-firelens-" + taskId);
         Map<String, String> logOptions = def.getLogConfiguration().options();

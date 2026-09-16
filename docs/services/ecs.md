@@ -41,6 +41,26 @@ bridge/awsvpc, ECS metadata, optional `@INCLUDE` of a `config-file-type=file` ex
 one `[OUTPUT]` per `awsfirelens` container), starts that router first, and points application
 containers with `logDriver: awsfirelens` at the generated unix socket. Other log drivers,
 including `awslogs`, still stream to CloudWatch via Floci rather than the configured driver.
+An `[OUTPUT]` for an AWS destination whose plugin reads a URL from `endpoint` (`s3`,
+`cloudwatch`, `firehose`) also gets `Endpoint` set to Floci's container-reachable base URL. The
+Fluent Bit AWS plugins take a custom endpoint only from their own configuration and ignore the
+`AWS_ENDPOINT_URL` injected into the container, so without it the router would ship logs to the
+real service. An `endpoint` set in the task definition's log options is never overwritten, so
+aiming one output at real AWS still works, and outputs declared in an `@INCLUDE`d or
+`config-file-type=s3` config are not visible to Floci and keep whatever endpoint they were
+written with.
+The upstream C plugins (`cloudwatch_logs`, `kinesis_firehose`, `kinesis_streams`) are left
+alone instead. They hand `endpoint` to `getaddrinfo` as a bare host name rather than parsing it as
+a URL, and they always dial TLS, so Floci's `http://host:port` base URL fails there as
+`Misformatted domain name` and a bare host fails certificate verification; no output-level switch
+disables either. On the `aws-for-fluent-bit` 3.x line these plugins also honour a separate `port`
+(undocumented for `kinesis_firehose` and `cloudwatch_logs`, but it works), so an output can be
+aimed at Floci's port, but it still cannot complete the TLS handshake. Those outputs go wherever
+the task definition points them.
+An injected `http://` endpoint also gets `tls Off`. Fluent Bit 1.9 (the `aws-for-fluent-bit` 2.x
+and `:latest` line) still calls `flb_tls_session_create` on HTTP S3 and SIGSEGVs on a NULL
+TLS context; the scheme alone is not enough. A `tls` the task definition already set is left
+alone.
 The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci does not
 share a network namespace, so the injected `FLUENT_HOST` (the router's container IP) must be
 reachable. `fluentd` FireLens, `config-file-type=s3`, and shared network namespaces (AppConfig

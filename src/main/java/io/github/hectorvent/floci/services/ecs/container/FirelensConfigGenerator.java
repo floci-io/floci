@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs.container;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Generates the Fluent Bit config FireLens would write for a task.
@@ -16,6 +17,25 @@ final class FirelensConfigGenerator {
     static final int FORWARD_PORT = 24224;
     static final int HEALTHCHECK_PORT = 8877;
 
+    /**
+     * Output plugins that read a URL from their {@code endpoint} property.
+     *
+     * <p>Everything else is left alone. Fluent Bit fails at startup on a property the plugin
+     * does not know, so an {@code Endpoint} line would break outputs such as {@code stdout},
+     * {@code null}, {@code es} or {@code http} that name their destination with a different
+     * key.
+     *
+     * <p>These three are the AWS-written Go plugins, which parse the value as a URL, so
+     * Floci's {@code http://host:port} base URL reaches them. The upstream C plugins
+     * ({@code cloudwatch_logs}, {@code kinesis_firehose}, {@code kinesis_streams}) hand the
+     * value to {@code getaddrinfo} as a bare host name and always dial TLS: a URL fails as
+     * "Misformatted domain name", and a bare host fails certificate verification against
+     * Floci's plain HTTP port, with no output-level switch for either. Injecting an endpoint
+     * there cannot work, so those outputs keep whatever the task definition gave them.
+     */
+    private static final Set<String> ENDPOINT_PLUGINS = Set.of(
+            "s3", "cloudwatch", "firehose");
+
     private FirelensConfigGenerator() {
     }
 
@@ -27,6 +47,7 @@ final class FirelensConfigGenerator {
             String taskDefinition,
             int routerMemoryMb,
             String externalConfigPath,
+            String pluginEndpoint,
             Map<String, Map<String, String>> containerLogOptions
     ) {
     }
@@ -94,10 +115,55 @@ final class FirelensConfigGenerator {
                     }
                     continue;
                 }
+                pluginOptions = withPluginEndpoint(plugin, pluginOptions, ctx.pluginEndpoint());
                 appendOutput(out, plugin, entry.getKey() + "-firelens*", pluginOptions);
             }
         }
         return out.toString();
+    }
+
+    /**
+     * Points an AWS output at Floci. The Fluent Bit AWS plugins read a custom endpoint only
+     * from their own configuration, so the {@code AWS_ENDPOINT_URL} Floci injects into the
+     * container does not reach them and the output would otherwise go to the real service.
+     * An endpoint the task definition set explicitly is never overwritten.
+     */
+    private static Map<String, String> withPluginEndpoint(
+            String plugin, Map<String, String> pluginOptions, String pluginEndpoint) {
+        if (pluginEndpoint == null || !ENDPOINT_PLUGINS.contains(plugin)) {
+            return pluginOptions;
+        }
+        String existingEndpoint = null;
+        for (String key : pluginOptions.keySet()) {
+            if ("endpoint".equalsIgnoreCase(key)) {
+                existingEndpoint = pluginOptions.get(key);
+                break;
+            }
+        }
+        if (existingEndpoint == null) {
+            pluginOptions.put("Endpoint", pluginEndpoint);
+            existingEndpoint = pluginEndpoint;
+        }
+        disableTlsForHttpEndpoint(pluginOptions, existingEndpoint);
+        return pluginOptions;
+    }
+
+    /**
+     * Fluent Bit 1.9 (the {@code aws-for-fluent-bit} 2.x / {@code :latest} line) still
+     * calls {@code flb_tls_session_create} on an HTTP S3 endpoint and SIGSEGVs on a NULL
+     * TLS context. {@code tls Off} is what that version actually honours; the {@code http://}
+     * scheme alone is not enough.
+     */
+    private static void disableTlsForHttpEndpoint(Map<String, String> pluginOptions, String endpoint) {
+        if (endpoint == null || !endpoint.regionMatches(true, 0, "http://", 0, 7)) {
+            return;
+        }
+        for (String key : pluginOptions.keySet()) {
+            if ("tls".equalsIgnoreCase(key)) {
+                return;
+            }
+        }
+        pluginOptions.put("tls", "Off");
     }
 
     static boolean addsTcpForward(String networkMode) {
