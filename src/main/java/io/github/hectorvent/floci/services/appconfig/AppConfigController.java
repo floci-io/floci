@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.appconfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
 import io.github.hectorvent.floci.services.appconfig.model.Deployment;
@@ -12,11 +11,17 @@ import io.github.hectorvent.floci.services.appconfig.model.Environment;
 import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersion;
 import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersionSummary;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import org.jboss.logging.Logger;
-
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
@@ -25,8 +30,6 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class AppConfigController {
-    private static final Logger LOG = Logger.getLogger(AppConfigController.class);
-
     private final AppConfigService service;
     private final ObjectMapper objectMapper;
 
