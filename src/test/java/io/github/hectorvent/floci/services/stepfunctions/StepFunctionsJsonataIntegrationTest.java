@@ -412,6 +412,58 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithS3JsonItemReader_maxItemsPathLimitsArrayDataset() throws Exception {
+        createBucket("map-inputs-max-items-path");
+        putObject("map-inputs-max-items-path", "workers.json", """
+                [{"workerId":"w1"},{"workerId":"w2"},{"workerId":"w3"}]
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON",
+                                    "MaxItemsPath": "$.limit"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-max-items-path",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-max-items-path-test", definition);
+        String execArn = startExecution(smArn, "{\"limit\":2}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+        assertFalse(output.contains("\"workerId\":\"w3\"") || output.contains("\"workerId\": \"w3\""));
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_maxItemsLimitsObjectDataset() throws Exception {
         createBucket("map-inputs-max-items-object");
         putObject("map-inputs-max-items-object", "workers.json", """
@@ -3563,10 +3615,11 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
-    void distributedMapWithListObjectsV2ItemReader_jsonataArgumentsAndItemSelectorBuildChildInputs() throws Exception {
+    void distributedMapWithListObjectsV2ItemReader_jsonataMaxItemsAndItemSelectorBuildChildInputs() throws Exception {
         createBucket("map-inputs-list-objects-jsonata");
         putObject("map-inputs-list-objects-jsonata", "workers/a.json", "[]");
         putObject("map-inputs-list-objects-jsonata", "workers/b.json", "[]");
+        putObject("map-inputs-list-objects-jsonata", "workers/c.json", "[]");
 
         String definition = """
                 {
@@ -3577,6 +3630,9 @@ class StepFunctionsJsonataIntegrationTest {
                             "Type": "Map",
                             "ItemReader": {
                                 "Resource": "arn:aws:states:::s3:listObjectsV2",
+                                "ReaderConfig": {
+                                    "MaxItems": "{% $states.input.limit %}"
+                                },
                                 "Arguments": {
                                     "Bucket": "{% $states.input.bucket %}",
                                     "Prefix": "{% $states.input.prefix %}"
@@ -3608,7 +3664,7 @@ class StepFunctionsJsonataIntegrationTest {
 
         String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-jsonata-test", definition);
         String execArn = startExecution(smArn,
-                "{\"bucket\":\"map-inputs-list-objects-jsonata\",\"prefix\":\"workers/\"}");
+                "{\"bucket\":\"map-inputs-list-objects-jsonata\",\"prefix\":\"workers/\",\"limit\":2}");
         String output = waitForExecution(execArn);
         JsonNode items = objectMapper.readTree(output);
 
