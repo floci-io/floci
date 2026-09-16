@@ -219,9 +219,7 @@ public class EksClusterManager {
 
         // The account label comes from the cluster record when set (restore runs with no request
         // context); regionResolver is the fallback for the create path.
-        String labelAccountId = cluster.getAccountId() != null
-                ? cluster.getAccountId()
-                : regionResolver.getAccountId();
+        String labelAccountId = resolveClusterAccountId(cluster);
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -231,7 +229,7 @@ public class EksClusterManager {
                 .withPrivileged(true)
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "eks", cluster.getName(), labelAccountId, regionResolver.getDefaultRegion()));
+                        "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
 
         if (config.services().eks().ecrRegistryMirror() && config.services().ecr().enabled()) {
             specBuilder.withHostDockerInternalOnLinux();
@@ -258,9 +256,7 @@ public class EksClusterManager {
         SigningKeyFiles signingKeyFiles = null;
         if (config.services().eks().irsaSigningKey() && oidcService != null) {
             try {
-                String accountId = cluster.getAccountId() != null
-                        ? cluster.getAccountId()
-                        : regionResolver.getAccountId();
+                String accountId = resolveClusterAccountId(cluster);
                 String issuer = resolveClusterIssuer(cluster);
                 ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
                 signingKeyFiles = writeSigningKeyFiles(cluster, oidcKey);
@@ -687,14 +683,41 @@ public class EksClusterManager {
 
     record SigningKeyFiles(Path signingKeyPath, Path publicKeyPath) {}
 
+    String resolveClusterAccountId(Cluster cluster) {
+        if (cluster != null) {
+            if (cluster.getAccountId() != null && !cluster.getAccountId().isBlank()) {
+                return cluster.getAccountId();
+            }
+            if (cluster.getArn() != null) {
+                String[] parts = cluster.getArn().split(":");
+                if (parts.length > 4 && !parts[4].isBlank()) {
+                    return parts[4];
+                }
+            }
+        }
+        if (regionResolver != null && regionResolver.getAccountId() != null && !regionResolver.getAccountId().isBlank()) {
+            return regionResolver.getAccountId();
+        }
+        if (config != null && config.defaultAccountId() != null && !config.defaultAccountId().isBlank()) {
+            return config.defaultAccountId();
+        }
+        return "000000000000";
+    }
+
+    Path resolveKeysDir(Cluster cluster) {
+        String accountId = resolveClusterAccountId(cluster);
+        String region = clusterRegion(cluster);
+        return Paths.get(config.services().eks().dataPath(), "keys", accountId, region, cluster.getName())
+                .toAbsolutePath().normalize();
+    }
+
     /**
      * Writes the cluster's RSA signing key and public key PEM files to Floci's local filesystem
-     * under the EKS data path with restrictive permissions (0600 for files, 0700 for directories).
-     * Returns the paths or null if writing failed.
+     * under the account- and region-qualified EKS data path with restrictive permissions (0600 for
+     * files, 0700 for directories). Returns the paths or null if writing failed.
      */
     SigningKeyFiles writeSigningKeyFiles(Cluster cluster, ClusterOidcKey oidcKey) {
-        Path keysDir = Paths.get(config.services().eks().dataPath(), "keys", cluster.getName())
-                .toAbsolutePath().normalize();
+        Path keysDir = resolveKeysDir(cluster);
         try {
             Files.createDirectories(keysDir);
             setRestrictivePermissions(keysDir, true);
@@ -762,9 +785,7 @@ public class EksClusterManager {
 
     void reinjectSigningKeys(String containerId, Cluster cluster) {
         try {
-            String accountId = cluster.getAccountId() != null
-                    ? cluster.getAccountId()
-                    : regionResolver.getAccountId();
+            String accountId = resolveClusterAccountId(cluster);
             String issuer = resolveClusterIssuer(cluster);
             ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
             SigningKeyFiles keyFiles = writeSigningKeyFiles(cluster, oidcKey);
@@ -912,9 +933,7 @@ public class EksClusterManager {
             return;
         }
         try {
-            String accountId = cluster.getAccountId() != null
-                    ? cluster.getAccountId()
-                    : regionResolver.getAccountId();
+            String accountId = resolveClusterAccountId(cluster);
             String region = clusterRegion(cluster);
 
             ContainerIps containerIps = resolveContainerIps(containerId);
@@ -958,14 +977,20 @@ public class EksClusterManager {
         }
     }
 
-    private String clusterRegion(Cluster cluster) {
+    String clusterRegion(Cluster cluster) {
         if (cluster != null && cluster.getArn() != null) {
             String[] parts = cluster.getArn().split(":");
             if (parts.length > 3 && !parts[3].isBlank()) {
                 return parts[3];
             }
         }
-        return regionResolver.getDefaultRegion();
+        if (regionResolver != null && regionResolver.getDefaultRegion() != null && !regionResolver.getDefaultRegion().isBlank()) {
+            return regionResolver.getDefaultRegion();
+        }
+        if (config != null && config.defaultRegion() != null && !config.defaultRegion().isBlank()) {
+            return config.defaultRegion();
+        }
+        return "us-east-1";
     }
 
     Instance synthesizeClusterNodeInstance(Cluster cluster, String containerIp, String region, String accountId) {

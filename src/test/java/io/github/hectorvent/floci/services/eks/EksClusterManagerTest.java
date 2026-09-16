@@ -917,9 +917,10 @@ class EksClusterManagerTest {
             assertTrue(cmd.contains("--kube-apiserver-arg=service-account-issuer=https://kubernetes.default.svc.cluster.local"));
             assertTrue(cmd.contains("--kube-apiserver-arg=api-audiences=https://kubernetes.default.svc.cluster.local,sts.amazonaws.com"));
 
-            Path keysDir = tempDir.resolve("keys").resolve("my-cluster");
+            Path keysDir = manager.resolveKeysDir(cluster);
             Path privFile = keysDir.resolve(EksClusterManager.SA_SIGNING_KEY_FILE);
             Path pubFile = keysDir.resolve(EksClusterManager.SA_PUBLIC_KEY_FILE);
+            assertEquals(tempDir.resolve("keys").resolve("000000000000").resolve("us-east-1").resolve("my-cluster"), keysDir);
             assertTrue(Files.exists(privFile));
             assertTrue(Files.exists(pubFile));
 
@@ -977,18 +978,19 @@ class EksClusterManagerTest {
         @Test
         void startClusterContinuesWhenWritingKeysFails(@TempDir Path tempDir) throws Exception {
             when(eks.irsaSigningKey()).thenReturn(true);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+
             // Create a regular file where the keys directory would be, causing createDirectories to fail
-            Path blocker = tempDir.resolve("keys").resolve("my-cluster");
+            Path blocker = manager.resolveKeysDir(cluster);
             Files.createDirectories(blocker.getParent());
             Files.writeString(blocker, "blocker");
-            when(eks.dataPath()).thenReturn(tempDir.toString());
 
             String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER";
             ClusterOidcKey key = new ClusterOidcKey(issuer, "kid-1", "pubKeyBase64", "privKeyBase64");
             when(oidcService.ensureKeyForAccount(anyString(), anyString(), anyString())).thenReturn(key);
-
-            Cluster cluster = new Cluster();
-            cluster.setName("my-cluster");
 
             // Must not throw despite file write failure
             manager.startCluster(cluster);
@@ -1018,7 +1020,7 @@ class EksClusterManagerTest {
 
             manager.restoreCluster(cluster);
 
-            Path keysDir = tempDir.resolve("keys").resolve("my-cluster");
+            Path keysDir = manager.resolveKeysDir(cluster);
             Path privFile = keysDir.resolve(EksClusterManager.SA_SIGNING_KEY_FILE);
             Path pubFile = keysDir.resolve(EksClusterManager.SA_PUBLIC_KEY_FILE);
             assertTrue(Files.exists(privFile));
@@ -1044,7 +1046,7 @@ class EksClusterManagerTest {
 
             manager.startCluster(cluster);
 
-            Path keysDir = tempDir.resolve("keys").resolve("perm-cluster");
+            Path keysDir = manager.resolveKeysDir(cluster);
             Path privFile = keysDir.resolve(EksClusterManager.SA_SIGNING_KEY_FILE);
             Path pubFile = keysDir.resolve(EksClusterManager.SA_PUBLIC_KEY_FILE);
 
@@ -1060,6 +1062,70 @@ class EksClusterManagerTest {
             } catch (UnsupportedOperationException ignored) {
                 // Ignore on non-POSIX platforms
             }
+        }
+
+        @Test
+        void twoAccountsWithSameClusterNameHaveIsolatedSigningKeyFiles(@TempDir Path tempDir) throws Exception {
+            when(eks.irsaSigningKey()).thenReturn(true);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            String clusterName = "shared-cluster";
+
+            Cluster cluster1 = new Cluster();
+            cluster1.setName(clusterName);
+            cluster1.setAccountId("111122223333");
+            cluster1.setArn("arn:aws:eks:us-east-1:111122223333:cluster/" + clusterName);
+            String issuer1 = "https://oidc.eks.us-east-1.amazonaws.com/id/ISSUER1111";
+            cluster1.setIdentity(new ClusterIdentity(new OidcIdentity(issuer1)));
+            ClusterOidcKey key1 = new ClusterOidcKey(issuer1, "kid-1", "pub1", "priv1");
+
+            Cluster cluster2 = new Cluster();
+            cluster2.setName(clusterName);
+            cluster2.setAccountId("444455556666");
+            cluster2.setArn("arn:aws:eks:us-east-1:444455556666:cluster/" + clusterName);
+            String issuer2 = "https://oidc.eks.us-east-1.amazonaws.com/id/ISSUER4444";
+            cluster2.setIdentity(new ClusterIdentity(new OidcIdentity(issuer2)));
+            ClusterOidcKey key2 = new ClusterOidcKey(issuer2, "kid-2", "pub2", "priv2");
+
+            Cluster cluster3 = new Cluster();
+            cluster3.setName(clusterName);
+            cluster3.setAccountId("111122223333");
+            cluster3.setArn("arn:aws:eks:eu-west-1:111122223333:cluster/" + clusterName);
+            String issuer3 = "https://oidc.eks.eu-west-1.amazonaws.com/id/ISSUER3333";
+            cluster3.setIdentity(new ClusterIdentity(new OidcIdentity(issuer3)));
+            ClusterOidcKey key3 = new ClusterOidcKey(issuer3, "kid-3", "pub3", "priv3");
+
+            when(oidcService.exportSigningKeyPem(key1)).thenReturn("priv-key-1");
+            when(oidcService.exportPublicKeyPem(key1)).thenReturn("pub-key-1");
+            when(oidcService.exportSigningKeyPem(key2)).thenReturn("priv-key-2");
+            when(oidcService.exportPublicKeyPem(key2)).thenReturn("pub-key-2");
+            when(oidcService.exportSigningKeyPem(key3)).thenReturn("priv-key-3");
+            when(oidcService.exportPublicKeyPem(key3)).thenReturn("pub-key-3");
+
+            EksClusterManager.SigningKeyFiles files1 = manager.writeSigningKeyFiles(cluster1, key1);
+            EksClusterManager.SigningKeyFiles files2 = manager.writeSigningKeyFiles(cluster2, key2);
+            EksClusterManager.SigningKeyFiles files3 = manager.writeSigningKeyFiles(cluster3, key3);
+
+            assertNotNull(files1);
+            assertNotNull(files2);
+            assertNotNull(files3);
+            assertNotEquals(files1.signingKeyPath(), files2.signingKeyPath());
+            assertNotEquals(files1.signingKeyPath(), files3.signingKeyPath());
+            assertNotEquals(files2.signingKeyPath(), files3.signingKeyPath());
+
+            Path expectedDir1 = tempDir.resolve("keys").resolve("111122223333").resolve("us-east-1").resolve(clusterName);
+            Path expectedDir2 = tempDir.resolve("keys").resolve("444455556666").resolve("us-east-1").resolve(clusterName);
+            Path expectedDir3 = tempDir.resolve("keys").resolve("111122223333").resolve("eu-west-1").resolve(clusterName);
+            assertEquals(expectedDir1, manager.resolveKeysDir(cluster1));
+            assertEquals(expectedDir2, manager.resolveKeysDir(cluster2));
+            assertEquals(expectedDir3, manager.resolveKeysDir(cluster3));
+
+            assertEquals("priv-key-1", Files.readString(files1.signingKeyPath()));
+            assertEquals("pub-key-1", Files.readString(files1.publicKeyPath()));
+            assertEquals("priv-key-2", Files.readString(files2.signingKeyPath()));
+            assertEquals("pub-key-2", Files.readString(files2.publicKeyPath()));
+            assertEquals("priv-key-3", Files.readString(files3.signingKeyPath()));
+            assertEquals("pub-key-3", Files.readString(files3.publicKeyPath()));
         }
     }
 }
