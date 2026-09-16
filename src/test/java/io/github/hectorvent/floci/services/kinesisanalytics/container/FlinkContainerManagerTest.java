@@ -316,8 +316,8 @@ class FlinkContainerManagerTest {
 
         assertThrows(RuntimeException.class, () -> manager.startCluster(app));
 
-        verify(lifecycleManager, times(2)).removeIfExists("floci-kinesisanalytics-jm-failure");
-        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-jm-failure-tm");
+        verify(lifecycleManager, times(2)).removeIfExists("floci-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-jm-failure");
+        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-jm-failure-tm");
         assertNull(app.getContainerId());
         assertNull(app.getTaskManagerContainerId());
     }
@@ -337,7 +337,7 @@ class FlinkContainerManagerTest {
         assertThrows(RuntimeException.class, () -> manager.startCluster(app));
 
         verify(lifecycleManager).stopAndRemove("jm-id", null);
-        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-tm-failure-tm");
+        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-tm-failure-tm");
         assertNull(app.getContainerId());
         assertNull(app.getRestEndpoint());
         assertNull(app.getTaskManagerContainerId());
@@ -356,8 +356,8 @@ class FlinkContainerManagerTest {
 
         assertThrows(RuntimeException.class, () -> manager.startCluster(app));
 
-        verify(lifecycleManager, times(2)).removeIfExists("floci-kinesisanalytics-log4j-copy-failure");
-        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-log4j-copy-failure-tm");
+        verify(lifecycleManager, times(2)).removeIfExists("floci-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-log4j-copy-failure");
+        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-log4j-copy-failure-tm");
         verify(lifecycleManager, Mockito.never()).startCreated(any(), any());
         assertNull(app.getContainerId());
     }

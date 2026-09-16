@@ -132,6 +132,24 @@ class KinesisAnalyticsV2ServiceTest {
     }
 
     @Test
+    void sameApplicationNameCanExistInDifferentRegions() {
+        FlinkApplication east = create("regional");
+        FlinkApplication west = service.createApplication("regional", "FLINK-1_18", ROLE,
+                null, null, null, null, null, 1, null, null, null, "us-west-2");
+
+        assertEquals("us-east-1", io.github.hectorvent.floci.core.common.AwsArnUtils
+                .parse(east.getApplicationArn()).region());
+        assertEquals("us-west-2", io.github.hectorvent.floci.core.common.AwsArnUtils
+                .parse(west.getApplicationArn()).region());
+        assertEquals(1, service.listApplications("us-east-1").size());
+        assertEquals(1, service.listApplications("us-west-2").size());
+        assertEquals("us-east-1", io.github.hectorvent.floci.core.common.AwsArnUtils
+                .parse(service.describeApplication("regional", "us-east-1").getApplicationArn()).region());
+        assertEquals("us-west-2", io.github.hectorvent.floci.core.common.AwsArnUtils
+                .parse(service.describeApplication("regional", "us-west-2").getApplicationArn()).region());
+    }
+
+    @Test
     void describeApplicationThrowsWhenMissing() {
         assertThrows(AwsException.class, () -> service.describeApplication("nope"));
     }
@@ -639,7 +657,7 @@ class KinesisAnalyticsV2ServiceTest {
             Thread.sleep(1500);
 
             Mockito.verify(store, Mockito.atLeastOnce())
-                    .putForAccount(Mockito.eq("000000000000"), Mockito.eq("demo"), Mockito.any());
+                    .putForAccount(Mockito.eq("000000000000"), Mockito.eq("us-east-1/demo"), Mockito.any());
             assertEquals("job-1", realMode.describeApplication("demo").getFlinkJobId());
         } finally {
             realMode.shutdown();
