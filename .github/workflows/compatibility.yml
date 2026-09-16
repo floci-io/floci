@@ -441,5 +441,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Dump floci logs
-        if: failure()
+        # A job cancelled at timeout-minutes is not a failure, but a hung suite is the case
+        # where the server log matters most.
+        if: failure() || cancelled()
         run: docker logs floci

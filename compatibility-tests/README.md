@@ -122,6 +122,10 @@ The Terraform and OpenTofu suites run each `test/*.bats` file in its own process
 concurrently, so they write one report per file rather than a single `junit.xml`.
 Every consumer globs the directory, so nothing downstream changes. Set
 `BATS_PARALLEL_FILES=0` to run the files one at a time when isolating a failure.
+Each file also runs under a `BATS_FILE_TIMEOUT` (default `12m`): a fixture that hangs
+fails under its own name with its TAP output ending at the stuck test, and the reports of
+the files that finished are still published, instead of the whole job dying at the
+workflow's 20 minute limit with nothing reported.
 
 ## Configuration
 

@@ -20,6 +20,11 @@ cd "$SCRIPT_DIR"
 
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 PARALLEL="${BATS_PARALLEL_FILES:-1}"
+# Bound one bats file so a hung fixture fails under its own name instead of the whole job
+# dying at the workflow's timeout-minutes with nothing reported. The workflow gives the
+# job 20 minutes and a healthy concurrent run finishes in about seven, so twelve leaves
+# room for a slow runner while still naming the culprit before the job limit.
+FILE_TIMEOUT="${BATS_FILE_TIMEOUT:-12m}"
 
 if [ -n "${IAC_BIN:-}" ]; then
     :
@@ -104,10 +109,29 @@ EOF
 }
 
 run_one() {
-    local file="$1" name="$2"
-    "$BATS_BIN" --report-formatter junit -o "${WORK_DIR}/${name}" "$file" \
-        > "${WORK_DIR}/${name}.log" 2>&1
-    echo "$?" > "${WORK_DIR}/${name}.status"
+    local file="$1" name="$2" started status
+    started=$(date +%s)
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k 30s "$FILE_TIMEOUT" \
+            "$BATS_BIN" --report-formatter junit -o "${WORK_DIR}/${name}" "$file" \
+            > "${WORK_DIR}/${name}.log" 2>&1
+    else
+        "$BATS_BIN" --report-formatter junit -o "${WORK_DIR}/${name}" "$file" \
+            > "${WORK_DIR}/${name}.log" 2>&1
+    fi
+    status=$?
+    if [ "$status" -eq 124 ]; then
+        echo "# ${name}.bats: timed out after ${FILE_TIMEOUT}; the TAP output above ends at the test that hung" \
+            >> "${WORK_DIR}/${name}.log"
+    fi
+    echo "$status" > "${WORK_DIR}/${name}.status"
+    # Publish the report as soon as this file is done rather than after every file has
+    # finished: if the job is cancelled while another file hangs, the reports of the files
+    # that completed are still uploaded, and the missing one names the hang.
+    if [ -f "${WORK_DIR}/${name}/report.xml" ]; then
+        mv "${WORK_DIR}/${name}/report.xml" "${RESULTS_DIR}/junit-${name}.xml"
+    fi
+    echo "# --- ${name}.bats finished in $(( $(date +%s) - started ))s (exit ${status}) ---"
 }
 
 warm_provider_cache
@@ -152,9 +176,7 @@ for name in "${NAMES[@]}"; do
     fi
     [ "$file_status" -eq 0 ] || status=1
 
-    if [ -f "${WORK_DIR}/${name}/report.xml" ]; then
-        mv "${WORK_DIR}/${name}/report.xml" "${RESULTS_DIR}/junit-${name}.xml"
-    else
+    if [ ! -f "${RESULTS_DIR}/junit-${name}.xml" ]; then
         echo "Error: no JUnit report produced for ${name}.bats" >&2
         status=1
     fi
