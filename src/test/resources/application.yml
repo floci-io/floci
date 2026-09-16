@@ -303,7 +303,7 @@ floci:
       enabled: true
       mock: true
       ecr-registry-mirror: true
-      imds: true
+      imds: false
     mwaa:
       enabled: true
       mock: true

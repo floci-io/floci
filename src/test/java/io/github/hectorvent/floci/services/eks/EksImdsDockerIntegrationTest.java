@@ -24,6 +24,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -112,6 +113,21 @@ class EksImdsDockerIntegrationTest {
         String imdsv1Cmd = "curl -s -f http://169.254.169.254/latest/meta-data/instance-id";
         String v1InstanceId = execInContainer(containerId, new String[]{"sh", "-c", imdsv1Cmd});
         assertEquals(instanceId.trim(), v1InstanceId.trim(), "IMDSv1 and IMDSv2 instance IDs should match");
+
+        // Pod-isolation test: ordinary pods in their own network namespace cannot reach link-local IMDS
+        String podIsolationCmd = """
+                if command -v unshare >/dev/null 2>&1; then
+                  unshare -n curl -s -f --connect-timeout 2 http://169.254.169.254/latest/meta-data/instance-id
+                else
+                  ip netns add pod-test 2>/dev/null || true
+                  ip netns exec pod-test curl -s -f --connect-timeout 2 http://169.254.169.254/latest/meta-data/instance-id
+                  ret=$?
+                  ip netns del pod-test 2>/dev/null || true
+                  exit $ret
+                fi
+                """;
+        ExecResult podResult = execInContainerWithExitCode(containerId, new String[]{"sh", "-c", podIsolationCmd});
+        assertNotEquals(0L, podResult.exitCode(), "IMDS should not be reachable from an isolated pod network namespace");
     }
 
     private boolean isDockerAvailable() {
@@ -123,20 +139,28 @@ class EksImdsDockerIntegrationTest {
         }
     }
 
-    private String execInContainer(String containerId, String[] cmd) throws Exception {
+    record ExecResult(long exitCode, String stdout, String stderr) {}
+
+    private ExecResult execInContainerWithExitCode(String containerId, String[] cmd) throws Exception {
         ExecCreateCmdResponse exec = dockerClient.execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdout(true)
                 .withAttachStderr(true)
                 .exec();
 
-        StringBuilder output = new StringBuilder();
+        StringBuilder stdout = new StringBuilder();
+        StringBuilder stderr = new StringBuilder();
         boolean completed = dockerClient.execStartCmd(exec.getId())
                 .exec(new ResultCallback.Adapter<Frame>() {
                     @Override
                     public void onNext(Frame frame) {
                         if (frame != null && frame.getPayload() != null) {
-                            output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                            String text = new String(frame.getPayload(), StandardCharsets.UTF_8);
+                            if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDERR) {
+                                stderr.append(text);
+                            } else {
+                                stdout.append(text);
+                            }
                         }
                     }
                 })
@@ -145,6 +169,15 @@ class EksImdsDockerIntegrationTest {
         if (!completed) {
             throw new RuntimeException("exec timed out in container " + containerId);
         }
-        return output.toString();
+        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
+        return new ExecResult(exitCode != null ? exitCode : -1L, stdout.toString(), stderr.toString());
+    }
+
+    private String execInContainer(String containerId, String[] cmd) throws Exception {
+        ExecResult result = execInContainerWithExitCode(containerId, cmd);
+        if (result.exitCode() != 0) {
+            throw new RuntimeException("exec failed with code " + result.exitCode() + ": " + result.stderr());
+        }
+        return result.stdout();
     }
 }

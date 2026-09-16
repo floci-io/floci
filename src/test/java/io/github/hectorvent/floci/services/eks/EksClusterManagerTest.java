@@ -46,6 +46,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -718,6 +719,19 @@ class EksClusterManagerTest {
             assertEquals("ip-172-17-0-2.us-west-2.compute.internal", instance.getPrivateDnsName());
             assertEquals("arn:aws:iam::123456789012:role/eks-node-role", instance.getIamInstanceProfileArn());
             assertEquals("running", instance.getState().getName());
+        }
+
+        @Test
+        void sameNameClustersInDifferentRegionsGetDistinctInstanceIds() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+
+            Instance inst1 = manager.synthesizeClusterNodeInstance(cluster, "172.17.0.2", "us-east-1", "123456789012");
+            Instance inst2 = manager.synthesizeClusterNodeInstance(cluster, "172.17.0.2", "us-west-2", "123456789012");
+
+            assertNotNull(inst1);
+            assertNotNull(inst2);
+            assertNotEquals(inst1.getInstanceId(), inst2.getInstanceId());
         }
 
         @Test

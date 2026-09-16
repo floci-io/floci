@@ -732,7 +732,7 @@ public class EksClusterManager {
             String accountId = cluster.getAccountId() != null
                     ? cluster.getAccountId()
                     : regionResolver.getAccountId();
-            String region = regionResolver.getDefaultRegion();
+            String region = clusterRegion(cluster);
 
             ContainerIps containerIps = resolveContainerIps(containerId);
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
@@ -775,13 +775,23 @@ public class EksClusterManager {
         }
     }
 
+    private String clusterRegion(Cluster cluster) {
+        if (cluster != null && cluster.getArn() != null) {
+            String[] parts = cluster.getArn().split(":");
+            if (parts.length > 3 && !parts[3].isBlank()) {
+                return parts[3];
+            }
+        }
+        return regionResolver.getDefaultRegion();
+    }
+
     Instance synthesizeClusterNodeInstance(Cluster cluster, String containerIp, String region, String accountId) {
         Instance inst = new Instance();
         String safeClusterName = cluster.getName() != null ? cluster.getName() : "eks-cluster";
         String safeAccountId = accountId != null ? accountId : config.defaultAccountId();
-        String safeRegion = region != null ? region : regionResolver.getDefaultRegion();
+        String safeRegion = region != null ? region : clusterRegion(cluster);
 
-        String seed = safeClusterName + "-" + safeAccountId;
+        String seed = safeClusterName + "-" + safeAccountId + "-" + safeRegion;
         String hex = UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
         String instanceId = "i-" + (hex.length() >= 17 ? hex.substring(0, 17) : (hex + "00000000000000000").substring(0, 17));
 
