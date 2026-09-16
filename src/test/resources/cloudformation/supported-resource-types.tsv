@@ -50,8 +50,8 @@ AWS::Cognito::UserPool	CognitoCfnProvisioner
 AWS::Cognito::UserPoolClient	CognitoCfnProvisioner
 AWS::Cognito::UserPoolDomain	CognitoCfnProvisioner
 AWS::Config::ConfigRule	ConfigCfnProvisioner
-AWS::DynamoDB::GlobalTable	LEGACY_SWITCH
-AWS::DynamoDB::Table	LEGACY_SWITCH
+AWS::DynamoDB::GlobalTable	DynamoDbCfnProvisioner
+AWS::DynamoDB::Table	DynamoDbCfnProvisioner
 AWS::EC2::EIP	Ec2NetworkCfnProvisioner
 AWS::EC2::FlowLog	Ec2FlowLogCfnProvisioner
 AWS::EC2::Instance	LEGACY_SWITCH
@@ -143,4 +143,4 @@ AWS::SecretsManager::Secret	SecretsManagerCfnProvisioner
 AWS::SecretsManager::SecretTargetAttachment	SecretTargetAttachmentCfnProvisioner
 AWS::StepFunctions::StateMachine	StepFunctionsCfnProvisioner
 AWS::WAFv2::WebACL	WafV2CfnProvisioner
-Custom::DynamoDBReplica	LEGACY_SWITCH
+Custom::DynamoDBReplica	DynamoDbCfnProvisioner

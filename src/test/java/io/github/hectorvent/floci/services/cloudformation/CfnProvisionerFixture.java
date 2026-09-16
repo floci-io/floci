@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFrontCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.DynamoDbCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.OrganizationsCfnProvisioner;
@@ -238,6 +239,9 @@ final class CfnProvisionerFixture {
             }
             if (snsService != null) {
                 discovered.add(new SnsCfnProvisioner(snsService));
+            }
+            if (dynamoDbService != null) {
+                discovered.add(new DynamoDbCfnProvisioner(dynamoDbService));
             }
             if (ssmService != null) {
                 discovered.add(new SsmCfnProvisioner(ssmService));
@@ -662,7 +666,6 @@ final class CfnProvisionerFixture {
             return new CloudFormationResourceProvisioner(
                     s3Service,
                     snsService,
-                    dynamoDbService,
                     lambdaService,
                     iamService,
                     ssmService,
