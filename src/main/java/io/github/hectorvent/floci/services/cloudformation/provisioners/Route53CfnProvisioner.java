@@ -7,14 +7,30 @@ import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
+/**
+ * Provisions {@code AWS::Route53::HostedZone} and {@code AWS::Route53::RecordSet}.
+ *
+ * <p>A record set is a name-only resource here, as it was in the legacy
+ * {@code CloudFormationResourceProvisioner} it moved out of: nothing is written to the zone,
+ * {@code Ref} is the record name (or a generated {@code record-} id when the template gives
+ * none), and {@code Fn::GetAtt Id}, the registry schema's only read-only property, resolves to
+ * the same value. Writing the record through {@code ChangeResourceRecordSets} is a follow-up.
+ */
 @ApplicationScoped
 public class Route53CfnProvisioner implements CfnResourceProvisioner {
+    static final String HOSTED_ZONE = "AWS::Route53::HostedZone";
+    static final String RECORD_SET = "AWS::Route53::RecordSet";
+
+    private static final Logger LOG = Logger.getLogger(Route53CfnProvisioner.class);
+
     private final Route53Service route53Service;
 
     @Inject
@@ -24,11 +40,27 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::Route53::HostedZone");
+        return Set.of(HOSTED_ZONE, RECORD_SET);
     }
 
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        switch (resource.getResourceType()) {
+            case "AWS::Route53::HostedZone" -> provisionHostedZone(resource, props, ctx);
+            case "AWS::Route53::RecordSet" -> provisionRecordSet(resource, props, ctx);
+            default -> throw new IllegalStateException(
+                    "Route53CfnProvisioner received an unsupported type: " + resource.getResourceType());
+        }
+    }
+
+    private void provisionRecordSet(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        String name = ctx.resolveOptional(props, "Name");
+        String id = name != null ? name : "record-" + UUID.randomUUID().toString().substring(0, 8);
+        resource.setPhysicalId(id);
+        resource.getAttributes().put("Id", id);
+    }
+
+    private void provisionHostedZone(StackResource resource, JsonNode props, ProvisionContext ctx) {
         String name = ctx.resolveOptional(props, "Name");
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("AWS::Route53::HostedZone requires Name");
@@ -126,7 +158,16 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        route53Service.deleteHostedZone(physicalId);
+        switch (resourceType) {
+            case "AWS::Route53::HostedZone" -> route53Service.deleteHostedZone(physicalId);
+            // Nothing was written for the record, so there is nothing to remove; the warning
+            // mirrors the legacy dispatcher's default arm so the gap stays visible in the log.
+            case "AWS::Route53::RecordSet" -> LOG.warnv(
+                    "No delete implemented for resource type {0}: {1} is not removed here.",
+                    resourceType, physicalId);
+            default -> throw new IllegalStateException(
+                    "Route53CfnProvisioner received an unsupported type: " + resourceType);
+        }
     }
 
     private List<VpcAssociation> parseVpcs(JsonNode node) {

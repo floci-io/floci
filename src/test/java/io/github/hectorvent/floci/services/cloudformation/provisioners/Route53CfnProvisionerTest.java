@@ -15,6 +15,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -22,6 +23,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Route53CfnProvisionerTest {
@@ -365,5 +367,66 @@ class Route53CfnProvisionerTest {
                 "once the replacement zone is deleted, physical state matches pre-update reality "
                         + "(tracked zone missing), so the generic rollback walker must treat this "
                         + "resource as restored instead of failing rollback as unimplemented");
+    }
+
+    @Test
+    void recordSetUsesItsNameAsRefAndIdAndWritesNothingToTheZone() {
+        Route53Service service = mock(Route53Service.class);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode()
+                .put("HostedZoneId", "Z123456789")
+                .put("Name", "www.example.com")
+                .put("Type", "A");
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(invocation -> invocation.<JsonNode>getArgument(0).asText());
+        ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Alias");
+        resource.setResourceType("AWS::Route53::RecordSet");
+
+        new Route53CfnProvisioner(service).provision(resource, props, context);
+
+        assertEquals("www.example.com", resource.getPhysicalId());
+        assertEquals(Set.of("Id"), resource.getAttributes().keySet());
+        assertEquals("www.example.com", resource.getAttributes().get("Id"));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void recordSetWithoutANameGetsAGeneratedRecordId() {
+        Route53Service service = mock(Route53Service.class);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode().put("Type", "A");
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(invocation -> invocation.<JsonNode>getArgument(0).asText());
+        ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Alias");
+        resource.setResourceType("AWS::Route53::RecordSet");
+
+        new Route53CfnProvisioner(service).provision(resource, props, context);
+
+        assertNotNull(resource.getPhysicalId());
+        assertTrue(resource.getPhysicalId().matches("record-[0-9a-f]{8}"), resource.getPhysicalId());
+        assertEquals(resource.getPhysicalId(), resource.getAttributes().get("Id"));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void deletingARecordSetLeavesHostedZonesAlone() {
+        Route53Service service = mock(Route53Service.class);
+
+        new Route53CfnProvisioner(service).delete("AWS::Route53::RecordSet", "www.example.com", "us-east-1");
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void deletingAHostedZoneStillDeletesTheZone() {
+        Route53Service service = mock(Route53Service.class);
+
+        new Route53CfnProvisioner(service).delete("AWS::Route53::HostedZone", "Z123456789", "us-east-1");
+
+        verify(service).deleteHostedZone("Z123456789");
     }
 }

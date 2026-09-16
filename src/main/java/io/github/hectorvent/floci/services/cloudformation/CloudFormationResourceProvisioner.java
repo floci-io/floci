@@ -134,8 +134,7 @@ public class CloudFormationResourceProvisioner {
             "AWS::IAM::ManagedPolicy",
             "AWS::IAM::Policy",
             "AWS::Lambda::Function",
-            "AWS::Lambda::LayerVersion",
-            "AWS::Route53::RecordSet");
+            "AWS::Lambda::LayerVersion");
 
     /** Reserved attribute keys used to carry custom-resource state to the later Delete invocation. */
     private static final String CR_SERVICE_TOKEN_ATTR = "__FlociServiceToken";
@@ -245,7 +244,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::IAM::ManagedPolicy" ->
                         provisionIamManagedPolicy(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::InstanceProfile" -> provisionInstanceProfile(resource, properties, engine, accountId, stackName);
-                case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
                 case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
                 case "AWS::ApiGateway::Authorizer" -> provisionApiGatewayAuthorizer(resource, properties, engine, region);
@@ -1960,11 +1958,6 @@ public class CloudFormationResourceProvisioner {
             r.setPhysicalId(key.getAccessKeyId());
             r.getAttributes().put("SecretAccessKey", key.getSecretAccessKey());
         }
-    }
-
-    private void provisionRoute53RecordSet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
-        String name = resolveOptional(props, "Name", engine);
-        r.setPhysicalId(name != null ? name : "record-" + UUID.randomUUID().toString().substring(0, 8));
     }
 
     // ── ApiGateway (V1) ──────────────────────────────────────────────────────

@@ -129,7 +129,7 @@ AWS::Redshift::ClusterParameterGroup	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterSecurityGroup	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterSubnetGroup	RedshiftClusterCfnProvisioner
 AWS::Route53::HostedZone	Route53CfnProvisioner
-AWS::Route53::RecordSet	LEGACY_SWITCH
+AWS::Route53::RecordSet	Route53CfnProvisioner
 AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner
