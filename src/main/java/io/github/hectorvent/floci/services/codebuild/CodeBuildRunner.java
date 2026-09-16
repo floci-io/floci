@@ -68,6 +68,8 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -1585,7 +1587,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                     extractSymlink(zipFile, entry, target, dest);
                 } else {
                     Files.createDirectories(target.getParent());
-                    try (InputStream in = zipFile.getInputStream(entry)) {
+                    try (InputStream in = openEntryStream(zipFile, entry)) {
                         Files.write(target, in.readAllBytes());
                     }
                     if (entry.getUnixMode() != 0) {
@@ -1601,6 +1603,24 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
+    // ZipFile.getInputStream() dispatches on entry.getMethod() through a switch that also
+    // covers BZIP2, DEFLATE64, XZ and ZSTD, instantiating the matching CompressorInputStream
+    // inline; GraalVM's static analysis resolves every branch of that switch because the method
+    // itself is reachable, not just the branch a given entry happens to take, and XZ/ZSTD need
+    // org.tukaani:xz / com.github.luben:zstd-jni on the classpath at native link time to do so.
+    // CodeBuild sources are ordinary zips (STORED or DEFLATED only, same as every common zip
+    // tool produces), so decoding just those two methods off the entry's raw bytes avoids the
+    // dispatch method entirely and the optional codec it would otherwise pull in unbuilt.
+    private static InputStream openEntryStream(ZipFile zipFile, ZipArchiveEntry entry) throws IOException {
+        InputStream raw = zipFile.getRawInputStream(entry);
+        return switch (entry.getMethod()) {
+            case ZipEntry.STORED -> raw;
+            case ZipEntry.DEFLATED -> new InflaterInputStream(raw, new Inflater(true));
+            default -> throw new IOException(
+                    "Unsupported zip compression method " + entry.getMethod() + " for entry " + entry.getName());
+        };
+    }
+
     // Recreates a symlink zip entry as a real symlink. The entry content is the link
     // target. Relative intra-tree targets (e.g. node_modules/.bin/ts-node ->
     // ../ts-node/dist/bin.js) are the common, legitimate case and must be created;
@@ -1610,7 +1630,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private void extractSymlink(ZipFile zipFile, ZipArchiveEntry entry, Path target, Path dest)
             throws IOException {
         String linkTarget;
-        try (InputStream in = zipFile.getInputStream(entry)) {
+        try (InputStream in = openEntryStream(zipFile, entry)) {
             linkTarget = new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
         Path resolved = target.getParent().resolve(linkTarget).normalize();
