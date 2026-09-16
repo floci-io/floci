@@ -69,7 +69,7 @@ public class BedrockAgentCoreCredentialProviderService {
                 throw new AwsException("ValidationException", "jsonKey must be between 1 and 128 characters", 400);
             }
         }
-        validateTags(request.get("tags"));
+        BedrockAgentCoreTagValidation.validateTags(request.get("tags"));
         Instant now = Instant.now();
         ObjectNode item = JsonNodeFactory.instance.objectNode();
         item.put("name", name);
@@ -196,7 +196,7 @@ public class BedrockAgentCoreCredentialProviderService {
         if (clientSecret != null && clientSecret.length() > 2048) {
             throw new AwsException("ValidationException", "clientSecret exceeds maximum length of 2048", 400);
         }
-        validateTags(request.get("tags"));
+        BedrockAgentCoreTagValidation.validateTags(request.get("tags"));
 
         Instant now = Instant.now();
         ObjectNode item = JsonNodeFactory.instance.objectNode();
@@ -434,29 +434,6 @@ public class BedrockAgentCoreCredentialProviderService {
         if (name == null || name.length() < 1 || name.length() > 128 || !name.matches("[a-zA-Z0-9\\-_]+")) {
             throw new AwsException("ValidationException", "name must match [a-zA-Z0-9\\-_]+ and be 1-128 characters", 400);
         }
-    }
-
-    private static void validateTags(JsonNode tags) {
-        if (tags == null || tags.isNull()) {
-            return;
-        }
-        if (!tags.isObject() || tags.size() > 50) {
-            throw new AwsException("ValidationException", "tags must be an object with at most 50 entries", 400);
-        }
-        tags.fields().forEachRemaining(entry -> {
-            String key = entry.getKey();
-            JsonNode rawValue = entry.getValue();
-            if (key.length() < 1 || key.length() > 128 || !key.matches("[a-zA-Z0-9\\s._:/=+@-]*")) {
-                throw new AwsException("ValidationException", "tag key does not satisfy AgentCore constraints", 400);
-            }
-            if (!rawValue.isTextual()) {
-                throw new AwsException("ValidationException", "tag value must be a string", 400);
-            }
-            String value = rawValue.asText();
-            if (value.length() > 256 || !value.matches("[a-zA-Z0-9\\s._:/=+@-]*")) {
-                throw new AwsException("ValidationException", "tag value does not satisfy AgentCore constraints", 400);
-            }
-        });
     }
 
     private static String text(JsonNode node, String field) {
