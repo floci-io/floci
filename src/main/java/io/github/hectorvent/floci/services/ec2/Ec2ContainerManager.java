@@ -77,7 +77,8 @@ import java.util.zip.GZIPInputStream;
 public class Ec2ContainerManager {
 
     private static final Logger LOG = Logger.getLogger(Ec2ContainerManager.class);
-    private static final String USER_DATA_SCRIPT_PATH = "/tmp/user-data.sh";
+    // Guest-created /tmp mounts hide files copied through Docker's archive API.
+    private static final String USER_DATA_SCRIPT_PATH = "/var/lib/user-data.sh";
     private static final Pattern MIME_BOUNDARY = Pattern.compile("(?im)^content-type:\\s*multipart/[^;]+;\\s*boundary=\"?([^\";\\n\\r]+)\"?.*$");
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
     /** Exit code the sshd install probe uses for "sshd is present but scp is not". See startSshd. */
@@ -1469,7 +1470,7 @@ public class Ec2ContainerManager {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
         byte[] tar = buildSingleFileTar("user-data.sh", script, 0755);
         dockerClient.copyArchiveToContainerCmd(containerId)
-                .withRemotePath("/tmp")
+                .withRemotePath("/var/lib")
                 .withTarInputStream(new ByteArrayInputStream(tar))
                 .exec();
 
