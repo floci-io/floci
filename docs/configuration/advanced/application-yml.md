@@ -131,6 +131,7 @@ floci:
     lambda:
       enabled: true
       ephemeral: false                        # true = remove container after each invocation
+      docker-flags: ""                        # Extra Docker create flags for Lambda containers
       ecr-base-uri: public.ecr.aws            # Registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
       honour-architectures: false             # true = select the declared Lambda Docker architecture
       default-memory-mb: 128

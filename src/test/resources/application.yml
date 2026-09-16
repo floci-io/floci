@@ -134,6 +134,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      docker-flags: ""
       honour-architectures: false
       zip-max-entries: 100000
       # aws-config-path:

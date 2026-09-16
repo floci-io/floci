@@ -442,6 +442,14 @@ public class ContainerBuilder {
             return this;
         }
 
+        /** Adds a DNS server to the container configuration. */
+        public Builder withDnsServer(String dnsServer) {
+            if (dnsServer != null && !dnsServer.isBlank()) {
+                dnsServers.add(dnsServer);
+            }
+            return this;
+        }
+
         /**
          * Builds the immutable ContainerSpec.
          */

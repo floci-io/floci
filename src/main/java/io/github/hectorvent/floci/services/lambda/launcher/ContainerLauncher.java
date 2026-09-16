@@ -269,6 +269,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
 
+        LambdaDockerFlags dockerFlags = configuredDockerFlags();
+        applyDockerFlags(specBuilder, dockerFlags);
+
         specBuilder.withEmbeddedDns();
 
         // Inject extra hosts entries into the container if present. Split on the FIRST
@@ -352,7 +355,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Create container without starting — provided.* runtimes exec
         // /var/runtime/bootstrap on start, so code must be copied first.
-        containerId = createContainer(spec, fn);
+        containerId = createContainer(spec, fn, dockerFlags);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
         // Docker now holds the real container-to-volume reference, which removeVolume's own in-use
         // check protects from here on - release the in-flight marker that stood in for it before
@@ -502,7 +505,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         };
     }
 
-    private String createContainer(ContainerSpec spec, LambdaFunction fn) {
+    private String createContainer(ContainerSpec spec, LambdaFunction fn, LambdaDockerFlags dockerFlags) {
+        if (dockerFlags.platform() != null) {
+            return lifecycleManager.create(spec, dockerFlags.platform());
+        }
         if (!config.services().lambda().honourArchitectures()) {
             return lifecycleManager.create(spec);
         }
@@ -512,6 +518,68 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     + fn.getArchitectures() + " for function '" + fn.getFunctionName() + "'");
         }
         return lifecycleManager.create(spec, platform.get());
+    }
+
+    private LambdaDockerFlags configuredDockerFlags() {
+        Optional<String> configured = Optional.ofNullable(config.services().lambda().dockerFlags())
+                .orElse(Optional.empty());
+        return configured.filter(value -> !value.isBlank())
+                .map(LambdaDockerFlags::parse)
+                .orElseGet(() -> LambdaDockerFlags.parse(null));
+    }
+
+    private static void applyDockerFlags(ContainerBuilder.Builder builder, LambdaDockerFlags flags) {
+        builder.withEnv(flags.environment());
+        for (String volume : flags.volumes()) {
+            String[] parts = volume.split(":", -1);
+            if (parts.length < 2 || parts.length > 3 || parts[0].isBlank() || parts[1].isBlank()) {
+                throw new IllegalArgumentException("Invalid Lambda Docker volume: " + volume);
+            }
+            if (parts.length == 3 && "ro".equals(parts[2])) {
+                builder.withReadOnlyBind(parts[0], parts[1]);
+            } else if (parts.length == 2 || "rw".equals(parts[2])) {
+                builder.withBind(parts[0], parts[1]);
+            } else {
+                throw new IllegalArgumentException("Invalid Lambda Docker volume mode: " + volume);
+            }
+        }
+        for (String publishedPort : flags.publishedPorts()) {
+            String[] parts = publishedPort.split(":", -1);
+            String hostIp = parts.length == 3 ? parts[0] : null;
+            String hostPort = parts.length == 2 ? parts[0] : parts.length == 3 ? parts[1] : "";
+            String containerPort = parts.length == 2 ? parts[1] : parts.length == 3 ? parts[2] : "";
+            if (hostPort.isBlank() || containerPort.isBlank()) {
+                throw new IllegalArgumentException("Invalid Lambda Docker published port: " + publishedPort);
+            }
+            int parsedHostPort = Integer.parseInt(hostPort);
+            int parsedContainerPort = Integer.parseInt(containerPort);
+            if (hostIp == null) {
+                builder.withPortBinding(parsedContainerPort, parsedHostPort);
+            } else if ("127.0.0.1".equals(hostIp)) {
+                builder.withLoopbackPortBinding(parsedContainerPort, parsedHostPort);
+            } else {
+                throw new IllegalArgumentException("Lambda Docker published ports only support "
+                        + "127.0.0.1 as an explicit host address: " + publishedPort);
+            }
+        }
+        for (String extraHost : flags.extraHosts()) {
+            int separator = extraHost.indexOf(':');
+            if (separator <= 0 || separator == extraHost.length() - 1) {
+                throw new IllegalArgumentException("Invalid Lambda Docker extra host: " + extraHost);
+            }
+            builder.withExtraHost(extraHost.substring(0, separator), extraHost.substring(separator + 1));
+        }
+        for (String dnsServer : flags.dnsServers()) {
+            builder.withDnsServer(dnsServer);
+        }
+        builder.withLabels(flags.labels());
+        if (flags.network() != null) {
+            builder.withNetworkMode(flags.network());
+        }
+        if (flags.user() != null) {
+            builder.withUser(flags.user());
+        }
+        builder.withPrivileged(flags.privileged());
     }
 
     public void stop(ContainerHandle handle) {
@@ -887,7 +955,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         acquirePopulatePermit(fn.getFunctionName());
         String helperId = null;
         try {
-            helperId = createContainer(helperSpec, fn);
+            helperId = createContainer(helperSpec, fn, LambdaDockerFlags.parse(null));
             lifecycleManager.startCreated(helperId, helperSpec);
             copyDirToContainerStrict(lifecycleManager.getDockerClient(), helperId,
                     Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());

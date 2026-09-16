@@ -401,6 +401,55 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_appliesConfiguredDockerFlagsToRealContainer() throws Exception {
+        when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(
+                "--env NODE_EXTRA_CA_CERTS=/opt/certs/root.pem "
+                        + "--volume /tmp/certs:/opt/certs:ro --add-host api.local:host-gateway "
+                        + "--dns 1.1.1.1 --label purpose=debug --network lambda-net "
+                        + "--user 1000:1000 --privileged --publish 127.0.0.1:5050:5050"));
+        Path codePath = Files.createDirectory(tempDir.resolve("flags-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("flags-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertTrue(spec.env().contains("NODE_EXTRA_CA_CERTS=/opt/certs/root.pem"));
+        assertEquals("lambda-net", spec.networkMode());
+        assertEquals("1000:1000", spec.user());
+        assertTrue(spec.privileged());
+        assertEquals(Map.of(5050, 5050), spec.portBindings());
+        assertEquals(List.of(5050), spec.loopbackPortBindings());
+        assertTrue(spec.extraHosts().contains("api.local:host-gateway"));
+        assertTrue(spec.dnsServers().contains("1.1.1.1"));
+        assertEquals("debug", spec.labels().get("purpose"));
+        assertEquals("/opt/certs", spec.binds().getFirst().getVolume().getPath());
+        assertEquals("/tmp/certs", spec.binds().getFirst().getPath());
+    }
+
+    @Test
+    void launchFunction_rejectsPublishedPortBoundToUnsupportedHostAddress() throws Exception {
+        when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(
+                "--publish 192.0.2.10:5050:5050"));
+        Path codePath = Files.createDirectory(tempDir.resolve("unsupported-publish-address-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("unsupported-publish-address-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> launcher.launch(fn));
+
+        assertTrue(exception.getMessage().contains("127.0.0.1"));
+    }
+
+    @Test
     void launchFunction_mountsConfiguredFileSystemVolume() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("efs-code"));
 

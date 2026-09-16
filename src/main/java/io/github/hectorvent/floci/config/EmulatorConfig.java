@@ -2287,6 +2287,9 @@ public interface EmulatorConfig {
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
 
+        /** Additional Docker create flags applied to every Lambda execution container. */
+        Optional<String> dockerFlags();
+
         /**
          * Base name prefix for the containers and code volumes Lambda spawns, replacing the
          * default {@code floci} (e.g. prefix {@code acme} names containers
