@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.execution;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
 import io.github.hectorvent.floci.services.appsync.graphql.execution.datasource.AppSyncDataSourceRoleAuthorizer;
 import io.github.hectorvent.floci.services.appsync.graphql.execution.datasource.DynamoDbDataSourceInvoker;
@@ -21,6 +22,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
+import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 
 class UnitResolverRuntimeTest {
 
@@ -29,12 +31,21 @@ class UnitResolverRuntimeTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
-    private final UnitResolverRuntime runtime = new UnitResolverRuntime(new AppSyncVtlEngine(), mapper,
+    private final UnitResolverRuntime runtime = new UnitResolverRuntime(new AppSyncVtlEngine(vtlConfig()), mapper,
             new NoneDataSourceInvoker(), new DynamoDbDataSourceInvoker(
                     dynamoDb, mapper, mock(AppSyncDataSourceRoleAuthorizer.class)));
 
     private final GraphQlRequestContext rc = new GraphQlRequestContext("api", "000000000000", "us-east-1",
             "API Key Authorization", null, Map.of("x-api-key", "da2-x"), Map.of("v", 1));
+
+    /** The sandbox limits the engine reads at construction; generous values keep them out of the way here. */
+    private static EmulatorConfig vtlConfig() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().appsync().vtlMaxLoops()).thenReturn(10_000);
+        when(config.services().appsync().vtlMaxOutputChars()).thenReturn(1_000_000);
+        when(config.services().appsync().vtlTimeoutMillis()).thenReturn(5_000L);
+        return config;
+    }
 
     private static DataSource none() {
         DataSource ds = new DataSource();
