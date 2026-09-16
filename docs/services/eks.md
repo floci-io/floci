@@ -13,6 +13,10 @@ EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Targe
 | `DescribeCluster` | Describe a cluster by name |
 | `ListClusters` | List all cluster names |
 | `DeleteCluster` | Delete a cluster |
+| `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
+| `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
+| `ListAccessEntries` | List principal ARNs with pagination |
+| `DeleteAccessEntry` | Delete access-entry metadata |
 | `CreateNodegroup` | Create node group metadata for a cluster |
 | `DescribeNodegroup` | Describe a node group by cluster and name |
 | `ListNodegroups` | List node group names for a cluster |
@@ -24,6 +28,28 @@ EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Targe
 | `TagResource` | Add tags to a cluster |
 | `UntagResource` | Remove tags from a cluster |
 | `ListTagsForResource` | List tags on a cluster |
+
+## Access-entry management
+
+`CreateCluster` accepts `accessConfig.authenticationMode` (`CONFIG_MAP`, `API_AND_CONFIG_MAP`, or `API`) and `bootstrapClusterCreatorAdminPermissions`. The API default is `CONFIG_MAP`; access-entry operations require an ACTIVE cluster created with `API` or `API_AND_CONFIG_MAP`.
+
+The four access-entry management operations support `STANDARD` (the default) and `EC2_LINUX`. STANDARD accepts existing IAM users or roles, including principals in another account. EC2_LINUX requires a role in the cluster account and generates `system:node:{{EC2PrivateDNSName}}`; custom usernames and Kubernetes groups are not accepted for node entries. Tags supplied at creation are preserved. Repeating a create with the same client token and normalized parameters returns the existing entry. Listing accepts `maxResults` from 1 to 100 and cluster-specific `nextToken` values.
+
+Access entries use EKS storage and retain the IAM principal's stable ID internally. Cluster deletion removes its entries, and a cluster recreated with the same name does not inherit previous entries or pagination tokens.
+
+!!! note "Management API scope"
+    These operations currently manage metadata only. They do not change the k3s token webhook's authorization behavior, create cluster-creator or managed-node entries automatically, or make native workers register. Authentication mode and the bootstrap flag are recorded; they are not yet enforced by the Kubernetes API server. Updating authentication mode, UpdateAccessEntry, access-policy association, and entry tag updates are not implemented. Worker authentication is a separate follow-up.
+
+```bash
+aws --endpoint-url http://localhost:4566 eks create-cluster \
+  --name local-nodes --role-arn arn:aws:iam::000000000000:role/cluster \
+  --resources-vpc-config '{}' \
+  --access-config authenticationMode=API,bootstrapClusterCreatorAdminPermissions=false
+# The IAM role must already exist.
+aws --endpoint-url http://localhost:4566 eks create-access-entry \
+  --cluster-name local-nodes --principal-arn arn:aws:iam::000000000000:role/worker \
+  --type EC2_LINUX
+```
 
 ## Modes
 

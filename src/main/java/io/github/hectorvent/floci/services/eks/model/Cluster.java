@@ -73,6 +73,11 @@ public class Cluster {
     @JsonIgnore
     private String dockerName;
 
+    private AccessConfig accessConfig;
+
+    public AccessConfig getAccessConfig() { return accessConfig; }
+    public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
+
     public Cluster() {}
 
     public String getName() { return name; }
