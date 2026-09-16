@@ -16,7 +16,6 @@ import org.jboss.logging.Logger;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -206,7 +205,7 @@ public class ElastiCacheContainerManager {
                 OutputStream out = s.getOutputStream();
                 out.write(RESP_PING);
                 out.flush();
-                String line = readAsciiLineCrLf(s.getInputStream());
+                String line = RespLineReader.readAsciiLineCrLf(s.getInputStream());
                 if (line.startsWith("+PONG")) {
                     if (attempt > 1) {
                         LOG.infov("ElastiCache backend ready for group {0} after {1} probe attempt(s)", groupId, attempt);
@@ -231,22 +230,6 @@ public class ElastiCacheContainerManager {
         throw new RuntimeException(
                 "ElastiCache backend for group " + groupId + " did not become ready on " + host + ":" + port
                         + " within " + BACKEND_READY_DEADLINE_MS + "ms");
-    }
-
-    private static String readAsciiLineCrLf(InputStream in) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        int b;
-        while ((b = in.read()) != -1) {
-            if (b == '\r') {
-                int next = in.read();
-                if (next != '\n') {
-                    throw new IOException("Expected \\n after \\r in RESP line");
-                }
-                break;
-            }
-            sb.append((char) b);
-        }
-        return sb.toString();
     }
 
     public void stop(ElastiCacheContainerHandle handle) {
