@@ -1688,11 +1688,12 @@ public class DynamoDbJsonHandler {
 
         for (JsonNode txItem : transactItemsNode) {
             for (JsonNode op : txItem) {
+                String conditionExpression = op.has("ConditionExpression")
+                        ? op.get("ConditionExpression").asText() : null;
                 DynamoDbExpressionSize.checkRead(op.path("UpdateExpression").textValue(), "UpdateExpression");
-                DynamoDbExpressionSize.checkReadWithSize(op.path("ConditionExpression").textValue(),
-                        "ConditionExpression");
-                ExpressionEvaluator.validateExpression(op.path("ConditionExpression").textValue(),
-                        "ConditionExpression", op.get("ExpressionAttributeNames"),
+                DynamoDbExpressionSize.checkReadWithSize(conditionExpression, "ConditionExpression");
+                ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression",
+                        op.get("ExpressionAttributeNames"),
                         op.get("ExpressionAttributeValues"));
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
             }
