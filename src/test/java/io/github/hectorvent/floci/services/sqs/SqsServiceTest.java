@@ -1370,6 +1370,33 @@ class SqsServiceTest {
         }
     }
 
+    @Test
+    void cancelMessageMoveTask_acceptedCancelIsNotOverwrittenByTheWorkersTerminalWrite() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-terminal-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-terminal-dlq");
+        sqsService.createQueue("cancel-terminal-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-terminal-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-terminal-destination");
+        for (int i = 0; i < 50; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        // The interleaving: the worker reads its own signal and concludes COMPLETED, the cancel is
+        // accepted (the task reads CANCELLING), and only then does the worker's terminal write
+        // land. Replaying that write with the stale decision must not turn CANCELLING back into
+        // COMPLETED.
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+        sqsService.finishMoveTask(taskHandle, 1, false);
+
+        assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
+        awaitMoveTaskStatus(dlqArn, taskHandle, "CANCELLED");
+        assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
+    }
+
     private String moveTaskStatus(String sourceArn, String taskHandle) {
         return sqsService.listMessageMoveTasks(sourceArn, "us-east-1").stream()
                 .filter(task -> task.taskHandle().equals(taskHandle))
