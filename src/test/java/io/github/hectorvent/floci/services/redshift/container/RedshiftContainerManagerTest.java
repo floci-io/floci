@@ -544,6 +544,8 @@ class RedshiftContainerManagerTest {
         RedshiftContainerHandle handleTolerated = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertNotNull(handleTolerated);
         assertNull(handleTolerated.getLogStream());
+    }
+
     @Test
     void testBootstrapCatalogSuccess() {
         CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
