@@ -7,6 +7,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Validates RDS IAM auth tokens (SigV4 presigned URLs).
@@ -75,7 +77,7 @@ public class RdsSigV4Validator {
         for (String pair : rawQuery.split("&")) {
             int eq = pair.indexOf('=');
             if (eq >= 0 && "X-Amz-Credential".equals(pair.substring(0, eq))) {
-                String[] parts = java.net.URLDecoder.decode(pair.substring(eq + 1), java.nio.charset.StandardCharsets.UTF_8)
+                String[] parts = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8)
                         .split("/");
                 return parts.length >= 5 && region.equals(parts[2]) && "rds-db".equals(parts[3]);
             }

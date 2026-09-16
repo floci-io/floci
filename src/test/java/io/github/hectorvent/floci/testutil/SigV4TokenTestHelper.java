@@ -78,6 +78,24 @@ public final class SigV4TokenTestHelper {
         return createRdsToken(host, port, dbUser, accessKeyId, secretKey, timestamp, expiresSeconds, null);
     }
 
+    public static String createRdsTokenWithScope(
+            String host,
+            int port,
+            String dbUser,
+            String accessKeyId,
+            String secretKey,
+            String region,
+            String service,
+            Instant timestamp,
+            int expiresSeconds
+    ) throws Exception {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("Action", "connect");
+        params.put("DBUser", dbUser);
+        return signToken(host, port, accessKeyId, secretKey, region, service, timestamp, expiresSeconds,
+                params, Map.of("host", host + ":" + port));
+    }
+
     public static String createRdsToken(
             String host,
             int port,
