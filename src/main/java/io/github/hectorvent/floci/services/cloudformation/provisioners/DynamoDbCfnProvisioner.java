@@ -216,9 +216,12 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(tableName);
         r.getAttributes().put("Arn", table.getTableArn());
-        // The registry schema declares TableId read-only on the global table; DescribeTable
-        // reports the same value, so Fn::GetAtt and the API agree.
-        r.getAttributes().put("TableId", table.getTableId());
+        // Only the global table's registry schema declares TableId read-only; a plain table exposes
+        // Arn and StreamArn alone, so publishing it there would accept a Fn::GetAtt CloudFormation
+        // rejects. DescribeTable reports the same value, so Fn::GetAtt and the API agree.
+        if (GLOBAL_TABLE.equals(r.getResourceType())) {
+            r.getAttributes().put("TableId", table.getTableId());
+        }
         // Only a live stream has an ARN worth handing to Fn::GetAtt. Publishing one unconditionally
         // resolved to nothing on a streamless table; publishing the retained ARN of a stream that
         // has since been switched off would resolve to something no longer running. An update
@@ -279,12 +282,14 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         if (tableName == null || tableName.isBlank() || replicaRegion == null || replicaRegion.isBlank()) {
             return;
         }
-        try {
-            dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(replicaRegion), region);
-        } catch (Exception e) {
-            LOG.debugv("Could not remove replica {0} from table {1}: {2}",
-                    replicaRegion, tableName, e.getMessage());
-        }
+        // Removing a replica the table no longer has is already a no-op in the service, so the one
+        // "already gone" case is the table itself; anything else must reach the stack as DELETE_FAILED.
+        String removedTableName = tableName;
+        String removedRegion = replicaRegion;
+        CfnDeletes.safeDelete("DynamoDB replica", removedTableName + "-" + removedRegion,
+                () -> dynamoDbService.applyReplicaUpdates(
+                        removedTableName, List.of(), List.of(removedRegion), region),
+                "ResourceNotFoundException");
     }
 
     private static String replicaRegionFromPhysicalId(String physicalId, String tableName) {

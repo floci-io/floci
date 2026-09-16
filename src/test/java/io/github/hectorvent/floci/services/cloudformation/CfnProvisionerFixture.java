@@ -665,7 +665,6 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             return new CloudFormationResourceProvisioner(
                     s3Service,
-                    snsService,
                     lambdaService,
                     iamService,
                     ssmService,

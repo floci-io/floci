@@ -85,8 +85,9 @@ class DynamoDbCfnProvisionerTest {
                 provisioner.resourceTypes());
     }
 
+    /** The registry schema declares only Arn and StreamArn read-only on a plain table; TableId belongs to the global table. */
     @Test
-    void tablePublishesArnAndTableIdAndNoStreamArnWithoutAStream() throws Exception {
+    void tablePublishesOnlyArnWithoutAStream() throws Exception {
         when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
                 .thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
@@ -94,9 +95,8 @@ class DynamoDbCfnProvisionerTest {
         provisioner.provision(r, props("{\"TableName\":\"orders\"}"), ctx());
 
         assertEquals(TABLE_NAME, r.getPhysicalId());
-        assertEquals(Set.of("Arn", "TableId"), r.getAttributes().keySet());
+        assertEquals(Set.of("Arn"), r.getAttributes().keySet());
         assertEquals(TABLE_ARN, r.getAttributes().get("Arn"));
-        assertEquals(TABLE_ID, r.getAttributes().get("TableId"));
     }
 
     @Test
@@ -124,7 +124,7 @@ class DynamoDbCfnProvisionerTest {
         provisioner.provision(r, props("{\"TableName\":\"orders\",\"StreamSpecification\":"
                 + "{\"StreamViewType\":\"NEW_AND_OLD_IMAGES\"}}"), ctx());
 
-        assertEquals(Set.of("Arn", "TableId", "StreamArn"), r.getAttributes().keySet());
+        assertEquals(Set.of("Arn", "StreamArn"), r.getAttributes().keySet());
         assertEquals(STREAM_ARN, r.getAttributes().get("StreamArn"));
     }
 
@@ -178,6 +178,25 @@ class DynamoDbCfnProvisionerTest {
         provisioner.delete(r, "us-east-1");
 
         verify(dynamoDb).applyReplicaUpdates(TABLE_NAME, List.of(), List.of("us-west-2"), "us-east-1");
+    }
+
+    /** Only a table that is already gone is "already deleted"; any other failure must reach the stack as DELETE_FAILED. */
+    @Test
+    void replicaDeletePropagatesAnythingButANotFoundTable() {
+        StackResource r = resource("Custom::DynamoDBReplica", "Replica");
+        r.setPhysicalId("orders-us-west-2");
+        r.getAttributes().put("TableName", TABLE_NAME);
+        r.getAttributes().put("__FlociDynamoDbReplicaRegion", "us-west-2");
+        doThrow(new AwsException("ValidationException", "Replica RegionName must not be empty", 400))
+                .when(dynamoDb).applyReplicaUpdates(TABLE_NAME, List.of(), List.of("us-west-2"), "us-east-1");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.delete(r, "us-east-1"));
+        assertEquals("ValidationException", e.getErrorCode());
+
+        doThrow(new AwsException("ResourceNotFoundException", "Requested resource not found", 400))
+                .when(dynamoDb).applyReplicaUpdates(TABLE_NAME, List.of(), List.of("us-west-2"), "us-east-1");
+
+        provisioner.delete(r, "us-east-1");
     }
 
     @Test
