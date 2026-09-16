@@ -191,6 +191,10 @@ public class RdsAuthProxy {
                             handshakeTimeoutMillis,
                             iamUserChecker, mysqlBinding);
                 }
+                case SQLSERVER -> {
+                    backend = connector.connect();
+                    TcpStreamBridge.relay(client, backend);
+                }
             }
         } catch (Exception e) {
             LOG.debugv("RDS connection error for instance {0}: {1}", instanceId, e.getMessage());

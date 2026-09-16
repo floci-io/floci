@@ -430,7 +430,7 @@ public class RdsQueryHandler {
                .elem("Engine", option.get("engine"))
                .elem("EngineVersion", option.get("engineVersion"))
                .elem("DBInstanceClass", option.get("dbInstanceClass"))
-               .elem("LicenseModel", "postgresql-license")
+               .elem("LicenseModel", licenseModel(option.get("engine")))
                .start("AvailabilityZones")
                  .start("AvailabilityZone")
                    .elem("Name", config.defaultAvailabilityZone())
@@ -441,6 +441,13 @@ public class RdsQueryHandler {
         xml.end("OrderableDBInstanceOptions").start("Marker").end("Marker");
         return Response.ok(AwsQueryResponse.envelope("DescribeOrderableDBInstanceOptions",
                 AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private static String licenseModel(String engine) {
+        if (engine != null && engine.regionMatches(true, 0, "sqlserver", 0, 9)) {
+            return "license-included";
+        }
+        return "postgresql-license";
     }
 
     private Response handleAddTagsToResource(MultivaluedMap<String, String> params, String region) {
@@ -2139,6 +2146,7 @@ public class RdsQueryHandler {
             case "postgres", "aurora-postgresql" -> "16.3";
             case "mysql", "aurora-mysql", "aurora" -> "8.0.36";
             case "mariadb" -> "11.2";
+            case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
             default -> "1.0";
         };
     }

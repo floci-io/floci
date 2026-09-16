@@ -1673,7 +1673,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 Map.of("engine", "postgres", "engineVersion", "16.14", "dbInstanceClass", "db.t4g.small"),
                 Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.medium"),
                 Map.of("engine", "mysql", "engineVersion", "8.0", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "mariadb", "engineVersion", "11", "dbInstanceClass", "db.t3.micro")
+                Map.of("engine", "mariadb", "engineVersion", "11", "dbInstanceClass", "db.t3.micro"),
+                Map.of("engine", "sqlserver-se", "engineVersion", "15.00", "dbInstanceClass", "db.t3.micro")
         );
         return options.stream()
                 .filter(option -> engine == null || engine.isBlank() || engine.equalsIgnoreCase(option.get("engine")))
@@ -3957,6 +3958,7 @@ public class RdsService implements Resettable, ResourceProvider {
             // to the default case below instead of silently becoming aurora-mysql.
             case "mysql", "aurora-mysql" -> DatabaseEngine.MYSQL;
             case "mariadb" -> DatabaseEngine.MARIADB;
+            case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> DatabaseEngine.SQLSERVER;
             default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
     }
@@ -3972,6 +3974,7 @@ public class RdsService implements Resettable, ResourceProvider {
             case MARIADB -> config.services().rds().defaultMariadbImage()
                     .orElseGet(() -> imageForRequestedVersion(
                             EmulatorConfig.RdsServiceConfig.DEFAULT_MARIADB_IMAGE, engineVersion));
+            case SQLSERVER -> config.services().rds().defaultSqlServerImage();
         };
     }
 
@@ -4005,6 +4008,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 case "postgres", "aurora-postgresql" -> "16.3";
                 case "mysql", "aurora", "aurora-mysql" -> "8.0.36";
                 case "mariadb" -> "11.2";
+                case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
                 default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
             };
         }
@@ -4022,6 +4026,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
                 yield versionParts[0] + "." + versionParts[1];
             }
+            case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> versionParts[0];
             default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
         return expectedFamilyPrefix(normalizedEngine) + familyVersion;
@@ -4043,6 +4048,7 @@ public class RdsService implements Resettable, ResourceProvider {
             case "mysql" -> "mysql";
             case "aurora", "aurora-mysql" -> "aurora-mysql";
             case "mariadb" -> "mariadb";
+            case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "sqlserver";
             default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
     }

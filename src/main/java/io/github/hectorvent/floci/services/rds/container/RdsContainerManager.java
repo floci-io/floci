@@ -260,7 +260,7 @@ public class RdsContainerManager {
             EndpointInfo endpoint = info.getEndpoint(enginePort);
 
             LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
-            initializeEngine(containerName, info.containerId(), engine, masterUsername);
+            initializeEngine(containerName, info.containerId(), engine, masterUsername, masterPassword, dbName);
 
             handle = new RdsContainerHandle(
                     info.containerId(), effectiveRuntimeId, instanceId,
@@ -434,6 +434,7 @@ public class RdsContainerManager {
         return switch (engine) {
             case POSTGRES -> postgresDataPath(image);
             case MYSQL, MARIADB -> "/var/lib/mysql";
+            case SQLSERVER -> "/var/opt/mssql";
         };
     }
 
@@ -469,10 +470,47 @@ public class RdsContainerManager {
         return Integer.parseInt(tag.substring(0, end));
     }
 
-    private void initializeEngine(String containerName, String containerId, DatabaseEngine engine, String masterUsername) {
-        if (engine == DatabaseEngine.POSTGRES) {
-            initializePostgresIamRole(containerName, containerId, masterUsername);
+    private void initializeEngine(String containerName, String containerId, DatabaseEngine engine,
+                                  String masterUsername, String masterPassword, String dbName) {
+        switch (engine) {
+            case POSTGRES -> initializePostgresIamRole(containerName, containerId, masterUsername);
+            case SQLSERVER -> initializeSqlServerMaster(containerName, containerId,
+                    masterUsername, masterPassword, dbName);
+            case MYSQL, MARIADB -> {
+            }
         }
+    }
+
+    private void initializeSqlServerMaster(String containerName, String containerId,
+                                           String masterUsername, String masterPassword, String dbName) {
+        String effectiveUser = (masterUsername == null || masterUsername.isBlank()) ? "sa" : masterUsername;
+        if ("sa".equalsIgnoreCase(effectiveUser) && (dbName == null || dbName.isBlank())) {
+            return;
+        }
+        String databaseSql = dbName == null || dbName.isBlank()
+                ? ""
+                : "IF DB_ID(N'" + sqlServerLiteral(dbName) + "') IS NULL CREATE DATABASE "
+                        + sqlServerIdentifier(dbName) + ";";
+        String loginSql = "sa".equalsIgnoreCase(effectiveUser)
+                ? ""
+                : "IF SUSER_ID(N'" + sqlServerLiteral(effectiveUser) + "') IS NULL BEGIN "
+                        + "CREATE LOGIN " + sqlServerIdentifier(effectiveUser)
+                        + " WITH PASSWORD = N'" + sqlServerLiteral(masterPassword) + "'; END;"
+                        + " ALTER SERVER ROLE sysadmin ADD MEMBER " + sqlServerIdentifier(effectiveUser) + ";";
+        String[] cmd = {
+                "/opt/mssql-tools18/bin/sqlcmd", "-S", "127.0.0.1", "-C",
+                "-U", "sa", "-P", masterPassword, "-Q", databaseSql + loginSql
+        };
+        execUntilSuccess(containerName, containerId, cmd, "SQL Server master login");
+    }
+
+    private static String sqlServerIdentifier(String value) {
+        String escaped = value.replace("]", "]]");
+        return "[" + escaped + "]";
+    }
+
+    private static String sqlServerLiteral(String value) {
+        return value == null ? "" : value.replace("'", "''");
     }
 
     static String postgresIamRoleInitSql() {
@@ -527,6 +565,16 @@ public class RdsContainerManager {
                     ? masterUsername : "postgres";
             return new String[]{"psql", "-v", "ON_ERROR_STOP=1", "-U", effectiveUser, "-d", "postgres",
                     "-c", postgresPasswordRotationSql(effectiveUser, newPassword)};
+        }
+        if (engine == DatabaseEngine.SQLSERVER) {
+            String effectiveUser = (masterUsername != null && !masterUsername.isBlank())
+                    ? masterUsername : "sa";
+            return new String[]{
+                    "/opt/mssql-tools18/bin/sqlcmd", "-S", "127.0.0.1", "-C",
+                    "-U", "sa", "-P", oldPassword, "-Q",
+                    "ALTER LOGIN " + sqlServerIdentifier(effectiveUser)
+                            + " WITH PASSWORD = N'" + sqlServerLiteral(newPassword)
+                            + "' OLD_PASSWORD = N'" + sqlServerLiteral(oldPassword) + "';"};
         }
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank())
                 ? masterUsername : "root";
@@ -883,6 +931,10 @@ public class RdsContainerManager {
                 }
                 envs.add("MARIADB_DATABASE=" + effectiveDb);
             }
+            case SQLSERVER -> {
+                envs.add("ACCEPT_EULA=Y");
+                envs.add("MSSQL_SA_PASSWORD=" + masterPassword);
+            }
         }
         return envs;
     }
@@ -904,7 +956,7 @@ public class RdsContainerManager {
                                 "--authentication-policy=mysql_native_password")
                         : List.of("--default-authentication-plugin=mysql_native_password");
             }
-            case POSTGRES, MARIADB -> List.of();
+            case POSTGRES, MARIADB, SQLSERVER -> List.of();
         };
     }
 

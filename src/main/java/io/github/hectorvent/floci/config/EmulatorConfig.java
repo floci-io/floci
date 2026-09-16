@@ -1426,6 +1426,10 @@ public interface EmulatorConfig {
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultMariadbImage();
 
+        /** Docker image used for SQL Server instances when no override is configured. */
+        @WithDefault("mcr.microsoft.com/mssql/server:2022-latest")
+        String defaultSqlServerImage();
+
         /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
         Optional<String> endpointHost();
 
