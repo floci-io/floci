@@ -63,10 +63,11 @@ public class CognitoWellKnownController {
         String jwksUri = cognitoService.getJwksUri(pool.getId());
         String tokenEndpoint = cognitoService.getTokenEndpoint(pool.getId());
         String userInfoEndpoint = cognitoService.getUserInfoEndpoint(pool.getId());
+        String authorizationEndpoint = tokenEndpoint.replace("/token", "/authorize");
 
         String body = """
-                {"issuer":"%s","jwks_uri":"%s","token_endpoint":"%s","userinfo_endpoint":"%s","subject_types_supported":["public"],"response_types_supported":["code"],"grant_types_supported":["client_credentials","authorization_code"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post"],"id_token_signing_alg_values_supported":["RS256"]}
-                """.formatted(issuer, jwksUri, tokenEndpoint, userInfoEndpoint).strip();
+                {"issuer":"%s","jwks_uri":"%s","authorization_endpoint":"%s","token_endpoint":"%s","userinfo_endpoint":"%s","subject_types_supported":["public"],"response_types_supported":["code"],"grant_types_supported":["client_credentials","authorization_code"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post"],"id_token_signing_alg_values_supported":["RS256"]}
+                """.formatted(issuer, jwksUri, authorizationEndpoint, tokenEndpoint, userInfoEndpoint).strip();
         return Response.ok(body).build();
     }
 

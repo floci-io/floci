@@ -190,6 +190,18 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
 
     @Test
     @Order(10)
+    void idpResponseRouteIsServedOnCustomDomain() {
+        given()
+                .header("Host", DOMAIN)
+        .when()
+                .get("/oauth2/idpresponse")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
+    }
+
+    @Test
+    @Order(11)
     void revokeEndpointIsNotServed() {
         for (String path : List.of("/oauth2/revoke")) {
             given()
@@ -203,7 +215,7 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
 
     /** A prefix domain's hostname resolves to AWS, so Floci never routes by it. */
     @Test
-    @Order(11)
+    @Order(12)
     void prefixDomainHostIsNotRouted() throws Exception {
         String prefix = "routing-prefix-" + System.nanoTime();
         cognitoJson("CreateUserPoolDomain", """
@@ -223,7 +235,7 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
      * requests on many threads must never let one request's pin decide another's answer.
      */
     @Test
-    @Order(12)
+    @Order(13)
     void concurrentRequestsKeepTheirOwnPinnedPool() throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(8);
         try {

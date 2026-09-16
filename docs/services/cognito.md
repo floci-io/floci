@@ -70,10 +70,14 @@ An action given a user pool ID that does not resolve returns `ResourceNotFoundEx
 | UpdateIdentityProvider | Updates a provider's details, attribute mapping or identifiers. |
 | DeleteIdentityProvider | Deletes an identity provider from a user pool. |
 
-Providers are stored configuration only. Floci does not perform the federated sign-in
-flow: there is no `/oauth2/authorize` or `/oauth2/idpresponse` endpoint, so a registered
-provider cannot be used to authenticate. This covers infrastructure tooling that creates
-and reads provider configuration, not federated login.
+Providers can be used for generic OIDC authorization-code sign-in. Floci routes the
+AWS-shaped `/oauth2/authorize` and `/oauth2/idpresponse` endpoints to the configured local
+OIDC provider, exchanges the returned code, provisions or reconciles the federated user,
+and issues a Cognito authorization code for the registered callback.
+
+Only `ProviderType=OIDC` is supported by this flow. Floci does not provide a built-in hosted
+UI and does not implement social providers such as Google, Facebook, Login with Amazon or
+SignInWithApple.
 
 Two deliberate divergences from AWS, both consequences of not calling out to a third
 party:
@@ -116,8 +120,7 @@ the account that created it, since these requests carry no AWS credential: a `cl
 another pool is refused with `invalid_client`, and an access token issued by another pool with
 `invalid_token`. Domain names are unique across all accounts, as on AWS. The pool's `openid-configuration` advertises the custom-domain
 URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`) are stored but not
-routed, since that hostname never reaches Floci. `/oauth2/authorize`, `/login` and `/logout` are not
-served on any host.
+routed, since that hostname never reaches Floci. `/login` and `/logout` are not served on any host.
 
 With TLS enabled, a custom domain (`CustomDomainConfig` set) is added to Floci's server
 certificate as soon as it is created, so `https://<domain>` verifies without a restart; see
@@ -273,16 +276,30 @@ and returned rather than rendered. Two divergences follow from that:
 |------------------------------------------------------|------------------------------------------------------------------|
 | `GET /{userPoolId}/.well-known/openid-configuration` | OpenID discovery document                                        |
 | `GET /{userPoolId}/.well-known/jwks.json`            | JSON Web Key Set for JWT validation                              |
-| `POST /cognito-idp/oauth2/token`                     | Relaxed OAuth token endpoint for `grant_type=client_credentials` |
+| `GET /cognito-idp/oauth2/authorize`                  | OIDC authorization-code start endpoint                         |
+| `GET /cognito-idp/oauth2/idpresponse`                | OIDC provider callback endpoint                                |
+| `POST /cognito-idp/oauth2/token`                     | OAuth authorization-code and client-credentials token endpoint |
+
+The OAuth endpoints support browser-style OIDC authorization-code sign-in as well as the
+emulator-friendly client-credentials flow:
+
+- `GET /cognito-idp/oauth2/authorize` validates the app client and callback, then redirects
+  to the configured provider with an opaque state and nonce.
+- `GET /cognito-idp/oauth2/idpresponse` consumes the provider state, exchanges the provider
+  code and redirects to the registered callback with a one-time Cognito authorization code.
+- `POST /cognito-idp/oauth2/token` redeems that authorization code once, or issues a machine
+  token for `grant_type=client_credentials`.
 
 `POST /cognito-idp/oauth2/token` is intentionally emulator-friendly rather than full Cognito parity:
 
 - It requires an existing `client_id`.
 - It accepts `client_id` and `client_secret` from the form body or Basic auth.
-- It requires a confidential app client created with `GenerateSecret=true`.
+- Client-credentials requires a confidential app client created with `GenerateSecret=true`.
+- Authorization-code redemption validates the client, callback URI and one-time code binding.
 - It requires `AllowedOAuthFlowsUserPoolClient=true` and `AllowedOAuthFlows=["client_credentials"]`.
 - It doesn't require a Cognito domain.
-- It returns only `access_token`, `token_type`, and `expires_in`.
+- Client-credentials returns only `access_token`, `token_type`, and `expires_in`; authorization-code
+  redemption returns the Cognito access, ID and refresh token set.
 - It validates requested OAuth scopes against the app client's `AllowedOAuthScopes` and the pool's registered resource-server scopes.
 - It advertises the prefixed token endpoint in `/{userPoolId}/.well-known/openid-configuration`, or
   `https://<domain>/oauth2/token` when the pool has a custom domain (see Custom domains above).
