@@ -5,6 +5,14 @@
 
 Floci implements the AWS AppSync Management API, providing local emulation of GraphQL API configuration, schema management, data source binding, resolver mapping, API key provisioning, custom domains, and channel namespaces.
 
+## OIDC issuer network policy
+
+AppSync OIDC authentication uses the shared JWT issuer policy. By default, issuer discovery and
+JWKS requests require HTTPS and reject local, private, link-local, and other non-public addresses.
+For an isolated development environment, set `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`.
+This also applies to API Gateway HTTP API JWT authorizers. The option permits private HTTPS
+targets and HTTP URLs that use a literal private or loopback address.
+
 ## Supported Operations
 
 ### GraphQL API

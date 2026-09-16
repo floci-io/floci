@@ -102,6 +102,7 @@ floci:
     # The test listener binds all interfaces so Quarkus keeps localhost as its test authority.
     # This is test-only; production keeps the loopback default.
     allow-unsafe-network-exposure: true
+    allow-private-jwt-targets: true
 
   init-hooks:
     shell-executable: /bin/sh

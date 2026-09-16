@@ -3,14 +3,16 @@ package io.github.hectorvent.floci.services.apigatewayv2;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
+import org.apache.hc.client5.http.DnsResolver;
+import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.math.BigInteger;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.http.HttpClient;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
@@ -18,9 +20,13 @@ import java.security.KeyPairGenerator;
 import java.security.Signature;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
-import java.time.Duration;
 import java.util.Base64;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -37,6 +43,7 @@ class JwtSignatureVerifierTest {
     private RSAPrivateKey privateKey;
     private RSAPublicKey publicKey;
     private JwtSignatureVerifier verifier;
+    private JwtSignatureVerifier strictVerifier;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @BeforeEach
@@ -74,14 +81,14 @@ class JwtSignatureVerifierTest {
         server.start();
         issuer = "http://127.0.0.1:" + server.getAddress().getPort();
 
-        HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(5))
-                .build();
-        verifier = new JwtSignatureVerifier(objectMapper, client);
+        verifier = new JwtSignatureVerifier(objectMapper, SystemDefaultDnsResolver.INSTANCE, true);
+        strictVerifier = new JwtSignatureVerifier(objectMapper, SystemDefaultDnsResolver.INSTANCE, false);
     }
 
     @AfterEach
     void tearDown() {
+        verifier.close();
+        strictVerifier.close();
         server.stop(0);
     }
 
@@ -139,6 +146,153 @@ class JwtSignatureVerifierTest {
 
         assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
                 () -> verifier.verify(token, null));
+    }
+
+    @Test
+    void rejectsNonPublicIssuerAddressesWithoutExplicitOptIn() throws Exception {
+        String token = signToken("test-key-1", privateKey);
+
+        assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
+                () -> strictVerifier.verify(token, issuer));
+        assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
+                () -> strictVerifier.verify(token, "https://127.0.0.1:443"));
+        assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
+                () -> strictVerifier.verify(token, "https://10.0.0.1"));
+        assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
+                () -> strictVerifier.verify(token, "https://169.254.169.254"));
+    }
+
+    @Test
+    void privateNetworkOptInDoesNotAllowPublicPlaintextIssuer() throws Exception {
+        String token = signToken("test-key-1", privateKey);
+
+        JwtSignatureVerifier.JwtVerificationException exception = assertThrows(
+                JwtSignatureVerifier.JwtVerificationException.class,
+                () -> verifier.verify(token, "http://example.invalid"));
+
+        assertTrue(exception.getMessage().contains("must use HTTPS"));
+    }
+
+    @Test
+    void rejectsMalformedIssuerScheme() throws Exception {
+        String token = signToken("test-key-1", privateKey);
+
+        JwtSignatureVerifier.JwtVerificationException exception = assertThrows(
+                JwtSignatureVerifier.JwtVerificationException.class,
+                () -> strictVerifier.verify(token, "ftp://issuer.example.com"));
+
+        assertTrue(exception.getMessage().contains("must use HTTPS"));
+    }
+
+    @Test
+    void rejectsPrivateJwksTargetReturnedByDiscovery() throws Exception {
+        String token = signToken("test-key-1", privateKey);
+        try (JwtSignatureVerifier privateJwksVerifier = new JwtSignatureVerifier(
+                objectMapper, SystemDefaultDnsResolver.INSTANCE, false) {
+            @Override
+            String fetchJwksUri(String ignoredIssuer) {
+                return "https://169.254.169.254/latest/meta-data";
+            }
+        }) {
+            assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
+                    () -> privateJwksVerifier.verify(token, "https://issuer.example.com"));
+        }
+    }
+
+    @Test
+    void rejectsMalformedJwksSchemeReturnedByDiscovery() throws Exception {
+        String token = signToken("test-key-1", privateKey);
+        try (JwtSignatureVerifier malformedJwksVerifier = new JwtSignatureVerifier(
+                objectMapper, SystemDefaultDnsResolver.INSTANCE, false) {
+            @Override
+            String fetchJwksUri(String ignoredIssuer) {
+                return "ftp://issuer.example.com/jwks.json";
+            }
+        }) {
+            assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
+                    () -> malformedJwksVerifier.verify(token, "https://issuer.example.com"));
+        }
+    }
+
+    @Test
+    void validatesResolvedAddressesAtTheConnectionBoundary() throws Exception {
+        AtomicInteger resolutions = new AtomicInteger();
+        DnsResolver changingResolver = dnsResolver(host -> resolutions.incrementAndGet() == 1
+                ? new InetAddress[]{InetAddress.ofLiteral("8.8.8.8")}
+                : new InetAddress[]{InetAddress.ofLiteral("127.0.0.1")});
+        JwtSignatureVerifier.JwtDnsResolver resolver =
+                new JwtSignatureVerifier.JwtDnsResolver(changingResolver, false);
+
+        assertEquals("8.8.8.8", resolver.resolve("issuer.example.com")[0].getHostAddress());
+        assertThrows(UnknownHostException.class, () -> resolver.resolve("issuer.example.com"));
+        assertEquals(2, resolutions.get());
+    }
+
+    @Test
+    void cachedKeyVerificationDoesNotResolveDnsAgain() throws Exception {
+        AtomicInteger fetches = new AtomicInteger();
+        AtomicInteger resolutions = new AtomicInteger();
+        DnsResolver countingResolver = dnsResolver(host -> {
+            resolutions.incrementAndGet();
+            return new InetAddress[]{InetAddress.ofLiteral("127.0.0.1")};
+        });
+        try (JwtSignatureVerifier cachingVerifier = new JwtSignatureVerifier(
+                objectMapper, countingResolver, false) {
+            @Override
+            Map<String, RSAPublicKey> fetchJwks(String ignoredIssuer) {
+                fetches.incrementAndGet();
+                return Map.of("test-key-1", publicKey);
+            }
+        }) {
+            String token = signToken("test-key-1", privateKey);
+
+            assertDoesNotThrow(() -> cachingVerifier.verify(token, "https://issuer.example.com"));
+            assertDoesNotThrow(() -> cachingVerifier.verify(token, "https://issuer.example.com"));
+
+            assertEquals(1, fetches.get());
+            assertEquals(0, resolutions.get());
+        }
+    }
+
+    private static DnsResolver dnsResolver(Function<String, InetAddress[]> lookup) {
+        return new DnsResolver() {
+            @Override
+            public InetAddress[] resolve(String host) {
+                return lookup.apply(host);
+            }
+
+            @Override
+            public String resolveCanonicalHostname(String host) {
+                return host;
+            }
+        };
+    }
+
+    @Test
+    void doesNotFollowDiscoveryRedirects() throws Exception {
+        AtomicInteger redirectedRequests = new AtomicInteger();
+        HttpServer redirectServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        redirectServer.createContext("/.well-known/openid-configuration", exchange -> {
+            exchange.getResponseHeaders().add("Location", "/discovery");
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
+        redirectServer.createContext("/discovery", exchange -> {
+            redirectedRequests.incrementAndGet();
+            exchange.sendResponseHeaders(200, 0);
+            exchange.close();
+        });
+        redirectServer.start();
+        try {
+            String redirectIssuer = "http://127.0.0.1:" + redirectServer.getAddress().getPort();
+            String token = signToken("test-key-1", privateKey);
+
+            assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
+                    () -> verifier.verify(token, redirectIssuer));
+            assertEquals(0, redirectedRequests.get());
+        } finally {
+            redirectServer.stop(0);
+        }
     }
 
     private String signToken(String kid, RSAPrivateKey signingKey) throws GeneralSecurityException {

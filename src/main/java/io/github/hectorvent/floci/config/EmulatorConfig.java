@@ -198,6 +198,9 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean disableCorsHeaders();
 
+        @WithDefault("false")
+        boolean allowPrivateJwtTargets();
+
         /**
          * Whether to grant Private Network Access preflights (respond with
          * {@code Access-Control-Allow-Private-Network: true}) when the browser asks.

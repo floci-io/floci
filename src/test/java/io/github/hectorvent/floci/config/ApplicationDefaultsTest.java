@@ -83,4 +83,21 @@ class ApplicationDefaultsTest {
                         .asBoolean(true),
                 "production application.yml should not create default admin credentials unless enabled");
     }
+
+    @Test
+    void productionConfigRejectsPrivateJwtTargetsByDefault() throws Exception {
+        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+
+        assertFalse(config.path("floci")
+                        .path("security")
+                        .path("allow-private-jwt-targets")
+                        .asBoolean(true),
+                "production application.yml should reject private JWT issuer and JWKS targets");
+
+        WithDefault fallback = EmulatorConfig.SecurityConfig.class
+                .getMethod("allowPrivateJwtTargets")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "allowPrivateJwtTargets should declare a fallback default");
+        assertEquals("false", fallback.value());
+    }
 }

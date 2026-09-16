@@ -2,6 +2,19 @@
 
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
+## JWT issuer network policy
+
+HTTP API JWT authorizers fetch the configured issuer's OIDC discovery document and JWKS. Floci
+rejects HTTP issuers and destinations that resolve to local, link-local, private, or other
+non-public addresses by default. This prevents an authorizer configuration from turning JWT
+verification into an SSRF path.
+
+For an isolated development environment with a local fixture issuer, set
+`FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`. This shared JWT policy also applies to AppSync
+OIDC providers. The option permits private HTTPS targets and HTTP URLs that use a literal private
+or loopback address. It does not permit public HTTP targets. Keep it disabled when Floci can
+receive untrusted API configuration.
+
 ## Custom API IDs
 
 API IDs are generated randomly, which means endpoint URLs change every time you recreate an API. To pin

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.auth;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
 import org.junit.jupiter.api.AfterEach;
@@ -12,7 +13,6 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
-import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
@@ -21,7 +21,6 @@ import java.security.Signature;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Arrays;
@@ -32,6 +31,8 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Follows {@code JwtSignatureVerifierTest}'s pattern: a real local {@code com.sun.net.httpserver}
@@ -48,6 +49,7 @@ class OidcAuthValidatorTest {
     private String issuer;
     private RSAPrivateKey privateKey;
     private RSAPublicKey publicKey;
+    private JwtSignatureVerifier signatureVerifier;
     private OidcAuthValidator validator;
 
     @BeforeEach
@@ -64,13 +66,18 @@ class OidcAuthValidatorTest {
         server.start();
         issuer = "http://127.0.0.1:" + server.getAddress().getPort();
 
-        HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-        validator = new OidcAuthValidator(new JwtClaimsDecoder(mapper),
-                new JwtSignatureVerifier(mapper, httpClient), Clock.fixed(NOW, ZoneOffset.UTC));
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.SecurityConfig securityConfig = mock(EmulatorConfig.SecurityConfig.class);
+        when(config.security()).thenReturn(securityConfig);
+        when(securityConfig.allowPrivateJwtTargets()).thenReturn(true);
+        signatureVerifier = new JwtSignatureVerifier(mapper, config);
+        validator = new OidcAuthValidator(new JwtClaimsDecoder(mapper), signatureVerifier,
+                Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @AfterEach
     void tearDown() {
+        signatureVerifier.close();
         server.stop(0);
     }
 

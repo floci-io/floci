@@ -254,6 +254,7 @@ floci:
     # The Docker images set it, since they listen on 0.0.0.0 inside the container.
     # Env var: FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true
     allow-unsafe-network-exposure: false
+    allow-private-jwt-targets: false
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
