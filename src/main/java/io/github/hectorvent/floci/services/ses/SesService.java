@@ -88,7 +88,9 @@ public class SesService {
     // controller and the v1 handler call directly for get/list/delete. The facade keeps create and
     // update for the identity-dependent validation, plus the send path and the tag dispatch.
     private final SesCvetService cvetService;
-    // Tenants (multi-tenancy) live in SesTenantService. The facade delegates.
+    // Tenants (multi-tenancy) live in SesTenantService, which the v2 controller calls directly for
+    // the tenant record; the facade keeps the associations, the delete cascade, the send-time tenant
+    // gate and the tenant-scoped suppression routing.
     private final SesTenantService tenantService;
     private final SmtpRelay smtpRelay;
     private final SesEventPublisher eventPublisher;
@@ -903,26 +905,9 @@ public class SesService {
     }
 
     // ──────────────────────── Tenants (multi-tenancy) ────────────────────────
-    // Tenants live in SesTenantService; the facade forwards.
-
-    public Tenant createTenant(String tenantName, List<Tag> tags, List<String> suppressedReasons,
-                               String suppressionScope, String accountId, String region) {
-        return tenantService.createTenant(tenantName, tags, suppressedReasons, suppressionScope,
-                accountId, region);
-    }
-
-    public void putTenantSuppressionAttributes(String tenantName, List<String> suppressedReasons,
-                                               String suppressionScope, String region) {
-        tenantService.putSuppressionAttributes(tenantName, suppressedReasons, suppressionScope, region);
-    }
-
-    public Tenant getTenant(String tenantName, String region) {
-        return tenantService.getTenant(tenantName, region);
-    }
-
-    public List<Tenant> listTenants(String region) {
-        return tenantService.listTenants(region);
-    }
+    // Tenants live in SesTenantService, which the v2 controller calls directly for the tenant
+    // record and its suppression attributes; the facade keeps the resource associations (they
+    // check the identity, configuration set or template exists) and the delete cascade.
 
     public void deleteTenant(String tenantName, String region) {
         // The tenant-scoped suppression entries live in the suppression domain; the callback runs
