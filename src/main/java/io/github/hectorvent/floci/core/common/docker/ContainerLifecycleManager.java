@@ -243,8 +243,18 @@ public class ContainerLifecycleManager {
             }
         }
 
-        Map<Integer, EndpointInfo> endpoints = resolveEndpoints(containerId, spec);
-        return new ContainerInfo(containerId, endpoints);
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        Map<Integer, EndpointInfo> endpoints = resolveEndpoints(inspect, spec);
+        Map<Integer, Integer> publishedHostPorts = new HashMap<>();
+        if (spec.portBindings() != null) {
+            for (Integer containerPort : spec.portBindings().keySet()) {
+                OptionalInt published = readPublishedHostPort(inspect, containerPort);
+                if (published.isPresent()) {
+                    publishedHostPorts.put(containerPort, published.getAsInt());
+                }
+            }
+        }
+        return new ContainerInfo(containerId, endpoints, publishedHostPorts);
     }
 
     /**
@@ -962,6 +972,15 @@ public class ContainerLifecycleManager {
         }
 
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        return resolveEndpoints(inspect, spec);
+    }
+
+    private Map<Integer, EndpointInfo> resolveEndpoints(InspectContainerResponse inspect,
+                                                        ContainerSpec spec) {
+        if (spec.exposedPorts() == null || spec.exposedPorts().isEmpty()) {
+            return Map.of();
+        }
+
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
 
         for (int containerPort : spec.exposedPorts()) {
