@@ -653,6 +653,36 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 | CreateVolume | Creates an EBS volume record. |
 | DescribeVolumes | Lists or returns stored EBS volume records. |
 | DeleteVolume | Deletes an EBS volume record. |
+| AttachVolume | Attaches a volume to an instance at the requested device; returns the attachment in `attaching` state. |
+| DetachVolume | Detaches a volume from an instance, optionally forced; returns the attachment in `detaching` state. |
+
+### Snapshots
+
+| Action | Description |
+|--------|-------------|
+| DescribeSnapshots | Lists or returns stored snapshots, filterable by id and owner. |
+
+### Flow Logs
+
+| Action | Description |
+|--------|-------------|
+| CreateFlowLogs | Creates flow logs for the given resources; returns one flow log id per resource. |
+| DescribeFlowLogs | Lists stored flow logs, optionally filtered by id. |
+| DeleteFlowLogs | Deletes the named flow logs. |
+
+### Spot Instances
+
+| Action | Description |
+|--------|-------------|
+| RequestSpotInstances | Requests spot instances from a launch specification; returns the created spot instance requests. |
+| DescribeSpotInstanceRequests | Lists spot instance requests, optionally filtered by id. |
+| CancelSpotInstanceRequests | Cancels the named spot instance requests, returning each id with its new state. |
+
+### VPN Gateways
+
+| Action | Description |
+|--------|-------------|
+| DescribeVpnGateways | Lists or returns stored VPN gateways. |
 
 ### EBS Encryption Defaults
 
