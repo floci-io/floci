@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -51,7 +52,7 @@ class EmulatorInfoControllerTest {
 
         controller.reset();
 
-        var order = inOrder(sageMakerTeardown, batchTeardown, storageFactory, resettable);
+        InOrder order = inOrder(sageMakerTeardown, batchTeardown, storageFactory, resettable);
         order.verify(sageMakerTeardown).stopManagedContainers();
         order.verify(batchTeardown).stopManagedContainers();
         order.verify(storageFactory).clearAll();
