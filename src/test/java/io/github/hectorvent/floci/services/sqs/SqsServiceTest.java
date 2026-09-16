@@ -1342,6 +1342,34 @@ class SqsServiceTest {
         assertEquals(1, sqsService.listMessageMoveTasks(dlqArn, "us-east-1").size());
     }
 
+    @Test
+    void cancelMessageMoveTask_statusNeverRegressesToRunningWhileTheWorkerRecordsProgress() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-stomp-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-stomp-dlq");
+        sqsService.createQueue("cancel-stomp-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-stomp-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-stomp-destination");
+        for (int i = 0; i < 3000; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        // Unthrottled, so the worker records its count after every message while the cancel
+        // lands: the two writers share the store's lock, and once the cancel has returned the
+        // task must only ever read CANCELLING or CANCELLED.
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        String status;
+        while (!"CANCELLED".equals(status = moveTaskStatus(dlqArn, taskHandle))) {
+            assertNotEquals("RUNNING", status, "a cancelled task reported RUNNING again");
+            assertTrue(System.nanoTime() < deadline, "move task never reached CANCELLED, last seen " + status);
+        }
+    }
+
     private String moveTaskStatus(String sourceArn, String taskHandle) {
         return sqsService.listMessageMoveTasks(sourceArn, "us-east-1").stream()
                 .filter(task -> task.taskHandle().equals(taskHandle))
