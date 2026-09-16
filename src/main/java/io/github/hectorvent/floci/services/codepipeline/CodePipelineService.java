@@ -70,12 +70,12 @@ public class CodePipelineService {
     private final S3Service s3Service;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledExecutorService sourcePoller = Executors.newSingleThreadScheduledExecutor();
-    private final Map<String, Object> pipelineLocks = new ConcurrentHashMap<>();
-    private final Map<String, Object> sourcePollLocks = new ConcurrentHashMap<>();
+    private final KeyedLockPool pipelineLocks = new KeyedLockPool();
+    private final KeyedLockPool sourcePollLocks = new KeyedLockPool();
     // Admission is serialized per pipeline on its own lock. A QUEUED worker holds the pipelineLocks
     // monitor for its whole run, so counting under that monitor would block StartPipelineExecution
     // until the running execution finished.
-    private final Map<String, Object> startLocks = new ConcurrentHashMap<>();
+    private final KeyedLockPool startLocks = new KeyedLockPool();
     private final Map<String, byte[]> runtimeArtifacts = new ConcurrentHashMap<>();
 
     @Inject
@@ -218,14 +218,14 @@ public class CodePipelineService {
     private void pollS3Sources(CodePipelinePipeline pipeline) {
         String pollLockKey = pipelineLockKey(
                 pipeline.getAccountId(), pipeline.getRegion(), pipeline.getName());
-        synchronized (sourcePollLocks.computeIfAbsent(pollLockKey, ignored -> new Object())) {
+        sourcePollLocks.withLock(pollLockKey, () -> {
             Optional<CodePipelinePipeline> currentPipeline = pipelineStore.getForAccount(
                     pipeline.getAccountId(), pipelineKey(pipeline.getRegion(), pipeline.getName()));
             if (currentPipeline.isEmpty()) {
                 return;
             }
             pollS3SourcesLocked(currentPipeline.get());
-        }
+        });
     }
 
     private void pollS3SourcesLocked(CodePipelinePipeline pipeline) {
@@ -348,10 +348,10 @@ public class CodePipelineService {
         pipeline.setTags(parseTags(request.path("tags")));
         initializeTransitions(pipeline);
         String pollLockKey = pipelineLockKey(account, region, name);
-        synchronized (sourcePollLocks.computeIfAbsent(pollLockKey, ignored -> new Object())) {
+        sourcePollLocks.withLock(pollLockKey, () -> {
             putPipeline(pipeline);
             resetSourcePollingBaselines(pipeline);
-        }
+        });
         ObjectNode response = mapper.createObjectNode();
         response.set("pipeline", pipeline.getDeclaration());
         if (!pipeline.getTags().isEmpty()) {
@@ -370,10 +370,10 @@ public class CodePipelineService {
         pipeline.setDeclaration(normalizeDeclaration(declaration, version));
         initializeTransitions(pipeline);
         String pollLockKey = pipelineLockKey(account, region, name);
-        synchronized (sourcePollLocks.computeIfAbsent(pollLockKey, ignored -> new Object())) {
+        sourcePollLocks.withLock(pollLockKey, () -> {
             putPipeline(pipeline);
             resetSourcePollingBaselines(pipeline);
-        }
+        });
         ObjectNode response = mapper.createObjectNode();
         response.set("pipeline", pipeline.getDeclaration());
         return response;
@@ -400,7 +400,7 @@ public class CodePipelineService {
         String name = text(request, "name");
         validatePipelineName(name);
         String pollLockKey = pipelineLockKey(account, region, name);
-        synchronized (sourcePollLocks.computeIfAbsent(pollLockKey, ignored -> new Object())) {
+        sourcePollLocks.withLock(pollLockKey, () -> {
             pipelineStore.deleteForAccount(account, pipelineKey(region, name));
             for (String key : executionStore.keysForAccount(account)) {
                 if (key.startsWith(region + ":" + name + ":")) {
@@ -408,7 +408,7 @@ public class CodePipelineService {
                 }
             }
             deleteSourcePollingBaselines(account, region, name);
-        }
+        });
         return mapper.createObjectNode();
     }
 
@@ -495,7 +495,7 @@ public class CodePipelineService {
             putExecution(execution);
             return true;
         }
-        synchronized (startLocks.computeIfAbsent(lockKey(execution), ignored -> new Object())) {
+        return startLocks.withLock(lockKey(execution), () -> {
             long active = executions(execution.getAccountId(), execution.getRegion(), execution.getPipelineName())
                     .stream()
                     .filter(candidate -> "InProgress".equals(candidate.getStatus())
@@ -506,7 +506,7 @@ public class CodePipelineService {
             }
             putExecution(execution);
             return true;
-        }
+        });
     }
 
     private ObjectNode stopPipelineExecution(JsonNode request, String region, String account) {
@@ -1014,9 +1014,7 @@ public class CodePipelineService {
             }
         };
         if ("QUEUED".equals(execution.getExecutionMode())) {
-            synchronized (pipelineLocks.computeIfAbsent(lockKey(execution), ignored -> new Object())) {
-                work.run();
-            }
+            pipelineLocks.withLock(lockKey(execution), work);
         } else {
             work.run();
         }
