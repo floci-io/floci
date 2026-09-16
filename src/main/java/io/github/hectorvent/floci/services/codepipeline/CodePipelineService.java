@@ -1142,16 +1142,21 @@ public class CodePipelineService {
                 null, null, null, null, null, null, null);
         state.setExternalExecutionId(build.getId());
         while (!Boolean.TRUE.equals(build.getBuildComplete())) {
-            if (execution.isStopRequested()) {
-                codeBuildService.stopBuild(execution.getRegion(), execution.getAccountId(), build.getId());
-                break;
+            if (abandonExternalActionIfRequested(execution, state)) {
+                return;
             }
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
             build = codeBuildService.getBuild(execution.getRegion(), execution.getAccountId(), build.getId());
         }
+        if (abandonExternalActionIfRequested(execution, state)) {
+            return;
+        }
         if (!"SUCCEEDED".equals(build.getBuildStatus())) {
-            throw new AwsException("ActionExecutionFailed",
-                    "CodeBuild build " + build.getId() + " finished with " + build.getBuildStatus(), 400);
+            String message = "CodeBuild build " + build.getId() + " finished with " + build.getBuildStatus();
+            if (recordExternalActionFailureWhileStopping(execution, state, message)) {
+                return;
+            }
+            throw new AwsException("ActionExecutionFailed", message, 400);
         }
     }
 
@@ -1170,16 +1175,42 @@ public class CodePipelineService {
         state.setExternalExecutionId(deploymentId);
         Deployment deployment = codeDeployService.getDeployment(execution.getRegion(), deploymentId);
         while (!List.of("Succeeded", "Failed", "Stopped").contains(deployment.getStatus())) {
-            if (execution.isStopRequested()) {
-                codeDeployService.stopDeployment(execution.getRegion(), deploymentId);
+            if (abandonExternalActionIfRequested(execution, state)) {
+                return;
             }
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
             deployment = codeDeployService.getDeployment(execution.getRegion(), deploymentId);
         }
-        if (!"Succeeded".equals(deployment.getStatus())) {
-            throw new AwsException("ActionExecutionFailed",
-                    "CodeDeploy deployment finished with " + deployment.getStatus(), 400);
+        if (abandonExternalActionIfRequested(execution, state)) {
+            return;
         }
+        if (!"Succeeded".equals(deployment.getStatus())) {
+            String message = "CodeDeploy deployment finished with " + deployment.getStatus();
+            if (recordExternalActionFailureWhileStopping(execution, state, message)) {
+                return;
+            }
+            throw new AwsException("ActionExecutionFailed", message, 400);
+        }
+    }
+
+    private boolean abandonExternalActionIfRequested(CodePipelineExecution execution, ActionExecution state) {
+        if (!execution.isStopRequested() || !execution.isAbandon()) {
+            return false;
+        }
+        state.setStatus("Abandoned");
+        state.setSummary("Action abandoned.");
+        return true;
+    }
+
+    private boolean recordExternalActionFailureWhileStopping(CodePipelineExecution execution,
+                                                              ActionExecution state, String message) {
+        if (!execution.isStopRequested()) {
+            return false;
+        }
+        state.setStatus("Failed");
+        state.setSummary(message);
+        state.setErrorDetails(Map.of("code", "ActionExecutionFailed", "message", message));
+        return true;
     }
 
     private void executeLambda(CodePipelineExecution execution, JsonNode action, ActionExecution state) {
