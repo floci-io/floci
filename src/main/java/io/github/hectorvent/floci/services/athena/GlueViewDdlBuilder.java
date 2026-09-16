@@ -215,7 +215,7 @@ public class GlueViewDdlBuilder {
 
     /**
      * Iceberg tables are not read via a Hive {@code InputFormat}/{@code SerializationLibrary}
-     * pair at all — pyiceberg and the AWS Glue-Iceberg integration leave those unset — so
+     * pair at all: pyiceberg and the AWS Glue-Iceberg integration leave those unset, so
      * {@link #inferReadFunction} would otherwise fall through to {@code read_csv_auto} and fail
      * on the table's binary Parquet data files, or a forced {@code read_parquet} would silently
      * glob every data file ever written under the table's location, including ones no longer

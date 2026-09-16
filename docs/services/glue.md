@@ -135,7 +135,9 @@ The Glue Data Catalog is automatically used by **Athena** to resolve table names
 
 Tables can reference a Schema Registry schema version through `StorageDescriptor.SchemaReference`. On `GetTable` and `GetTables`, Floci resolves the schema definition into Glue columns when possible.
 
-The DuckDB read function is selected based on the table's `StorageDescriptor.InputFormat` and `StorageDescriptor.SerdeInfo.SerializationLibrary`:
+A table whose `Parameters.table_type` is `ICEBERG` (case-insensitive), as set by `pyiceberg`'s `GlueCatalog` and AWS's own Glue-Iceberg integration, is read via `iceberg_scan` against `Parameters.metadata_location` instead, following the table's real manifest list rather than its `StorageDescriptor`. See [Athena's format inference](athena.md#format-inference) for the full explanation.
+
+For every other table, the DuckDB read function is selected based on the table's `StorageDescriptor.InputFormat` and `StorageDescriptor.SerdeInfo.SerializationLibrary`:
 
 | Condition | DuckDB function |
 |---|---|
