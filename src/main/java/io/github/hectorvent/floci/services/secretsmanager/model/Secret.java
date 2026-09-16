@@ -7,6 +7,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -134,8 +136,17 @@ public class Secret {
         return versions;
     }
 
+    /**
+     * A rotation adds versions from the rotation executor while request threads iterate this map
+     * to answer DescribeSecret, GetSecretValue and ListSecretVersionIds, and those reads do not
+     * take the rotation lock (a describe never waits on a rotation, as on AWS). The map must
+     * therefore never be fail-fast: a plain map, which is what Jackson and most callers hand in,
+     * is copied into a concurrent one; a concurrent map is installed as given.
+     */
     public void setVersions(Map<String, SecretVersion> versions) {
-        this.versions = versions;
+        this.versions = versions == null || versions instanceof ConcurrentMap<String, SecretVersion>
+                ? versions
+                : new ConcurrentHashMap<>(versions);
     }
 
     public String getCurrentVersionId() {

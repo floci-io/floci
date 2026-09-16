@@ -1,18 +1,25 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.HashMap;
+import java.util.AbstractMap;
+import java.util.AbstractSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -145,6 +152,48 @@ class SecretsManagerRotationLockTest {
                 .count());
     }
 
+    @Test
+    void describeSecretIterationSurvivesAVersionAddedByARotation() throws Exception {
+        // A rotation adds its AWSPENDING version from the rotation executor while a request thread
+        // is building DescribeSecret's VersionIdsToStages from the same map. Park the reader one
+        // entry into that iteration, add the version, and let the reader continue.
+        SecretsManagerJsonHandler handler = new SecretsManagerJsonHandler(service, new ObjectMapper());
+        ParkingIterationVersions versions = new ParkingIterationVersions(secret.getVersions());
+        secret.setVersions(versions);
+        assertTrue(secret.getVersions() instanceof ConcurrentMap,
+                "the installed map must survive setVersions so the parked iteration is the one under test");
+
+        ObjectNode describe = new ObjectMapper().createObjectNode().put("SecretId", SECRET_NAME);
+        AtomicReference<Response> response = new AtomicReference<>();
+        versions.arm();
+        Watched reader = start("reader", () -> response.set(handler.handle("DescribeSecret", describe, REGION)));
+        assertTrue(versions.awaitEntered(), "DescribeSecret never started iterating the versions");
+
+        Watched writer = start("writer", () ->
+                service.putSecretValue(SECRET_NAME, "staged-value", null, SECOND_TOKEN, REGION, List.of("AWSPENDING")));
+        writer.awaitSuccess();
+
+        versions.release();
+        reader.awaitSuccess();
+
+        assertEquals(200, response.get().getStatus());
+        ObjectNode body = (ObjectNode) response.get().getEntity();
+        assertTrue(body.get("VersionIdsToStages").has(secret.getCurrentVersionId()),
+                "the version that existed before the rotation must be reported");
+    }
+
+    @Test
+    void versionsReloadedFromPersistenceAreNotFailFast() throws Exception {
+        // Persisted secrets come back through Jackson as plain maps; the rotation thread mutates
+        // whatever map is installed, so a reloaded secret must get the same guarantee.
+        Secret reloaded = new ObjectMapper().findAndRegisterModules().readValue("""
+                {"name":"reloaded","arn":"arn:aws:secretsmanager:us-east-1:000000000000:secret:reloaded-abc123",
+                 "versions":{"v1":{"versionId":"v1","secretString":"x","versionStages":["AWSCURRENT"]}}}
+                """, Secret.class);
+        assertTrue(reloaded.getVersions() instanceof ConcurrentMap);
+        assertEquals("x", reloaded.getVersions().get("v1").getSecretString());
+    }
+
     private BlockingVersions installBlockingVersions() {
         BlockingVersions versions = new BlockingVersions(secret.getVersions());
         secret.setVersions(versions);
@@ -215,8 +264,105 @@ class SecretsManagerRotationLockTest {
         }
     }
 
+    /**
+     * Forwards to the secret's real versions map, and parks the first armed entry-set iteration
+     * after its first element so another thread can add a version mid-iteration. Implements
+     * {@link ConcurrentMap} only so {@code Secret.setVersions} installs it unchanged; whether the
+     * iteration then survives is decided by the map it forwards to.
+     */
+    private static final class ParkingIterationVersions extends AbstractMap<String, SecretVersion>
+            implements ConcurrentMap<String, SecretVersion> {
+
+        private final Map<String, SecretVersion> delegate;
+        private final Park park = new Park();
+
+        ParkingIterationVersions(Map<String, SecretVersion> delegate) {
+            this.delegate = delegate;
+        }
+
+        void arm() {
+            park.arm();
+        }
+
+        boolean awaitEntered() throws InterruptedException {
+            return park.awaitEntered();
+        }
+
+        void release() {
+            park.release();
+        }
+
+        @Override
+        public SecretVersion put(String key, SecretVersion value) {
+            return delegate.put(key, value);
+        }
+
+        @Override
+        public SecretVersion get(Object key) {
+            return delegate.get(key);
+        }
+
+        @Override
+        public boolean containsKey(Object key) {
+            return delegate.containsKey(key);
+        }
+
+        @Override
+        public SecretVersion putIfAbsent(String key, SecretVersion value) {
+            return delegate.putIfAbsent(key, value);
+        }
+
+        @Override
+        public boolean remove(Object key, Object value) {
+            return delegate.remove(key, value);
+        }
+
+        @Override
+        public boolean replace(String key, SecretVersion oldValue, SecretVersion newValue) {
+            return delegate.replace(key, oldValue, newValue);
+        }
+
+        @Override
+        public SecretVersion replace(String key, SecretVersion value) {
+            return delegate.replace(key, value);
+        }
+
+        @Override
+        public Set<Map.Entry<String, SecretVersion>> entrySet() {
+            return new AbstractSet<>() {
+                @Override
+                public Iterator<Map.Entry<String, SecretVersion>> iterator() {
+                    Iterator<Map.Entry<String, SecretVersion>> iterator = delegate.entrySet().iterator();
+                    return new Iterator<>() {
+                        private boolean first = true;
+
+                        @Override
+                        public boolean hasNext() {
+                            return iterator.hasNext();
+                        }
+
+                        @Override
+                        public Map.Entry<String, SecretVersion> next() {
+                            Map.Entry<String, SecretVersion> entry = iterator.next();
+                            if (first) {
+                                first = false;
+                                park.parkIfArmed();
+                            }
+                            return entry;
+                        }
+                    };
+                }
+
+                @Override
+                public int size() {
+                    return delegate.size();
+                }
+            };
+        }
+    }
+
     /** Parks the first armed {@code put} so another thread can observe the half-applied swap. */
-    private static final class BlockingVersions extends HashMap<String, SecretVersion> {
+    private static final class BlockingVersions extends ConcurrentHashMap<String, SecretVersion> {
 
         private final Park park = new Park();
 
