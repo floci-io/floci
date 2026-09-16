@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
@@ -20,6 +22,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -29,7 +32,15 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
+@TestProfile(EksImdsDockerIntegrationTest.Profile.class)
 class EksImdsDockerIntegrationTest {
+
+    public static final class Profile implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of("floci.services.eks.imds", "true");
+        }
+    }
 
     private static final Logger LOG = Logger.getLogger(EksImdsDockerIntegrationTest.class);
     private static final String TEST_IMAGE = "alpine:3.21";
@@ -95,6 +106,10 @@ class EksImdsDockerIntegrationTest {
         containerId = lifecycleManager.createAndStart(spec).containerId();
         assertNotNull(containerId, "Container ID must not be null");
 
+        // Ensure curl dependency is installed in the test fixture if absent
+        execInContainer(containerId, new String[]{"sh", "-c",
+                "command -v curl >/dev/null 2>&1 || apk add --no-cache curl"});
+
         eksClusterManager.configureLinkLocalMetadataEndpoint(cluster, containerId);
 
         // IMDSv2 token test
@@ -109,18 +124,19 @@ class EksImdsDockerIntegrationTest {
         assertNotNull(instanceId, "instance-id response should not be null");
         assertTrue(instanceId.trim().startsWith("i-"), "Instance ID should start with 'i-': " + instanceId);
 
-        // IMDSv1 fallback test
-        String imdsv1Cmd = "curl -s -f http://169.254.169.254/latest/meta-data/instance-id";
+        // IMDSv1 fallback test using wget (tool guaranteed by alpine:3.21 image)
+        String imdsv1Cmd = "wget -q -O - http://169.254.169.254/latest/meta-data/instance-id";
         String v1InstanceId = execInContainer(containerId, new String[]{"sh", "-c", imdsv1Cmd});
         assertEquals(instanceId.trim(), v1InstanceId.trim(), "IMDSv1 and IMDSv2 instance IDs should match");
 
         // Pod-isolation test: ordinary pods in their own network namespace cannot reach link-local IMDS
+        // Tested using wget (tool guaranteed by alpine:3.21 image)
         String podIsolationCmd = """
                 if command -v unshare >/dev/null 2>&1; then
-                  unshare -n curl -s -f --connect-timeout 2 http://169.254.169.254/latest/meta-data/instance-id
+                  unshare -n wget -q -O - -T 2 http://169.254.169.254/latest/meta-data/instance-id
                 else
                   ip netns add pod-test 2>/dev/null || true
-                  ip netns exec pod-test curl -s -f --connect-timeout 2 http://169.254.169.254/latest/meta-data/instance-id
+                  ip netns exec pod-test wget -q -O - -T 2 http://169.254.169.254/latest/meta-data/instance-id
                   ret=$?
                   ip netns del pod-test 2>/dev/null || true
                   exit $ret
