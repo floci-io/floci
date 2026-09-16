@@ -157,6 +157,7 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 | `FLOCI_SERVICES_EKS_ENDPOINT_MODE` | `host` | `describe-cluster` endpoint: `host` (`localhost:<hostPort>`) or `network` (container DNS) |
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
+| `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 
 ### Pulling images from Floci ECR
@@ -265,9 +266,58 @@ Every cluster gets an OIDC identity provider, so the full IRSA flow (trust polic
 
 The issuer URL is a faithful string for building trust policies, but it is not fetched: Floci's STS resolves the signing key in-process. The private key is held in storage separate from the cluster model and is never returned by any API.
 
-### Minting a service-account token
+### Service-account tokens
 
-Real EKS has the kubelet project a token into the pod. Floci has no kubelet, so a local-dev harness requests one and writes it to the file named by `AWS_WEB_IDENTITY_TOKEN_FILE`. Signing happens server-side, so the private key never leaves Floci.
+Floci supports two ways to obtain IRSA service account tokens:
+
+#### 1. In-cluster projected tokens (real k3s mode)
+
+In real mode (`mock: false`), Floci starts a k3s container for the cluster. When IRSA signing key support is enabled (`FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY=true`, default `true`), Floci exports the cluster RSA keypair to `/etc/rancher/k3s/sa-signing-key.pem` and `/etc/rancher/k3s/sa-public-key.pem` with restrictive filesystem permissions (`0600`) before k3s starts.
+
+The k3s API server is configured with:
+- `--kube-apiserver-arg=service-account-signing-key-file=/etc/rancher/k3s/sa-signing-key.pem`
+- `--kube-apiserver-arg=service-account-key-file=/etc/rancher/k3s/sa-public-key.pem`
+- `--kube-apiserver-arg=service-account-issuer=<cluster-oidc-issuer>`
+- `--kube-apiserver-arg=service-account-issuer=https://kubernetes.default.svc.cluster.local`
+- `--kube-apiserver-arg=api-audiences=https://kubernetes.default.svc.cluster.local,sts.amazonaws.com`
+
+This enables in-cluster pods to project service account tokens directly using Kubernetes standard projected volumes:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: irsa-workload
+  namespace: default
+spec:
+  serviceAccountName: my-service-account
+  containers:
+  - name: workload
+    image: my-workload:latest
+    env:
+    - name: AWS_ROLE_ARN
+      value: arn:aws:iam::000000000000:role/my-irsa-role
+    - name: AWS_WEB_IDENTITY_TOKEN_FILE
+      value: /var/run/secrets/eks.amazonaws.com/serviceaccount/token
+    volumeMounts:
+    - mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+      name: aws-iam-token
+      readOnly: true
+  volumes:
+  - name: aws-iam-token
+    projected:
+      sources:
+      - serviceAccountToken:
+          path: token
+          expirationSeconds: 86400
+          audience: sts.amazonaws.com
+```
+
+Tokens projected with audience `sts.amazonaws.com` are signed by k3s using the cluster key and advertise the cluster issuer URL. When the AWS SDK inside the container calls `sts:AssumeRoleWithWebIdentity`, Floci verifies the signature against the cluster public key and checks the trust policy conditions. In-cluster components that do not specify an audience receive tokens with both the in-cluster audience and STS audience, allowing normal Kubernetes operation without disruption.
+
+#### 2. Minting a service-account token via HTTP (mock mode & out-of-cluster testing)
+
+For local development harnesses running outside Kubernetes or when using mock mode (`FLOCI_SERVICES_EKS_MOCK=true`), tokens can be requested directly from Floci via HTTP. Signing happens server-side, so the private key never leaves Floci:
 
 ```bash
 curl -sX POST http://localhost:4566/_floci/eks/clusters/my-cluster/oidc-token \
@@ -284,8 +334,7 @@ curl -sX POST http://localhost:4566/_floci/eks/clusters/my-cluster/oidc-token \
 }
 ```
 
-`audience` (default `sts.amazonaws.com`) and `expirySeconds` (default 24h, max 7d) are optional.
-This is Floci plumbing under `_floci/…`, not an AWS API.
+`audience` (default `sts.amazonaws.com`) and `expirySeconds` (default 24h, max 7d) are optional. This is Floci plumbing under `_floci/…`, not an AWS API.
 
 ### Trust policy
 

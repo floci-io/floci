@@ -2800,6 +2800,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean imds();
+
+        /**
+         * When true, configures k3s with the cluster's per-cluster OIDC signing keypair and
+         * advertises Floci's OIDC issuer URL, enabling in-cluster IAM Roles for Service Accounts (IRSA).
+         */
+        @WithDefault("true")
+        boolean irsaSigningKey();
     }
 
     /**

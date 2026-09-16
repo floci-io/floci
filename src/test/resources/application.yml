@@ -313,6 +313,7 @@ floci:
       mock: true
       ecr-registry-mirror: true
       imds: false
+      irsa-signing-key: true
     mwaa:
       enabled: true
       mock: true

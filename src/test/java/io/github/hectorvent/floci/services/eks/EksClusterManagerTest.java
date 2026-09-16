@@ -11,7 +11,11 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
+import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,24 +39,31 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
-import java.time.Instant;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -801,6 +812,254 @@ class EksClusterManagerTest {
             manager.unregisterMetadataEndpoint(cluster);
             verify(metadataServer).unregisterInstance(any());
             assertNull(manager.getRegisteredClusterNodeInstance(cluster));
+        }
+    }
+
+    @Nested
+    class IrsaSigningKey {
+
+        private EmulatorConfig config;
+        private EmulatorConfig.EksServiceConfig eks;
+        private ContainerLifecycleManager lifecycleManager;
+        private ContainerBuilder.Builder builder;
+        private DockerClient dockerClient;
+        private CopyArchiveToContainerCmd copyCmd;
+        private EksOidcService oidcService;
+        private RegionResolver regionResolver;
+        private EksClusterManager manager;
+
+        @BeforeEach
+        void setUp() {
+            config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+            eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.eks()).thenReturn(eks);
+            when(eks.defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+            when(eks.apiServerBasePort()).thenReturn(6440);
+            when(eks.apiServerMaxPort()).thenReturn(6499);
+            when(eks.dockerNetwork()).thenReturn(Optional.empty());
+            when(eks.disableCni()).thenReturn(false);
+            when(eks.iamAuthWebhook()).thenReturn(false);
+            when(eks.ecrRegistryMirror()).thenReturn(false);
+            when(eks.imds()).thenReturn(false);
+            when(eks.endpointMode()).thenReturn("host");
+            when(config.defaultAccountId()).thenReturn("000000000000");
+
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            dockerClient = Mockito.mock(DockerClient.class);
+            copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+            when(lifecycleManager.create(any())).thenReturn("container-id");
+            when(lifecycleManager.startCreated(any(), any())).thenReturn(
+                    new ContainerInfo("container-id", Map.of()));
+
+            ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+            builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+            regionResolver = Mockito.mock(RegionResolver.class);
+            when(regionResolver.getAccountId()).thenReturn("000000000000");
+            when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+
+            oidcService = Mockito.mock(EksOidcService.class);
+            when(oidcService.newIssuerUrl(anyString())).thenReturn(
+                    "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER12345678901234567890");
+
+            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                    config, regionResolver, null, oidcService);
+        }
+
+        @Test
+        void buildIrsaServerArgsProducesCorrectFlagsAndAudiences() {
+            String issuer = "https://oidc.eks.us-west-2.amazonaws.com/id/MYISSUER";
+            List<String> args = EksClusterManager.buildIrsaServerArgs(issuer);
+
+            assertTrue(args.contains("--kube-apiserver-arg=service-account-signing-key-file=/etc/sa-signing-key.pem"));
+            assertTrue(args.contains("--kube-apiserver-arg=service-account-key-file=/etc/sa-public-key.pem"));
+            assertTrue(args.contains("--kube-apiserver-arg=service-account-issuer=" + issuer));
+            assertTrue(args.contains("--kube-apiserver-arg=service-account-issuer=https://kubernetes.default.svc.cluster.local"));
+            assertTrue(args.contains("--kube-apiserver-arg=api-audiences=https://kubernetes.default.svc.cluster.local,sts.amazonaws.com"));
+
+            assertThrows(IllegalArgumentException.class, () -> EksClusterManager.buildIrsaServerArgs(null));
+            assertThrows(IllegalArgumentException.class, () -> EksClusterManager.buildIrsaServerArgs("  "));
+        }
+
+        @Test
+        void startClusterInjectsKeysAndConfiguresArgsWhenEnabled(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(true);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER";
+            ClusterOidcKey key = new ClusterOidcKey(issuer, "kid-1", "pubKeyBase64", "privKeyBase64");
+            when(oidcService.ensureKeyForAccount(anyString(), anyString(), anyString())).thenReturn(key);
+            when(oidcService.exportSigningKeyPem(key)).thenReturn("-----BEGIN PRIVATE KEY-----\npriv\n-----END PRIVATE KEY-----\n");
+            when(oidcService.exportPublicKeyPem(key)).thenReturn("-----BEGIN PUBLIC KEY-----\npub\n-----END PUBLIC KEY-----\n");
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+            cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertTrue(cmd.contains("--kube-apiserver-arg=service-account-signing-key-file=/etc/sa-signing-key.pem"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=service-account-key-file=/etc/sa-public-key.pem"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=service-account-issuer=" + issuer));
+            assertTrue(cmd.contains("--kube-apiserver-arg=service-account-issuer=https://kubernetes.default.svc.cluster.local"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=api-audiences=https://kubernetes.default.svc.cluster.local,sts.amazonaws.com"));
+
+            Path keysDir = tempDir.resolve("keys").resolve("my-cluster");
+            Path privFile = keysDir.resolve(EksClusterManager.SA_SIGNING_KEY_FILE);
+            Path pubFile = keysDir.resolve(EksClusterManager.SA_PUBLIC_KEY_FILE);
+            assertTrue(Files.exists(privFile));
+            assertTrue(Files.exists(pubFile));
+
+            verify(copyCmd).withHostResource(privFile.toString());
+            verify(copyCmd).withHostResource(pubFile.toString());
+            verify(copyCmd, atLeastOnce()).withRemotePath("/etc");
+            verify(copyCmd, atLeastOnce()).exec();
+        }
+
+        @Test
+        void startClusterOmitsIrsaArgsAndKeyInjectionWhenDisabled(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(false);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertFalse(cmd.stream().anyMatch(a -> a.contains("service-account-signing-key-file")));
+            assertFalse(cmd.stream().anyMatch(a -> a.contains("service-account-key-file")));
+            assertFalse(cmd.stream().anyMatch(a -> a.contains("service-account-issuer")));
+            assertFalse(cmd.stream().anyMatch(a -> a.contains("api-audiences")));
+
+            verifyNoInteractions(dockerClient);
+            assertFalse(Files.exists(tempDir.resolve("keys")));
+        }
+
+        @Test
+        void startClusterContinuesWhenSigningKeyInjectionFails(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(true);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER";
+            ClusterOidcKey key = new ClusterOidcKey(issuer, "kid-1", "pubKeyBase64", "privKeyBase64");
+            when(oidcService.ensureKeyForAccount(anyString(), anyString(), anyString())).thenReturn(key);
+            when(oidcService.exportSigningKeyPem(key)).thenReturn("-----BEGIN PRIVATE KEY-----\npriv\n-----END PRIVATE KEY-----\n");
+            when(oidcService.exportPublicKeyPem(key)).thenReturn("-----BEGIN PUBLIC KEY-----\npub\n-----END PUBLIC KEY-----\n");
+
+            when(copyCmd.exec()).thenThrow(new RuntimeException("Docker copy failed"));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+
+            // Must not throw despite injection failure
+            manager.startCluster(cluster);
+            assertEquals("container-id", cluster.getContainerId());
+        }
+
+        @Test
+        void startClusterContinuesWhenWritingKeysFails(@TempDir Path tempDir) throws Exception {
+            when(eks.irsaSigningKey()).thenReturn(true);
+            // Create a regular file where the keys directory would be, causing createDirectories to fail
+            Path blocker = tempDir.resolve("keys").resolve("my-cluster");
+            Files.createDirectories(blocker.getParent());
+            Files.writeString(blocker, "blocker");
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER";
+            ClusterOidcKey key = new ClusterOidcKey(issuer, "kid-1", "pubKeyBase64", "privKeyBase64");
+            when(oidcService.ensureKeyForAccount(anyString(), anyString(), anyString())).thenReturn(key);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+
+            // Must not throw despite file write failure
+            manager.startCluster(cluster);
+            assertEquals("container-id", cluster.getContainerId());
+        }
+
+        @Test
+        void restoreClusterReinjectsSigningKeysForSurvivingContainer(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(true);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER";
+            ClusterOidcKey key = new ClusterOidcKey(issuer, "kid-1", "pubKeyBase64", "privKeyBase64");
+            when(oidcService.ensureKeyForAccount(anyString(), anyString(), anyString())).thenReturn(key);
+            when(oidcService.exportSigningKeyPem(key)).thenReturn("-----BEGIN PRIVATE KEY-----\npriv\n-----END PRIVATE KEY-----\n");
+            when(oidcService.exportPublicKeyPem(key)).thenReturn("-----BEGIN PUBLIC KEY-----\npub\n-----END PUBLIC KEY-----\n");
+
+            Container container = Mockito.mock(Container.class);
+            when(container.getId()).thenReturn("surviving-container-id");
+            when(lifecycleManager.findByName("floci-eks-my-cluster")).thenReturn(Optional.of(container));
+            when(lifecycleManager.adopt(anyString(), any())).thenReturn(
+                    new ContainerInfo("surviving-container-id", Map.of(6443, new ContainerLifecycleManager.EndpointInfo("localhost", 6500)), Map.of(6443, 6500)));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+            cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+
+            manager.restoreCluster(cluster);
+
+            Path keysDir = tempDir.resolve("keys").resolve("my-cluster");
+            Path privFile = keysDir.resolve(EksClusterManager.SA_SIGNING_KEY_FILE);
+            Path pubFile = keysDir.resolve(EksClusterManager.SA_PUBLIC_KEY_FILE);
+            assertTrue(Files.exists(privFile));
+            assertTrue(Files.exists(pubFile));
+
+            verify(copyCmd).withHostResource(privFile.toString());
+            verify(copyCmd).withHostResource(pubFile.toString());
+        }
+
+        @Test
+        void signingKeyFilesWrittenWithRestrictivePermissions(@TempDir Path tempDir) throws Exception {
+            when(eks.irsaSigningKey()).thenReturn(true);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/TESTISSUER";
+            ClusterOidcKey key = new ClusterOidcKey(issuer, "kid-1", "pubKeyBase64", "privKeyBase64");
+            when(oidcService.ensureKeyForAccount(anyString(), anyString(), anyString())).thenReturn(key);
+            when(oidcService.exportSigningKeyPem(key)).thenReturn("-----BEGIN PRIVATE KEY-----\npriv\n-----END PRIVATE KEY-----\n");
+            when(oidcService.exportPublicKeyPem(key)).thenReturn("-----BEGIN PUBLIC KEY-----\npub\n-----END PUBLIC KEY-----\n");
+
+            Cluster cluster = new Cluster();
+            cluster.setName("perm-cluster");
+
+            manager.startCluster(cluster);
+
+            Path keysDir = tempDir.resolve("keys").resolve("perm-cluster");
+            Path privFile = keysDir.resolve(EksClusterManager.SA_SIGNING_KEY_FILE);
+            Path pubFile = keysDir.resolve(EksClusterManager.SA_PUBLIC_KEY_FILE);
+
+            try {
+                Set<PosixFilePermission> dirPerms = Files.getPosixFilePermissions(keysDir);
+                assertEquals(PosixFilePermissions.fromString("rwx------"), dirPerms);
+
+                Set<PosixFilePermission> privPerms = Files.getPosixFilePermissions(privFile);
+                assertEquals(PosixFilePermissions.fromString("rw-------"), privPerms);
+
+                Set<PosixFilePermission> pubPerms = Files.getPosixFilePermissions(pubFile);
+                assertEquals(PosixFilePermissions.fromString("rw-------"), pubPerms);
+            } catch (UnsupportedOperationException ignored) {
+                // Ignore on non-POSIX platforms
+            }
         }
     }
 }

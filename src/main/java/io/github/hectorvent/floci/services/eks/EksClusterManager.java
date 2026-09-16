@@ -14,6 +14,9 @@ import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
+import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
@@ -33,6 +36,7 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -40,6 +44,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -68,6 +74,12 @@ public class EksClusterManager {
     private static final String REGISTRIES_TAR_ENTRY = "rancher/k3s/registries.yaml";
     private static final String ENDPOINT_MODE_NETWORK = "network";
 
+    static final String SA_SIGNING_KEY_FILE = "sa-signing-key.pem";
+    static final String SA_PUBLIC_KEY_FILE = "sa-public-key.pem";
+    static final String SA_SIGNING_KEY_CONTAINER_PATH = WEBHOOK_CONFIG_DIR + "/" + SA_SIGNING_KEY_FILE;
+    static final String SA_PUBLIC_KEY_CONTAINER_PATH = WEBHOOK_CONFIG_DIR + "/" + SA_PUBLIC_KEY_FILE;
+    static final String KUBERNETES_DEFAULT_ISSUER = "https://kubernetes.default.svc.cluster.local";
+
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerDetector containerDetector;
@@ -77,6 +89,7 @@ public class EksClusterManager {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final Ec2MetadataServer metadataServer;
+    private final EksOidcService oidcService;
     private final Map<String, Instance> clusterNodeInstances = new ConcurrentHashMap<>();
 
     public EksClusterManager(ContainerBuilder containerBuilder,
@@ -88,7 +101,20 @@ public class EksClusterManager {
                              EmulatorConfig config,
                              RegionResolver regionResolver) {
         this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
-                dockerHostResolver, ecrRegistryManager, config, regionResolver, null);
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, null, null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer, null);
     }
 
     @Inject
@@ -100,7 +126,8 @@ public class EksClusterManager {
                              EcrRegistryManager ecrRegistryManager,
                              EmulatorConfig config,
                              RegionResolver regionResolver,
-                             Ec2MetadataServer metadataServer) {
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -110,6 +137,7 @@ public class EksClusterManager {
         this.config = config;
         this.regionResolver = regionResolver;
         this.metadataServer = metadataServer;
+        this.oidcService = oidcService;
     }
 
     /**
@@ -227,6 +255,24 @@ public class EksClusterManager {
             }
         }
 
+        SigningKeyFiles signingKeyFiles = null;
+        if (config.services().eks().irsaSigningKey() && oidcService != null) {
+            try {
+                String accountId = cluster.getAccountId() != null
+                        ? cluster.getAccountId()
+                        : regionResolver.getAccountId();
+                String issuer = resolveClusterIssuer(cluster);
+                ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+                signingKeyFiles = writeSigningKeyFiles(cluster, oidcKey);
+                if (signingKeyFiles != null) {
+                    serverArgs.addAll(buildIrsaServerArgs(oidcKey.getIssuer()));
+                }
+            } catch (Exception e) {
+                LOG.warnv("EKS IRSA signing key injection disabled for cluster {0}: could not prepare keys: {1}",
+                        cluster.getName(), e.getMessage());
+            }
+        }
+
         if (config.services().eks().disableCni()) {
             // A container's /sys mount defaults to private propagation, which breaks
             // Cilium's BPF filesystem mount ("mounted on /sys but it is not a shared or
@@ -249,6 +295,9 @@ public class EksClusterManager {
             copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
         }
         injectEcrRegistryMirror(containerId, cluster.getName());
+        if (signingKeyFiles != null) {
+            copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
+        }
         ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
         applyEndpoints(cluster, containerName, hostPort, info);
@@ -278,6 +327,10 @@ public class EksClusterManager {
                     + "(a surviving data volume is reused)", cluster.getName());
             startCluster(cluster);
             return;
+        }
+
+        if (config.services().eks().irsaSigningKey() && oidcService != null) {
+            reinjectSigningKeys(existing.get().getId(), cluster);
         }
 
         ContainerInfo info;
@@ -599,6 +652,128 @@ public class EksClusterManager {
         } catch (Exception e) {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
+        }
+    }
+
+    /**
+     * Builds the API server arguments configuring k3s to sign service account tokens with the
+     * cluster's OIDC keypair and advertise the cluster's OIDC issuer URL. api-audiences includes
+     * both the standard Kubernetes in-cluster audience and STS_AUDIENCE.
+     */
+    static List<String> buildIrsaServerArgs(String issuerUrl) {
+        if (issuerUrl == null || issuerUrl.isBlank()) {
+            throw new IllegalArgumentException("issuerUrl is required");
+        }
+        return List.of(
+                "--kube-apiserver-arg=service-account-signing-key-file=" + SA_SIGNING_KEY_CONTAINER_PATH,
+                "--kube-apiserver-arg=service-account-key-file=" + SA_PUBLIC_KEY_CONTAINER_PATH,
+                "--kube-apiserver-arg=service-account-issuer=" + issuerUrl,
+                "--kube-apiserver-arg=service-account-issuer=" + KUBERNETES_DEFAULT_ISSUER,
+                "--kube-apiserver-arg=api-audiences=" + KUBERNETES_DEFAULT_ISSUER + "," + EksOidcService.STS_AUDIENCE
+        );
+    }
+
+    String resolveClusterIssuer(Cluster cluster) {
+        if (cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
+                && cluster.getIdentity().getOidc().getIssuer() != null
+                && !cluster.getIdentity().getOidc().getIssuer().isBlank()) {
+            return cluster.getIdentity().getOidc().getIssuer();
+        }
+        String region = clusterRegion(cluster);
+        String issuer = oidcService.newIssuerUrl(region);
+        cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+        return issuer;
+    }
+
+    record SigningKeyFiles(Path signingKeyPath, Path publicKeyPath) {}
+
+    /**
+     * Writes the cluster's RSA signing key and public key PEM files to Floci's local filesystem
+     * under the EKS data path with restrictive permissions (0600 for files, 0700 for directories).
+     * Returns the paths or null if writing failed.
+     */
+    SigningKeyFiles writeSigningKeyFiles(Cluster cluster, ClusterOidcKey oidcKey) {
+        Path keysDir = Paths.get(config.services().eks().dataPath(), "keys", cluster.getName())
+                .toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(keysDir);
+            setRestrictivePermissions(keysDir, true);
+
+            Path signingKeyPath = keysDir.resolve(SA_SIGNING_KEY_FILE);
+            Files.writeString(signingKeyPath, oidcService.exportSigningKeyPem(oidcKey));
+            setRestrictivePermissions(signingKeyPath, false);
+
+            Path publicKeyPath = keysDir.resolve(SA_PUBLIC_KEY_FILE);
+            Files.writeString(publicKeyPath, oidcService.exportPublicKeyPem(oidcKey));
+            setRestrictivePermissions(publicKeyPath, false);
+
+            return new SigningKeyFiles(signingKeyPath, publicKeyPath);
+        } catch (IOException e) {
+            LOG.warnv("EKS IRSA signing key disabled for cluster {0}: could not write key files: {1}",
+                    cluster.getName(), e.getMessage());
+            return null;
+        }
+    }
+
+    private static void setRestrictivePermissions(Path path, boolean isDirectory) {
+        try {
+            Set<PosixFilePermission> perms = isDirectory
+                    ? PosixFilePermissions.fromString("rwx------")
+                    : PosixFilePermissions.fromString("rw-------");
+            Files.setPosixFilePermissions(path, perms);
+        } catch (UnsupportedOperationException | IOException ignored) {
+            File file = path.toFile();
+            file.setReadable(false, false);
+            file.setReadable(true, true);
+            file.setWritable(false, false);
+            file.setWritable(true, true);
+            if (isDirectory) {
+                file.setExecutable(false, false);
+                file.setExecutable(true, true);
+            } else {
+                file.setExecutable(false, false);
+            }
+        }
+    }
+
+    /**
+     * Streams the signing key and public key PEM files into the k3s container at /etc using the Docker API.
+     * A failure logs a warning and lets cluster startup continue.
+     */
+    void copySigningKeysIntoContainer(String containerId, SigningKeyFiles keyFiles, String clusterName) {
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withHostResource(keyFiles.signingKeyPath().toString())
+                    .withRemotePath(WEBHOOK_CONFIG_DIR)
+                    .exec();
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withHostResource(keyFiles.publicKeyPath().toString())
+                    .withRemotePath(WEBHOOK_CONFIG_DIR)
+                    .exec();
+            LOG.debugv("Injected IRSA OIDC signing keypair into k3s container {0} for cluster {1}",
+                    containerId, clusterName);
+        } catch (Exception e) {
+            LOG.warnv("EKS IRSA service account tokens may not verify for cluster {0}: could not copy "
+                    + "key files into the k3s container: {1}", clusterName, e.getMessage());
+        }
+    }
+
+    void reinjectSigningKeys(String containerId, Cluster cluster) {
+        try {
+            String accountId = cluster.getAccountId() != null
+                    ? cluster.getAccountId()
+                    : regionResolver.getAccountId();
+            String issuer = resolveClusterIssuer(cluster);
+            ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+            SigningKeyFiles keyFiles = writeSigningKeyFiles(cluster, oidcKey);
+            if (keyFiles != null) {
+                copySigningKeysIntoContainer(containerId, keyFiles, cluster.getName());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not re-inject IRSA signing keys for surviving EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
         }
     }
 
