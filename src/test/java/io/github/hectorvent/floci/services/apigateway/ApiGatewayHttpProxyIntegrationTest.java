@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -159,6 +160,35 @@ class ApiGatewayHttpProxyIntegrationTest {
         return "http://127.0.0.1:" + backendPort + "/{proxy}";
     }
 
+    private String importProxyApi(String spec) {
+        String apiId = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(String.format(Locale.ROOT, spec, backendPort))
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .extract().path("id");
+        createdApis.add(apiId);
+        return apiId;
+    }
+
+    private String deploy(String apiId) {
+        return given()
+                .contentType(ContentType.JSON)
+                .body("{}")
+                .when().post("/restapis/" + apiId + "/deployments")
+                .then().statusCode(201)
+                .extract().path("id");
+    }
+
+    private void createStage(String apiId, String deploymentId) {
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"stageName\":\"test\",\"deploymentId\":\"" + deploymentId + "\"}")
+                .when().post("/restapis/" + apiId + "/stages")
+                .then().statusCode(201);
+    }
+
     @AfterEach
     void cleanup() {
         for (String apiId : createdApis) {
@@ -181,6 +211,44 @@ class ApiGatewayHttpProxyIntegrationTest {
         assertEquals("GET", lastMethod.get());
         assertEquals("/orders/42", lastPath.get());
         assertEquals("limit=5", lastQuery.get());
+    }
+
+    @Test
+    void importsAndInvokesHttpProxyFromOpenApi() {
+        resetRecordings();
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "ImportedHttpProxy", "version": "1.0" },
+                  "paths": {
+                    "/orders/{proxy}": {
+                      "get": {
+                        "parameters": [
+                          { "name": "proxy", "in": "path", "required": true,
+                            "schema": { "type": "string" } }
+                        ],
+                        "x-amazon-apigateway-integration": {
+                          "type": "http_proxy",
+                          "httpMethod": "GET",
+                          "uri": "http://127.0.0.1:%d/{proxy}"
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String apiId = importProxyApi(spec);
+        String deploymentId = deploy(apiId);
+        createStage(apiId, deploymentId);
+
+        given()
+                .when().get("/execute-api/" + apiId + "/test/orders/42")
+                .then()
+                .statusCode(200)
+                .body("from", org.hamcrest.Matchers.equalTo("backend"));
+
+        assertEquals("/42", lastPath.get());
     }
 
     @Test
