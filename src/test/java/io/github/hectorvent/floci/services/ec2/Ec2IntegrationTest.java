@@ -1984,7 +1984,7 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(41)
-    void importKeyPairWithInvalidBase64ReturnsInvalidKeyPairFormat() {
+    void importKeyPairWithInvalidBase64ReturnsInvalidKeyFormat() {
         given()
             .formParam("Action", "ImportKeyPair")
             .formParam("KeyName", "bad-material-key")
@@ -1994,7 +1994,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.Format"));
+            .body("Response.Errors.Error.Code", equalTo("InvalidKey.Format"));
     }
 
     @Test

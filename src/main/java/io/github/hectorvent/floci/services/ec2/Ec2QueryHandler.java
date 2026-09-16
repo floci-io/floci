@@ -3104,7 +3104,7 @@ public class Ec2QueryHandler {
         try {
             publicKeyMaterial = new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidKeyPair.Format", "Key is not in valid OpenSSH public key format", 400);
+            throw new AwsException("InvalidKey.Format", "Key is not in valid OpenSSH public key format", 400);
         }
         KeyPair kp = service.importKeyPair(region, keyName, publicKeyMaterial);
         XmlBuilder xml = new XmlBuilder()
