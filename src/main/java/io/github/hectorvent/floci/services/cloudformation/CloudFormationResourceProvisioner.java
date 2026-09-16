@@ -86,13 +86,6 @@ public class CloudFormationResourceProvisioner {
             "__FlociApiGatewayV2BodyAuthorizerIds";
 
     /**
-     * Every resource type the switch in {@link #provision} still serves. Load-bearing: the
-     * default arm throws for a member of this set, so deleting an arm during the migration to
-     * per-service provisioners without deleting its entry here fails loudly instead of
-     * silently stubbing the resource. Kept in step with the registry by
-     * {@code CfnResourceInventoryTest}.
-     */
-    /**
      * Types whose delete needs the whole {@link StackResource} — a create-time attribute (the
      * rule's event bus, the authorizer's api id, the nodegroup's cluster) or the stashed
      * custom-resource properties. Deleting one of these from type and physical id alone silently
@@ -111,6 +104,13 @@ public class CloudFormationResourceProvisioner {
             "AWS::IAM::ManagedPolicy",
             "AWS::IAM::Policy");
 
+    /**
+     * Every resource type the switch in {@link #provision} still serves. Load-bearing: the
+     * default arm throws for a member of this set, so deleting an arm during the migration to
+     * per-service provisioners without deleting its entry here fails loudly instead of
+     * silently stubbing the resource. Kept in step with the registry by
+     * {@code CfnResourceInventoryTest}.
+     */
     static final Set<String> LEGACY_SWITCH_TYPES = Set.of(
             "AWS::ApiGateway::Authorizer",
             "AWS::ApiGateway::Deployment",
@@ -492,16 +492,6 @@ public class CloudFormationResourceProvisioner {
                     + "here.", resourceType, physicalId);
         }
     }
-
-    /**
-     * Applies the optional {@code CorsConfiguration} property of {@code AWS::S3::Bucket} by translating
-     * the CloudFormation {@code CorsRules} list into the S3 CORS XML document the bucket stores and
-     * serves from its {@code ?cors} subresource.
-     *
-     * <p>This reconciles to the template on every provision (create and update): when the property is
-     * absent or has no rules, any existing CORS configuration is cleared so the bucket matches the
-     * template. Clearing is a harmless no-op on create since a freshly created bucket has none.
-     */
 
     // ── EC2 networking ─────────────────────────────────────────────────────────
     // Each method delegates to Ec2Service so the resource really exists (describe-subnets,
