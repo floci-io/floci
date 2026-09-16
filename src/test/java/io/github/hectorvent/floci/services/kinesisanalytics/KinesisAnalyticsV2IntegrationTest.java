@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
@@ -23,6 +24,11 @@ class KinesisAnalyticsV2IntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String ROLE = "arn:aws:iam::000000000000:role/x";
+
+    private static String authorization(String region) {
+        return "AWS4-HMAC-SHA256 Credential=AKID/20260916/" + region
+                + "/kinesisanalytics/aws4_request, SignedHeaders=host, Signature=abc";
+    }
 
     @BeforeAll
     static void configureRestAssured() {
@@ -62,6 +68,26 @@ class KinesisAnalyticsV2IntegrationTest {
             .statusCode(200)
             .body("ApplicationDetail.ApplicationName", equalTo("it-describe"))
             .body("ApplicationDetail.RuntimeEnvironment", equalTo("FLINK-1_18"));
+    }
+
+    @Test
+    void sameApplicationNameIsIsolatedByRequestRegion() {
+        String name = "it-region-" + System.nanoTime();
+        String body = "{\"ApplicationName\": \"" + name
+                + "\", \"RuntimeEnvironment\": \"FLINK-1_18\","
+                + " \"ServiceExecutionRole\": \"" + ROLE + "\"}";
+
+        given().header("Authorization", authorization("us-east-1"))
+                .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplication")
+                .contentType(CONTENT_TYPE).body(body)
+        .when().post("/").then().statusCode(200)
+                .body("ApplicationDetail.ApplicationARN", containsString(":us-east-1:"));
+
+        given().header("Authorization", authorization("us-west-2"))
+                .header("X-Amz-Target", "KinesisAnalytics_20180523.CreateApplication")
+                .contentType(CONTENT_TYPE).body(body)
+        .when().post("/").then().statusCode(200)
+                .body("ApplicationDetail.ApplicationARN", containsString(":us-west-2:"));
     }
 
     @Test

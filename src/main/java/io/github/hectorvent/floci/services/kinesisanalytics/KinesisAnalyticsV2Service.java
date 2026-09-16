@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -138,6 +139,18 @@ public class KinesisAnalyticsV2Service {
                                               Map<String, String> tags,
                                               Map<String, Map<String, String>> environmentProperties,
                                               Boolean snapshotsEnabled) {
+        return createApplication(applicationName, runtimeEnvironment, serviceExecutionRole,
+                applicationDescription, applicationMode, codeS3Bucket, codeS3Key, codeS3ObjectVersion,
+                parallelism, tags, environmentProperties, snapshotsEnabled, config.defaultRegion());
+    }
+
+    public FlinkApplication createApplication(String applicationName, String runtimeEnvironment,
+                                              String serviceExecutionRole, String applicationDescription,
+                                              String applicationMode, String codeS3Bucket, String codeS3Key,
+                                              String codeS3ObjectVersion, int parallelism,
+                                              Map<String, String> tags,
+                                              Map<String, Map<String, String>> environmentProperties,
+                                              Boolean snapshotsEnabled, String region) {
         if (applicationName == null || applicationName.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ApplicationName is required", 400);
         }
@@ -155,7 +168,7 @@ public class KinesisAnalyticsV2Service {
         if (serviceExecutionRole == null || serviceExecutionRole.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ServiceExecutionRole is required", 400);
         }
-        if (storage.get(applicationName).isPresent()) {
+        if (storage.get(applicationKey(region, applicationName)).isPresent()) {
             throw new AwsException("ResourceInUseException",
                     "Application already exists: " + applicationName, 400);
         }
@@ -165,7 +178,7 @@ public class KinesisAnalyticsV2Service {
         }
 
         String accountId = regionResolver.getAccountId();
-        String arn = AwsArnUtils.Arn.of("kinesisanalytics", config.defaultRegion(), accountId,
+        String arn = AwsArnUtils.Arn.of("kinesisanalytics", region, accountId,
                 "application/" + applicationName).toString();
         String mode = (applicationMode == null || applicationMode.isBlank()) ? "STREAMING" : applicationMode;
 
@@ -189,23 +202,63 @@ public class KinesisAnalyticsV2Service {
             app.setSnapshotsEnabled(snapshotsEnabled);
         }
 
-        storage.put(applicationName, app);
+        putApplication(app);
         LOG.infov("Created Kinesis Analytics V2 application {0}", applicationName);
         return app;
     }
 
     public FlinkApplication describeApplication(String applicationName) {
-        return storage.get(applicationName)
+        return describeApplication(applicationName, config.defaultRegion());
+    }
+
+    public FlinkApplication describeApplication(String applicationName, String region) {
+        Optional<FlinkApplication> scoped = storage.get(applicationKey(region, applicationName));
+        Optional<FlinkApplication> legacy = region.equals(config.defaultRegion())
+                ? storage.get(applicationName) : Optional.empty();
+        legacy.ifPresent(application -> {
+            if (scoped.isEmpty()) {
+                putApplication(application);
+            }
+            storage.delete(applicationName);
+        });
+        return scoped.or(() -> scoped.isEmpty() ? legacy : Optional.empty())
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Application not found: " + applicationName, 400));
     }
 
     public List<FlinkApplication> listApplications() {
-        return storage.scan(k -> true);
+        return listApplications(config.defaultRegion());
+    }
+
+    public List<FlinkApplication> listApplications(String region) {
+        String prefix = region + "/";
+        List<FlinkApplication> applications = new java.util.ArrayList<>(storage.scan(k -> k.startsWith(prefix)));
+        if (region.equals(config.defaultRegion())) {
+            java.util.Set<String> names = applications.stream()
+                    .map(FlinkApplication::getApplicationName)
+                    .collect(java.util.stream.Collectors.toSet());
+            for (String key : new java.util.ArrayList<>(storage.keys())) {
+                if (key.contains("/")) {
+                    continue;
+                }
+                storage.get(key).ifPresent(legacy -> {
+                    if (names.add(legacy.getApplicationName())) {
+                        putApplication(legacy);
+                        applications.add(legacy);
+                    }
+                    storage.delete(key);
+                });
+            }
+        }
+        return applications;
     }
 
     public FlinkApplication startApplication(String applicationName) {
-        FlinkApplication app = describeApplication(applicationName);
+        return startApplication(applicationName, config.defaultRegion());
+    }
+
+    public FlinkApplication startApplication(String applicationName, String region) {
+        FlinkApplication app = describeApplication(applicationName, region);
         // Defends state persisted by a floci build older than the ApplicationName check in
         // createApplication: applicationARN is baked as literal text into the CloudWatch-log-format
         // config FlinkContainerManager writes on startup, and a name outside AWS's charset (most
@@ -260,7 +313,11 @@ public class KinesisAnalyticsV2Service {
     }
 
     public FlinkApplication stopApplication(String applicationName) {
-        FlinkApplication app = describeApplication(applicationName);
+        return stopApplication(applicationName, config.defaultRegion());
+    }
+
+    public FlinkApplication stopApplication(String applicationName, String region) {
+        FlinkApplication app = describeApplication(applicationName, region);
         if (app.getApplicationStatus() != ApplicationStatus.RUNNING
                 && app.getApplicationStatus() != ApplicationStatus.STARTING) {
             throw new AwsException("ResourceInUseException",
@@ -296,7 +353,16 @@ public class KinesisAnalyticsV2Service {
                                               String serviceExecutionRole, String codeS3Bucket,
                                               String codeS3Key, String codeS3ObjectVersion,
                                               Integer parallelism, Boolean snapshotsEnabled) {
-        FlinkApplication app = describeApplication(applicationName);
+        return updateApplication(applicationName, currentApplicationVersionId, serviceExecutionRole,
+                codeS3Bucket, codeS3Key, codeS3ObjectVersion, parallelism, snapshotsEnabled,
+                config.defaultRegion());
+    }
+
+    public FlinkApplication updateApplication(String applicationName, Long currentApplicationVersionId,
+                                              String serviceExecutionRole, String codeS3Bucket,
+                                              String codeS3Key, String codeS3ObjectVersion,
+                                              Integer parallelism, Boolean snapshotsEnabled, String region) {
+        FlinkApplication app = describeApplication(applicationName, region);
         // AWS requires CurrentApplicationVersionId and rejects a stale value with
         // ConcurrentModificationException (optimistic concurrency on the application version).
         if (currentApplicationVersionId == null) {
@@ -359,7 +425,11 @@ public class KinesisAnalyticsV2Service {
     }
 
     public void deleteApplication(String applicationName, Instant createTimestamp) {
-        FlinkApplication app = describeApplication(applicationName);
+        deleteApplication(applicationName, createTimestamp, config.defaultRegion());
+    }
+
+    public void deleteApplication(String applicationName, Instant createTimestamp, String region) {
+        FlinkApplication app = describeApplication(applicationName, region);
         // AWS requires CreateTimestamp and rejects a value that does not match the stored one. The
         // wire value is epoch seconds, so compare at second granularity.
         if (createTimestamp == null) {
@@ -385,7 +455,12 @@ public class KinesisAnalyticsV2Service {
             // volume must survive a stop/restart cycle so snapshots remain describable/listable.
             containerManager.removeSavepointsVolume(app);
         }
-        storage.delete(applicationName);
+        String key = applicationKey(region, applicationName);
+        if (app.getAccountId() != null && storage instanceof AccountAwareStorageBackend<FlinkApplication> aware) {
+            aware.deleteForAccount(app.getAccountId(), key);
+        } else {
+            storage.delete(key);
+        }
         LOG.infov("Deleted Kinesis Analytics V2 application {0}", applicationName);
     }
 
@@ -418,7 +493,11 @@ public class KinesisAnalyticsV2Service {
     }
 
     public Snapshot createApplicationSnapshot(String applicationName, String snapshotName) {
-        FlinkApplication app = describeApplication(applicationName);
+        return createApplicationSnapshot(applicationName, snapshotName, config.defaultRegion());
+    }
+
+    public Snapshot createApplicationSnapshot(String applicationName, String snapshotName, String region) {
+        FlinkApplication app = describeApplication(applicationName, region);
         if (snapshotName == null || snapshotName.isBlank()) {
             throw new AwsException("InvalidArgumentException", "SnapshotName is required", 400);
         }
@@ -459,7 +538,11 @@ public class KinesisAnalyticsV2Service {
     }
 
     public Snapshot describeApplicationSnapshot(String applicationName, String snapshotName) {
-        FlinkApplication app = describeApplication(applicationName);
+        return describeApplicationSnapshot(applicationName, snapshotName, config.defaultRegion());
+    }
+
+    public Snapshot describeApplicationSnapshot(String applicationName, String snapshotName, String region) {
+        FlinkApplication app = describeApplication(applicationName, region);
         Snapshot snapshot = app.getSnapshots().get(snapshotName);
         if (snapshot == null) {
             throw new AwsException("ResourceNotFoundException",
@@ -469,12 +552,22 @@ public class KinesisAnalyticsV2Service {
     }
 
     public List<Snapshot> listApplicationSnapshots(String applicationName) {
-        return List.copyOf(describeApplication(applicationName).getSnapshots().values());
+        return listApplicationSnapshots(applicationName, config.defaultRegion());
+    }
+
+    public List<Snapshot> listApplicationSnapshots(String applicationName, String region) {
+        return List.copyOf(describeApplication(applicationName, region).getSnapshots().values());
     }
 
     public void deleteApplicationSnapshot(String applicationName, String snapshotName,
                                           Instant snapshotCreationTimestamp) {
-        FlinkApplication app = describeApplication(applicationName);
+        deleteApplicationSnapshot(applicationName, snapshotName, snapshotCreationTimestamp,
+                config.defaultRegion());
+    }
+
+    public void deleteApplicationSnapshot(String applicationName, String snapshotName,
+                                          Instant snapshotCreationTimestamp, String region) {
+        FlinkApplication app = describeApplication(applicationName, region);
         Snapshot snapshot = app.getSnapshots().get(snapshotName);
         if (snapshot == null) {
             throw new AwsException("ResourceNotFoundException",
@@ -509,7 +602,13 @@ public class KinesisAnalyticsV2Service {
      */
     public String createApplicationPresignedUrl(String applicationName, String urlType,
                                                  Long sessionExpirationDurationInSeconds) {
-        FlinkApplication app = describeApplication(applicationName);
+        return createApplicationPresignedUrl(applicationName, urlType,
+                sessionExpirationDurationInSeconds, config.defaultRegion());
+    }
+
+    public String createApplicationPresignedUrl(String applicationName, String urlType,
+                                                Long sessionExpirationDurationInSeconds, String region) {
+        FlinkApplication app = describeApplication(applicationName, region);
         if (!"FLINK_DASHBOARD_URL".equals(urlType)) {
             throw new AwsException("InvalidArgumentException",
                     "Unsupported UrlType: " + urlType + "; only FLINK_DASHBOARD_URL is supported", 400);
@@ -538,7 +637,8 @@ public class KinesisAnalyticsV2Service {
             throw new AwsException("InvalidArgumentException", "Invalid resource ARN: " + resourceArn, 400);
         }
         String applicationName = resourceArn.substring(slash + 1);
-        return storage.get(applicationName)
+        String region = AwsArnUtils.regionOrDefault(resourceArn, config.defaultRegion());
+        return storage.get(applicationKey(region, applicationName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No application found for ARN: " + resourceArn, 400));
     }
@@ -593,10 +693,16 @@ public class KinesisAnalyticsV2Service {
     }
 
     private void putApplication(FlinkApplication app) {
+        String region = AwsArnUtils.regionOrDefault(app.getApplicationArn(), config.defaultRegion());
+        String key = applicationKey(region, app.getApplicationName());
         if (app.getAccountId() != null && storage instanceof AccountAwareStorageBackend<FlinkApplication> aware) {
-            aware.putForAccount(app.getAccountId(), app.getApplicationName(), app);
+            aware.putForAccount(app.getAccountId(), key, app);
         } else {
-            storage.put(app.getApplicationName(), app);
+            storage.put(key, app);
         }
+    }
+
+    private String applicationKey(String region, String applicationName) {
+        return region + "/" + applicationName;
     }
 }
