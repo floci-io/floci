@@ -1378,6 +1378,60 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void dryRunValidatesImagesBeforeReportingSuccess() {
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        when(resolver.resolveImage("ami-windows"))
+                .thenThrow(new AwsException("UnsupportedOperation", "Unsupported AMI", 400));
+        Ec2Service service = liveService(manager, resolver, new Ec2ImageCatalog());
+        String deregistered = service.registerImage("us-east-1", "dry-run-image", null, null, null,
+                List.of()).getImageId();
+        service.deregisterImage("us-east-1", deregistered, false);
+
+        for (boolean dryRun : List.of(true, false)) {
+            assertEquals("UnsupportedOperation", assertThrows(AwsException.class,
+                    () -> service.runInstances("us-east-1", "ami-windows", "t3.micro", 1, 1,
+                            null, List.of(), null, null, List.of(), null, null,
+                            null, null, 0, null, null, null, null, dryRun)).getErrorCode());
+            assertEquals("InvalidAMIID.Unavailable", assertThrows(AwsException.class,
+                    () -> service.runInstances("us-east-1", deregistered, "t3.micro", 1, 1,
+                            null, List.of(), null, null, List.of(), null, null,
+                            null, null, 0, null, null, null, null, dryRun)).getErrorCode());
+            assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                    () -> service.runInstances("us-east-1", "ami-ubuntu2404-amd64", "t4g.medium", 1, 1,
+                            null, List.of(), null, null, List.of(), null, null,
+                            null, null, 0, null, null, null, null, dryRun)).getErrorCode());
+        }
+        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        verifyNoInteractions(manager);
+    }
+
+    @Test
+    void dryRunValidatesSuppliedEniWithoutAttachingOrProvisioning() {
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = liveService(manager, mock(AmiImageResolver.class));
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null, null,
+                List.of(), List.of(), List.of());
+        for (boolean dryRun : List.of(true, false)) {
+            assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                    () -> service.runInstances("us-east-1", "ami-test", "t3.micro", 2, 2,
+                            null, List.of(), null, null, List.of(), null, null,
+                            null, eni.getNetworkInterfaceId(), 0, null, null, null, null, dryRun)).getErrorCode());
+        }
+        assertEquals("DryRunOperation", assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1,
+                        null, List.of(), null, null, List.of(), null, null,
+                        null, eni.getNetworkInterfaceId(), 0, null, null, null, null, true)).getErrorCode());
+        assertNull(eni.getAttachment());
+        assertEquals("available", eni.getStatus());
+        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        verifyNoInteractions(manager);
+    }
+
+    @Test
     void runInstancesRejectsUnsupportedImageBeforeCreatingInstance() {
         Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
         AmiImageResolver resolver = mock(AmiImageResolver.class);

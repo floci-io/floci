@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pins the shared SigV4 crypto primitives against AWS's own published test vector, independent
@@ -50,5 +52,20 @@ class SigV4RequestValidatorTest {
     @Test
     void hexEncodeLowercasesAndZeroPadsEachByte() {
         assertEquals("00ff0a", SigV4RequestValidator.hexEncode(new byte[]{0x00, (byte) 0xFF, 0x0A}));
+    }
+
+    @Test
+    void containsHeaderMatchesAnyOfTheSemicolonSeparatedNames() {
+        assertTrue(SigV4RequestValidator.containsHeader("host;x-amz-date;x-amz-content-sha256", "host"));
+        assertTrue(SigV4RequestValidator.containsHeader("host;x-amz-date", "x-amz-date"));
+        assertFalse(SigV4RequestValidator.containsHeader("host;x-amz-date", "authorization"));
+    }
+
+    @Test
+    void isSha256HexRequiresExactlySixtyFourHexCharacters() {
+        assertTrue(SigV4RequestValidator.isSha256Hex(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        assertFalse(SigV4RequestValidator.isSha256Hex("UNSIGNED-PAYLOAD"));
+        assertFalse(SigV4RequestValidator.isSha256Hex("e3b0c442"));
     }
 }

@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
-public class CacheBehavior {
+public class CacheBehavior implements CacheBehaviorSettings {
 
     private String pathPattern;
     private String targetOriginId;

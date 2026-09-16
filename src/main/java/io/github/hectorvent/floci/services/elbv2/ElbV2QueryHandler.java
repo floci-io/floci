@@ -470,7 +470,10 @@ public class ElbV2QueryHandler {
         Integer port = parseIntOrNull(p.getFirst("Port"));
         String sslPolicy = p.getFirst("SslPolicy");
         List<String> certs = parseCertificateList(p, "Certificates");
-        List<Action> defaultActions = parseActions(p, "DefaultActions");
+        List<Action> defaultActions = parseActions(p, "DefaultActions", false);
+        applyExistingClientSecrets(defaultActions,
+                service.describeListeners(region, null, List.of(listenerArn)).stream()
+                        .findFirst().map(Listener::getDefaultActions).orElse(null));
         List<String> alpnPolicy = memberList(p, "AlpnPolicy");
 
         Listener listener = service.modifyListener(region, listenerArn, protocol, port, sslPolicy,
@@ -585,7 +588,10 @@ public class ElbV2QueryHandler {
     private Response handleModifyRule(MultivaluedMap<String, String> p, String region) {
         String ruleArn = p.getFirst("RuleArn");
         List<RuleCondition> conditions = parseConditions(p);
-        List<Action> actions = parseActions(p, "Actions");
+        List<Action> actions = parseActions(p, "Actions", false);
+        applyExistingClientSecrets(actions,
+                service.describeRules(region, null, List.of(ruleArn)).stream()
+                        .findFirst().map(Rule::getActions).orElse(null));
 
         Rule rule = service.modifyRule(region, ruleArn,
                 conditions.isEmpty() ? null : conditions,
@@ -957,7 +963,56 @@ public class ElbV2QueryHandler {
             if (a.getFixedResponseMessageBody() != null) xml.elem("MessageBody", a.getFixedResponseMessageBody());
             xml.end("FixedResponseConfig");
         }
+        if ("authenticate-oidc".equals(a.getType())) {
+            xml.start("AuthenticateOidcConfig");
+            xml.elem("Issuer", safe(a.getOidcIssuer()));
+            xml.elem("AuthorizationEndpoint", safe(a.getOidcAuthorizationEndpoint()));
+            xml.elem("TokenEndpoint", safe(a.getOidcTokenEndpoint()));
+            xml.elem("UserInfoEndpoint", safe(a.getOidcUserInfoEndpoint()));
+            xml.elem("ClientId", safe(a.getOidcClientId()));
+            // ClientSecret is deliberately absent. Real AWS never returns it, so a client that
+            // read it back here would compare it against a value AWS would not have sent.
+            if (a.getOidcSessionCookieName() != null) {
+                xml.elem("SessionCookieName", a.getOidcSessionCookieName());
+            }
+            if (a.getOidcScope() != null) xml.elem("Scope", a.getOidcScope());
+            if (a.getOidcSessionTimeout() != null) {
+                xml.elem("SessionTimeout", String.valueOf(a.getOidcSessionTimeout()));
+            }
+            if (a.getOidcOnUnauthenticatedRequest() != null) {
+                xml.elem("OnUnauthenticatedRequest", a.getOidcOnUnauthenticatedRequest());
+            }
+            xml.raw(authExtraParamsXml(a.getOidcAuthenticationRequestExtraParams()));
+            xml.end("AuthenticateOidcConfig");
+        }
+        if ("authenticate-cognito".equals(a.getType())) {
+            xml.start("AuthenticateCognitoConfig");
+            xml.elem("UserPoolArn", safe(a.getCognitoUserPoolArn()));
+            xml.elem("UserPoolClientId", safe(a.getCognitoUserPoolClientId()));
+            xml.elem("UserPoolDomain", safe(a.getCognitoUserPoolDomain()));
+            if (a.getCognitoSessionCookieName() != null) {
+                xml.elem("SessionCookieName", a.getCognitoSessionCookieName());
+            }
+            if (a.getCognitoScope() != null) xml.elem("Scope", a.getCognitoScope());
+            if (a.getCognitoSessionTimeout() != null) {
+                xml.elem("SessionTimeout", String.valueOf(a.getCognitoSessionTimeout()));
+            }
+            if (a.getCognitoOnUnauthenticatedRequest() != null) {
+                xml.elem("OnUnauthenticatedRequest", a.getCognitoOnUnauthenticatedRequest());
+            }
+            xml.raw(authExtraParamsXml(a.getCognitoAuthenticationRequestExtraParams()));
+            xml.end("AuthenticateCognitoConfig");
+        }
         return xml.build();
+    }
+
+    private String authExtraParamsXml(Map<String, String> params) {
+        if (params == null || params.isEmpty()) {
+            return "";
+        }
+        XmlBuilder xml = new XmlBuilder().start("AuthenticationRequestExtraParams");
+        params.forEach((k, v) -> xml.start("entry").elem("key", k).elem("value", safe(v)).end("entry"));
+        return xml.end("AuthenticationRequestExtraParams").build();
     }
 
     private String conditionXml(RuleCondition c) {
@@ -1059,6 +1114,16 @@ public class ElbV2QueryHandler {
     }
 
     private List<Action> parseActions(MultivaluedMap<String, String> p, String prefix) {
+        return parseActions(p, prefix, true);
+    }
+
+    /**
+     * @param creating true for CreateListener and CreateRule, false for the two modify operations.
+     *     AuthenticateOidcActionConfig.ClientSecret is required on a create and may be omitted on a
+     *     modify only when UseExistingClientSecret is true, so the two paths cannot share one rule.
+     */
+    private List<Action> parseActions(MultivaluedMap<String, String> p, String prefix,
+                                      boolean creating) {
         List<Action> result = new ArrayList<>();
         int i = 1;
         while (true) {
@@ -1105,11 +1170,120 @@ public class ElbV2QueryHandler {
                     a.setFixedResponseContentType(p.getFirst(prefix + ".member." + i + ".FixedResponseConfig.ContentType"));
                     a.setFixedResponseMessageBody(p.getFirst(prefix + ".member." + i + ".FixedResponseConfig.MessageBody"));
                 }
+                case "authenticate-oidc" -> parseAuthenticateOidc(p,
+                        prefix + ".member." + i + ".AuthenticateOidcConfig.", a, creating);
+                case "authenticate-cognito" -> parseAuthenticateCognito(p,
+                        prefix + ".member." + i + ".AuthenticateCognitoConfig.", a);
             }
             result.add(a);
             i++;
         }
         return result;
+    }
+
+    // AuthenticateOidcActionConfig and AuthenticateCognitoActionConfig document these three
+    // defaults, and AWS reports the resolved values on Describe rather than the caller's gaps.
+    private static final String DEFAULT_AUTH_SESSION_COOKIE = "AWSELBAuthSessionCookie";
+    private static final String DEFAULT_AUTH_SCOPE = "openid";
+    private static final long DEFAULT_AUTH_SESSION_TIMEOUT = 604800L;
+
+    private void parseAuthenticateOidc(MultivaluedMap<String, String> p, String base, Action a,
+                                       boolean creating) {
+        a.setOidcIssuer(requiredAuthMember(p, base, "Issuer"));
+        a.setOidcAuthorizationEndpoint(requiredAuthMember(p, base, "AuthorizationEndpoint"));
+        a.setOidcTokenEndpoint(requiredAuthMember(p, base, "TokenEndpoint"));
+        a.setOidcUserInfoEndpoint(requiredAuthMember(p, base, "UserInfoEndpoint"));
+        a.setOidcClientId(requiredAuthMember(p, base, "ClientId"));
+        String clientSecret = p.getFirst(base + "ClientSecret");
+        boolean useExisting = Boolean.parseBoolean(p.getFirst(base + "UseExistingClientSecret"));
+        if (clientSecret == null || clientSecret.isBlank()) {
+            // Required on a create. On a modify it may be dropped only by asking for the stored
+            // one, and modifyExistingClientSecrets below is what puts that secret back.
+            if (creating || !useExisting) {
+                throw new AwsException("ValidationError", creating
+                        ? "ClientSecret is required."
+                        : "ClientSecret is required unless UseExistingClientSecret is true.", 400);
+            }
+        }
+        a.setOidcClientSecret(clientSecret);
+        a.setOidcUseExistingClientSecret(useExisting);
+        a.setOidcSessionCookieName(orDefault(p.getFirst(base + "SessionCookieName"),
+                DEFAULT_AUTH_SESSION_COOKIE));
+        a.setOidcScope(orDefault(p.getFirst(base + "Scope"), DEFAULT_AUTH_SCOPE));
+        a.setOidcSessionTimeout(parseSessionTimeout(p.getFirst(base + "SessionTimeout")));
+        a.setOidcOnUnauthenticatedRequest(p.getFirst(base + "OnUnauthenticatedRequest"));
+        a.setOidcAuthenticationRequestExtraParams(parseAuthExtraParams(p, base));
+    }
+
+    private void parseAuthenticateCognito(MultivaluedMap<String, String> p, String base, Action a) {
+        a.setCognitoUserPoolArn(requiredAuthMember(p, base, "UserPoolArn"));
+        a.setCognitoUserPoolClientId(requiredAuthMember(p, base, "UserPoolClientId"));
+        a.setCognitoUserPoolDomain(requiredAuthMember(p, base, "UserPoolDomain"));
+        a.setCognitoSessionCookieName(orDefault(p.getFirst(base + "SessionCookieName"),
+                DEFAULT_AUTH_SESSION_COOKIE));
+        a.setCognitoScope(orDefault(p.getFirst(base + "Scope"), DEFAULT_AUTH_SCOPE));
+        a.setCognitoSessionTimeout(parseSessionTimeout(p.getFirst(base + "SessionTimeout")));
+        a.setCognitoOnUnauthenticatedRequest(p.getFirst(base + "OnUnauthenticatedRequest"));
+        a.setCognitoAuthenticationRequestExtraParams(parseAuthExtraParams(p, base));
+    }
+
+    /**
+     * Puts the stored client secret back on any authenticate-oidc action that asked to keep it.
+     * Both modify operations replace the action list wholesale, so without this the documented
+     * UseExistingClientSecret flow would blank the secret it was written to preserve. A rule or a
+     * listener carries at most one authentication action, so the stored one is unambiguous.
+     */
+    private void applyExistingClientSecrets(List<Action> parsed, List<Action> existing) {
+        String stored = existing == null ? null : existing.stream()
+                .filter(a -> "authenticate-oidc".equals(a.getType()))
+                .map(Action::getOidcClientSecret)
+                .filter(Objects::nonNull)
+                .findFirst().orElse(null);
+        for (Action a : parsed) {
+            if ("authenticate-oidc".equals(a.getType()) && a.isOidcUseExistingClientSecret()
+                    && (a.getOidcClientSecret() == null || a.getOidcClientSecret().isBlank())) {
+                if (stored == null) {
+                    throw new AwsException("ValidationError",
+                            "UseExistingClientSecret is true but no client secret is stored.", 400);
+                }
+                a.setOidcClientSecret(stored);
+            }
+        }
+    }
+
+    private String requiredAuthMember(MultivaluedMap<String, String> p, String base, String name) {
+        String value = p.getFirst(base + name);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("ValidationError", name + " is required.", 400);
+        }
+        return value;
+    }
+
+    private static String orDefault(String value, String fallback) {
+        return value != null && !value.isBlank() ? value : fallback;
+    }
+
+    private static Long parseSessionTimeout(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_AUTH_SESSION_TIMEOUT;
+        }
+        return Long.parseLong(raw);
+    }
+
+    // AuthenticationRequestExtraParams is a map on the wire, so it arrives as
+    // <base>.AuthenticationRequestExtraParams.entry.N.key / .value.
+    private Map<String, String> parseAuthExtraParams(MultivaluedMap<String, String> p, String base) {
+        Map<String, String> params = new LinkedHashMap<>();
+        int n = 1;
+        while (true) {
+            String key = p.getFirst(base + "AuthenticationRequestExtraParams.entry." + n + ".key");
+            if (key == null) {
+                break;
+            }
+            params.put(key, safe(p.getFirst(base + "AuthenticationRequestExtraParams.entry." + n + ".value")));
+            n++;
+        }
+        return params;
     }
 
     private List<RuleCondition> parseConditions(MultivaluedMap<String, String> p) {

@@ -32,6 +32,7 @@ public class EventSourceMapping {
     private ScalingConfig scalingConfig;
     private Boolean bisectBatchOnFunctionError;
     private Integer maximumRetryAttempts;
+    private Integer maximumRecordAgeInSeconds;
     private DestinationConfig destinationConfig;
     private FilterCriteria filterCriteria;
     private Map<String, Object> selfManagedEventSource;
@@ -125,6 +126,14 @@ public class EventSourceMapping {
 
     public void setMaximumRetryAttempts(Integer maximumRetryAttempts) {
         this.maximumRetryAttempts = maximumRetryAttempts;
+    }
+
+    public Integer getMaximumRecordAgeInSeconds() {
+        return maximumRecordAgeInSeconds;
+    }
+
+    public void setMaximumRecordAgeInSeconds(Integer maximumRecordAgeInSeconds) {
+        this.maximumRecordAgeInSeconds = maximumRecordAgeInSeconds;
     }
 
     public DestinationConfig getDestinationConfig() {

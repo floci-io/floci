@@ -39,7 +39,7 @@ final class ProjectionEvaluator {
         validateExpression(projectionExpression);
         PathTrie root = new PathTrie();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
-            List<String> segments = resolvePath(rawPath.trim(), exprAttrNames);
+            List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames);
             if (segments.isEmpty()) {
                 continue;
             }
@@ -66,9 +66,9 @@ final class ProjectionEvaluator {
     static Set<String> topLevelAttributes(String projectionExpression, JsonNode exprAttrNames) {
         var attributes = new java.util.HashSet<String>();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
-            List<String> segments = resolvePath(rawPath.trim(), exprAttrNames);
+            List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames);
             if (!segments.isEmpty()) {
-                attributes.add(segments.getFirst());
+                attributes.add(segments.getFirst().name());
             }
         }
         return Set.copyOf(attributes);
@@ -116,8 +116,24 @@ final class ProjectionEvaluator {
 
     // ── Path resolution ──
 
-    private static List<String> resolvePath(String path, JsonNode exprAttrNames) {
-        List<String> segments = new ArrayList<>();
+    /**
+     * One step of a document path. The kind is fixed by the raw expression: a name token
+     * (including a resolved #alias, whatever characters its value contains) addresses a map
+     * key, and only a [n] suffix written in the expression itself addresses a list index.
+     */
+    private record PathSegment(String name, long index, boolean isIndex) {
+
+        static PathSegment name(String name) {
+            return new PathSegment(name, -1L, false);
+        }
+
+        static PathSegment index(long index) {
+            return new PathSegment(null, index, true);
+        }
+    }
+
+    private static List<PathSegment> resolvePath(String path, JsonNode exprAttrNames) {
+        List<PathSegment> segments = new ArrayList<>();
         // Tokenize on dots, preserving [n] bracket indices
         String[] parts = path.split("\\.");
         for (String part : parts) {
@@ -126,7 +142,7 @@ final class ProjectionEvaluator {
             if (bracketIdx >= 0) {
                 String name = part.substring(0, bracketIdx);
                 if (!name.isEmpty()) {
-                    segments.add(resolveSegment(name, exprAttrNames));
+                    segments.add(PathSegment.name(resolveSegment(name, exprAttrNames)));
                 }
                 // Parse each [n] suffix
                 String rest = part.substring(bracketIdx);
@@ -134,12 +150,13 @@ final class ProjectionEvaluator {
                 while (i < rest.length() && rest.charAt(i) == '[') {
                     int close = rest.indexOf(']', i);
                     if (close < 0) break;
-                    validateListIndex(rest.substring(i + 1, close));
-                    segments.add(rest.substring(i, close + 1)); // e.g. "[0]"
+                    String content = rest.substring(i + 1, close);
+                    validateListIndex(content);
+                    segments.add(PathSegment.index(Long.parseLong(content)));
                     i = close + 1;
                 }
             } else {
-                segments.add(resolveSegment(part, exprAttrNames));
+                segments.add(PathSegment.name(resolveSegment(part, exprAttrNames)));
             }
         }
         return segments;
@@ -194,14 +211,13 @@ final class ProjectionEvaluator {
         // Long keys: the allowable index range (up to 4294967294) exceeds Integer.MAX_VALUE.
         private final TreeMap<Long, PathTrie> indices = new TreeMap<>();
 
-        void insert(List<String> segments) {
+        void insert(List<PathSegment> segments) {
             PathTrie node = this;
-            for (String seg : segments) {
-                if (seg.startsWith("[")) {
-                    long idx = Long.parseLong(seg.substring(1, seg.length() - 1));
-                    node = node.indices.computeIfAbsent(idx, k -> new PathTrie());
+            for (PathSegment seg : segments) {
+                if (seg.isIndex()) {
+                    node = node.indices.computeIfAbsent(seg.index(), k -> new PathTrie());
                 } else {
-                    node = node.names.computeIfAbsent(seg, k -> new PathTrie());
+                    node = node.names.computeIfAbsent(seg.name(), k -> new PathTrie());
                 }
             }
             node.terminal = true;

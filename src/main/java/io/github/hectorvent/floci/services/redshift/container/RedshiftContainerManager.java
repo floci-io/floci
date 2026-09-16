@@ -87,22 +87,7 @@ public class RedshiftContainerManager {
 
         ContainerSpec spec = specBuilder.build();
         ContainerInfo info = lifecycleManager.createAndStart(spec);
-        EndpointInfo endpoint = info.getEndpoint(enginePort);
-
-        RedshiftContainerHandle handle = new RedshiftContainerHandle(
-                info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
-
-        try {
-            Closeable stream = logStreamer.attach(info.containerId(), "/floci/redshift", clusterIdentifier, "us-east-1", "redshift:" + clusterIdentifier);
-            handle.setLogStream(stream);
-        } catch (Exception e) {
-            LOG.warnv("Failed to stream logs for {0}", containerName);
-        }
-
-        waitForReady(containerName, info.containerId(), masterUsername, "dev");
-
-        containers.put(containerKey(accountId, clusterIdentifier), handle);
-        return handle;
+        return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort);
     }
 
     /**
@@ -128,12 +113,27 @@ public class RedshiftContainerManager {
                 containerName, clusterIdentifier);
         int enginePort = 5432;
         ContainerInfo info = lifecycleManager.adopt(existing.get().getId(), List.of(enginePort));
-        EndpointInfo endpoint = info.getEndpoint(enginePort);
+        return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort);
+    }
 
+    private RedshiftContainerHandle initializeAndRegisterHandle(
+            ContainerInfo info,
+            String accountId,
+            String clusterIdentifier,
+            String masterUsername,
+            String containerName,
+            int enginePort) {
+        EndpointInfo endpoint = info.getEndpoint(enginePort);
         RedshiftContainerHandle handle = new RedshiftContainerHandle(
                 info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
+
         try {
-            Closeable stream = logStreamer.attach(info.containerId(), "/floci/redshift", clusterIdentifier, "us-east-1", "redshift:" + clusterIdentifier);
+            Closeable stream = logStreamer.attach(
+                    info.containerId(),
+                    "/floci/redshift",
+                    clusterIdentifier,
+                    "us-east-1",
+                    "redshift:" + clusterIdentifier);
             handle.setLogStream(stream);
         } catch (Exception e) {
             LOG.warnv("Failed to stream logs for {0}", containerName);

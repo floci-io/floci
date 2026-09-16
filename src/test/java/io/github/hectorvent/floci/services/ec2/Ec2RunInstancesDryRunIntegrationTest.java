@@ -1,0 +1,84 @@
+package io.github.hectorvent.floci.services.ec2;
+
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+import java.util.UUID;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.emptyOrNullString;
+
+@QuarkusTest
+class Ec2RunInstancesDryRunIntegrationTest {
+    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
+
+    @ParameterizedTest
+    @CsvSource({"true,MinCount,invalid", "false,MinCount,invalid",
+            "true,MinCount,0", "false,MinCount,0", "true,MaxCount,-1", "false,MaxCount,-1",
+            "true,MinCount,2", "false,MinCount,2", "true,UserData,%%%", "false,UserData,%%%",
+            "true,MetadataOptions.HttpTokens,invalid", "false,MetadataOptions.HttpTokens,invalid",
+            "true,CreditSpecification.CpuCredits,invalid", "false,CreditSpecification.CpuCredits,invalid"})
+    void invalidLaunchInputKeepsItsValidationError(boolean dryRun, String parameter, String value) {
+        given().header("Authorization", AUTH).formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
+                .formParam("DryRun", dryRun).formParam(parameter, value)
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,SubnetId,subnet-missing,InvalidSubnetID.NotFound",
+            "false,SubnetId,subnet-missing,InvalidSubnetID.NotFound",
+            "true,SecurityGroupId.1,sg-missing,InvalidGroup.NotFound",
+            "false,SecurityGroupId.1,sg-missing,InvalidGroup.NotFound",
+            "true,NetworkInterface.1.NetworkInterfaceId,eni-missing,InvalidNetworkInterfaceID.NotFound",
+            "false,NetworkInterface.1.NetworkInterfaceId,eni-missing,InvalidNetworkInterfaceID.NotFound"})
+    void invalidLaunchResourcesKeepTheirValidationError(boolean dryRun, String parameter,
+                                                       String value, String errorCode) {
+        given().header("Authorization", AUTH).formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890").formParam("InstanceType", "t3.micro")
+                .formParam("DryRun", dryRun).formParam(parameter, value)
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo(errorCode));
+    }
+
+    @Test
+    void dryRunWithoutAnImageReturnsMissingParameter() {
+        given().header("Authorization", AUTH).formParam("Action", "RunInstances")
+                .formParam("DryRun", true).post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    @Test
+    void dryRunReturnsEc2ErrorWithoutCreatingAnInstanceOrConsumingClientToken() {
+        String token = UUID.randomUUID().toString();
+        given().header("Authorization", AUTH)
+                .formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("MinCount", "1").formParam("MaxCount", "1")
+                .formParam("ClientToken", token).formParam("DryRun", "true")
+                .formParam("TagSpecification.1.ResourceType", "instance")
+                .formParam("TagSpecification.1.Tag.1.Key", "DryRunTest")
+                .formParam("TagSpecification.1.Tag.1.Value", token)
+                .post("/").then().statusCode(412)
+                .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+
+        given().header("Authorization", AUTH).formParam("Action", "DescribeInstances")
+                .formParam("Filter.1.Name", "tag:DryRunTest").formParam("Filter.1.Value.1", token)
+                .post("/").then().statusCode(200)
+                .body("DescribeInstancesResponse.reservationSet", emptyOrNullString());
+
+        String id = given().header("Authorization", AUTH).formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-0abcdef1234567890")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("ClientToken", token).formParam("DryRun", "false")
+                .post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        given().header("Authorization", AUTH).formParam("Action", "TerminateInstances")
+                .formParam("InstanceId.1", id).post("/").then().statusCode(200);
+    }
+}

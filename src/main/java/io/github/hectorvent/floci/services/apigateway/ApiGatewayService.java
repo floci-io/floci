@@ -10,6 +10,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
@@ -378,6 +379,61 @@ public class ApiGatewayService {
 
     // ──────────────────────────── Method CRUD ────────────────────────────
 
+    /**
+     * The character set API Gateway allows in a method request parameter name. Measured against real
+     * AWS (us-west-2): {@code PutMethod} and an OpenAPI import both reject anything outside it with
+     * {@link #PARAMETER_NAME_ERROR}, quoting this exact expression. {@code $ : . _ -} are allowed,
+     * so {@code filter.a} imports; brackets are not, so a JSON:API style {@code filter[a]} does not.
+     *
+     * <p>This limitation is undocumented, and the runtime behaves differently: a request carrying
+     * {@code ?filter[a]=1} reaches a Lambda proxy integration with the brackets intact. Only the
+     * declared parameter name is restricted.
+     */
+    private static final Pattern REQUEST_PARAMETER_NAME = Pattern.compile("^[a-zA-Z0-9:._$-]+$");
+
+    private static final String PARAMETER_NAME_ERROR =
+            "Invalid mapping expression specified: Validation Result: warnings : [], errors : "
+                    + "[Parameter name should match the following regular expression: ^[a-zA-Z0-9:._$-]+$]";
+
+    private static final List<String> REQUEST_PARAMETER_PREFIXES = List.of(
+            "method.request.querystring.", "method.request.header.", "method.request.path.");
+
+    /**
+     * Rethrows a parameter-name rejection using the envelope an import reports it under. Direct
+     * {@code PutMethod} surfaces the bare message; {@code ImportRestApi}/{@code PutRestApi} name the
+     * method and path first, both measured against real AWS.
+     */
+    private static AwsException importParameterNameFailure(String httpMethod, String path, AwsException cause) {
+        return new AwsException("BadRequestException",
+                "Errors found during import:\tUnable to put method '" + httpMethod
+                        + "' on resource at path '" + path + "': " + cause.getMessage(),
+                400);
+    }
+
+    /**
+     * Validates the names in a method's {@code requestParameters} map, which are of the form
+     * {@code method.request.<location>.<name>}. A name may itself contain dots ({@code filter.a}),
+     * so everything after the location prefix is the name. Keys that do not carry a recognised
+     * prefix are left alone: AWS rejects those with a different message that is not measured here.
+     *
+     * @throws AwsException if any parameter name falls outside {@link #REQUEST_PARAMETER_NAME}
+     */
+    private static void validateRequestParameterNames(Map<String, ?> requestParameters) {
+        if (requestParameters == null) return;
+        for (String key : requestParameters.keySet()) {
+            if (key == null) continue;
+            for (String prefix : REQUEST_PARAMETER_PREFIXES) {
+                if (key.startsWith(prefix)) {
+                    String name = key.substring(prefix.length());
+                    if (!REQUEST_PARAMETER_NAME.matcher(name).matches()) {
+                        throw new AwsException("BadRequestException", PARAMETER_NAME_ERROR, 400);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     public MethodConfig putMethod(String region, String apiId, String resourceId, String httpMethod, Map<String, Object> request) {
         ApiGatewayResource resource = getResource(region, apiId, resourceId);
         MethodConfig method = new MethodConfig();
@@ -389,6 +445,7 @@ public class ApiGatewayService {
 
         @SuppressWarnings("unchecked")
         Map<String, Boolean> reqParams = (Map<String, Boolean>) request.get("requestParameters");
+        validateRequestParameterNames(reqParams);
         if (reqParams != null) method.setRequestParameters(reqParams);
 
         @SuppressWarnings("unchecked")
@@ -2671,8 +2728,15 @@ public class ApiGatewayService {
             if (operations != null) {
                 for (var opEntry : operations.entrySet()) {
                     String httpMethod = opEntry.getKey().name().toUpperCase();
-                    applyOperation(region, apiId, resourceId, httpMethod, opEntry.getValue(), openAPI,
-                            schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                    try {
+                        applyOperation(region, apiId, resourceId, httpMethod, opEntry.getValue(), openAPI,
+                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                    } catch (AwsException e) {
+                        if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
+                            throw importParameterNameFailure(httpMethod, path, e);
+                        }
+                        throw e;
+                    }
                 }
             }
 
@@ -2687,8 +2751,15 @@ public class ApiGatewayService {
                     try {
                         Operation anyOperation = io.swagger.v3.core.util.Json.mapper()
                                 .convertValue(anyMethodExt, Operation.class);
-                        applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
-                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                        try {
+                            applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
+                                    schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                        } catch (AwsException e) {
+                            if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
+                                throw importParameterNameFailure("ANY", path, e);
+                            }
+                            throw e;
+                        }
                     } catch (IllegalArgumentException e) {
                         throw new AwsException("BadRequestException",
                                 "Invalid x-amazon-apigateway-any-method definition for path " + path + ": "

@@ -310,6 +310,10 @@ services:
     doc: docs/services/route53resolver.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/route53resolver/Route53ResolverJsonHandler.java, mode: switch }
+  - service: sagemaker
+    doc: docs/services/sagemaker.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/sagemaker/SageMakerJsonHandler.java, mode: switch }
   - service: securityhub
     doc: docs/services/securityhub.md
     sources:

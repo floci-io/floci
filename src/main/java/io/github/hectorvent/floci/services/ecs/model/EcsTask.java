@@ -39,6 +39,8 @@ public class EcsTask {
     private Instant protectedUntil;
     private Map<String, String> tags = new HashMap<>();
     private NetworkConfiguration networkConfiguration;
+    private String networkInterfaceId;
+    private String privateIpAddress;
 
     public EcsTask() {
     }
@@ -72,6 +74,8 @@ public class EcsTask {
         this.protectedUntil = other.protectedUntil;
         this.tags = other.tags;
         this.networkConfiguration = other.networkConfiguration;
+        this.networkInterfaceId = other.networkInterfaceId;
+        this.privateIpAddress = other.privateIpAddress;
     }
 
     public String getTaskArn() { return taskArn; }
@@ -126,6 +130,11 @@ public class EcsTask {
     public void setNetworkConfiguration(NetworkConfiguration networkConfiguration) {
         this.networkConfiguration = networkConfiguration;
     }
+
+    public String getNetworkInterfaceId() { return networkInterfaceId; }
+    public void setNetworkInterfaceId(String networkInterfaceId) { this.networkInterfaceId = networkInterfaceId; }
+    public String getPrivateIpAddress() { return privateIpAddress; }
+    public void setPrivateIpAddress(String privateIpAddress) { this.privateIpAddress = privateIpAddress; }
 
     public String getStoppedReason() { return stoppedReason; }
     public void setStoppedReason(String stoppedReason) { this.stoppedReason = stoppedReason; }

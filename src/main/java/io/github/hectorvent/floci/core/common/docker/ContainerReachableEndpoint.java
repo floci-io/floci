@@ -8,17 +8,24 @@ import jakarta.inject.Inject;
 import java.net.URI;
 
 /**
- * Computes the Floci base URL reachable from <em>inside</em> a Lambda container.
+ * Computes the Floci base URL reachable from <em>inside</em> a Docker container that Floci launches.
  *
- * <p>When the embedded DNS server is active, Lambda containers have it wired as their
- * resolver and can reach Floci by the configured hostname (or the default DNS suffix).
- * Otherwise we fall back to the raw Docker host address (e.g. {@code host.docker.internal}
- * or the bridge IP) resolved by {@link DockerHostResolver}.
+ * <p>When the embedded DNS server is active, containers built with
+ * {@code ContainerBuilder.Builder.withEmbeddedDns()} have it wired as their resolver and can reach Floci by
+ * the configured hostname (or the default DNS suffix). Otherwise we fall back to the raw Docker host
+ * address (e.g. {@code host.docker.internal} or the bridge IP) resolved by {@link DockerHostResolver}.
  *
- * <p>This is the address that must back any URL handed to a Lambda for a callback —
- * most notably the {@code ResponseURL} a CloudFormation custom resource PUTs its result to.
- * Extracted from {@code ContainerLauncher} so both the launcher and the CloudFormation
- * provisioner share one definition of "how a container reaches Floci".
+ * <p>This is the single definition of "how a container reaches Floci", shared by:
+ * <ul>
+ *   <li>{@link LaunchedContainerAwsEnv}, which sets the AWS endpoint for Lambda, ECS, Flink and MWAA
+ *       containers</li>
+ *   <li>{@code Ec2ContainerManager}, for the {@code AWS_ENDPOINT_URL} of EC2 instance containers</li>
+ *   <li>{@code CloudFormationResourceProvisioner}, for the {@code ResponseURL} a custom resource
+ *       Lambda PUTs its result to</li>
+ * </ul>
+ *
+ * <p>Kubernetes pods do not use it: {@code KubernetesFlociAddressResolver} builds their endpoint
+ * without the embedded DNS server.
  */
 @ApplicationScoped
 public class ContainerReachableEndpoint {
@@ -36,7 +43,7 @@ public class ContainerReachableEndpoint {
         this.embeddedDnsServer = embeddedDnsServer;
     }
 
-    /** The Floci {@code http://host:port} base URL reachable from inside a Lambda container. */
+    /** The Floci {@code http://host:port} base URL reachable from inside a launched Docker container. */
     public String baseUrl() {
         int flociPort = URI.create(config.baseUrl()).getPort();
         String flociHostname = embeddedDnsServer.getServerIp().isPresent()

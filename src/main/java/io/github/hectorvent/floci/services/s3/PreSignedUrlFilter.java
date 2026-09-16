@@ -44,6 +44,13 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
+        // A browser preflight reuses the target request's presigned URL, so its OPTIONS method
+        // must not be verified against a signature created for the follow-up PUT/GET request.
+        // The dedicated S3 OPTIONS resource performs the bucket CORS evaluation instead.
+        if (isCorsPreflight(requestContext)) {
+            return;
+        }
+
         var queryParams = requestContext.getUriInfo().getQueryParameters();
 
         // Only process if this is a pre-signed URL request
@@ -144,6 +151,16 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         }
     }
 
+    private static boolean isCorsPreflight(ContainerRequestContext requestContext) {
+        return "OPTIONS".equalsIgnoreCase(requestContext.getMethod())
+                && hasText(requestContext.getHeaderString("Origin"))
+                && hasText(requestContext.getHeaderString("Access-Control-Request-Method"));
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
     private boolean verifySigV4Signature(ContainerRequestContext requestContext,
                                         String signature, String secretKey) {
         try {
@@ -166,7 +183,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             URI requestUri = requestContext.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) instanceof URI uri
                     ? uri
                     : requestContext.getUriInfo().getRequestUri();
-            String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"), requestUri);
+            String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"),
+                    requestContext.getHeaderString("X-Forwarded-Host"), requestUri);
 
             StringBuilder canonicalHeaders = new StringBuilder();
             for (String header : signedHeaders.split(";")) {

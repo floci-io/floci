@@ -215,7 +215,7 @@ public class AlarmEvaluator {
      * two are indistinguishable across their most recent three buckets alone.</p>
      */
     private static boolean settledBreach(Double[] buckets, MetricAlarm alarm, int evaluationPeriods) {
-        int datapointsToAlarm = alarm.getDatapointsToAlarm() > 0
+        int datapointsToAlarm = alarm.getDatapointsToAlarm() != null
                 ? alarm.getDatapointsToAlarm() : evaluationPeriods;
         int oldestBreachingAge = 0;
         for (int age = 1; age <= buckets.length; age++) {
@@ -252,7 +252,8 @@ public class AlarmEvaluator {
     }
 
     private static String evaluateBreachCount(int breaching, MetricAlarm alarm, int evaluationPeriods) {
-        int datapointsToAlarm = alarm.getDatapointsToAlarm() > 0 ? alarm.getDatapointsToAlarm() : evaluationPeriods;
+        int datapointsToAlarm = alarm.getDatapointsToAlarm() != null
+                ? alarm.getDatapointsToAlarm() : evaluationPeriods;
         return breaching >= datapointsToAlarm ? "ALARM" : "OK";
     }
 

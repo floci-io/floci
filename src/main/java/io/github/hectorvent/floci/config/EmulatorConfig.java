@@ -78,6 +78,8 @@ public interface EmulatorConfig {
 
     DnsConfig dns();
 
+    NetworkConfig network();
+
     AuthConfig auth();
 
     SecurityConfig security();
@@ -91,6 +93,18 @@ public interface EmulatorConfig {
     TlsConfig tls();
 
     ProtocolsConfig protocols();
+
+    interface NetworkConfig {
+        SecurityGroupEnforcementConfig securityGroupEnforcement();
+    }
+
+    interface SecurityGroupEnforcementConfig {
+        @WithDefault("false")
+        boolean enabled();
+
+        @WithDefault("floci/network-helper:local")
+        String helperImage();
+    }
 
     interface ProtocolsConfig {
         /**
@@ -322,6 +336,7 @@ public interface EmulatorConfig {
 
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
+        SageMakerStorageConfig sagemaker();
     }
 
     interface ApsStorageConfig {
@@ -597,7 +612,15 @@ public interface EmulatorConfig {
         @WithDefault("5000")
         long flushIntervalMs();
     }
+
     interface EfsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface SageMakerStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -713,6 +736,7 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        SageMakerServiceConfig sagemaker();
         LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
@@ -1090,6 +1114,13 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
     }
 
+    interface SageMakerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        Optional<String> dockerNetwork();
+    }
+
     interface CodeDeployServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1177,6 +1208,21 @@ public interface EmulatorConfig {
     interface ApiGatewayServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Maximum #foreach loop iterations allowed in a single VTL mapping template render, as a
+         *  hard backstop against runaway loops. Env: FLOCI_SERVICES_APIGATEWAY_VTL_MAX_LOOPS */
+        @WithDefault("10000")
+        int vtlMaxLoops();
+
+        /** Maximum rendered output size, in characters, for a single VTL mapping template render.
+         *  Env: FLOCI_SERVICES_APIGATEWAY_VTL_MAX_OUTPUT_CHARS */
+        @WithDefault("1048576")
+        int vtlMaxOutputChars();
+
+        /** Wall-clock execution budget, in milliseconds, for a single VTL mapping template render.
+         *  Env: FLOCI_SERVICES_APIGATEWAY_VTL_TIMEOUT_MILLIS */
+        @WithDefault("5000")
+        long vtlTimeoutMillis();
     }
 
     interface IamServiceConfig {
@@ -1968,6 +2014,21 @@ public interface EmulatorConfig {
         /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
         @WithDefault("30")
         int schemaWorkerShutdownTimeoutSeconds();
+
+        /** Maximum #foreach loop iterations allowed in a single VTL resolver template render, as a
+         *  hard backstop against runaway loops. Env: FLOCI_SERVICES_APPSYNC_VTL_MAX_LOOPS */
+        @WithDefault("10000")
+        int vtlMaxLoops();
+
+        /** Maximum rendered output size, in characters, for a single VTL resolver template render.
+         *  Env: FLOCI_SERVICES_APPSYNC_VTL_MAX_OUTPUT_CHARS */
+        @WithDefault("1048576")
+        int vtlMaxOutputChars();
+
+        /** Wall-clock execution budget, in milliseconds, for a single VTL resolver template render.
+         *  Env: FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS */
+        @WithDefault("5000")
+        long vtlTimeoutMillis();
     }
 
     interface OamServiceConfig {

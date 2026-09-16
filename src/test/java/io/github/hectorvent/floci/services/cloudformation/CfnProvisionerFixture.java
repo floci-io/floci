@@ -13,9 +13,11 @@ import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFrontCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.DynamoDbCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.OrganizationsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.StepFunctionsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SqsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WafV2CfnProvisioner;
 import io.github.hectorvent.floci.services.configservice.AwsConfigService;
@@ -229,11 +231,17 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
+            if (stepFunctionsService != null) {
+                discovered.add(new StepFunctionsCfnProvisioner(stepFunctionsService, s3Service, objectMapper));
+            }
             if (s3Service != null) {
                 discovered.add(new S3CfnProvisioner(s3Service));
             }
             if (snsService != null) {
                 discovered.add(new SnsCfnProvisioner(snsService));
+            }
+            if (dynamoDbService != null) {
+                discovered.add(new DynamoDbCfnProvisioner(dynamoDbService));
             }
             if (ssmService != null) {
                 discovered.add(new SsmCfnProvisioner(ssmService));
@@ -657,8 +665,6 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             return new CloudFormationResourceProvisioner(
                     s3Service,
-                    snsService,
-                    dynamoDbService,
                     lambdaService,
                     iamService,
                     ssmService,
@@ -671,7 +677,6 @@ final class CfnProvisionerFixture {
                     objectMapper,
                     customResourceResponseStore,
                     reachableEndpoint,
-                    stepFunctionsService,
                     ec2Service,
                     eksService,
                     logsService,

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import org.junit.jupiter.api.Test;
 
@@ -23,17 +24,17 @@ class CloudFrontOriginSecurityTest {
                 "169.254.169.254", "100.64.0.1", "224.0.0.1", "240.0.0.1",
                 "::1", "fe80::1", "fc00::1", "2001:db8::1"
         }) {
-            assertTrue(CloudFrontServingController.isBlockedOriginAddress(InetAddress.getByName(address)),
+            assertTrue(SsrfProtection.isBlockedAddress(InetAddress.getByName(address)),
                     address + " must not be reachable as a default custom origin");
         }
     }
 
     @Test
     void permitsPublicAddresses() throws Exception {
-        assertFalse(CloudFrontServingController.isBlockedOriginAddress(InetAddress.getByName("8.8.8.8")));
-        assertFalse(CloudFrontServingController.isBlockedOriginAddress(
+        assertFalse(SsrfProtection.isBlockedAddress(InetAddress.getByName("8.8.8.8")));
+        assertFalse(SsrfProtection.isBlockedAddress(
                 InetAddress.getByName("2606:4700:4700::1111")));
-        assertFalse(CloudFrontServingController.isBlockedOriginAddress(ipv4MappedAddress("8.8.8.8")));
+        assertFalse(SsrfProtection.isBlockedAddress(ipv4MappedAddress("8.8.8.8")));
     }
 
     @Test
@@ -43,7 +44,7 @@ class CloudFrontOriginSecurityTest {
                 "169.254.169.254", "100.64.0.1", "192.0.0.1", "192.0.2.1", "198.18.0.1",
                 "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1"
         }) {
-            assertTrue(CloudFrontServingController.isBlockedOriginAddress(ipv4MappedAddress(address)),
+            assertTrue(SsrfProtection.isBlockedAddress(ipv4MappedAddress(address)),
                     "IPv4-mapped " + address + " must not be reachable as a default custom origin");
         }
     }

@@ -41,6 +41,7 @@ class SesServiceListManagementTest {
     @Mock SmtpRelay smtpRelay;
 
     private SesService service;
+    private SesContactService contacts;
     private InMemoryStorage<String, Contact> contactStore;
 
     @BeforeEach
@@ -48,17 +49,18 @@ class SesServiceListManagementTest {
         SesServiceTestBuilder builder = SesServiceTestBuilder.create().smtpRelay(smtpRelay);
         contactStore = builder.contactStore();
         service = builder.build();
+        contacts = builder.contactService();
 
         // Sports defaults OPT_IN, Promos defaults OPT_OUT.
-        service.createContactList(LIST, "desc", List.of(
+        contacts.createContactList(LIST, "desc", List.of(
                 new Topic("Sports", "Sports", "OPT_IN", "d"),
                 new Topic("Promos", "Promos", "OPT_OUT", "d")), List.of(), REGION);
-        service.createContact(LIST, "unsub@example.com", List.of(), true, null, REGION);
-        service.createContact(LIST, "sportsout@example.com",
+        contacts.createContact(LIST, "unsub@example.com", List.of(), true, null, REGION);
+        contacts.createContact(LIST, "sportsout@example.com",
                 List.of(new TopicPreference("Sports", "OPT_OUT")), false, null, REGION);
-        service.createContact(LIST, "sportsin@example.com",
+        contacts.createContact(LIST, "sportsin@example.com",
                 List.of(new TopicPreference("Sports", "OPT_IN")), false, null, REGION);
-        service.createContact(LIST, "noprefs@example.com", List.of(), false, null, REGION);
+        contacts.createContact(LIST, "noprefs@example.com", List.of(), false, null, REGION);
     }
 
     private void send(List<String> to, String topicName) {
@@ -169,7 +171,7 @@ class SesServiceListManagementTest {
 
     @Test
     void unsubscribeContact_withTopic_setsOptOut() {
-        service.unsubscribeContact(LIST, "sportsin@example.com", "Sports", REGION);
+        contacts.unsubscribeContact(LIST, "sportsin@example.com", "Sports", REGION);
         Contact c = contact("sportsin@example.com");
         assertTrue(c.getTopicPreferences().stream()
                 .anyMatch(p -> "Sports".equals(p.getTopicName()) && "OPT_OUT".equals(p.getSubscriptionStatus())));
@@ -177,13 +179,13 @@ class SesServiceListManagementTest {
 
     @Test
     void unsubscribeContact_withoutTopic_setsUnsubscribeAll() {
-        service.unsubscribeContact(LIST, "sportsin@example.com", null, REGION);
+        contacts.unsubscribeContact(LIST, "sportsin@example.com", null, REGION);
         assertTrue(contact("sportsin@example.com").isUnsubscribeAll());
     }
 
     @Test
     void unsubscribeContact_absentContact_autoCreatesAndOptsOut() {
-        service.unsubscribeContact(LIST, "ghost@example.com", null, REGION);
+        contacts.unsubscribeContact(LIST, "ghost@example.com", null, REGION);
         assertTrue(contact("ghost@example.com").isUnsubscribeAll());
     }
 
@@ -193,7 +195,7 @@ class SesServiceListManagementTest {
         c.setTopicPreferences(List.of(new TopicPreference("Sports", "OPT_IN")));
         contactStore.put("contact::" + REGION + "::" + LIST + "::immutable@example.com", c);
 
-        service.unsubscribeContact(LIST, "immutable@example.com", "Promos", REGION);
+        contacts.unsubscribeContact(LIST, "immutable@example.com", "Promos", REGION);
 
         assertTrue(contact("immutable@example.com").getTopicPreferences().stream()
                 .anyMatch(p -> "Promos".equals(p.getTopicName()) && "OPT_OUT".equals(p.getSubscriptionStatus())));

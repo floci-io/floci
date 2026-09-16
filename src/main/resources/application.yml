@@ -116,6 +116,10 @@ quarkus:
 floci:
   port: 4566
   base-url: "http://localhost:4566"
+  network:
+    security-group-enforcement:
+      enabled: false
+      helper-image: floci/network-helper:local
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
   default-region: us-east-1
@@ -160,6 +164,8 @@ floci:
       acm:
         flush-interval-ms: 5000
       opensearch:
+        flush-interval-ms: 5000
+      sagemaker:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
@@ -319,6 +325,9 @@ floci:
         enabled: false
     apigateway:
       enabled: true
+      vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL mapping template may execute (truncates the loop, does not fail the template)
+      vtl-max-output-chars: 1048576        # Maximum characters a VTL mapping template may render before it fails
+      vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL mapping template may spend evaluating before it fails
     apigatewayv2:
       enabled: true
     iam:
@@ -593,6 +602,9 @@ floci:
     codebuild:
       enabled: true
       # docker-network: floci-network
+    sagemaker:
+      enabled: true
+      # docker-network: floci-network
     batch:
       enabled: true
       runner-mode: immediate
@@ -658,6 +670,9 @@ floci:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
+      vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL resolver template may execute (truncates the loop, does not fail the template)
+      vtl-max-output-chars: 1048576        # Maximum characters a VTL resolver template may render before it fails
+      vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL resolver template may spend evaluating before it fails
     s3vectors:
       enabled: true
     s3tables:

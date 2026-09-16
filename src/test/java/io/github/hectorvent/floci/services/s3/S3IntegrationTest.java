@@ -489,6 +489,68 @@ class S3IntegrationTest {
     }
 
     @Test
+    void createBucketRejectsOverlyLongBucketName() {
+        String longBucketName = "30388849b0eaef3dfba3aa83849d28987be6fb7920bdbf3233bdc8e966f73870.json";
+        given()
+        .when()
+            .put("/" + longBucketName)
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidBucketName"));
+    }
+
+    @Test
+    void createBucketRejectsNonXmlPayload() {
+        given()
+            .contentType("application/json")
+            .body("{\"key\":\"value\"}")
+        .when()
+            .put("/malformed-xml-bucket")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+    }
+
+    @Test
+    void createBucketReroutesMisplacedVirtualHostedPutObject() {
+        String targetBucket = "reroute-target-bucket";
+        String objectKey = "misplaced-file.json";
+        String content = "{\"message\":\"hello from misplaced put\"}";
+
+        given().put("/" + targetBucket).then().statusCode(200);
+
+        // PutObject request arriving on single path segment with custom Host
+        given()
+            .header("Host", targetBucket + ".floci.apps.custom.com")
+            .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+            .contentType("application/json")
+            .body(content)
+        .when()
+            .put("/" + objectKey)
+        .then()
+            .statusCode(200);
+
+        // Verify stored in targetBucket
+        given()
+        .when()
+            .get("/" + targetBucket + "/" + objectKey)
+        .then()
+            .statusCode(200)
+            .body(equalTo(content));
+
+        // Verify objectKey was not created as bucket
+        given()
+        .when()
+            .head("/" + objectKey)
+        .then()
+            .statusCode(404);
+
+        // Clean up
+        given().delete("/" + targetBucket + "/" + objectKey).then().statusCode(204);
+        given().delete("/" + targetBucket).then().statusCode(204);
+    }
+
+    @Test
     @Order(23)
     void copyObjectWithNonAsciiKeySucceeds() {
         String bucket = "copy-nonascii-bucket";

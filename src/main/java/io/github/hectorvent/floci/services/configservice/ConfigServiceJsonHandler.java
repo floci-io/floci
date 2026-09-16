@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.configservice;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
 import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorder;
@@ -63,6 +64,9 @@ public class ConfigServiceJsonHandler {
             case "PutRetentionConfiguration" -> putRetentionConfiguration(request, region);
             case "DescribeRetentionConfigurations" -> describeRetentionConfigurations(request, region);
             case "DeleteRetentionConfiguration" -> deleteRetentionConfiguration(request, region);
+            case "PutAggregationAuthorization" -> putAggregationAuthorization(request, region);
+            case "DescribeAggregationAuthorizations" -> describeAggregationAuthorizations(request, region);
+            case "DeleteAggregationAuthorization" -> deleteAggregationAuthorization(request, region);
             case "TagResource" -> tagResource(request);
             case "UntagResource" -> untagResource(request);
             case "ListTagsForResource" -> listTagsForResource(request);
@@ -299,15 +303,36 @@ public class ConfigServiceJsonHandler {
         return Response.ok(pagedResponse("ConformancePackStatusDetails", page)).build();
     }
 
+    // --- Aggregation Authorizations ---
+
+    private Response putAggregationAuthorization(JsonNode req, String region) {
+        AggregationAuthorization authorization = service.putAggregationAuthorization(region,
+                req.path("AuthorizedAccountId").asText(null),
+                req.path("AuthorizedAwsRegion").asText(null),
+                extractTags(req));
+        ObjectNode resp = mapper.createObjectNode();
+        resp.set("AggregationAuthorization", mapper.valueToTree(authorization));
+        return Response.ok(resp).build();
+    }
+
+    private Response describeAggregationAuthorizations(JsonNode req, String region) {
+        AwsConfigService.Paged<AggregationAuthorization> page = service.describeAggregationAuthorizations(region,
+                extractLimit(req, "Limit"), extractNextToken(req));
+        return Response.ok(pagedResponse("AggregationAuthorizations", page)).build();
+    }
+
+    private Response deleteAggregationAuthorization(JsonNode req, String region) {
+        service.deleteAggregationAuthorization(region,
+                req.path("AuthorizedAccountId").asText(null),
+                req.path("AuthorizedAwsRegion").asText(null));
+        return Response.ok(mapper.createObjectNode()).build();
+    }
+
     // --- Tagging ---
 
     private Response tagResource(JsonNode req) {
         String arn = req.path("ResourceArn").asText(null);
-        List<Map<String, String>> tagList = new ArrayList<>();
-        req.path("Tags").forEach(t -> tagList.add(Map.of(
-                "Key", t.path("Key").asText(),
-                "Value", t.path("Value").asText())));
-        service.tagResource(arn, tagList);
+        service.tagResource(arn, extractTags(req));
         return Response.ok(mapper.createObjectNode()).build();
     }
 
@@ -328,6 +353,14 @@ public class ConfigServiceJsonHandler {
     }
 
     // --- Helpers ---
+
+    private List<Map<String, String>> extractTags(JsonNode req) {
+        List<Map<String, String>> tagList = new ArrayList<>();
+        req.path("Tags").forEach(t -> tagList.add(Map.of(
+                "Key", t.path("Key").asText(),
+                "Value", t.path("Value").asText())));
+        return tagList;
+    }
 
     private List<String> extractStringList(JsonNode req, String fieldName) {
         List<String> result = new ArrayList<>();

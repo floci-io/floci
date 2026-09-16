@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontDistributionFilter;
 import io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFilter;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -29,6 +30,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
     static final String ORIGINAL_REQUEST_URI_PROPERTY = S3VirtualHostFilter.class.getName() + ".originalRequestUri";
 
     private final String baseHostname;
+    private final Instance<S3Service> s3ServiceInstance;
 
     /**
      * Hostname suffixes for which a bare {@code s3.<suffix>} Host header is Floci's own
@@ -64,17 +66,30 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
     private static final String DUALSTACK = "dualstack";
 
     @Inject
-    public S3VirtualHostFilter(EmulatorConfig config, ContainerDetector containerDetector) {
+    public S3VirtualHostFilter(EmulatorConfig config, ContainerDetector containerDetector,
+                               Instance<S3Service> s3ServiceInstance) {
         this.baseHostname = config.hostname()
                 .orElseGet(() -> containerDetector.isRunningInContainer()
                         ? EmbeddedDnsServer.DEFAULT_SUFFIX
                         : extractHostnameFromUrl(config.baseUrl()));
         this.serviceHostSuffixes = buildServiceHostSuffixes(config.hostname(), config.dns().extraSuffixes());
+        this.s3ServiceInstance = s3ServiceInstance;
     }
 
     S3VirtualHostFilter() {
+        this(Optional.empty(), Optional.empty());
+    }
+
+    S3VirtualHostFilter(Optional<String> hostname, Optional<List<String>> extraSuffixes) {
+        this.baseHostname = hostname.orElse("localhost");
+        this.serviceHostSuffixes = buildServiceHostSuffixes(hostname, extraSuffixes);
+        this.s3ServiceInstance = null;
+    }
+
+    S3VirtualHostFilter(Instance<S3Service> s3ServiceInstance) {
         this.baseHostname = "localhost";
         this.serviceHostSuffixes = buildServiceHostSuffixes(Optional.empty(), Optional.empty());
+        this.s3ServiceInstance = s3ServiceInstance;
     }
 
     /**
@@ -102,7 +117,10 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // ":authority" pseudo-header, surfaced here as the request URI authority.
         // Falling back to it keeps virtual-hosted-style routing working when a
         // browser negotiates HTTP/2 over HTTPS (where the Host header is absent).
-        String host = resolveHost(requestContext.getHeaderString("Host"), uri);
+        // Reverse proxies (e.g. Traefik, Nginx) preserve the client's original host
+        // in X-Forwarded-Host when Host is rewritten to the internal upstream.
+        String host = resolveHost(requestContext.getHeaderString("Host"),
+                requestContext.getHeaderString("X-Forwarded-Host"), uri);
         if (host == null) return;
 
         // Do not hijack requests meant for other AWS services
@@ -127,6 +145,9 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         }
 
         String bucket = extractBucket(host, baseHostname, serviceHostSuffixes);
+        if (bucket == null && signedForS3 && s3ServiceInstance != null && s3ServiceInstance.isResolvable()) {
+            bucket = extractBucketFromExisting(host, s3ServiceInstance.get());
+        }
         if (bucket == null) return;
 
         String path = uri.getRawPath();
@@ -165,15 +186,31 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      * header is absent we fall back to the URI authority so virtual-hosted-style
      * requests are recognized on both protocol versions.
      *
+     * <p>Reverse proxies (e.g. Traefik, Nginx, ALB) often rewrite the {@code Host} header
+     * to the internal upstream address (e.g. {@code floci:4566}) and forward the client's
+     * original host in {@code X-Forwarded-Host}. When present, that header takes priority
+     * so virtual-hosted bucket names survive reverse proxying.
+     *
      * @param hostHeader the value of the {@code Host} header, or {@code null}
+     * @param xForwardedHost the value of the {@code X-Forwarded-Host} header, or {@code null}
      * @param requestUri the request URI, or {@code null}
      * @return the effective authority ({@code host[:port]}), or {@code null} if neither is available
      */
-    static String resolveHost(String hostHeader, URI requestUri) {
-        if (hostHeader != null) {
-            return hostHeader;
+    static String resolveHost(String hostHeader, String xForwardedHost, URI requestUri) {
+        if (xForwardedHost != null && !xForwardedHost.isBlank()) {
+            String first = xForwardedHost.split(",", -1)[0].trim();
+            if (!first.isEmpty()) {
+                return first;
+            }
+        }
+        if (hostHeader != null && !hostHeader.isBlank()) {
+            return hostHeader.trim();
         }
         return requestUri != null ? requestUri.getAuthority() : null;
+    }
+
+    static String resolveHost(String hostHeader, URI requestUri) {
+        return resolveHost(hostHeader, null, requestUri);
     }
 
     /**
@@ -265,7 +302,12 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
         // Website endpoints keep their historical tail-agnostic handling: any
         // bucket.s3-website-<region>.<anything> is virtual-hosted.
-        return bucketBeforeWebsiteQualifier(hostname);
+        String websiteBucket = bucketBeforeWebsiteQualifier(hostname);
+        if (websiteBucket != null) {
+            return websiteBucket;
+        }
+
+        return bucketBeforeS3Qualifier(hostname);
     }
 
     /**
@@ -496,6 +538,73 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         for (int i = labels.length - 2; i >= 1; i--) {
             if (labels[i].toLowerCase().startsWith("s3-website")) {
                 return String.join(".", Arrays.copyOfRange(labels, 0, i));
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Tail-agnostic S3 qualifier handling: {@code <bucket>.s3.<region>.<domain>} or
+     * {@code <bucket>.s3-fips.dualstack.<region>.<domain>} on custom or unconfigured domains.
+     * Recognized when an {@code s3} label appears after the bucket candidate and is followed
+     * by a valid AWS region id.
+     */
+    static String bucketBeforeS3Qualifier(String hostname) {
+        String[] labels = hostname.split("\\.", -1);
+        for (int i = 1; i < labels.length - 1; i++) {
+            String head = labels[i].toLowerCase();
+            if ("s3".equals(head) || "s3-fips".equals(head)) {
+                int next = i + 1;
+                if (next < labels.length && DUALSTACK.equalsIgnoreCase(labels[next])) {
+                    next++;
+                }
+                if (next < labels.length && AwsRegions.isRegionId(labels[next])) {
+                    String candidate = String.join(".", Arrays.copyOfRange(labels, 0, i));
+                    if (isValidCandidateBucket(candidate)) {
+                        return candidate;
+                    }
+                }
+            } else if (head.startsWith("s3-") && AwsRegions.isRegionId(head.substring("s3-".length()))) {
+                String candidate = String.join(".", Arrays.copyOfRange(labels, 0, i));
+                if (isValidCandidateBucket(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isValidCandidateBucket(String candidate) {
+        if (candidate.isEmpty()) {
+            return false;
+        }
+        String[] labels = candidate.split("\\.", -1);
+        for (int i = 1; i < labels.length; i++) {
+            if (NON_S3_SERVICE_LABELS.contains(labels[i].toLowerCase())) {
+                return false;
+            }
+        }
+        return !isForeignRegionalHost(labels);
+    }
+
+    /**
+     * Fallback for virtual-hosted requests on custom domains where the hostname does not
+     * carry standard S3 qualifiers or DNS suffixes, but the leading subdomain matches a
+     * bucket that already exists in Floci.
+     */
+    static String extractBucketFromExisting(String host, S3Service s3Service) {
+        if (host == null || s3Service == null) {
+            return null;
+        }
+        String hostname = stripPort(host);
+        String[] labels = hostname.split("\\.", -1);
+        if (labels.length < 2) {
+            return null;
+        }
+        for (int i = labels.length - 1; i >= 1; i--) {
+            String candidate = String.join(".", Arrays.copyOfRange(labels, 0, i));
+            if (s3Service.bucketExists(candidate)) {
+                return candidate;
             }
         }
         return null;

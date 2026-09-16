@@ -2370,18 +2370,27 @@ public class AslExecutor {
         int effectiveConcurrency = effectiveMapConcurrency(
                 childCount, requestedConcurrency, distributed);
 
+        // A declared tolerance lets a Distributed Map absorb failed items instead of failing on the
+        // first one. Absent, the state keeps the earlier behaviour and fails with the item's error.
+        ToleratedFailures tolerated = resolveToleratedFailures(stateDef, itemCount, mapInput, jsonata,
+                context, variables);
+
         chain.publish("MapStateStarted", Map.of("length", itemCount));
         MapRunIdentity mapRun = null;
         MapRun mapRunRecord = null;
         if (distributed) {
             mapRun = newMapRunIdentity(stateDef, sm, context);
             mapRunRecord = newMapRun(mapRun, context, itemCount, childCount, requestedConcurrency);
+            mapRunRecord.setToleratedFailureCount(tolerated.declaredCount());
+            mapRunRecord.setToleratedFailurePercentage(tolerated.declaredPercentage());
             chain.publish("MapRunStarted", Map.of("mapRunArn", mapRun.arn()));
         }
         var succeededItems = new AtomicInteger();
         var failedItems = new AtomicInteger();
         AtomicInteger succeededExecutions = new AtomicInteger();
         AtomicInteger failedExecutions = new AtomicInteger();
+        List<Integer> succeededChildren = new ArrayList<>(childCount);
+        FailedChild[] failedByIndex = hasResultWriter ? new FailedChild[childCount] : null;
         var iterationChains = new ArrayList<HistoryChain>(childCount);
         for (var i = 0; i < childCount; i++) {
             iterationChains.add(distributed ? HistoryChain.ofChildExecution() : chain.fork());
@@ -2398,15 +2407,22 @@ public class AslExecutor {
 
             long startMs = hasResultWriter ? System.currentTimeMillis() : 0L;
             JsonNode branchOutput;
+            // AWS evaluates ItemSelector before it records MapIterationStarted, so a failing
+            // expression fails the Map state without any event for that iteration.
+            boolean iterationStarted = false;
             try {
-                if (!distributed) {
-                    iterationChain.publish("MapIterationStarted", Map.of("name", name, "index", i));
-                }
                 JsonNode iterInput = item;
                 if (!batchedChild && itemTransform != null) {
                     // $ in ItemSelector resolves against the Map state's effective input, not the item.
-                    iterInput = resolveParameters(itemTransform, mapInput, iterContext);
+                    iterInput = jsonata
+                            ? jsonataEvaluator.resolveTemplate(itemTransform, "ItemSelector",
+                                    buildStatesVar(mapInput, null, iterContext), variables)
+                            : resolveParameters(itemTransform, mapInput, iterContext);
                 }
+                if (!distributed) {
+                    iterationChain.publish("MapIterationStarted", Map.of("name", name, "index", i));
+                }
+                iterationStarted = true;
                 if (hasResultWriter) {
                     childInputsByIndex[i] = iterInput;
                 }
@@ -2418,12 +2434,25 @@ public class AslExecutor {
                 branchOutput = executeBranch(startAt, iteratorStates, iterInput, iterationChain, sm,
                         topLevelQueryLanguage, iterContext, variables.deepCopy());
             } catch (FailStateException e) {
-                failedItems.addAndGet(itemsInChild);
+                int failedSoFar = failedItems.addAndGet(itemsInChild);
                 failedExecutions.incrementAndGet();
-                if (!distributed && !e.isRuntimeError()) {
+                if (iterationStarted && !distributed && !e.isRuntimeError()) {
                     iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
                 }
-                throw new IterationFailure(i, e);
+                if (!tolerated.declared()) {
+                    throw new IterationFailure(i, e);
+                }
+                if (failedSoFar > tolerated.threshold()) {
+                    throw new IterationFailure(i, new FailStateException(
+                            "States.ExceedToleratedFailureThreshold",
+                            "The map run failed because a tolerated failure threshold was exceeded. "
+                                    + failedSoFar + " of " + itemCount + " items failed."));
+                }
+                if (hasResultWriter) {
+                    failedByIndex[i] = new FailedChild(childInputsByIndex[i],
+                            new long[]{startMs, System.currentTimeMillis()}, e.error, e.cause);
+                }
+                return null;
             }
             succeededItems.addAndGet(itemsInChild);
             succeededExecutions.incrementAndGet();
@@ -2460,20 +2489,33 @@ public class AslExecutor {
             } finally {
                 iterationChains.forEach(HistoryChain::abandon);
             }
-            results.addAll(itemOutputs);
+            for (int i = 0; i < itemOutputs.size(); i++) {
+                if (itemOutputs.get(i) != null) {
+                    succeededChildren.add(i);
+                    results.add(itemOutputs.get(i));
+                }
+            }
         }
 
         JsonNode mapResult = results;
         if (hasResultWriter) {
             ArrayNode childInputs = objectMapper.createArrayNode();
-            List<long[]> childTimings = new ArrayList<>(childCount);
-            for (int i = 0; i < childCount; i++) {
+            List<long[]> childTimings = new ArrayList<>(succeededChildren.size());
+            for (int i : succeededChildren) {
                 childInputs.add(childInputsByIndex[i]);
                 childTimings.add(childTimingsByIndex[i]);
             }
+            // Tolerated failures stay observable: AWS exports them to FAILED_n.json even when the run
+            // itself stays within its budget.
+            List<FailedChild> failedChildren = new ArrayList<>();
+            for (int i = 0; i < childCount; i++) {
+                if (failedByIndex[i] != null) {
+                    failedChildren.add(failedByIndex[i]);
+                }
+            }
             try {
                 mapResult = applyResultWriter(name, stateDef, mapInput, results, childInputs, childTimings,
-                        sm, context, jsonata, variables, mapRun);
+                        failedChildren, sm, context, jsonata, variables, mapRun);
             } catch (FailStateException e) {
                 // A ResultWriter failure fails the Map run on AWS.
                 publishMapRunFailedEvent(chain, e);
@@ -2681,6 +2723,56 @@ public class AslExecutor {
         return batch;
     }
 
+    /**
+     * The failed-item budget a Distributed Map declared. {@code declaredCount} and
+     * {@code declaredPercentage} are what DescribeMapRun reports; {@code threshold} is the number of
+     * failed items the run absorbs, which is the stricter of the two whenever both are declared.
+     */
+    private record ToleratedFailures(boolean declared, int declaredCount, double declaredPercentage,
+                                     int threshold) {
+    }
+
+    private ToleratedFailures resolveToleratedFailures(JsonNode stateDef, int itemCount, JsonNode mapInput,
+                                                       boolean jsonata, JsonNode context, ObjectNode variables) {
+        boolean hasCount = stateDef.has("ToleratedFailureCount") || stateDef.has("ToleratedFailureCountPath");
+        boolean hasPercentage = stateDef.has("ToleratedFailurePercentage")
+                || stateDef.has("ToleratedFailurePercentagePath");
+        if (!hasCount && !hasPercentage) {
+            return new ToleratedFailures(false, 0, 0.0, 0);
+        }
+
+        int count = hasCount
+                ? resolveToleranceField(stateDef, "ToleratedFailureCount", Integer.MAX_VALUE, mapInput,
+                        jsonata, context, variables)
+                : 0;
+        int percentage = hasPercentage
+                ? resolveToleranceField(stateDef, "ToleratedFailurePercentage", 100, mapInput, jsonata,
+                        context, variables)
+                : 0;
+
+        int fromPercentage = (int) ((long) itemCount * percentage / 100);
+        int threshold;
+        if (hasCount && hasPercentage) {
+            threshold = Math.min(count, fromPercentage);
+        } else if (hasCount) {
+            threshold = count;
+        } else {
+            threshold = fromPercentage;
+        }
+        return new ToleratedFailures(true, count, percentage, threshold);
+    }
+
+    /** A tolerance is a percentage or a count, so it shares the Map integer resolver and adds a ceiling. */
+    private int resolveToleranceField(JsonNode stateDef, String field, int maximum, JsonNode mapInput,
+                                      boolean jsonata, JsonNode context, ObjectNode variables) {
+        int value = resolveMapIntegerField(stateDef, field, 0, mapInput, jsonata, context, variables);
+        if (value > maximum) {
+            throw new FailStateException("States.Runtime",
+                    field + " must resolve to an integer between 0 and " + maximum, field);
+        }
+        return value;
+    }
+
 
     /**
      * Emulates a Distributed Map state's {@code ResultWriter}
@@ -2698,15 +2790,16 @@ public class AslExecutor {
      *
      * <p>By construction every child branch here has already succeeded (a failed branch throws and
      * fails the Map before this point, since inline Maps here do not implement tolerated-failure),
-     * so {@code ResultFiles.FAILED} / {@code PENDING} are empty and all results go to a single
-     * {@code SUCCEEDED_0.json}.
+     * so it passes no failed children: {@code ResultFiles.FAILED} / {@code PENDING} are empty and all
+     * results go to a single {@code SUCCEEDED_0.json}.
      */
     // Package-private for unit testing of the ResultWriter export/format behaviour.
     JsonNode applyResultWriter(String mapStateName, JsonNode stateDef, JsonNode input,
                                ArrayNode results, ArrayNode childInputs, List<long[]> childTimings,
                                StateMachine sm, JsonNode context, boolean jsonata) throws Exception {
         return applyResultWriter(mapStateName, stateDef, input, results, childInputs, childTimings,
-                sm, context, jsonata, objectMapper.createObjectNode(), newMapRunIdentity(stateDef, sm, context));
+                List.of(), sm, context, jsonata, objectMapper.createObjectNode(),
+                newMapRunIdentity(stateDef, sm, context));
     }
 
     private record MapRunIdentity(String label, String id, String arn) {
@@ -2727,8 +2820,9 @@ public class AslExecutor {
 
     private JsonNode applyResultWriter(String mapStateName, JsonNode stateDef, JsonNode input,
                                        ArrayNode results, ArrayNode childInputs, List<long[]> childTimings,
-                                       StateMachine sm, JsonNode context, boolean jsonata,
-                                       ObjectNode variables, MapRunIdentity mapRun) throws Exception {
+                                       List<FailedChild> failedChildren, StateMachine sm, JsonNode context,
+                                       boolean jsonata, ObjectNode variables, MapRunIdentity mapRun)
+            throws Exception {
         JsonNode writer = stateDef.get("ResultWriter");
         JsonNode writerConfig = writer.path("WriterConfig");
         boolean export = writer.hasNonNull("Resource");
@@ -2818,7 +2912,17 @@ public class AslExecutor {
             manifest.put("DestinationBucket", bucket);
             manifest.put("MapRunArn", mapRunArn);
             ObjectNode resultFiles = manifest.putObject("ResultFiles");
-            resultFiles.putArray("FAILED");
+            ArrayNode failedFiles = resultFiles.putArray("FAILED");
+            if (!failedChildren.isEmpty()) {
+                String failedKey = base + "FAILED_0.json";
+                byte[] failedBytes = serializeResultFile(
+                        formatFailedChildren(failedChildren, region, account, smName, mapRun.label()),
+                        outputType);
+                s3Service.putObject(bucket, failedKey, failedBytes, "application/json", new HashMap<>());
+                ObjectNode failedEntry = failedFiles.addObject();
+                failedEntry.put("Key", failedKey);
+                failedEntry.put("Size", failedBytes.length);
+            }
             resultFiles.putArray("PENDING");
             ObjectNode succeededEntry = resultFiles.putArray("SUCCEEDED").addObject();
             succeededEntry.put("Key", succeededKey);
@@ -2888,6 +2992,38 @@ public class AslExecutor {
         return out;
     }
 
+    /** A child execution that failed within the Map's tolerated budget. */
+    private record FailedChild(JsonNode input, long[] timing, String error, String cause) {
+    }
+
+    /** The FAILED_n.json records, which carry the child's error rather than an output. */
+    private ArrayNode formatFailedChildren(List<FailedChild> failedChildren, String region, String account,
+                                           String smName, String mapRunLabel) {
+        ArrayNode out = objectMapper.createArrayNode();
+        String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
+                + smName + "/" + mapRunLabel;
+        for (FailedChild child : failedChildren) {
+            String childId = UUID.randomUUID().toString();
+            ObjectNode record = out.addObject();
+            record.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
+                    + smName + "/" + mapRunLabel + ":" + childId);
+            record.put("Input", stringifyResult(child.input()));
+            record.putObject("InputDetails").put("Included", true);
+            record.put("Name", childId);
+            record.put("Error", child.error());
+            record.put("Cause", child.cause());
+            record.putObject("OutputDetails").put("Included", false);
+            record.put("RedriveCount", 0);
+            record.put("RedriveStatus", "REDRIVABLE");
+            record.put("RedriveStatusReason", "Execution is FAILED and can be redriven");
+            record.put("StartDate", Instant.ofEpochMilli(child.timing()[0]).toString());
+            record.put("StateMachineArn", childSmArn);
+            record.put("Status", "FAILED");
+            record.put("StopDate", Instant.ofEpochMilli(child.timing()[1]).toString());
+        }
+        return out;
+    }
+
     private String stringifyResult(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return "null";
@@ -2934,8 +3070,7 @@ public class AslExecutor {
                                                     ObjectNode variables) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
-            throw new FailStateException("States.ItemReaderFailed",
-                    "ItemReader resource arn:aws:states:::s3:listObjectsV2 is not yet implemented by the emulator");
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables);
         }
         if (!"arn:aws:states:::s3:getObject".equals(resource)) {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
@@ -2947,15 +3082,7 @@ public class AslExecutor {
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
 
-        JsonNode resolvedParameters;
-        if (jsonata && itemReader.has("Arguments")) {
-            JsonNode statesVar = buildStatesVar(input, null, context);
-            resolvedParameters = jsonataEvaluator.resolveTemplate(
-                    itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
-        } else {
-            JsonNode parameters = itemReader.path("Parameters");
-            resolvedParameters = resolveParameters(parameters, input, context);
-        }
+        JsonNode resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
         if (bucket == null || key == null) {
@@ -3003,6 +3130,56 @@ public class AslExecutor {
         return items;
     }
 
+    private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,
+                                                 boolean jsonata, ObjectNode variables) throws Exception {
+        if (jsonata && itemReader.has("Arguments")) {
+            JsonNode statesVar = buildStatesVar(input, null, context);
+            return jsonataEvaluator.resolveTemplate(
+                    itemReader.get("Arguments"), "ItemReader/Arguments", statesVar, variables);
+        }
+        return resolveParameters(itemReader.path("Parameters"), input, context);
+    }
+
+    private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
+                                                     boolean jsonata, ObjectNode variables) throws Exception {
+        JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
+        String bucket = parameters.path("Bucket").asText(null);
+        if (bucket == null) {
+            throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket");
+        }
+        String prefix = parameters.path("Prefix").asText(null);
+
+        ArrayNode items = objectMapper.createArrayNode();
+        int maxItems = maxItems(itemReader);
+        try {
+            // MaxItems keeps the first keys in order, so the listing itself is capped.
+            for (S3Object object : s3Service.listObjects(bucket, prefix, null,
+                    maxItems > 0 ? maxItems : Integer.MAX_VALUE)) {
+                items.add(listObjectsItem(object, jsonata));
+            }
+        } catch (AwsException e) {
+            throw new FailStateException("States.ItemReaderFailed", e.getMessage());
+        }
+        return new ResolvedMapItems(items, MapItemsSource.ITEM_READER_ARRAY);
+    }
+
+    // AWS renders LastModified as epoch seconds: a double in JSONPath state machines and an
+    // integer in JSONata ones.
+    private ObjectNode listObjectsItem(S3Object object, boolean jsonata) {
+        ObjectNode item = objectMapper.createObjectNode();
+        item.put("Etag", object.getETag());
+        item.put("Key", object.getKey());
+        long lastModified = object.getLastModified().getEpochSecond();
+        if (jsonata) {
+            item.put("LastModified", lastModified);
+        } else {
+            item.put("LastModified", (double) lastModified);
+        }
+        item.put("Size", object.getSize());
+        item.put("StorageClass", object.getStorageClass());
+        return item;
+    }
+
     private ArrayNode normalizeObjectItems(JsonNode items) {
         ArrayNode normalized = objectMapper.createArrayNode();
         items.fields().forEachRemaining(entry -> {
@@ -3028,8 +3205,12 @@ public class AslExecutor {
         return pointedItems;
     }
 
+    private int maxItems(JsonNode itemReader) {
+        return itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+    }
+
     private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
-        int maxItems = itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+        int maxItems = maxItems(itemReader);
         if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
             return items;
         }
