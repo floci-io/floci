@@ -789,7 +789,13 @@ public interface EmulatorConfig {
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
         CodeGuruReviewerServiceConfig codegurureviewer();
+        CodeArtifactServiceConfig codeartifact();
         MarketplaceServiceConfig marketplace();
+    }
+
+    interface CodeArtifactServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface ConnectServiceConfig {
