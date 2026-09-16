@@ -25,6 +25,8 @@ class Ec2MetadataServerTest {
         server.reconcileContainerAddresses(Set.of("192.0.2.4"), first);
         assertTrue(server.registeredContainer("192.0.2.1").isEmpty());
         assertEquals(second, server.registeredContainer("192.0.2.2").orElseThrow());
+        server.unregisterInstance(null);
+        assertEquals(first, server.registeredContainer("192.0.2.4").orElseThrow());
         server.unregisterInstance(first);
         assertTrue(server.registeredContainer("192.0.2.4").isEmpty());
         assertEquals(second, server.registeredContainer("192.0.2.3").orElseThrow());

@@ -7,7 +7,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 import jakarta.inject.Inject;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.ServerSocket;
 import java.net.URI;
@@ -28,8 +29,9 @@ class Ec2InstanceCredentialsIntegrationTest {
     @Inject
     IamService iam;
 
-    @Test
-    void imdsCredentialsResolveToTheAttachedRoleAndAreRevokedOnTermination() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void imdsCredentialsResolveToTheAttachedRoleAndAreRevokedOnCleanup(boolean stopServer) throws Exception {
         String account = "246813579012";
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String role = "worker-" + suffix;
@@ -81,9 +83,14 @@ class Ec2InstanceCredentialsIntegrationTest {
             assertEquals("arn:aws:sts::" + account + ":assumed-role/" + role + "/i-credentials",
                     iam.resolveCallerArn(key).orElseThrow());
             assertEquals(response.body(), get(client, endpoint + path + role, token.body()).body());
-            server.unregisterInstance(instance);
+            if (stopServer) {
+                server.stop();
+            } else {
+                server.unregisterInstance(instance);
+                assertNotEquals(200, get(client, endpoint + path + role, token.body()).statusCode());
+            }
             assertTrue(iam.findSecretKey(key, sessionToken).isEmpty());
-            assertNotEquals(200, get(client, endpoint + path + role, token.body()).statusCode());
+            assertTrue(server.registeredContainer("127.0.0.1").isEmpty());
         } finally {
             server.stop();
             vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
