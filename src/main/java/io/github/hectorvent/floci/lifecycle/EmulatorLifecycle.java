@@ -193,6 +193,10 @@ public class EmulatorLifecycle {
         if (sweptSessions > 0) {
             LOG.infov("Removed {0} orphaned Lambda execution-role session(s)", sweptSessions);
         }
+        int sweptEc2Sessions = iamService.sweepOrphanedEc2InstanceSessions();
+        if (sweptEc2Sessions > 0) {
+            LOG.infov("Removed {0} orphaned EC2 instance session(s)", sweptEc2Sessions);
+        }
         schemaCreationWorker.recoverOrphans();
         schemaCreationWorker.rehydrateSchemas();
         stepFunctionsService.abortAbandonedExecutions();
@@ -215,7 +219,7 @@ public class EmulatorLifecycle {
             elbClassicService.restorePersistedRuntime();
         }
 
-        if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+        if (isMetadataServerNeeded()) {
             ec2MetadataServer.start().exceptionally(ex -> {
                 LOG.warnv("EC2 IMDS server failed to start: {0}", ex.getMessage());
                 return null;
@@ -304,7 +308,7 @@ public class EmulatorLifecycle {
         // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
         runCleanup("storage flush", storageFactory::flushAll);
         runCleanup("EC2 metadata server", () -> {
-            if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+            if (isMetadataServerNeeded()) {
                 ec2MetadataServer.stop();
             }
         });
@@ -344,5 +348,17 @@ public class EmulatorLifecycle {
         } catch (RuntimeException e) {
             LOG.warnv(e, "Shutdown cleanup failed for {0}; continuing with the remaining steps", resource);
         }
+    }
+
+    private boolean isMetadataServerNeeded() {
+        if (config == null || config.services() == null) {
+            return false;
+        }
+        EmulatorConfig.Ec2ServiceConfig ec2 = config.services().ec2();
+        if (ec2 != null && ec2.enabled() && !ec2.mock()) {
+            return true;
+        }
+        EmulatorConfig.EksServiceConfig eks = config.services().eks();
+        return eks != null && eks.enabled() && !eks.mock() && eks.imds();
     }
 }

@@ -76,7 +76,8 @@ import java.util.zip.GZIPInputStream;
 public class Ec2ContainerManager {
 
     private static final Logger LOG = Logger.getLogger(Ec2ContainerManager.class);
-    private static final String USER_DATA_SCRIPT_PATH = "/tmp/user-data.sh";
+    // Guest-created /tmp mounts hide files copied through Docker's archive API.
+    private static final String USER_DATA_SCRIPT_PATH = "/var/lib/user-data.sh";
     private static final Pattern MIME_BOUNDARY = Pattern.compile("(?im)^content-type:\\s*multipart/[^;]+;\\s*boundary=\"?([^\";\\n\\r]+)\"?.*$");
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
     /** Exit code the sshd install probe uses for "sshd is present but scp is not". See startSshd. */
@@ -581,7 +582,7 @@ public class Ec2ContainerManager {
                             namespace.helperId(), prefixLists);
                 }
                 ContainerSpec spec = buildContainerSpec(containerName, image, region, serviceEndpoint, imdsEndpoint,
-                        instanceId, sshHostPort, namespace);
+                        instanceId, sshHostPort, namespace, instance.getIamInstanceProfileArn() != null);
                 containerId = image.dockerPlatform() == null
                         ? lifecycleManager.create(spec)
                         : lifecycleManager.create(spec, image.dockerPlatform());
@@ -635,13 +636,15 @@ public class Ec2ContainerManager {
 
     private ContainerSpec buildContainerSpec(String containerName, ResolvedAmiImage image, String region,
                                              String serviceEndpoint, String imdsEndpoint, String instanceId,
-                                             int sshHostPort, SecurityGroupFirewallManager.Namespace namespace) {
+                                             int sshHostPort, SecurityGroupFirewallManager.Namespace namespace,
+                                             boolean hasInstanceProfile) {
         // Minimal images keep the historic tail command, while cloud-image AMI guests can boot their init.
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image.dockerImage())
                 .withName(containerName)
                 .withEmbeddedDns()
                 .withDockerNetwork(Optional.empty())
-                .withEnv(localAwsEnvironment(region, serviceEndpoint, imdsEndpoint))
+                .withEnv(localAwsEnvironment(region, serviceEndpoint, imdsEndpoint,
+                        hasInstanceProfile))
                 .withEnv("AWS_EC2_INSTANCE_ID", instanceId)
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
@@ -1463,7 +1466,7 @@ public class Ec2ContainerManager {
             String logGroup, String logStream, String region
     ) throws Exception {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
-        RetryingTarCopier.copyBytes(dockerClient, containerId, "/tmp", "user-data.sh", script, 0755);
+        RetryingTarCopier.copyBytes(dockerClient, containerId, "/var/lib", "user-data.sh", script, 0755);
 
         // Execute the script directly so Docker honors its shebang, matching cloud-init shellscript behavior.
         String execId = dockerClient.execCreateCmd(containerId)
@@ -1780,59 +1783,30 @@ public class Ec2ContainerManager {
     }
 
     static String[] metadataProxyInstallCommand() {
-        return new String[]{"sh", "-c", String.join("\n",
-                "set -eu",
-                "if command -v ip >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then exit 0; fi",
-                "if command -v apt-get >/dev/null 2>&1; then",
-                "  apt-get update -qq >/dev/null",
-                "  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 socat curl ca-certificates >/dev/null",
-                "elif command -v dnf >/dev/null 2>&1; then",
-                // --allowerasing lets dnf swap the curl-minimal that
-                // public.ecr.aws/amazonlinux/amazonlinux:2023 ships by default for the full
-                // curl package this proxy needs. Without it, dnf aborts the whole transaction
-                // on a curl/curl-minimal conflict and iproute+socat never install either, even
-                // though neither of them conflicts with anything.
-                "  dnf install -y --allowerasing iproute socat curl ca-certificates >/dev/null",
-                // Same gap as the sshd probe: Amazon Linux 2 has only yum, so on an instance
-                // launched from ami-amazonlinux2 this chain reached its else branch and exited 1
-                // with "No supported package manager found for IMDS proxy dependencies" --
-                // leaving the instance without a link-local IMDS endpoint.
-                "elif command -v yum >/dev/null 2>&1; then",
-                "  yum install -y iproute socat curl ca-certificates >/dev/null",
-                "elif command -v apk >/dev/null 2>&1; then",
-                "  apk add --no-cache iproute2 socat curl ca-certificates >/dev/null",
-                "else",
-                "  echo 'No supported package manager found for IMDS proxy dependencies' >&2",
-                "  exit 1",
-                "fi")};
+        return Ec2MetadataProxy.installCommand();
     }
 
     static String[] metadataProxyStartCommand(String flociHost, int imdsPort) {
-        return new String[]{"sh", "-c", String.join("\n",
-                "set -eu",
-                "ip addr show dev lo | grep -q '169.254.169.254/32' || ip addr add 169.254.169.254/32 dev lo",
-                "if [ -f /tmp/floci-imds-proxy.pid ] && kill -0 \"$(cat /tmp/floci-imds-proxy.pid)\" 2>/dev/null; then",
-                "  exit 0",
-                "fi",
-                "nohup socat TCP-LISTEN:80,bind=169.254.169.254,fork,reuseaddr TCP:" + flociHost + ":" + imdsPort + " >/tmp/floci-imds-proxy.log 2>&1 &",
-                "echo $! > /tmp/floci-imds-proxy.pid",
-                "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do",
-                "  curl -fsS --max-time 1 http://169.254.169.254/latest/meta-data/instance-id >/dev/null && exit 0",
-                "  sleep 1",
-                "done",
-                "cat /tmp/floci-imds-proxy.log >&2 || true",
-                "exit 1")};
+        return Ec2MetadataProxy.startCommand(flociHost, imdsPort);
     }
 
+
     static List<String> localAwsEnvironment(String region, String serviceEndpoint, String imdsEndpoint) {
-        return List.of(
+        return localAwsEnvironment(region, serviceEndpoint, imdsEndpoint, false);
+    }
+
+    static List<String> localAwsEnvironment(String region, String serviceEndpoint, String imdsEndpoint,
+                                            boolean hasInstanceProfile) {
+        List<String> environment = new ArrayList<>(List.of(
                 "AWS_EC2_METADATA_SERVICE_ENDPOINT=" + imdsEndpoint,
                 "AWS_ENDPOINT_URL=" + serviceEndpoint,
                 "AWS_DEFAULT_REGION=" + region,
-                "AWS_REGION=" + region,
-                "AWS_ACCESS_KEY_ID=test",
-                "AWS_SECRET_ACCESS_KEY=test",
-                "AWS_SESSION_TOKEN=test-session-token");
+                "AWS_REGION=" + region));
+        if (!hasInstanceProfile) {
+            environment.addAll(List.of("AWS_ACCESS_KEY_ID=test", "AWS_SECRET_ACCESS_KEY=test",
+                    "AWS_SESSION_TOKEN=test-session-token"));
+        }
+        return environment;
     }
 
     static String summarizeUserDataOutput(BoundedOutput output) {
@@ -2046,26 +2020,7 @@ public class Ec2ContainerManager {
     }
 
     static Optional<String> preferredMetadataSourceIp(Map<String, ContainerNetwork> networks) {
-        if (networks == null || networks.isEmpty()) {
-            return Optional.empty();
-        }
-        Optional<String> configuredNetworkIp = networks.entrySet().stream()
-                .filter(entry -> !"bridge".equals(entry.getKey()))
-                .map(Map.Entry::getValue)
-                .map(ContainerNetwork::getIpAddress)
-                .filter(ip -> ip != null && !ip.isBlank())
-                .findFirst();
-        if (configuredNetworkIp.isPresent()) {
-            return configuredNetworkIp;
-        }
-        ContainerNetwork bridge = networks.get("bridge");
-        if (bridge != null && bridge.getIpAddress() != null && !bridge.getIpAddress().isBlank()) {
-            return Optional.of(bridge.getIpAddress());
-        }
-        return networks.values().stream()
-                .map(ContainerNetwork::getIpAddress)
-                .filter(ip -> ip != null && !ip.isBlank())
-                .findFirst();
+        return Ec2MetadataProxy.preferredMetadataSourceIp(networks);
     }
 
 }

@@ -1347,6 +1347,19 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void transactWriteItemsRejectsANonTextConditionExpression() {
+        ObjectNode put = mapper.createObjectNode();
+        put.set("Item", item("userId", "u1"));
+        put.put("ConditionExpression", 1);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Put", put), "eu-west-1"));
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("Invalid ConditionExpression: Syntax error; token: \"1\", near: \"1\"",
+                exception.getMessage());
+    }
+
+    @Test
     void transactWriteItemsRejectsAnUpdateExpressionOver4096Bytes() {
         createUsersTable("eu-west-1");
         var update = mapper.createObjectNode();

@@ -67,7 +67,7 @@ class EksServiceTest {
         Ec2Service ec2Service = null;
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         eksService = new EksService(storageFactory, config, regionResolver, clusterManager, ec2Service,
-                new EksOidcService(storageFactory, new ObjectMapper()));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
     }
 
     private EmulatorConfig testConfig() {
@@ -227,7 +227,7 @@ class EksServiceTest {
         EksOidcService oidcService = new EksOidcService(
                 fixedStorageFactory(keyStore), new ObjectMapper());
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
-                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService);
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService, mock(EksAccessEntryService.class));
         restarted.init();
 
         Cluster migrated = restarted.describeCluster("legacy-cluster");
@@ -251,7 +251,7 @@ class EksServiceTest {
         EksOidcService oidcService = new EksOidcService(
                 fixedStorageFactory(keyStore), new ObjectMapper());
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
-                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService);
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService, mock(EksAccessEntryService.class));
         restarted.init();
 
         // The issuer a trust policy was written against must survive a restart, and its key must
@@ -282,7 +282,7 @@ class EksServiceTest {
         EksOidcService oidcService = new EksOidcService(
                 fixedStorageFactory(keyStore), new ObjectMapper());
         new EksService(fixedStorageFactory(clusterStore), testConfig(),
-                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService).init();
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService, mock(EksAccessEntryService.class)).init();
 
         Cluster migrated = clusterStore.getForAccount(otherAccount, "legacy-cluster").orElseThrow();
         String issuer = migrated.getIdentity().getOidc().getIssuer();
@@ -316,7 +316,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -356,7 +356,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -390,7 +390,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -419,7 +419,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -446,7 +446,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -521,7 +521,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, realEc2Service(),
-                new EksOidcService(storageFactory, new ObjectMapper()));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of("subnet-1", "subnet-2"));
@@ -548,7 +548,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, realEc2Service(),
-                new EksOidcService(storageFactory, new ObjectMapper()));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
@@ -583,7 +583,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()));
+                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
@@ -613,7 +613,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()));
+                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("eu-west-2", "a")));
@@ -660,7 +660,7 @@ class EksServiceTest {
         // The request is for eu-west-2, where that subnet does not exist.
         RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()));
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(usEastOnlySubnet));
@@ -991,7 +991,7 @@ class EksServiceTest {
         };
         return new EksService(storageFactory, testConfig(mock),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
-                new EksOidcService(storageFactory, new ObjectMapper()));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
     }
 
     @Test

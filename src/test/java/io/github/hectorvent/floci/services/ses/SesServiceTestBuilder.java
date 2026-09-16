@@ -2,9 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.services.ses.model.AccountDetails;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
-import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.ContactList;
@@ -34,9 +32,6 @@ final class SesServiceTestBuilder {
 
     private final InMemoryStorage<String, Identity> identityStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, SentEmail> emailStore = new InMemoryStorage<>();
-    private final InMemoryStorage<String, Boolean> accountSettingsStore = new InMemoryStorage<>();
-    private final InMemoryStorage<String, AccountVdmAttributes> accountVdmStore = new InMemoryStorage<>();
-    private final InMemoryStorage<String, AccountDetails> accountDetailsStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, EmailTemplate> templateStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, ConfigurationSet> configSetStore = new InMemoryStorage<>();
     private final InMemoryStorage<String, SuppressedDestination> suppressionStore = new InMemoryStorage<>();
@@ -57,9 +52,10 @@ final class SesServiceTestBuilder {
     private Route53Service route53Service = null;
     private ObjectMapper objectMapper = new ObjectMapper();
     private Clock clock = Clock.systemUTC();
-    // Built by build(); exposed so tests can seed contacts through the domain service now that the
-    // facade no longer forwards the contact CRUD.
+    // Built by build(); exposed so tests can seed contacts and account suppression through the domain
+    // services now that the facade no longer forwards those operations.
     private SesContactService contactService;
+    private SesSuppressionService suppressionService;
 
     static SesServiceTestBuilder create() {
         return new SesServiceTestBuilder();
@@ -122,15 +118,23 @@ final class SesServiceTestBuilder {
         return contactService;
     }
 
+    SesSuppressionService suppressionService() {
+        if (suppressionService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return suppressionService;
+    }
+
     SesService build() {
         contactService = new SesContactService(contactListStore, contactStore, clock);
+        suppressionService = new SesSuppressionService(suppressionStore, accountSuppressionStore,
+                new InMemoryStorage<>());
         return new SesService(
                 new SesIdentityService(identityStore, route53Service, clock),
                 new SesSentEmailService(emailStore),
-                new SesAccountService(accountSettingsStore, accountVdmStore, accountDetailsStore),
                 new SesTemplateService(templateStore, objectMapper, new SecureRandom()),
                 new SesConfigurationSetService(configSetStore),
-                new SesSuppressionService(suppressionStore, accountSuppressionStore, new InMemoryStorage<>()),
+                suppressionService,
                 new SesDedicatedIpService(dedicatedIpPoolStore),
                 contactService,
                 new SesPolicyService(policyStore, objectMapper),

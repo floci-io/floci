@@ -611,7 +611,8 @@ public class RdsService implements Resettable, ResourceProvider {
         int proxyPort = allocateProxyPort();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
-        } else if (masterUsername.length() > 16 || !masterUsername.matches("^[a-zA-Z][a-zA-Z0-9_]*$")) {
+        } else if (masterUsername.length() > engine.maxMasterUsernameLength()
+                || !masterUsername.matches("^[a-zA-Z][a-zA-Z0-9_]*$")) {
             throw new AwsException("InvalidParameterValue",
                     "MasterUsername must begin with a letter and contain only alphanumeric characters or underscores.", 400);
         }

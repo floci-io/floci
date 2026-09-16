@@ -42,6 +42,9 @@ public final class RandomPasswordGenerator {
         boolean excludePunctuation = boolField(node, "ExcludePunctuation");
         boolean includeSpace = boolField(node, "IncludeSpace");
         String excludeChars = stringField(node, "ExcludeCharacters");
+        if (excludeChars != null && excludeChars.length() > 4096) {
+            throw new IllegalArgumentException("ExcludeCharacters must be at most 4096 characters.");
+        }
 
         JsonNode passwordLengthNode = node == null ? null : node.get("PasswordLength");
         int length = (passwordLengthNode != null && !passwordLengthNode.isNull())

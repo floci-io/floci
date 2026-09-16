@@ -127,12 +127,23 @@ iterations.
 
 ## Distributed Map ItemReader
 
-`ItemReader` supports `arn:aws:states:::s3:getObject` with `InputType: JSON` and
-`arn:aws:states:::s3:listObjectsV2`. The listing reads every page under `Prefix`, and each item
-carries the AWS fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`.
-An empty prefix gives zero iterations and the Map succeeds. `ReaderConfig.MaxItems` applies to
-both readers; `MaxItemsPath` is not supported. The `CSV`, `JSONL`, `PARQUET` and `MANIFEST` input
-types are accepted by `CreateStateMachine` and fail the execution with `States.ItemReaderFailed`.
+`ItemReader` reads a dataset from S3. The resource decides how the dataset is found, and
+`ReaderConfig.InputType` decides how it is read.
+
+`arn:aws:states:::s3:getObject` reads a single object:
+
+- `JSON` is either an array, or an object whose entries become `Key` and `Value` items.
+  `ReaderConfig.ItemsPointer` selects a node inside it.
+- `JSONL` is one item per line. Blank lines are skipped, and `ItemsPointer` does not apply,
+  matching AWS.
+- `CSV`, `PARQUET` and `MANIFEST` are accepted by `CreateStateMachine` and fail the execution
+  with `States.ItemReaderFailed`.
+
+`arn:aws:states:::s3:listObjectsV2` reads every page under `Prefix`. Each item carries the AWS
+fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`. An empty prefix
+gives zero iterations and the Map succeeds.
+
+`ReaderConfig.MaxItems` applies to every reader; `MaxItemsPath` is not supported.
 
 ## Distributed Map ItemBatcher
 

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ses.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -196,5 +197,37 @@ class SesV2JsonTest {
             assertEquals(field + " is required.", assertAws("BadRequestException", 400,
                     () -> SesV2Json.readRequiredStringField(node, field)).getMessage());
         }
+    }
+
+    @Test
+    void parseSuppressedReasons_absentIsEmpty_elementsFollowAwsCoercion() {
+        assertEquals(List.of(),
+                SesV2Json.parseSuppressedReasons(json("{}").path("SuppressedReasons")));
+        assertEquals(List.of(), SesV2Json.parseSuppressedReasons(json("null")));
+        assertEquals(List.of("BOUNCE", "COMPLAINT"),
+                SesV2Json.parseSuppressedReasons(json("[\"BOUNCE\",\"COMPLAINT\"]")));
+        // A null element passes deserialization and is left to the service-layer value check.
+        assertEquals(Arrays.asList("BOUNCE", null),
+                SesV2Json.parseSuppressedReasons(json("[\"BOUNCE\",null]")));
+        assertEquals("Expected list or null", assertAws("SerializationException", 400,
+                () -> SesV2Json.parseSuppressedReasons(json("\"BOUNCE\""))).getMessage());
+        assertEquals("NUMBER_VALUE can not be converted to a String",
+                assertAws("SerializationException", 400,
+                        () -> SesV2Json.parseSuppressedReasons(json("[1]"))).getMessage());
+        assertEquals("TRUE_VALUE can not be converted to a String",
+                assertAws("SerializationException", 400,
+                        () -> SesV2Json.parseSuppressedReasons(json("[true]"))).getMessage());
+        assertEquals("Start of structure or map found where not expected.",
+                assertAws("SerializationException", 400,
+                        () -> SesV2Json.parseSuppressedReasons(json("[{}]"))).getMessage());
+    }
+
+    @Test
+    void parseSendingEnabled_missingIsFalse_otherwiseCoerces() {
+        assertFalse(SesV2Json.parseSendingEnabled(json("{}").path("SendingEnabled")));
+        assertTrue(SesV2Json.parseSendingEnabled(json("true")));
+        assertTrue(SesV2Json.parseSendingEnabled(json("\"yes\"")));
+        assertAws("SerializationException", 400, () -> SesV2Json.parseSendingEnabled(json("null")));
+        assertAws("SerializationException", 400, () -> SesV2Json.parseSendingEnabled(json("0")));
     }
 }

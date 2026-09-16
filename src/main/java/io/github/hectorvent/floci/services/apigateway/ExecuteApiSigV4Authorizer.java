@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.auth.CredentialScope;
+import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -22,10 +23,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 /**
  * Verifies the SigV4 signature on an execute-api data-plane request, so a route or method whose
@@ -348,28 +347,20 @@ public class ExecuteApiSigV4Authorizer {
                                  String amzDate, Long expiresSeconds) {}
 
     private static SignedRequest headerSignedRequest(String authorization, HttpHeaders headers) {
-        String trimmed = authorization.trim();
-        if (!trimmed.regionMatches(true, 0, ALGORITHM, 0, ALGORITHM.length())) {
+        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
+        if (parsed == null) {
             return null;
         }
-        Map<String, String> parameters = new LinkedHashMap<>();
-        for (String part : trimmed.substring(ALGORITHM.length()).split(",")) {
-            int equals = part.indexOf('=');
-            if (equals > 0) {
-                parameters.put(part.substring(0, equals).trim(), part.substring(equals + 1).trim());
-            }
-        }
-        String credential = parameters.get("Credential");
-        String signedHeaders = parameters.get("SignedHeaders");
-        String signature = parameters.get("Signature");
         String amzDate = headers.getHeaderString("X-Amz-Date");
         if (amzDate == null || amzDate.isBlank()) {
             amzDate = headers.getHeaderString("Date");
         }
-        if (isBlank(credential) || isBlank(signedHeaders) || isBlank(signature) || isBlank(amzDate)) {
+        if (isBlank(parsed.credential()) || isBlank(parsed.signedHeaders())
+                || isBlank(parsed.signature()) || isBlank(amzDate)) {
             return null;
         }
-        return new SignedRequest(credential, signedHeaders.toLowerCase(Locale.ROOT), signature, amzDate, null);
+        return new SignedRequest(parsed.credential(), parsed.signedHeaders().toLowerCase(Locale.ROOT),
+                parsed.signature(), amzDate, null);
     }
 
     private static SignedRequest presignedRequest(MultivaluedMap<String, String> queryParameters) {

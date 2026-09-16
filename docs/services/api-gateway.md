@@ -2,6 +2,19 @@
 
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
+## JWT issuer network policy
+
+HTTP API JWT authorizers fetch the configured issuer's OIDC discovery document and JWKS. Floci
+rejects HTTP issuers and destinations that resolve to local, link-local, private, or other
+non-public addresses by default. This prevents an authorizer configuration from turning JWT
+verification into an SSRF path.
+
+For an isolated development environment with a local fixture issuer, set
+`FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`. This shared JWT policy also applies to AppSync
+OIDC providers. The option permits private HTTPS targets and HTTP URLs that use a literal private
+or loopback address. It does not permit public HTTP targets. Keep it disabled when Floci can
+receive untrusted API configuration.
+
 ## Custom API IDs
 
 API IDs are generated randomly, which means endpoint URLs change every time you recreate an API. To pin
@@ -53,7 +66,7 @@ duplicate override IDs.
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **API Keys** | CreateApiKey, ImportApiKeys, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
-| **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan |
+| **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan, GetUsage |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
@@ -302,6 +315,32 @@ aws apigateway create-deployment \
 # Call the deployed API
 curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 ```
+
+### Usage reporting
+
+`GetUsage` returns the real response envelope: a `values` map of API key id to one `[used, remaining]`
+pair per day of the inclusive range, alongside `usagePlanId`, `startDate` and `endDate`. The second
+element of each pair is the quota limit minus cumulative use on real API Gateway, not the quota
+itself.
+
+The operation pages over the API key entries with `limit` and `position`, defaulting to 25 keys a
+page and emitting `position` only when another page exists.
+
+Request acceptance and response page size are separate things here. Probed against real API
+Gateway, every `limit` from 500 up to `Integer.MAX_VALUE` is accepted without error, so none is
+rejected. That does not show the service ever returning more than 500 entries in one page, and the
+documented contract caps a page at 500, so a larger `limit` is honoured as a request while the page
+returned stays capped at 500.
+
+The lower bound is a deliberate divergence: real API Gateway answers `limit=0` and `limit=-1` with
+an `InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected
+as a `BadRequestException` instead of reproducing a 500.
+
+**Both numbers are always zero.** Nothing meters requests per API key, and a usage plan stores no
+quota to subtract from, so there is no limit to report against. Throttle settings are likewise
+accepted and stored but never enforced. Storing a quota on the usage plan and counting on the
+execute path are the two pieces still missing; a caller that sums the used counts gets zero, which
+is what it already got before the action existed, without having to special-case a missing endpoint.
 
 ### Usage Plan Tags and Custom IDs
 

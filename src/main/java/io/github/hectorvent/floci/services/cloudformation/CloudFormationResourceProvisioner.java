@@ -1,8 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
-import io.github.hectorvent.floci.core.common.AwsNamespaces;
-import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ReplacementCleanup;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
@@ -12,47 +10,28 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynami
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
-import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
-import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
-import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
-import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
-import io.github.hectorvent.floci.services.ecr.EcrService;
-import io.github.hectorvent.floci.services.ecr.model.Repository;
-import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
-import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
-import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
-import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.services.kinesis.KinesisService;
-import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
-import io.github.hectorvent.floci.services.firehose.FirehoseService;
-import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
-import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
-import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.sqs.SqsService;
-import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
-import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
@@ -61,24 +40,18 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
-
-import io.github.hectorvent.floci.services.s3.model.S3Object;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -113,13 +86,6 @@ public class CloudFormationResourceProvisioner {
             "__FlociApiGatewayV2BodyAuthorizerIds";
 
     /**
-     * Every resource type the switch in {@link #provision} still serves. Load-bearing: the
-     * default arm throws for a member of this set, so deleting an arm during the migration to
-     * per-service provisioners without deleting its entry here fails loudly instead of
-     * silently stubbing the resource. Kept in step with the registry by
-     * {@code CfnResourceInventoryTest}.
-     */
-    /**
      * Types whose delete needs the whole {@link StackResource} — a create-time attribute (the
      * rule's event bus, the authorizer's api id, the nodegroup's cluster) or the stashed
      * custom-resource properties. Deleting one of these from type and physical id alone silently
@@ -138,6 +104,13 @@ public class CloudFormationResourceProvisioner {
             "AWS::IAM::ManagedPolicy",
             "AWS::IAM::Policy");
 
+    /**
+     * Every resource type the switch in {@link #provision} still serves. Load-bearing: the
+     * default arm throws for a member of this set, so deleting an arm during the migration to
+     * per-service provisioners without deleting its entry here fails loudly instead of
+     * silently stubbing the resource. Kept in step with the registry by
+     * {@code CfnResourceInventoryTest}.
+     */
     static final Set<String> LEGACY_SWITCH_TYPES = Set.of(
             "AWS::ApiGateway::Authorizer",
             "AWS::ApiGateway::Deployment",
@@ -194,22 +167,16 @@ public class CloudFormationResourceProvisioner {
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service,
-                                             LambdaService lambdaService, IamService iamService,
-                                             SsmService ssmService, KmsService kmsService,
+                                             LambdaService lambdaService,
+                                             IamService iamService,
                                              ApiGatewayService apiGatewayService,
                                              ApiGatewayV2Service apiGatewayV2Service,
-                                             EcrService ecrService,
-                                             PipesService pipesService,
                                              LambdaLayerService lambdaLayerService,
                                              ObjectMapper objectMapper,
                                              CustomResourceResponseStore customResourceResponseStore,
                                              ContainerReachableEndpoint reachableEndpoint,
                                              Ec2Service ec2Service,
                                              EksService eksService,
-                                             CloudWatchLogsService logsService,
-                                             KinesisService kinesisService,
-                                             CloudWatchMetricsService cloudWatchMetricsService,
-                                             FirehoseService firehoseService,
                                              CloudFormationResourceRegistry resourceRegistry,
                                              CfnDynamicReferences dynamicReferences,
                                              EmulatorConfig config) {
@@ -526,23 +493,10 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    // ── S3 ────────────────────────────────────────────────────────────────────
-
-    /**
-     * Applies the optional {@code CorsConfiguration} property of {@code AWS::S3::Bucket} by translating
-     * the CloudFormation {@code CorsRules} list into the S3 CORS XML document the bucket stores and
-     * serves from its {@code ?cors} subresource.
-     *
-     * <p>This reconciles to the template on every provision (create and update): when the property is
-     * absent or has no rules, any existing CORS configuration is cleared so the bucket matches the
-     * template. Clearing is a harmless no-op on create since a freshly created bucket has none.
-     */
-
     // ── EC2 networking ─────────────────────────────────────────────────────────
     // Each method delegates to Ec2Service so the resource really exists (describe-subnets,
     // ELBv2 create-load-balancer, etc. resolve it). physicalId is set to the real EC2 id so
     // Ref/exports resolve to a real vpc-/subnet-/... id rather than a stub.
-
 
     private void provisionSecurityGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                         String region, String stackName) {
@@ -639,17 +593,7 @@ public class CloudFormationResourceProvisioner {
         return prefix;
     }
 
-    // ── Kinesis ─────────────────────────────────────────────────────────────────
-
-    // ── CloudWatch ──────────────────────────────────────────────────────────────
-
     // ── Auto Scaling ────────────────────────────────────────────────────────────
-
-
-
-
-
-
 
     private List<String> resolveStringList(JsonNode props, String field, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(field)) {
@@ -659,7 +603,6 @@ public class CloudFormationResourceProvisioner {
         // (Fn::Split / Fn::GetAZs / Fn::Cidr) and drops blank entries (issue #2937).
         return new ArrayList<>(engine.resolveStringList(props.get(field)));
     }
-
 
     private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                       String region) {
@@ -866,7 +809,6 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-
     // ── EKS ─────────────────────────────────────────────────────────────────────
 
     private void provisionEksCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -912,10 +854,6 @@ public class CloudFormationResourceProvisioner {
             r.getAttributes().put("Arn", nodegroup.getNodegroupArn());
         }
     }
-
-    // ── Kinesis Data Firehose ───────────────────────────────────────────────────
-
-    // ── SNS ───────────────────────────────────────────────────────────────────
 
     // ── Lambda ────────────────────────────────────────────────────────────────
 
@@ -1963,85 +1901,7 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    // ── SSM Parameter ─────────────────────────────────────────────────────────
-
-    // ── KMS ───────────────────────────────────────────────────────────────────
-
-
-    private void putResolvedText(ObjectNode req, String target, JsonNode props, String source,
-                                 CloudFormationTemplateEngine engine) {
-        String value = resolveOptional(props, source, engine);
-        if (value != null) {
-            req.put(target, value);
-        }
-    }
-
-    private void putResolvedObject(ObjectNode req, String target, JsonNode props, String source,
-                                   CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return;
-        }
-        JsonNode resolved = engine.resolveNode(props.get(source));
-        if (resolved != null && resolved.isObject()) {
-            req.set(target, resolved);
-        }
-    }
-
-    private void putResolvedArray(ObjectNode req, String target, JsonNode props, String source,
-                                  CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return;
-        }
-        JsonNode resolved = engine.resolveNode(props.get(source));
-        if (resolved != null && resolved.isArray()) {
-            req.set(target, resolved);
-        }
-    }
-
-    private void putStringMapFromObject(ObjectNode req, String target, JsonNode props, String source,
-                                        CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return;
-        }
-        JsonNode resolved = engine.resolveNode(props.get(source));
-        if (!resolved.isObject()) {
-            return;
-        }
-        ObjectNode out = JsonNodeFactory.instance.objectNode();
-        resolved.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
-        req.set(target, out);
-    }
-
-    private void putTagsObject(ObjectNode req, JsonNode props, CloudFormationTemplateEngine engine) {
-        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
-        if (!tags.isEmpty()) {
-            ObjectNode tagNode = req.putObject("tags");
-            tags.forEach(tagNode::put);
-        }
-    }
-
-    private void copyIfPresent(ObjectNode target, String targetName, JsonNode source, String sourceName) {
-        if (source.has(sourceName) && !source.get(sourceName).isNull()) {
-            target.set(targetName, source.get(sourceName));
-        }
-    }
-
     // ── Pipes ──────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     /**
      * One attempt at deleting what this update's replacement displaced, delegated to the
@@ -2091,9 +1951,7 @@ public class CloudFormationResourceProvisioner {
                 .orElse(false);
     }
 
-
     // ── Helpers ───────────────────────────────────────────────────────────────
-
 
     private void provisionIamAccessKey(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
         String userName = resolveOptional(props, "UserName", engine);
@@ -2102,23 +1960,6 @@ public class CloudFormationResourceProvisioner {
             r.setPhysicalId(key.getAccessKeyId());
             r.getAttributes().put("SecretAccessKey", key.getSecretAccessKey());
         }
-    }
-
-    private Map<String, String> parseCfnTags(JsonNode tagsNode, CloudFormationTemplateEngine engine) {
-        tagsNode = engine.resolveNode(tagsNode);
-        Map<String, String> out = new HashMap<>();
-        if (tagsNode == null || tagsNode.isNull() || !tagsNode.isArray()) {
-            return out;
-        }
-        for (JsonNode entry : tagsNode) {
-            JsonNode resolved = engine.resolveNode(entry);
-            String key = resolved.path("Key").asText(null);
-            String value = resolved.path("Value").asText("");
-            if (key != null) {
-                out.put(key, value);
-            }
-        }
-        return out;
     }
 
     private void provisionRoute53RecordSet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
@@ -3100,18 +2941,6 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(deployment.getDeploymentId());
     }
 
-    private Integer parseIntegerPropOrNull(JsonNode props, String name, CloudFormationTemplateEngine engine) {
-        String value = resolveOptional(props, name, engine);
-        if (value == null || value.isBlank()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(value.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
     // ── Lambda LayerVersion ──────────────────────────────────────────────────
     //
     // Without this, layer versions (e.g. CDK's AwsCliLayer) fall through to the stub, so the
@@ -3364,63 +3193,17 @@ public class CloudFormationResourceProvisioner {
         return account.matches("\\d{12}") ? account : "000000000000";
     }
 
-
-    private static List<String> jsonArrayToStringList(JsonNode node) {
-        List<String> result = new ArrayList<>();
-        if (node != null && node.isArray()) {
-            node.forEach(v -> result.add(v.asText()));
-        }
-        return result;
-    }
-
-
-    private static Integer parseIntOrNull(String value) {
-        if (value == null || value.isBlank()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(value);
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
     private static String textOrNull(JsonNode node, String field) {
         return node != null && node.hasNonNull(field) ? node.path(field).asText() : null;
     }
 
     // ── CloudFront ────────────────────────────────────────────────────────────
 
-
-
-
-
-
-
-
-
-
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(name) || props.get(name).isNull()) {
             return null;
         }
         return engine.resolve(props.get(name));
-    }
-
-    /**
-     * Like {@link #resolveOptional}, but skips the general dynamic-reference stage that
-     * {@link CloudFormationTemplateEngine#resolve} applies. RDS {@code MasterUsername}/
-     * {@code MasterUserPassword} are the only properties where {@code ssm-secure} is a valid
-     * dynamic reference service, and the general stage rejects {@code ssm-secure} outright since
-     * it is invalid everywhere else; the caller resolves the intrinsic-only result itself via
-     * {@link #resolveDynamicReferences} with the permission only these two properties are allowed.
-     */
-    private String resolveOptionalWithoutDynamicReferences(JsonNode props, String name,
-                                                            CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(name) || props.get(name).isNull()) {
-            return null;
-        }
-        return engine.resolveWithoutDynamicReferences(props.get(name));
     }
 
     /**
@@ -3605,7 +3388,6 @@ public class CloudFormationResourceProvisioner {
         resource.getAttributes().remove(INLINE_CLEANUP_USER_TARGETS_ATTR);
         resource.getAttributes().remove(INLINE_CLEANUP_GROUP_TARGETS_ATTR);
     }
-
 
     /**
      * Generate an AWS-like physical name: {stackName}-{logicalId}-{randomSuffix}.

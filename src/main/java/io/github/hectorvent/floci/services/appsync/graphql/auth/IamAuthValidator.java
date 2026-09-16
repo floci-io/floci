@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.auth;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.auth.CredentialScope;
+import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
@@ -17,7 +18,6 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
@@ -212,28 +212,17 @@ public class IamAuthValidator {
      * regardless.
      */
     private static SignedRequest headerSignedRequest(String authorization, Map<String, String> requestHeaders) {
-        if (authorization == null) {
+        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
+        if (parsed == null) {
             return null;
         }
-        String trimmed = authorization.trim();
-        if (!trimmed.regionMatches(true, 0, ALGORITHM, 0, ALGORITHM.length())) {
-            return null;
-        }
-        Map<String, String> parameters = new LinkedHashMap<>();
-        for (String part : trimmed.substring(ALGORITHM.length()).split(",")) {
-            int equals = part.indexOf('=');
-            if (equals > 0) {
-                parameters.put(part.substring(0, equals).trim(), part.substring(equals + 1).trim());
-            }
-        }
-        String credential = parameters.get("Credential");
-        String signedHeaders = parameters.get("SignedHeaders");
-        String signature = parameters.get("Signature");
         String amzDate = header(requestHeaders, "X-Amz-Date");
-        if (isBlank(credential) || isBlank(signedHeaders) || isBlank(signature) || isBlank(amzDate)) {
+        if (isBlank(parsed.credential()) || isBlank(parsed.signedHeaders())
+                || isBlank(parsed.signature()) || isBlank(amzDate)) {
             return null;
         }
-        return new SignedRequest(credential, signedHeaders.toLowerCase(Locale.ROOT), signature, amzDate);
+        return new SignedRequest(parsed.credential(), parsed.signedHeaders().toLowerCase(Locale.ROOT),
+                parsed.signature(), amzDate);
     }
 
     private static String canonicalHeaders(String signedHeaders, Map<String, String> requestHeaders) {

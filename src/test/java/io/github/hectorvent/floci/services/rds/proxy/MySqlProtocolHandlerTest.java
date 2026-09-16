@@ -3,8 +3,11 @@ package io.github.hectorvent.floci.services.rds.proxy;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
+import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
@@ -15,17 +18,24 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -36,6 +46,25 @@ class MySqlProtocolHandlerTest {
     private static final int CLIENT_SECURE_CONNECTION = 0x8000;
     private static final int CLIENT_SSL = 0x0800;
     private static final int CLIENT_PLUGIN_AUTH = 0x0008_0000;
+    private static final String MYSQL_NATIVE_PASSWORD = "mysql_native_password";
+    private static final String MYSQL_CLEAR_PASSWORD = "mysql_clear_password";
+    private static final int CLIENT_CONNECT_WITH_DB = 0x0008;
+    private static final int CLIENT_CONNECT_ATTRS = 0x0010_0000;
+    private static final int CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x0020_0000;
+    private static final int CLIENT_ZSTD_COMPRESSION_ALGORITHM = 0x0400_0000;
+    /** What libmysqlclient 8 sends: every optional field after the auth-response is present. */
+    private static final int FULL_RESPONSE_CAPABILITIES = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
+            | CLIENT_CONNECT_WITH_DB | CLIENT_PLUGIN_AUTH | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+            | CLIENT_CONNECT_ATTRS | CLIENT_ZSTD_COMPRESSION_ALGORITHM;
+    private static final int ER_ACCESS_DENIED = 1045;
+    private static final byte[] OK_PAYLOAD = {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00};
+    private static final byte[] MASTER_BACKEND_NONCE =
+            "second-backend-nonce".getBytes(StandardCharsets.US_ASCII);
+
+    /** Fails a login that opens a second backend connection; only an IAM auth switch may. */
+    private static final PostgresProtocolHandler.BackendConnector NO_RECONNECT = () -> {
+        throw new IOException("unexpected second backend connection");
+    };
 
     @TempDir
     Path tempDir;
@@ -64,7 +93,7 @@ class MySqlProtocolHandlerTest {
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, "admin", "secret",
+                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                     } catch (IOException e) {
@@ -126,7 +155,7 @@ class MySqlProtocolHandlerTest {
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, "admin", "secret",
+                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                     } catch (IOException e) {
@@ -182,7 +211,7 @@ class MySqlProtocolHandlerTest {
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, "admin", "secret",
+                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), tlsCertificates,
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                     } catch (IOException e) {
@@ -280,7 +309,7 @@ class MySqlProtocolHandlerTest {
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, "admin", "secret",
+                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), tlsCertificates,
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                     } catch (IOException e) {
@@ -341,7 +370,7 @@ class MySqlProtocolHandlerTest {
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
                         MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, "admin", "secret",
+                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
                                 false, testSigV4Validator(), testTlsCertificates(),
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 200);
                     } catch (IOException e) {
@@ -360,6 +389,303 @@ class MySqlProtocolHandlerTest {
                 ourClient.close();
                 proxyClient.close();
             }
+        }
+    }
+
+    // ── RDS IAM authentication ───────────────────────────────────────────────
+
+    @Test
+    void switchesIamLoginToClearPasswordAndAuthenticatesBackendAsMaster() throws Exception {
+        AuthSwitchLogin login = authSwitchLogin("app", rdsToken("app", Instant.now()), true, true);
+
+        assertNotNull(login.authSwitch(), "an access-denied backend verdict must become an auth switch");
+        assertEquals(3, login.authSwitch()[3] & 0xFF);
+        assertEquals(MYSQL_CLEAR_PASSWORD, authSwitchPluginName(login.authSwitch()));
+        assertOk(login.clientVerdict(), 5);
+        assertEquals(1, login.reconnects());
+        // The master leg keeps the client's database, attributes and zstd level, in wire order.
+        assertArrayEquals(
+                fullHandshakeResponse41("admin", scrambleNativePassword("secret", MASTER_BACKEND_NONCE),
+                        MYSQL_NATIVE_PASSWORD, FULL_RESPONSE_CAPABILITIES, 1),
+                login.masterResponse());
+    }
+
+    @Test
+    void iamAuthSwitchKeepsSequenceNumbersInStepAfterTlsUpgrade() throws Exception {
+        AuthSwitchLogin login = authSwitchLogin("app", rdsToken("app", Instant.now()), true, true);
+
+        // SSLRequest(1) and HandshakeResponse(2) leave the client one packet ahead of the backend.
+        assertNotNull(login.authSwitch());
+        assertEquals(3, login.authSwitch()[3] & 0xFF);
+        assertOk(login.clientVerdict(), 5);
+        assertArrayEquals(
+                fullHandshakeResponse41("admin", scrambleNativePassword("secret", MASTER_BACKEND_NONCE),
+                        MYSQL_NATIVE_PASSWORD, FULL_RESPONSE_CAPABILITIES, 1),
+                login.masterResponse(),
+                "the fresh backend connection expects the response at sequence 1 without CLIENT_SSL");
+    }
+
+    @Test
+    void rejectsIamTokenWithTamperedSignature() throws Exception {
+        String token = rdsToken("app", Instant.now());
+        String tampered = token.substring(0, token.length() - 1) + (token.endsWith("0") ? "1" : "0");
+
+        assertIamLoginRejected(authSwitchLogin("app", tampered, true, false));
+    }
+
+    @Test
+    void rejectsExpiredIamToken() throws Exception {
+        String expired = rdsToken("app", Instant.now().minusSeconds(3600));
+
+        assertIamLoginRejected(authSwitchLogin("app", expired, true, false));
+    }
+
+    @Test
+    void rejectsIamTokenIssuedForAnotherDbUser() throws Exception {
+        String otherUser = rdsToken("reporting", Instant.now());
+
+        assertIamLoginRejected(authSwitchLogin("app", otherUser, true, false));
+    }
+
+    @Test
+    void iamDisabledRelaysBackendRejectionWithoutAuthSwitch() throws Exception {
+        AuthSwitchLogin login = authSwitchLogin("app", rdsToken("app", Instant.now()), false, false);
+
+        assertNull(login.authSwitch(), "the proxy must not ask for an IAM token when IAM auth is disabled");
+        assertAccessDenied(login.clientVerdict(), 2);
+        assertEquals(0, login.reconnects());
+    }
+
+    @Test
+    void validatesIamTokenSentUpFrontAfterTheDatabaseAndAuthenticatesBackendAsMaster() throws Exception {
+        byte[] response = fullHandshakeResponse41("app", nulTerminated(rdsToken("app", Instant.now())),
+                MYSQL_CLEAR_PASSWORD, FULL_RESPONSE_CAPABILITIES, 1);
+
+        DirectLogin login = directLogin(response, true);
+
+        assertAccessDenied(login.clientVerdict(), 2);
+        assertNull(login.backendResponse(), "clear-password IAM must require TLS");
+    }
+
+    @Test
+    void iamDisabledForwardsClearPasswordLoginToBackendUnmodified() throws Exception {
+        byte[] response = fullHandshakeResponse41("app", nulTerminated(rdsToken("app", Instant.now())),
+                MYSQL_CLEAR_PASSWORD, FULL_RESPONSE_CAPABILITIES, 1);
+
+        DirectLogin login = directLogin(response, false);
+
+        assertOk(login.clientVerdict(), 2);
+        assertArrayEquals(response, login.backendResponse(),
+                "without IAM auth the backend, not the proxy, decides on a non-master login");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void forwardsNonMasterNativePasswordLoginUnmodified(boolean iamEnabled) throws Exception {
+        byte[] response = fullHandshakeResponse41("app", scrambleNativePassword("app-password", fixedNonce()),
+                MYSQL_NATIVE_PASSWORD, FULL_RESPONSE_CAPABILITIES, 1);
+
+        DirectLogin login = directLogin(response, iamEnabled);
+
+        assertOk(login.clientVerdict(), 2);
+        assertArrayEquals(response, login.backendResponse());
+    }
+
+    @Test
+    void forwardsMasterPasswordLoginUnmodifiedWhenIamEnabled() throws Exception {
+        byte[] response = fullHandshakeResponse41("admin", scrambleNativePassword("secret", fixedNonce()),
+                MYSQL_NATIVE_PASSWORD, FULL_RESPONSE_CAPABILITIES, 1);
+
+        DirectLogin login = directLogin(response, true);
+
+        assertOk(login.clientVerdict(), 2);
+        assertArrayEquals(response, login.backendResponse());
+    }
+
+    @Test
+    void rejectsWrongMasterPasswordWithoutAuthSwitchWhenIamEnabled() throws Exception {
+        byte[] response = fullHandshakeResponse41("admin", scrambleNativePassword("wrong", fixedNonce()),
+                MYSQL_NATIVE_PASSWORD, FULL_RESPONSE_CAPABILITIES, 1);
+
+        DirectLogin login = directLogin(response, true);
+
+        assertAccessDenied(login.clientVerdict(), 2);
+        assertNull(login.backendResponse(), "a rejected master login must never reach the backend");
+    }
+
+    private static String rdsToken(String dbUser, Instant issuedAt) throws Exception {
+        return SigV4TokenTestHelper.createRdsToken("mydb.abc123.us-east-1.rds.amazonaws.com", 3306,
+                dbUser, "AKIATEST", "secret", issuedAt, 900);
+    }
+
+    private static void assertIamLoginRejected(AuthSwitchLogin login) {
+        assertNull(login.authSwitch(), "invalid or non-TLS IAM must not receive an auth switch");
+        assertAccessDenied(login.clientVerdict(), 2);
+        assertEquals(0, login.reconnects(), "an invalid token must never reach the backend as master");
+        assertNull(login.masterResponse());
+    }
+
+    private static void assertOk(byte[] packet, int sequence) {
+        assertNotNull(packet);
+        assertEquals(0x00, packet[4] & 0xFF, "expected an OK packet");
+        assertEquals(sequence, packet[3] & 0xFF);
+    }
+
+    private static void assertAccessDenied(byte[] packet, int sequence) {
+        assertNotNull(packet);
+        assertEquals(0xFF, packet[4] & 0xFF, "expected an ERR packet");
+        assertEquals(ER_ACCESS_DENIED, (packet[5] & 0xFF) | ((packet[6] & 0xFF) << 8));
+        assertEquals(sequence, packet[3] & 0xFF);
+    }
+
+    private record DirectLogin(byte[] clientVerdict, byte[] backendResponse) {}
+
+    /** One client HandshakeResponse against a single backend connection that accepts it. */
+    private DirectLogin directLogin(byte[] clientResponse, boolean iamEnabled) throws Exception {
+        AtomicReference<byte[]> backendResponse = new AtomicReference<>();
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = clientServer.accept();
+             Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
+            ourClient.setSoTimeout(5_000);
+            Thread backendThread = startBackend(backendServer, fixedNonce(), OK_PAYLOAD, backendResponse);
+            Thread authThread = startProxy(proxyClient, backend, NO_RECONNECT, iamEnabled,
+                    testTlsCertificates());
+
+            InputStream clientIn = ourClient.getInputStream();
+            OutputStream clientOut = ourClient.getOutputStream();
+            assertNotNull(readMysqlPacketRaw(clientIn));
+            clientOut.write(clientResponse);
+            clientOut.flush();
+            byte[] verdict = readMysqlPacketRaw(clientIn);
+
+            ourClient.close();
+            proxyClient.close();
+            joinAll(authThread, backendThread);
+            return new DirectLogin(verdict, backendResponse.get());
+        }
+    }
+
+    private record AuthSwitchLogin(byte[] authSwitch, byte[] clientVerdict, byte[] masterResponse,
+                                   int reconnects) {}
+
+    /**
+     * Drives a cleartext-enabled client the way libmysqlclient, PyMySQL, mysql2 and Connector/J log in
+     * with an IAM token: the HandshakeResponse answers the advertised mysql_native_password with a
+     * scramble of the token, and the token itself is only sent if the server switches to
+     * mysql_clear_password. The first backend connection rejects that scramble — as the real backend
+     * does for an IAM user, whose password hash never matches — and a second one, if the proxy opens
+     * it, accepts whatever it receives.
+     */
+    private AuthSwitchLogin authSwitchLogin(String username, String token, boolean iamEnabled, boolean tls)
+            throws Exception {
+        AtomicReference<byte[]> rejectedResponse = new AtomicReference<>();
+        AtomicReference<byte[]> masterResponse = new AtomicReference<>();
+        AtomicReference<Thread> masterBackendThread = new AtomicReference<>();
+        AtomicInteger reconnects = new AtomicInteger();
+        RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
+        if (tls) {
+            tlsCertificates.ensureHost("172.17.0.8");
+        }
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket masterBackendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = clientServer.accept();
+             Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
+            ourClient.setSoTimeout(5_000);
+            PostgresProtocolHandler.BackendConnector connector = () -> {
+                reconnects.incrementAndGet();
+                masterBackendThread.set(startBackend(
+                        masterBackendServer, MASTER_BACKEND_NONCE, OK_PAYLOAD, masterResponse));
+                return new Socket("localhost", masterBackendServer.getLocalPort());
+            };
+            Thread backendThread = startBackend(
+                    backendServer, fixedNonce(), accessDeniedPayload(), rejectedResponse);
+            Thread authThread = startProxy(proxyClient, backend, connector, iamEnabled, tlsCertificates);
+
+            InputStream clientIn = ourClient.getInputStream();
+            OutputStream clientOut = ourClient.getOutputStream();
+            assertNotNull(readMysqlPacketRaw(clientIn));
+            int capabilities = FULL_RESPONSE_CAPABILITIES;
+            int sequence = 1;
+            if (tls) {
+                clientOut.write(buildSslRequest());
+                clientOut.flush();
+                SSLSocket sslClient = trustedClientSocket(ourClient);
+                sslClient.startHandshake();
+                clientIn = sslClient.getInputStream();
+                clientOut = sslClient.getOutputStream();
+                capabilities |= CLIENT_SSL;
+                sequence = 2;
+            }
+            clientOut.write(fullHandshakeResponse41(username, scrambleNativePassword(token, fixedNonce()),
+                    MYSQL_NATIVE_PASSWORD, capabilities, sequence));
+            clientOut.flush();
+
+            byte[] reply = readMysqlPacketRaw(clientIn);
+            byte[] authSwitch = null;
+            if (reply != null && (reply[4] & 0xFF) == 0xFE) {
+                authSwitch = reply;
+                clientOut.write(wrapPacket((reply[3] & 0xFF) + 1, nulTerminated(token)));
+                clientOut.flush();
+                reply = readMysqlPacketRaw(clientIn);
+            }
+
+            ourClient.close();
+            proxyClient.close();
+            joinAll(authThread, backendThread);
+            if (masterBackendThread.get() != null) {
+                joinAll(masterBackendThread.get());
+            }
+            return new AuthSwitchLogin(authSwitch, reply, masterResponse.get(), reconnects.get());
+        }
+    }
+
+    /**
+     * Backend that sends its handshake, records the HandshakeResponse it receives (null if the proxy
+     * never forwards one), answers it with {@code verdict} at sequence 2, then closes.
+     */
+    private static Thread startBackend(ServerSocket server, byte[] nonce, byte[] verdict,
+                                       AtomicReference<byte[]> response) {
+        return Thread.ofVirtual().start(() -> {
+            try (Socket socket = server.accept()) {
+                OutputStream out = socket.getOutputStream();
+                out.write(buildHandshakeV10(nonce, MYSQL_NATIVE_PASSWORD));
+                out.flush();
+                byte[] raw = readMysqlPacketRaw(socket.getInputStream());
+                response.set(raw);
+                if (raw != null) {
+                    writeMysqlPacket(out, 2, verdict);
+                    out.flush();
+                }
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+    }
+
+    private static Thread startProxy(Socket proxyClient, Socket backend,
+                                     PostgresProtocolHandler.BackendConnector connector,
+                                     boolean iamEnabled, RdsProxyTlsCertificates tlsCertificates) {
+        return Thread.ofVirtual().start(() -> {
+            try {
+                MySqlProtocolHandler.handleAuth(
+                        proxyClient, backend, connector, "admin", "secret",
+                        iamEnabled, testSigV4Validator(), tlsCertificates,
+                        (user, pass) -> PasswordValidator.AuthResult.PASSTHROUGH, 5000);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+    }
+
+    private static void joinAll(Thread... threads) throws InterruptedException {
+        for (Thread thread : threads) {
+            thread.join(5_000);
+            assertFalse(thread.isAlive(), "thread did not terminate");
         }
     }
 
@@ -487,6 +813,66 @@ class MySqlProtocolHandlerTest {
         payload.write(scramble);
 
         return wrapPacket(sequence, payload.toByteArray());
+    }
+
+    /**
+     * A HandshakeResponse41 shaped like libmysqlclient 8's: a length-encoded auth-response followed by
+     * the database, client plugin name, connection attributes and zstd compression level, in the
+     * order the protocol defines them.
+     */
+    private static byte[] fullHandshakeResponse41(String username, byte[] authData, String plugin,
+                                                  int capabilities, int sequence) {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        writeInt32LE(payload, capabilities);
+        writeInt32LE(payload, 0x0100_0000); // max packet size
+        payload.write(0xFF); // charset utf8mb4_0900_ai_ci
+        payload.writeBytes(new byte[23]); // reserved
+        payload.writeBytes(nulTerminated(username));
+        writeLenenc(payload, authData.length);
+        payload.writeBytes(authData);
+        payload.writeBytes(nulTerminated("appdb"));
+        payload.writeBytes(nulTerminated(plugin));
+        ByteArrayOutputStream attributes = new ByteArrayOutputStream();
+        for (String entry : new String[]{"_client_name", "libmysql", "program_name", "mysql"}) {
+            byte[] bytes = entry.getBytes(StandardCharsets.UTF_8);
+            writeLenenc(attributes, bytes.length);
+            attributes.writeBytes(bytes);
+        }
+        writeLenenc(payload, attributes.size());
+        payload.writeBytes(attributes.toByteArray());
+        payload.write(3); // zstd compression level
+        return wrapPacket(sequence, payload.toByteArray());
+    }
+
+    private static void writeLenenc(ByteArrayOutputStream out, int value) {
+        if (value < 0xFB) {
+            out.write(value);
+        } else {
+            out.write(0xFC);
+            writeInt16LE(out, value);
+        }
+    }
+
+    private static byte[] nulTerminated(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        return Arrays.copyOf(bytes, bytes.length + 1);
+    }
+
+    private static byte[] accessDeniedPayload() {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        payload.write(0xFF);
+        writeInt16LE(payload, ER_ACCESS_DENIED);
+        payload.writeBytes("#28000Access denied for user 'app'@'172.17.0.1' (using password: YES)"
+                .getBytes(StandardCharsets.UTF_8));
+        return payload.toByteArray();
+    }
+
+    private static String authSwitchPluginName(byte[] raw) {
+        int end = 5;
+        while (end < raw.length && raw[end] != 0) {
+            end++;
+        }
+        return new String(raw, 5, end - 5, StandardCharsets.UTF_8);
     }
 
     private static String extractUsername(byte[] payload) {

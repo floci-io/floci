@@ -99,10 +99,11 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     private void provisionTable(StackResource r, JsonNode props, ProvisionContext ctx) {
         CloudFormationTemplateEngine engine = ctx.engine();
         String region = ctx.region();
-        String tableName = ctx.resolveOptional(props, "TableName");
-        if (tableName == null || tableName.isBlank()) {
-            tableName = ctx.generatePhysicalName(r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false);
-        }
+        // TableName is create-only, so an update without one must keep the name generated on
+        // create rather than mint another: a fresh name here created a second table on every
+        // UpdateStack and re-pointed Ref at it.
+        String tableName = ctx.stablePhysicalName(ctx.resolveOptional(props, "TableName"),
+                r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false);
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
         List<AttributeDefinition> attrDefs = new ArrayList<>();

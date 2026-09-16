@@ -23,6 +23,7 @@ public class SessionCredential {
     private String originAccountId;
     /** True when this session belongs to a Floci-launched Lambda container. */
     private boolean lambdaExecutionRole;
+    private String ec2InstanceId;
 
     public SessionCredential() {}
 
@@ -90,6 +91,9 @@ public class SessionCredential {
 
     public String getOriginAccountId() { return originAccountId; }
     public void setOriginAccountId(String originAccountId) { this.originAccountId = originAccountId; }
+
+    public String getEc2InstanceId() { return ec2InstanceId; }
+    public void setEc2InstanceId(String ec2InstanceId) { this.ec2InstanceId = ec2InstanceId; }
 
     public boolean isLambdaExecutionRole() { return lambdaExecutionRole; }
     public void setLambdaExecutionRole(boolean lambdaExecutionRole) { this.lambdaExecutionRole = lambdaExecutionRole; }

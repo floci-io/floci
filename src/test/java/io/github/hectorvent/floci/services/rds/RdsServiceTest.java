@@ -2760,9 +2760,42 @@ class RdsServiceTest {
 
         AwsException ex4 = assertThrows(AwsException.class, () ->
                 rdsService.createDbInstance("mydb4", "postgres", "13",
-                        "a1234567890123456", "password", "dbname", "db.t3.micro",
+                        "a" + "b".repeat(63), "password", "dbname", "db.t3.micro",
                         20, false, null, null, null, null, false));
         assertEquals("InvalidParameterValue", ex4.getErrorCode());
+    }
+
+    @Test
+    void createDbInstanceAcceptsTheLongestMasterUsernameEachEngineAllows() {
+        DbInstance postgres = rdsService.createDbInstance("pg63", "postgres", "13",
+                "a" + "b".repeat(62), "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        assertEquals(63, postgres.getMasterUsername().length());
+
+        DbInstance mysql = rdsService.createDbInstance("my32", "mysql", "8.0",
+                "a" + "b".repeat(31), "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        assertEquals(32, mysql.getMasterUsername().length());
+
+        DbInstance mariadb = rdsService.createDbInstance("mar16", "mariadb", "11.4",
+                "a" + "b".repeat(15), "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        assertEquals(16, mariadb.getMasterUsername().length());
+    }
+
+    @Test
+    void createDbInstanceRejectsMasterUsernameLongerThanTheEngineAllows() {
+        AwsException mysql = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("my33", "mysql", "8.0",
+                        "a" + "b".repeat(32), "password", "dbname", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+        assertEquals("InvalidParameterValue", mysql.getErrorCode());
+
+        AwsException mariadb = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("mar17", "mariadb", "11.4",
+                        "a" + "b".repeat(16), "password", "dbname", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+        assertEquals("InvalidParameterValue", mariadb.getErrorCode());
     }
 
     @Test

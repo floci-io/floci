@@ -43,7 +43,7 @@ class TlsProxyServerReservedPortTest {
         when(vertx.createNetClient()).thenReturn(mock(NetClient.class));
         when(vertx.createNetServer(any())).thenReturn(server);
 
-        return new TlsProxyServer(vertx, config, 4510, 4511);
+        return new TlsProxyServer(vertx, config, "127.0.0.1", 4510, 4511);
     }
 
     /**
@@ -76,7 +76,7 @@ class TlsProxyServerReservedPortTest {
         when(vertx.createNetClient()).thenReturn(mock(NetClient.class));
         when(vertx.createNetServer(any())).thenReturn(server);
 
-        TlsProxyServer proxy = new TlsProxyServer(vertx, config, 4510, 4511);
+        TlsProxyServer proxy = new TlsProxyServer(vertx, config, "127.0.0.1", 4510, 4511);
         beforeStart.accept(proxy);
         return proxy;
     }

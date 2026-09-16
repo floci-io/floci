@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -237,7 +238,7 @@ class SecretsManagerServiceTest {
     void listSecretsExcludesDeleted() {
         service.createSecret("active", "v1", null, null, null, null, REGION);
         service.createSecret("deleted", "v2", null, null, null, null, REGION);
-        service.deleteSecret("deleted", 0, true, REGION);
+        service.deleteSecret("deleted", null, true, REGION);
 
         List<Secret> secrets = service.listSecrets(REGION);
         assertEquals(1, secrets.size());
@@ -1101,5 +1102,433 @@ class SecretsManagerServiceTest {
         );
         assertEquals("InvalidRequestException", ex.getErrorCode());
         latch.countDown();
+    }
+
+    // ─── CancelRotateSecret ────────────────────────────────────────────────────
+
+    private static final String ROTATION_LAMBDA_ARN =
+            "arn:aws:lambda:us-east-1:000000000000:function:rotate";
+    private static final String ROTATION_TOKEN = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+
+    /**
+     * Turns rotation on without leaving a background rotation racing the assertions: this
+     * service has no LambdaService, and with no AWSPENDING staged the {@code rotateImmediately
+     * = false} task only invokes a Lambda that isn't there, so it mutates nothing.
+     */
+    private void enableRotation(String name) {
+        service.rotateSecret(name, ROTATION_TOKEN, ROTATION_LAMBDA_ARN,
+                new Secret.RotationRules(14, null, null), false, REGION);
+    }
+
+    @Test
+    void cancelRotateSecretTurnsRotationOff() {
+        service.createSecret("rotating", "v1", null, null, null, null, REGION);
+        enableRotation("rotating");
+        assertTrue(service.describeSecret("rotating", REGION).isRotationEnabled());
+
+        SecretsManagerService.CancelRotationResult result =
+                service.cancelRotateSecret("rotating", REGION);
+
+        assertFalse(result.secret().isRotationEnabled());
+        assertFalse(service.describeSecret("rotating", REGION).isRotationEnabled());
+    }
+
+    @Test
+    void cancelRotateSecretReportsNoPendingVersionWhenNoneIsStaged() {
+        service.createSecret("rotating", "v1", null, null, null, null, REGION);
+        enableRotation("rotating");
+
+        assertNull(service.cancelRotateSecret("rotating", REGION).pendingVersionId());
+    }
+
+    @Test
+    void cancelRotateSecretReportsTheStagedPendingVersion() {
+        service.createSecret("rotating", "v1", null, null, null, null, REGION);
+        service.putSecretValue("rotating", "half-rotated", null,
+                ROTATION_TOKEN, REGION, List.of("AWSPENDING"));
+
+        assertEquals(ROTATION_TOKEN,
+                service.cancelRotateSecret("rotating", REGION).pendingVersionId());
+    }
+
+    @Test
+    void cancelRotateSecretLeavesAwsPendingAttachedForTheCallerToCleanUp() {
+        // AWS explicitly does NOT unstage the version: "You might need to remove the staging
+        // label AWSPENDING from the partially created version."
+        service.createSecret("rotating", "v1", null, null, null, null, REGION);
+        service.putSecretValue("rotating", "half-rotated", null,
+                ROTATION_TOKEN, REGION, List.of("AWSPENDING"));
+
+        service.cancelRotateSecret("rotating", REGION);
+
+        SecretVersion pending = service.getSecretValue("rotating", null, "AWSPENDING", REGION);
+        assertEquals(ROTATION_TOKEN, pending.getVersionId());
+    }
+
+    @Test
+    void cancelRotateSecretOnASecretMarkedForDeletionThrows() {
+        service.createSecret("doomed", "v1", null, null, null, null, REGION);
+        service.deleteSecret("doomed", 7, false, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.cancelRotateSecret("doomed", REGION));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    // ─── DeleteSecret recovery-window validation ───────────────────────────────
+
+    @Test
+    void deleteSecretRejectsARecoveryWindowOutsideSevenToThirtyDays() {
+        service.createSecret("windowed", "v1", null, null, null, null, REGION);
+
+        for (int window : new int[] { -1, 0, 6, 31, 365 }) {
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    service.deleteSecret("windowed", window, false, REGION));
+            assertEquals("InvalidParameterException", ex.getErrorCode(),
+                    "window " + window + " should be rejected");
+        }
+    }
+
+    @Test
+    void deleteSecretAcceptsTheBoundaryRecoveryWindows() {
+        for (int window : new int[] { 7, 30 }) {
+            String name = "boundary-" + window;
+            service.createSecret(name, "v1", null, null, null, null, REGION);
+            assertNotNull(service.deleteSecret(name, window, false, REGION).getDeletedDate());
+        }
+    }
+
+    @Test
+    void deleteSecretRejectsForceDeleteCombinedWithARecoveryWindow() {
+        service.createSecret("conflicted", "v1", null, null, null, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.deleteSecret("conflicted", 7, true, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    // ─── CreateSecret ClientRequestToken ───────────────────────────────────────
+
+    @Test
+    void createSecretUsesTheClientRequestTokenAsTheVersionId() {
+        Secret secret = service.createSecret("tokened", "v1", null, null, null, null,
+                null, ROTATION_TOKEN, REGION);
+
+        assertEquals(ROTATION_TOKEN, secret.getCurrentVersionId());
+        assertEquals("v1", service.getSecretValue("tokened", ROTATION_TOKEN, null, REGION)
+                .getSecretString());
+    }
+
+    @Test
+    void createSecretRejectsAClientRequestTokenOutsideThe32To64Range() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createSecret("bad-token", "v1", null, null, null, null,
+                        null, "too-short", REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    // ─── Service-managed secrets stay manageable by their owning service ───────
+
+    @Test
+    void theOwningServiceCanStillUpdateItsOwnManagedSecret() {
+        // RDS re-encrypts its managed master user secret in place on ModifyDBCluster by calling
+        // updateSecret. The "managed by another service" guard belongs on the wire API, which
+        // outside callers reach; applying it here would break RDS's own rekey path.
+        service.createSecret("rds!db-1", "v1", null, null, "old-key", null, "rds", REGION);
+
+        Secret rekeyed = service.updateSecret("rds!db-1", null, "new-key", REGION);
+
+        assertEquals("new-key", rekeyed.getKmsKeyId());
+    }
+
+    @Test
+    void theOwningServiceCanStillCancelRotationOnItsOwnManagedSecret() {
+        service.createSecret("rds!db-2", "v1", null, null, null, null, "rds", REGION);
+
+        assertFalse(service.cancelRotateSecret("rds!db-2", REGION).secret().isRotationEnabled());
+    }
+
+    @Test
+    void putSecretValueRejectsBothSecretStringAndSecretBinary() {
+        // AWS: "Either SecretString or SecretBinary must have a value, but not both."
+        service.createSecret("both-values", "v1", null, null, null, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putSecretValue("both-values", "text", "YmluYXJ5", null, REGION, null));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void putSecretValueStillAcceptsTheEmptyPlaceholderARotationStages() {
+        // Both null is how a rotation registers its AWSPENDING version before it has a value.
+        service.createSecret("placeholder", "v1", null, null, null, null, REGION);
+
+        SecretVersion staged = service.putSecretValue("placeholder", null, null,
+                "a1b2c3d4-e5f6-7890-abcd-ef1234567890", REGION, List.of("AWSPENDING"));
+
+        assertNull(staged.getSecretString());
+        assertTrue(staged.getVersionStages().contains("AWSPENDING"));
+    }
+
+    // ─── KMS key validation ────────────────────────────────────────────────────
+
+    /**
+     * KmsService is a cross-service collaborator whose real test constructors are package-private
+     * to {@code services.kms}, so it is mocked here the same way the rotation tests mock
+     * LambdaService.
+     */
+    private SecretsManagerService serviceWithKms(io.github.hectorvent.floci.services.kms.KmsService kms) {
+        return new SecretsManagerService(new InMemoryStorage<>(), 30,
+                new RegionResolver(REGION, "000000000000"), null, new com.fasterxml.jackson.databind.ObjectMapper(), kms);
+    }
+
+    private static io.github.hectorvent.floci.services.kms.model.KmsKey kmsKey(boolean enabled, String state) {
+        io.github.hectorvent.floci.services.kms.model.KmsKey key =
+                new io.github.hectorvent.floci.services.kms.model.KmsKey();
+        key.setKeyId("abcd1234-ef56-7890-abcd-ef1234567890");
+        key.setEnabled(enabled);
+        key.setKeyState(state);
+        return key;
+    }
+
+    @Test
+    void createSecretRejectsAKmsKeyThatDoesNotExist() {
+        io.github.hectorvent.floci.services.kms.KmsService kms =
+                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString()))
+                .thenThrow(new AwsException("NotFoundException", "Key not found", 404));
+
+        AwsException ex = assertThrows(AwsException.class, () -> serviceWithKms(kms)
+                .createSecret("kms-secret", "v1", null, null, "missing-key", null, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void createSecretRejectsADisabledKmsKey() {
+        io.github.hectorvent.floci.services.kms.KmsService kms =
+                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(kmsKey(false, "Disabled"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> serviceWithKms(kms)
+                .createSecret("kms-secret", "v1", null, null, "disabled-key", null, REGION));
+        assertEquals("EncryptionFailure", ex.getErrorCode());
+    }
+
+    @Test
+    void createSecretRejectsAKmsKeyPendingDeletion() {
+        io.github.hectorvent.floci.services.kms.KmsService kms =
+                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(kmsKey(true, "PendingDeletion"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> serviceWithKms(kms)
+                .createSecret("kms-secret", "v1", null, null, "doomed-key", null, REGION));
+        assertEquals("EncryptionFailure", ex.getErrorCode());
+    }
+
+    @Test
+    void createSecretAcceptsAnEnabledKmsKey() {
+        io.github.hectorvent.floci.services.kms.KmsService kms =
+                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(kmsKey(true, "Enabled"));
+
+        Secret secret = serviceWithKms(kms)
+                .createSecret("kms-secret", "v1", null, null, "good-key", null, REGION);
+        assertEquals("good-key", secret.getKmsKeyId());
+    }
+
+    @Test
+    void theAwsManagedDefaultKeyIsNeverLookedUp() {
+        // AWS creates aws/secretsmanager on demand, so it always resolves. Looking it up would
+        // fail on a fresh emulator where nobody has created it.
+        io.github.hectorvent.floci.services.kms.KmsService kms =
+                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        SecretsManagerService kmsAware = serviceWithKms(kms);
+
+        kmsAware.createSecret("default-key", "v1", null, null, "alias/aws/secretsmanager", null, REGION);
+        kmsAware.createSecret("bare-default", "v1", null, null, "aws/secretsmanager", null, REGION);
+
+        org.mockito.Mockito.verify(kms, org.mockito.Mockito.never())
+                .describeKey(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void updateSecretRejectsAKmsKeyThatDoesNotExist() {
+        io.github.hectorvent.floci.services.kms.KmsService kms =
+                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        SecretsManagerService kmsAware = serviceWithKms(kms);
+        kmsAware.createSecret("kms-secret", "v1", null, null, null, null, REGION);
+
+        org.mockito.Mockito.when(kms.describeKey(org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString()))
+                .thenThrow(new AwsException("NotFoundException", "Key not found", 404));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsAware.updateSecret("kms-secret", null, "missing-key", REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void aSecretWithoutAKmsKeyNeedsNoLookup() {
+        io.github.hectorvent.floci.services.kms.KmsService kms =
+                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.kms.KmsService.class);
+        serviceWithKms(kms).createSecret("no-key", "v1", null, null, null, null, REGION);
+
+        org.mockito.Mockito.verify(kms, org.mockito.Mockito.never())
+                .describeKey(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+    }
+
+    // ─── Replication ───────────────────────────────────────────────────────────
+
+    private static final String REPLICA_REGION = "eu-west-1";
+
+    private Secret replicate(String name, String... regions) {
+        List<SecretsManagerService.ReplicaRegion> targets = new java.util.ArrayList<>();
+        for (String r : regions) {
+            targets.add(new SecretsManagerService.ReplicaRegion(r, null));
+        }
+        return service.replicateSecretToRegions(name, targets, false, REGION);
+    }
+
+    @Test
+    void replicateSecretCopiesTheValueIntoTheReplicaRegion() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+
+        Secret primary = replicate("multi", REPLICA_REGION);
+
+        assertEquals(1, primary.getReplicationStatus().size());
+        assertEquals(REPLICA_REGION, primary.getReplicationStatus().getFirst().region());
+        assertEquals("InSync", primary.getReplicationStatus().getFirst().status());
+        assertEquals("v1", service.getSecretValue("multi", null, null, REPLICA_REGION).getSecretString());
+    }
+
+    @Test
+    void replicaArnMatchesThePrimaryWithTheRegionSwapped() {
+        // AWS: "The replica ARN is the same as the original primary secret ARN except the Region."
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        Secret primary = replicate("multi", REPLICA_REGION);
+        Secret replica = service.describeSecret("multi", REPLICA_REGION);
+
+        assertEquals(primary.getArn().replace(REGION, REPLICA_REGION), replica.getArn());
+    }
+
+    @Test
+    void replicaTracksLaterWritesToThePrimary() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        replicate("multi", REPLICA_REGION);
+
+        service.putSecretValue("multi", "v2", null, null, REGION, null);
+
+        assertEquals("v2", service.getSecretValue("multi", null, null, REPLICA_REGION).getSecretString());
+    }
+
+    @Test
+    void replicaReportsThePrimaryRegionAndThePrimaryReportsItsOwn() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        replicate("multi", REPLICA_REGION);
+
+        assertEquals(REGION, service.describeSecret("multi", REPLICA_REGION).getPrimaryRegion());
+        assertNull(service.describeSecret("multi", REGION).getPrimaryRegion());
+    }
+
+    @Test
+    void replicatingOntoAnExistingNameFailsThatRegionWithoutForce() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        service.createSecret("multi", "squatter", null, null, null, null, REPLICA_REGION);
+
+        Secret primary = replicate("multi", REPLICA_REGION);
+
+        assertEquals("Failed", primary.getReplicationStatus().getFirst().status());
+        // The pre-existing secret is left untouched.
+        assertEquals("squatter", service.getSecretValue("multi", null, null, REPLICA_REGION).getSecretString());
+    }
+
+    @Test
+    void replicatingOntoAnExistingNameOverwritesItWithForce() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        service.createSecret("multi", "squatter", null, null, null, null, REPLICA_REGION);
+
+        Secret primary = service.replicateSecretToRegions("multi",
+                List.of(new SecretsManagerService.ReplicaRegion(REPLICA_REGION, null)), true, REGION);
+
+        assertEquals("InSync", primary.getReplicationStatus().getFirst().status());
+        assertEquals("v1", service.getSecretValue("multi", null, null, REPLICA_REGION).getSecretString());
+    }
+
+    @Test
+    void writingToAReplicaIsRejected() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        replicate("multi", REPLICA_REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putSecretValue("multi", "sneaky", null, null, REPLICA_REGION, null));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    @Test
+    void deletingAPrimaryThatStillHasReplicasIsRejected() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        replicate("multi", REPLICA_REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.deleteSecret("multi", null, false, REGION));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    @Test
+    void removingARegionDeletesTheReplicaImmediately() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        replicate("multi", REPLICA_REGION);
+
+        Secret primary = service.removeRegionsFromReplication("multi", List.of(REPLICA_REGION), REGION);
+
+        assertTrue(primary.getReplicationStatus().isEmpty());
+        assertThrows(AwsException.class, () -> service.describeSecret("multi", REPLICA_REGION));
+        // With the last replica gone the primary can be deleted again.
+        assertNotNull(service.deleteSecret("multi", null, false, REGION).getDeletedDate());
+    }
+
+    @Test
+    void stopReplicationPromotesTheReplicaToAStandalonePrimary() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        replicate("multi", REPLICA_REGION);
+
+        Secret promoted = service.stopReplicationToReplica("multi", REPLICA_REGION);
+
+        assertNull(promoted.getPrimaryRegion());
+        // The old primary no longer lists it, and the promoted copy now accepts writes.
+        assertTrue(service.describeSecret("multi", REGION).getReplicationStatus().isEmpty());
+        assertEquals("now-mine", service.putSecretValue("multi", "now-mine", null, null,
+                REPLICA_REGION, null).getSecretString());
+        // The promotion does not disturb the original primary's value.
+        assertEquals("v1", service.getSecretValue("multi", null, null, REGION).getSecretString());
+    }
+
+    @Test
+    void stopReplicationOnAPrimaryIsRejected() {
+        service.createSecret("multi", "v1", null, null, null, null, REGION);
+        replicate("multi", REPLICA_REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.stopReplicationToReplica("multi", REGION));
+        assertEquals("InvalidRequestException", ex.getErrorCode());
+    }
+
+    // ─── ListSecrets planned deletion ──────────────────────────────────────────
+
+    @Test
+    void listSecretsCanIncludeSecretsPendingDeletion() {
+        service.createSecret("active", "v1", null, null, null, null, REGION);
+        service.createSecret("doomed", "v2", null, null, null, null, REGION);
+        service.deleteSecret("doomed", 7, false, REGION);
+
+        assertEquals(1, service.listSecrets(REGION, null, false).size());
+        assertEquals(2, service.listSecrets(REGION, null, true).size());
     }
 }

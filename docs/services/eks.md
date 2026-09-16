@@ -13,6 +13,10 @@ EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Targe
 | `DescribeCluster` | Describe a cluster by name |
 | `ListClusters` | List all cluster names |
 | `DeleteCluster` | Delete a cluster |
+| `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
+| `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
+| `ListAccessEntries` | List principal ARNs with pagination |
+| `DeleteAccessEntry` | Delete access-entry metadata |
 | `CreateNodegroup` | Create node group metadata for a cluster |
 | `DescribeNodegroup` | Describe a node group by cluster and name |
 | `ListNodegroups` | List node group names for a cluster |
@@ -24,6 +28,28 @@ EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Targe
 | `TagResource` | Add tags to a cluster |
 | `UntagResource` | Remove tags from a cluster |
 | `ListTagsForResource` | List tags on a cluster |
+
+## Access-entry management
+
+`CreateCluster` accepts `accessConfig.authenticationMode` (`CONFIG_MAP`, `API_AND_CONFIG_MAP`, or `API`) and `bootstrapClusterCreatorAdminPermissions`. The API default is `CONFIG_MAP`; access-entry operations require an ACTIVE cluster created with `API` or `API_AND_CONFIG_MAP`.
+
+The four access-entry management operations support `STANDARD` (the default) and `EC2_LINUX`. STANDARD accepts existing IAM users or roles, including principals in another account. EC2_LINUX requires a role in the cluster account and generates `system:node:{{EC2PrivateDNSName}}`; custom usernames and Kubernetes groups are not accepted for node entries. Tags supplied at creation are preserved. Repeating a create with the same client token and normalized parameters returns the existing entry. Listing accepts `maxResults` from 1 to 100 and cluster-specific `nextToken` values.
+
+Access entries use EKS storage and retain the IAM principal's stable ID internally. Cluster deletion removes its entries, and a cluster recreated with the same name does not inherit previous entries or pagination tokens.
+
+!!! note "Management API scope"
+    These operations currently manage metadata only. They do not change the k3s token webhook's authorization behavior, create cluster-creator or managed-node entries automatically, or make native workers register. Authentication mode and the bootstrap flag are recorded; they are not yet enforced by the Kubernetes API server. Updating authentication mode, UpdateAccessEntry, access-policy association, and entry tag updates are not implemented. Worker authentication is a separate follow-up.
+
+```bash
+aws --endpoint-url http://localhost:4566 eks create-cluster \
+  --name local-nodes --role-arn arn:aws:iam::000000000000:role/cluster \
+  --resources-vpc-config '{}' \
+  --access-config authenticationMode=API,bootstrapClusterCreatorAdminPermissions=false
+# The IAM role must already exist.
+aws --endpoint-url http://localhost:4566 eks create-access-entry \
+  --cluster-name local-nodes --principal-arn arn:aws:iam::000000000000:role/worker \
+  --type EC2_LINUX
+```
 
 ## Modes
 
@@ -115,6 +141,7 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 | `FLOCI_SERVICES_EKS_ENDPOINT_MODE` | `host` | `describe-cluster` endpoint: `host` (`localhost:<hostPort>`) or `network` (container DNS) |
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
+| `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 
 ### Pulling images from Floci ECR
 
@@ -171,6 +198,39 @@ services:
     environment:
       FLOCI_SERVICES_EKS_MOCK: "true"
 ```
+
+## Instance Metadata Service (IMDS)
+
+When enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, Floci adds `169.254.169.254/32` to the loopback interface (`lo`) and runs a lightweight `socat` TCP relay forwarding metadata requests to Floci's IMDS server.
+
+Both IMDSv1 and IMDSv2 (`PUT /latest/api/token`) are supported. The cluster container is registered as a synthesized EC2 instance node (type `m5.large`, image `ami-eks-k3s`) associated with the cluster's IAM role:
+
+```bash
+# IMDSv2: obtain token
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "x-aws-ec2-metadata-token-ttl-seconds: 21600")
+
+# Read node instance ID
+curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-id
+```
+
+### Reachability and network namespaces
+
+The link-local proxy attaches to the loopback interface of the k3s container network namespace (the node network namespace).
+
+- **Reachable from node network namespace:** Workloads configured with `hostNetwork: true` share the node network namespace and can reach `169.254.169.254:80`. This allows local testing of host-network security policies, intrusion-detection rules, and credential exfiltration defenses.
+- **Not reachable from ordinary pods:** Pods running in separate pod network namespaces cannot reach `169.254.169.254` through this loopback alias because link-local addresses are non-routable across network namespaces. Pod-CIDR DNAT routing is not implemented.
+
+### Configuration
+
+IMDS proxy initialization is disabled by default (`floci.services.eks.imds=false`). Set `FLOCI_SERVICES_EKS_IMDS=true` to enable the proxy setup inside the k3s container.
+
+A failure to configure the proxy (for example on custom minimal images lacking network utilities) logs a warning and allows cluster startup to continue.
+
+### Hop limits
+
+EC2 metadata options store `HttpPutResponseHopLimit`, but the userspace TCP proxy relay terminates the incoming connection and opens a new connection to Floci, regenerating the IP packet TTL. Hop limits are recorded on the instance metadata options model but are not enforced by the userspace proxy.
 
 ## IRSA (IAM Roles for Service Accounts)
 

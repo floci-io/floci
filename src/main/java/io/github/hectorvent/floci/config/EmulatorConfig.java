@@ -217,6 +217,9 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean disableCorsHeaders();
 
+        @WithDefault("false")
+        boolean allowPrivateJwtTargets();
+
         /**
          * Whether to grant Private Network Access preflights (respond with
          * {@code Access-Control-Allow-Private-Network: true}) when the browser asks.
@@ -228,6 +231,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean corsAllowPrivateNetwork();
+
+        /**
+         * Whether Floci may listen outside loopback (127.0.0.0/8, ::1, localhost), through
+         * {@code quarkus.http.host} or the TLS proxy that uses it. Anyone who can reach such an
+         * address can call Floci's APIs, so startup fails unless this is set; see
+         * {@link NetworkExposureGuard}.
+         */
+        @WithDefault("false")
+        boolean allowUnsafeNetworkExposure();
     }
 
     interface StorageConfig {
@@ -1641,6 +1653,12 @@ public interface EmulatorConfig {
 
         @WithDefault("30")
         int defaultRecoveryWindowDays();
+
+        @WithDefault("true")
+        boolean scheduledRotationEnabled();
+
+        @WithDefault("60")
+        long rotationTickSeconds();
     }
 
     interface ApiGatewayV2ServiceConfig {
@@ -2777,6 +2795,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean disableCni();
+
+        /**
+         * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
+         * network namespace that relays to Floci's EC2 metadata service.
+         */
+        @WithDefault("false")
+        boolean imds();
     }
 
     /**

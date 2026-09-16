@@ -380,6 +380,20 @@ class CloudFormationTemplateEngineTest {
      * literal text because {@code resolveNode}, the general-purpose path every non-RDS property goes
      * through, had no dynamic-reference stage.
      */
+    @Test
+    void resolveNodeResolvesDynamicReferenceInPlainStringValue() {
+        UnaryOperator<String> resolver = value -> {
+            assertEquals("{{resolve:ssm:/demo/url}}", value);
+            return "https://real.example.com";
+        };
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), mapper, (Function<String, String>) name -> null, resolver);
+
+        assertEquals("https://real.example.com",
+                e.resolveNode(json("\"{{resolve:ssm:/demo/url}}\"")).asText());
+    }
+
     /**
      * CDK emits an RDS master credential as an {@code Fn::Join} whose fragments split one dynamic
      * reference: {@code ["{{resolve:secretsmanager:", {"Ref": "Secret"}, ":SecretString:password::}}"]}.
@@ -422,20 +436,6 @@ class CloudFormationTemplateEngineTest {
                         + "secret:creds-AbC123:SecretString:password::}}",
                 e.resolveWithoutDynamicReferences(json("{\"Fn::Join\":[\"\",[\"{{resolve:secretsmanager:\","
                         + "{\"Ref\":\"Secret\"},\":SecretString:password::}}\"]]}")));
-    }
-
-    @Test
-    void resolveNodeResolvesDynamicReferenceInPlainStringValue() {
-        UnaryOperator<String> resolver = value -> {
-            assertEquals("{{resolve:ssm:/demo/url}}", value);
-            return "https://real.example.com";
-        };
-        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
-                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of(), mapper, (Function<String, String>) name -> null, resolver);
-
-        assertEquals("https://real.example.com",
-                e.resolveNode(json("\"{{resolve:ssm:/demo/url}}\"")).asText());
     }
 
     /**

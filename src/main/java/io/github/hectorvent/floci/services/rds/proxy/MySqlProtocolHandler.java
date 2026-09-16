@@ -39,6 +39,12 @@ import java.util.regex.Pattern;
  * the terminal OK/ERR (including any {@code AuthSwitchRequest}/{@code AuthMoreData} round trips)
  * is relayed through {@link #relayConnectionPhase} to keep both sides in sync before handing off
  * to the plain byte-for-byte {@link #bridge}.
+ *
+ * <p>With IAM database authentication enabled, an IAM token offered in cleartext
+ * ({@code mysql_clear_password}) is validated by the proxy, which then authenticates the session to
+ * the backend as the master user. Clients normally reveal the token only after the server asks them
+ * to switch to {@code mysql_clear_password}, so when the backend rejects a non-master login the proxy
+ * asks for that switch itself (see {@link #authenticateIamUserAfterAuthSwitch}).
  */
 public class MySqlProtocolHandler {
 
@@ -48,13 +54,19 @@ public class MySqlProtocolHandler {
     private static final int CLIENT_PLUGIN_AUTH = 0x0008_0000;
     private static final int CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x200000;
     private static final int CLIENT_SECURE_CONNECTION = 0x8000;
+    private static final int CLIENT_CONNECT_WITH_DB = 0x0008;
     private static final String MYSQL_NATIVE_PASSWORD = "mysql_native_password";
     private static final String CACHING_SHA2_PASSWORD = "caching_sha2_password";
+    private static final String MYSQL_CLEAR_PASSWORD = "mysql_clear_password";
 
     // First payload byte of the packet types that can appear during the connection phase.
     private static final int OK_PACKET_MARKER = 0x00;
     private static final int ERR_PACKET_MARKER = 0xFF;
     private static final int AUTH_MORE_DATA_MARKER = 0x01;
+    private static final int AUTH_SWITCH_REQUEST_MARKER = 0xFE;
+
+    // Server error code for a failed login ("Access denied for user ...").
+    private static final int ER_ACCESS_DENIED_ERROR = 1045;
 
     // Second payload byte of an AuthMoreData packet under caching_sha2_password: fast_auth_success
     // means the backend is about to send the terminal OK with no further input from the client.
@@ -76,11 +88,38 @@ public class MySqlProtocolHandler {
             "IDENTIFIED WITH mysql_native_password AS '" + NO_MATCHING_PASSWORD_HASH + "'";
 
     public static void handleAuth(Socket client, Socket backend,
+                                  PostgresProtocolHandler.BackendConnector backendConnector,
                                   String masterUsername, String masterPassword,
                                   boolean iamEnabled, RdsSigV4Validator sigV4,
                                   RdsProxyTlsCertificates tlsCertificates,
                                   PasswordValidator passwordValidator,
                                   int handshakeTimeoutMillis) throws IOException {
+        handleAuth(client, backend, backendConnector, masterUsername, masterPassword,
+                iamEnabled, sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                username -> true, null);
+    }
+
+    public static void handleAuth(Socket client, Socket backend,
+                                  PostgresProtocolHandler.BackendConnector backendConnector,
+                                  String masterUsername, String masterPassword,
+                                  boolean iamEnabled, RdsSigV4Validator sigV4,
+                                  RdsProxyTlsCertificates tlsCertificates,
+                                  PasswordValidator passwordValidator,
+                                  int handshakeTimeoutMillis,
+                                  IamUserChecker iamUserChecker) throws IOException {
+        handleAuth(client, backend, backendConnector, masterUsername, masterPassword, iamEnabled,
+                sigV4, tlsCertificates, passwordValidator, handshakeTimeoutMillis, iamUserChecker, null);
+    }
+
+    public static void handleAuth(Socket client, Socket backend,
+                                  PostgresProtocolHandler.BackendConnector backendConnector,
+                                  String masterUsername, String masterPassword,
+                                  boolean iamEnabled, RdsSigV4Validator sigV4,
+                                  RdsProxyTlsCertificates tlsCertificates,
+                                  PasswordValidator passwordValidator,
+                                  int handshakeTimeoutMillis,
+                                  IamUserChecker iamUserChecker,
+                                  RdsMysqlBinding mysqlBinding) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
         // The backend accepted the TCP connection but may never answer (or answer only
@@ -169,21 +208,34 @@ public class MySqlProtocolHandler {
         }
 
         // Phase 4: Validate credentials against the backend nonce.
+        // IAM token sent up front in cleartext: validate SigV4, then connect to backend as master.
         // Master user: validate the scramble locally against the known master password.
         // Non-master users: pass through — the backend validates their scramble directly.
-        // IAM tokens: validate SigV4, then connect to backend as master.
-        byte[] clientPayload = Arrays.copyOfRange(clientResponseRaw, 4, clientResponseRaw.length);
-        String[] parsed = parseHandshakeResponse(clientPayload);
-        String clientUsername = parsed[0];
-        byte[] clientAuthData = parsed[1] != null
-                ? parsed[1].getBytes(StandardCharsets.ISO_8859_1) : new byte[0];
+        ParsedHandshakeResponse parsed = parseHandshakeResponse(
+                Arrays.copyOfRange(clientResponseRaw, 4, clientResponseRaw.length));
+        String clientUsername = parsed.username();
+        boolean masterUser = masterUsername.equals(clientUsername);
+        boolean tlsEstablished = client instanceof SSLSocket ssl && ssl.getSession().isValid();
+        boolean iamLogin = iamEnabled && tlsEstablished && MYSQL_CLEAR_PASSWORD.equals(parsed.authPlugin())
+                && isIamToken(clearPassword(parsed.authData()));
 
         boolean valid;
         try {
-            if (masterUsername.equals(clientUsername)) {
+            if (iamEnabled && MYSQL_CLEAR_PASSWORD.equals(parsed.authPlugin())
+                    && isIamToken(clearPassword(parsed.authData())) && !tlsEstablished) {
+                valid = false;
+            } else if (iamLogin) {
+                valid = sigV4.validate(clearPassword(parsed.authData()), clientUsername, mysqlBinding);
+                if (valid) {
+                    clientResponseRaw = rewriteHandshakeCredentials(
+                            clientResponseRaw, parsed, masterUsername,
+                            scramblePassword(masterPassword, backendNonce, backendAuthPlugin),
+                            backendAuthPlugin);
+                }
+            } else if (masterUser) {
                 byte[] expected = scramblePassword(
                         masterPassword, backendNonce, backendAuthPlugin);
-                valid = Arrays.equals(expected, clientAuthData);
+                valid = Arrays.equals(expected, parsed.authData());
             } else {
                 // Non-master user: defer to backend — it knows their password.
                 valid = true;
@@ -194,7 +246,7 @@ public class MySqlProtocolHandler {
         }
 
         if (!valid) {
-            byte[] err = buildErrorPacket(1045,
+            byte[] err = buildErrorPacket(ER_ACCESS_DENIED_ERROR,
                     "Access denied for user '" + clientUsername + "'@'localhost' (using password: YES)");
             writeMysqlPacket(clientOut, 2, err);
             clientOut.flush();
@@ -205,15 +257,32 @@ public class MySqlProtocolHandler {
 
         // Phase 5: Forward client's HandshakeResponse to backend, then relay the rest of the
         // connection phase (renumbering if a TLS upgrade shifted the shared sequence counter)
-        // before handing off to the plain byte-for-byte bridge.
+        // before handing off to the plain byte-for-byte bridge. With IAM auth enabled, a non-master
+        // login may be an IAM user whose client only sends its token after an auth switch, so the
+        // backend's verdict is inspected before it reaches the client.
         backendOut.write(clientResponseRaw);
         backendOut.flush();
 
-        if (sequenceOffset != 0
-                && !relayConnectionPhase(clientIn, clientOut, backendIn, backendOut, sequenceOffset)) {
-            closeQuietly(client);
-            closeQuietly(backend);
-            return;
+        boolean mayBeIamUser = iamEnabled && !masterUser && !iamLogin;
+        if (sequenceOffset != 0 || mayBeIamUser) {
+            byte[] verdict = relayConnectionPhase(
+                    clientIn, clientOut, backendIn, backendOut, sequenceOffset);
+            if (verdict == null) {
+                closeQuietly(client);
+                closeQuietly(backend);
+                return;
+            }
+            if (mayBeIamUser && isAccessDenied(verdict)
+                    && tlsEstablished && iamUserChecker.isIamUser(clientUsername)) {
+                closeQuietly(backend);
+                authenticateIamUserAfterAuthSwitch(
+                        client, clientIn, clientOut, verdict[3] & 0xFF, clientResponseRaw, parsed,
+                        backendNonce, backendConnector, masterUsername, masterPassword, sigV4,
+                        handshakeTimeoutMillis, mysqlBinding);
+                return;
+            }
+            clientOut.write(verdict);
+            clientOut.flush();
         }
 
         // Authenticated: clear the handshake deadline so a long-lived idle session is never killed.
@@ -224,29 +293,32 @@ public class MySqlProtocolHandler {
 
     /**
      * Relays packets between client and backend for the remainder of the connection phase,
-     * shifting each sequence number by {@code offset} to correct for a packet the backend never
-     * saw (see {@link #handleAuth}). Stops once the terminal OK/ERR packet reaches the client —
-     * at that point both sides independently reset their sequence counters for the next command,
-     * so the offset no longer applies and {@link #bridge} can take over untouched.
+     * shifting each sequence number by {@code offset} to correct for packets the backend never
+     * saw (see {@link #handleAuth}). Stops at the terminal OK/ERR packet and returns it renumbered
+     * but not yet forwarded, so the caller can act on the verdict. After it both sides
+     * independently reset their sequence counters for the next command, so the offset no longer
+     * applies and {@link #bridge} can take over untouched.
      *
-     * @return {@code false} if either side closed the connection mid-exchange
+     * @return the terminal OK/ERR packet, or {@code null} if either side closed the connection
+     *         mid-exchange
      */
-    private static boolean relayConnectionPhase(InputStream clientIn, OutputStream clientOut,
-                                                InputStream backendIn, OutputStream backendOut,
-                                                int offset) throws IOException {
+    private static byte[] relayConnectionPhase(InputStream clientIn, OutputStream clientOut,
+                                               InputStream backendIn, OutputStream backendOut,
+                                               int offset) throws IOException {
         while (true) {
             byte[] backendRaw = readMysqlPacketRaw(backendIn);
             if (backendRaw == null || backendRaw.length < 5) {
-                return false;
+                return null;
             }
             backendRaw[3] = (byte) (backendRaw[3] + offset);
-            clientOut.write(backendRaw);
-            clientOut.flush();
 
             int marker = backendRaw[4] & 0xFF;
             if (marker == OK_PACKET_MARKER || marker == ERR_PACKET_MARKER) {
-                return true;
+                return backendRaw;
             }
+            clientOut.write(backendRaw);
+            clientOut.flush();
+
             if (marker == AUTH_MORE_DATA_MARKER && backendRaw.length > 5
                     && (backendRaw[5] & 0xFF) == CACHING_SHA2_FAST_AUTH_SUCCESS) {
                 // caching_sha2_password fast-auth success: the client sends nothing back — the
@@ -259,12 +331,133 @@ public class MySqlProtocolHandler {
             // once more before the backend issues its next verdict.
             byte[] clientRaw = readMysqlPacketRaw(clientIn);
             if (clientRaw == null || clientRaw.length < 4) {
-                return false;
+                return null;
             }
             clientRaw[3] = (byte) (clientRaw[3] - offset);
             backendOut.write(clientRaw);
             backendOut.flush();
         }
+    }
+
+    // ── IAM authentication ────────────────────────────────────────────────────
+
+    /**
+     * Standard clients (libmysqlclient, PyMySQL, mysql2, Connector/J) answer the plugin the server
+     * advertised with a scramble of the IAM token, and send the token itself only when asked to
+     * switch to {@code mysql_clear_password}, as RDS does for {@code AWSAuthenticationPlugin} users.
+     * The backend holds those users with a password hash that never matches (see
+     * {@link #rewriteIamAuthPlugin}), so it rejects the scramble. This turns that rejection into the
+     * auth switch, validates the token, and authenticates the session as master on a fresh backend
+     * connection, since the backend drops the one whose login failed.
+     *
+     * @param switchSequence the sequence number the client expects the server's next packet at
+     */
+    private static void authenticateIamUserAfterAuthSwitch(
+            Socket client, InputStream clientIn, OutputStream clientOut, int switchSequence,
+            byte[] clientResponseRaw, ParsedHandshakeResponse parsed, byte[] nonce,
+            PostgresProtocolHandler.BackendConnector backendConnector,
+            String masterUsername, String masterPassword, RdsSigV4Validator sigV4,
+            int handshakeTimeoutMillis, RdsMysqlBinding mysqlBinding) throws IOException {
+        if (!(client instanceof SSLSocket ssl) || !ssl.getSession().isValid()) {
+            closeQuietly(client);
+            return;
+        }
+        writeMysqlPacket(clientOut, switchSequence, buildAuthSwitchRequest(MYSQL_CLEAR_PASSWORD, nonce));
+        clientOut.flush();
+
+        byte[] reply = readMysqlPacketRaw(clientIn);
+        if (reply == null) {
+            closeQuietly(client);
+            return;
+        }
+        int nextSequence = (reply[3] & 0xFF) + 1;
+        String token = clearPassword(Arrays.copyOfRange(reply, 4, reply.length));
+        boolean valid;
+        try {
+            valid = isIamToken(token) && sigV4.validate(token, parsed.username(), mysqlBinding);
+        } catch (Exception e) {
+            LOG.warnv("MySQL IAM auth error: {0}", e.getMessage());
+            valid = false;
+        }
+        if (!valid) {
+            byte[] err = buildErrorPacket(ER_ACCESS_DENIED_ERROR, "Access denied for user '"
+                    + parsed.username() + "'@'localhost' (using password: YES)");
+            writeMysqlPacket(clientOut, nextSequence, err);
+            clientOut.flush();
+            closeQuietly(client);
+            return;
+        }
+
+        Socket backend = backendConnector.connect();
+        try {
+            backend.setSoTimeout(handshakeTimeoutMillis);
+            InputStream backendIn = backend.getInputStream();
+            OutputStream backendOut = backend.getOutputStream();
+            byte[] handshake = readMysqlPacketRaw(backendIn);
+            if (handshake == null || handshake.length < 5) {
+                LOG.warnv("MySQL backend sent no handshake");
+                closeQuietly(client);
+                closeQuietly(backend);
+                return;
+            }
+            String authPlugin = extractMysqlAuthPlugin(handshake);
+            byte[] masterResponse = rewriteHandshakeCredentials(
+                    clientResponseRaw, parsed, masterUsername,
+                    scramblePassword(masterPassword, extractMysqlNonce(handshake), authPlugin),
+                    authPlugin);
+            // The fresh connection has seen nothing yet: it expects this response at sequence 1 and
+            // answers at 2, while the client expects that answer at nextSequence.
+            masterResponse[3] = 1;
+            backendOut.write(masterResponse);
+            backendOut.flush();
+
+            byte[] verdict = relayConnectionPhase(
+                    clientIn, clientOut, backendIn, backendOut, nextSequence - 2);
+            if (verdict == null) {
+                closeQuietly(client);
+                closeQuietly(backend);
+                return;
+            }
+            clientOut.write(verdict);
+            clientOut.flush();
+            client.setSoTimeout(0);
+            backend.setSoTimeout(0);
+        } catch (Exception e) {
+            LOG.warnv("MySQL IAM auth against the backend failed: {0}", e.getMessage());
+            closeQuietly(client);
+            closeQuietly(backend);
+            return;
+        }
+        bridge(client, backend);
+    }
+
+    /** mysql_clear_password sends the password NUL-terminated. */
+    private static String clearPassword(byte[] authData) {
+        int length = authData.length;
+        if (length > 0 && authData[length - 1] == 0) {
+            length--;
+        }
+        return new String(authData, 0, length, StandardCharsets.UTF_8);
+    }
+
+    private static boolean isIamToken(String password) {
+        return password.contains("X-Amz-Signature");
+    }
+
+    private static boolean isAccessDenied(byte[] raw) {
+        return raw.length >= 7 && (raw[4] & 0xFF) == ERR_PACKET_MARKER
+                && ((raw[5] & 0xFF) | ((raw[6] & 0xFF) << 8)) == ER_ACCESS_DENIED_ERROR;
+    }
+
+    /** AuthSwitchRequest: marker, NUL-terminated plugin name, then the plugin's challenge data. */
+    private static byte[] buildAuthSwitchRequest(String authPlugin, byte[] nonce) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        baos.write(AUTH_SWITCH_REQUEST_MARKER);
+        baos.writeBytes(authPlugin.getBytes(StandardCharsets.UTF_8));
+        baos.write(0);
+        baos.writeBytes(nonce);
+        baos.write(0);
+        return baos.toByteArray();
     }
 
     // ── TLS upgrade ───────────────────────────────────────────────────────────
@@ -415,7 +608,14 @@ public class MySqlProtocolHandler {
 
     // ── Parse HandshakeResponse41 ─────────────────────────────────────────────
 
-    private static String[] parseHandshakeResponse(byte[] data) {
+    /**
+     * Parses a HandshakeResponse41 payload: capabilities, max-packet-size, charset, 23 reserved
+     * bytes, username and auth-response, then (each only when its capability flag is set) the
+     * database ({@code CLIENT_CONNECT_WITH_DB}), the client plugin name ({@code CLIENT_PLUGIN_AUTH}),
+     * connection attributes and a zstd compression level. Records where the auth-response and plugin
+     * name fields sit so {@link #rewriteHandshakeCredentials} can copy everything else verbatim.
+     */
+    private static ParsedHandshakeResponse parseHandshakeResponse(byte[] data) {
         int i = 0;
         // 4 bytes: capabilities
         int caps = (data[i] & 0xFF) | ((data[i + 1] & 0xFF) << 8)
@@ -437,37 +637,120 @@ public class MySqlProtocolHandler {
         i++; // skip null
 
         // auth-response
-        String password = "";
+        byte[] authData = new byte[0];
         if (i < data.length) {
-            byte[] authData;
             if ((caps & CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) != 0) {
                 int[] consumed = {0};
                 long authLen = readLenencInt(data, i, consumed);
                 i += consumed[0];
-                authData = new byte[(int) authLen];
-                if (i + authData.length <= data.length) {
-                    System.arraycopy(data, i, authData, 0, authData.length);
-                }
+                authData = Arrays.copyOfRange(data, i, (int) Math.min(data.length, i + authLen));
+                i += authData.length;
             } else if ((caps & CLIENT_SECURE_CONNECTION) != 0) {
                 int authLen = data[i] & 0xFF;
                 i++;
-                authData = new byte[authLen];
-                if (i + authLen <= data.length) {
-                    System.arraycopy(data, i, authData, 0, authLen);
-                }
+                authData = Arrays.copyOfRange(data, i, Math.min(data.length, i + authLen));
+                i += authData.length;
             } else {
                 int passStart = i;
                 while (i < data.length && data[i] != 0) {
                     i++;
                 }
-                authData = new byte[i - passStart];
-                System.arraycopy(data, passStart, authData, 0, authData.length);
+                authData = Arrays.copyOfRange(data, passStart, i);
+                i++; // skip null
             }
-            // Preserve raw bytes using ISO-8859-1 so binary scramble data survives
-            password = new String(authData, StandardCharsets.ISO_8859_1);
+        }
+        i = Math.min(i, data.length);
+        int authEnd = i;
+
+        // null-terminated database
+        if ((caps & CLIENT_CONNECT_WITH_DB) != 0) {
+            while (i < data.length && data[i] != 0) {
+                i++;
+            }
+            i = Math.min(i + 1, data.length);
         }
 
-        return new String[]{username, password};
+        // null-terminated client plugin name
+        int pluginStart = i;
+        String authPlugin = null;
+        if ((caps & CLIENT_PLUGIN_AUTH) != 0) {
+            while (i < data.length && data[i] != 0) {
+                i++;
+            }
+            if (i > pluginStart) {
+                authPlugin = new String(data, pluginStart, i - pluginStart, StandardCharsets.UTF_8);
+            }
+            i = Math.min(i + 1, data.length);
+        }
+
+        return new ParsedHandshakeResponse(
+                caps, username, authData, authPlugin, authEnd, pluginStart, i);
+    }
+
+    /**
+     * @param authEnd     payload offset just past the auth-response field
+     * @param pluginStart payload offset of the client plugin name field (where it would be if absent)
+     * @param pluginEnd   payload offset just past the client plugin name field
+     */
+    private record ParsedHandshakeResponse(int capabilities, String username, byte[] authData,
+                                           String authPlugin, int authEnd, int pluginStart,
+                                           int pluginEnd) {}
+
+    /**
+     * Rebuilds a HandshakeResponse41 with other credentials and client plugin name, copying the
+     * database, connection attributes and any trailing bytes verbatim and in place.
+     */
+    private static byte[] rewriteHandshakeCredentials(byte[] raw, ParsedHandshakeResponse parsed,
+                                                       String username, byte[] authData,
+                                                       String authPlugin) {
+        int capabilities = parsed.capabilities();
+        ByteArrayOutputStream rewritten = new ByteArrayOutputStream(raw.length);
+        // Capabilities, max-packet-size, charset and reserved bytes: the prefix an SSLRequest carries.
+        rewritten.write(raw, 4, SSL_REQUEST_PAYLOAD_LENGTH);
+        rewritten.writeBytes(username.getBytes(StandardCharsets.UTF_8));
+        rewritten.write(0);
+        if ((capabilities & CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) != 0) {
+            writeLenencInt(rewritten, authData.length);
+            rewritten.writeBytes(authData);
+        } else if ((capabilities & CLIENT_SECURE_CONNECTION) != 0) {
+            rewritten.write(authData.length);
+            rewritten.writeBytes(authData);
+        } else {
+            rewritten.writeBytes(authData);
+            rewritten.write(0);
+        }
+        // The database, if any, sits between the auth-response and the plugin name.
+        rewritten.write(raw, 4 + parsed.authEnd(), parsed.pluginStart() - parsed.authEnd());
+        if ((capabilities & CLIENT_PLUGIN_AUTH) != 0) {
+            rewritten.writeBytes(authPlugin.getBytes(StandardCharsets.UTF_8));
+            rewritten.write(0);
+        }
+        // Connection attributes and zstd compression level.
+        rewritten.write(raw, 4 + parsed.pluginEnd(), raw.length - 4 - parsed.pluginEnd());
+
+        byte[] result = new byte[4 + rewritten.size()];
+        int length = rewritten.size();
+        result[0] = (byte) (length & 0xFF);
+        result[1] = (byte) ((length >> 8) & 0xFF);
+        result[2] = (byte) ((length >> 16) & 0xFF);
+        result[3] = raw[3];
+        System.arraycopy(rewritten.toByteArray(), 0, result, 4, length);
+        return result;
+    }
+
+    private static void writeLenencInt(ByteArrayOutputStream out, int value) {
+        if (value < 0xFB) {
+            out.write(value);
+        } else if (value <= 0xFFFF) {
+            out.write(0xFC);
+            out.write(value & 0xFF);
+            out.write((value >> 8) & 0xFF);
+        } else {
+            out.write(0xFD);
+            out.write(value & 0xFF);
+            out.write((value >> 8) & 0xFF);
+            out.write((value >> 16) & 0xFF);
+        }
     }
 
     private static long readLenencInt(byte[] data, int offset, int[] consumed) {
@@ -560,6 +843,9 @@ public class MySqlProtocolHandler {
             return null;
         }
         int length = b0 | (b1 << 8) | (b2 << 16);
+        if (length > MAX_PACKET_PAYLOAD) {
+            throw new IOException("MySQL packet exceeds protocol limit");
+        }
         byte[] raw = new byte[4 + length];
         raw[0] = (byte) b0;
         raw[1] = (byte) b1;
@@ -583,6 +869,11 @@ public class MySqlProtocolHandler {
         out.write((len >> 16) & 0xFF);
         out.write(seq & 0xFF);
         out.write(payload);
+    }
+
+    @FunctionalInterface
+    public interface IamUserChecker {
+        boolean isIamUser(String username);
     }
 
     private static byte[] buildErrorPacket(int errorCode, String message) throws IOException {

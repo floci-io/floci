@@ -54,6 +54,13 @@ class DynamoDbCfnProvisionerTest {
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
     }
 
+    /** The update path: the same engine plus the physical id the previous provision assigned. */
+    private ProvisionContext updateCtx(String priorPhysicalId) {
+        ProvisionContext create = ctx();
+        return new ProvisionContext(create.engine(), create.region(), create.accountId(),
+                create.stackName(), priorPhysicalId);
+    }
+
     private StackResource resource(String type, String logicalId) {
         StackResource r = new StackResource();
         r.setLogicalId(logicalId);
@@ -226,6 +233,29 @@ class DynamoDbCfnProvisionerTest {
         assertThrows(IllegalStateException.class, () -> provisioner.provision(r, props, ctx));
         assertThrows(IllegalStateException.class, () -> provisioner.delete("AWS::SQS::Queue", "q", "us-east-1"));
         verifyNoInteractions(dynamoDb);
+    }
+
+    /**
+     * A table without an explicit TableName keeps the name generated on create: regenerating one
+     * on every UpdateStack created a second table and re-pointed Ref at it.
+     */
+    @Test
+    void updateWithoutExplicitNameReusesTheGeneratedName() throws Exception {
+        String priorName = "my-stack-Orders-0123456789ab";
+        TableDefinition existing = table(false);
+        existing.setTableName(priorName);
+        when(dynamoDb.createTable(eq(priorName), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
+        when(dynamoDb.describeTable(priorName, "us-east-1")).thenReturn(existing);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(priorName);
+
+        provisioner.provision(r, props("{}"), updateCtx(priorName));
+
+        assertEquals(priorName, r.getPhysicalId());
+        verify(dynamoDb).createTable(eq(priorName), anyList(), anyList(), any(), any(), anyList(), anyList(),
+                eq("us-east-1"));
+        verify(dynamoDb).describeTable(priorName, "us-east-1");
     }
 
     @Test

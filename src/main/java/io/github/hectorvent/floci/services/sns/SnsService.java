@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -45,6 +46,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HexFormat;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -52,6 +54,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.function.Predicate;
 
 @ApplicationScoped
 public class SnsService implements Resettable, ResourceProvider {
@@ -69,6 +72,14 @@ public class SnsService implements Resettable, ResourceProvider {
             "APNS", "APNS_SANDBOX", "GCM", "FCM");
     private static final java.util.regex.Pattern PLATFORM_APP_NAME_PATTERN =
             java.util.regex.Pattern.compile("[a-zA-Z0-9_.\\-]{1,256}");
+
+    /**
+     * Operator names that may not appear as a field name inside a {@code $or} array; their
+     * presence is one of the conditions AWS uses to decide whether {@code $or} is an operator.
+     */
+    private static final Set<String> RESERVED_POLICY_KEYWORDS = Set.of(
+            "$or", "anything-but", "exists", "prefix", "suffix", "numeric", "cidr",
+            "equals-ignore-case", "wildcard");
 
     private final StorageBackend<String, Topic> topicStore;
     private final StorageBackend<String, Subscription> subscriptionStore;
@@ -1016,19 +1027,8 @@ public class SnsService implements Resettable, ResourceProvider {
                 }
                 return matchesBodyPolicy(filterPolicy, parsedBody);
             }
-            Map<String, MessageAttributeValue> attrs = messageAttributes != null ? messageAttributes : Map.of();
-            var fields = filterPolicy.fields();
-            while (fields.hasNext()) {
-                var entry = fields.next();
-                String key = entry.getKey();
-                JsonNode rules = entry.getValue();
-                MessageAttributeValue attr = attrs.get(key);
-                String actualValue = attr != null ? attr.getStringValue() : null;
-                if (!matchesAttributeRules(actualValue, rules)) {
-                    return false;
-                }
-            }
-            return true;
+            return matchesAttributePolicy(filterPolicy,
+                    messageAttributes != null ? messageAttributes : Map.of());
         } catch (Exception e) {
             LOG.warnv("Failed to parse filter policy for {0}: {1}", sub.getSubscriptionArn(), e.getMessage());
             return false;
@@ -1049,6 +1049,12 @@ public class SnsService implements Resettable, ResourceProvider {
             var entry = fields.next();
             String key = entry.getKey();
             JsonNode ruleOrNested = entry.getValue();
+            if (isOrOperator(key, ruleOrNested)) {
+                if (!anyClauseMatches(ruleOrNested, clause -> matchesBodyPolicy(clause, body))) {
+                    return false;
+                }
+                continue;
+            }
             JsonNode bodyValue = (body != null && body.isObject()) ? body.get(key) : null;
             if (ruleOrNested.isArray()) {
                 if (!matchesBodyRules(bodyValue, ruleOrNested)) {
@@ -1167,6 +1173,114 @@ public class SnsService implements Resettable, ResourceProvider {
     }
 
     /**
+     * Evaluates a filter policy against the message attribute map. Every key must match (AND),
+     * except {@code $or}, whose clauses are alternatives (OR) that still AND with their siblings.
+     */
+    private boolean matchesAttributePolicy(JsonNode policy, Map<String, MessageAttributeValue> attrs) {
+        if (!policy.isObject()) {
+            return false;
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = policy.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            String key = entry.getKey();
+            JsonNode rules = entry.getValue();
+            if (isOrOperator(key, rules)) {
+                if (!anyClauseMatches(rules, clause -> matchesAttributePolicy(clause, attrs))) {
+                    return false;
+                }
+                continue;
+            }
+            if (!matchesAttribute(attrs.get(key), rules)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Applies a rule array to one message attribute. A {@code String.Array} attribute carries a
+     * JSON array in its StringValue and AWS matches each element separately, so a positive rule
+     * passes when any element matches. {@code anything-but} inverts that: it passes only when no
+     * element is listed. {@code exists} asks about the attribute itself, not about its elements.
+     */
+    private boolean matchesAttribute(MessageAttributeValue attr, JsonNode rules) {
+        if (!rules.isArray()) {
+            return false;
+        }
+        List<String> elements = stringArrayElements(attr);
+        if (elements == null) {
+            return matchesAttributeRules(attr != null ? attr.getStringValue() : null, rules);
+        }
+        for (JsonNode rule : rules) {
+            if (rule.isObject() && rule.has("exists")) {
+                if (rule.get("exists").asBoolean()) {
+                    return true;
+                }
+                continue;
+            }
+            if (rule.isObject() && rule.has("anything-but")) {
+                if (noElementIsListed(rule, elements)) {
+                    return true;
+                }
+                continue;
+            }
+            for (String element : elements) {
+                if (matchesSingleAttributeRule(element, rule)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when no element of a {@code String.Array} is named by an {@code anything-but} rule,
+     * which is what AWS requires for that rule to match. A JSON null element names nothing, so
+     * it cannot veto the match. Note {@link #matchesObjectRule} returns true for a value that is
+     * NOT listed, so a false from it is the element that vetoes.
+     */
+    private boolean noElementIsListed(JsonNode rule, List<String> elements) {
+        for (String element : elements) {
+            if (element != null && !matchesObjectRule(rule, element)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Returns the elements of a {@code String.Array} attribute, or {@code null} when the attribute
+     * is not one -- including when its StringValue does not hold a JSON array. AWS rejects that at
+     * publish time; here the value falls back to being matched whole.
+     */
+    private List<String> stringArrayElements(MessageAttributeValue attr) {
+        if (attr == null || !"String.Array".equals(attr.getDataType())
+                || attr.getStringValue() == null) {
+            return null;
+        }
+        try {
+            // FAIL_ON_TRAILING_TOKENS matters here: without it a value of "[\"a\"] junk" parses as
+            // ["a"] and element-matches, instead of falling back to being matched whole.
+            JsonNode parsed = objectMapper.reader()
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(attr.getStringValue());
+            if (!parsed.isArray()) {
+                return null;
+            }
+            List<String> elements = new ArrayList<>(parsed.size());
+            for (JsonNode element : parsed) {
+                elements.add(element.isNull() ? null : element.asText());
+            }
+            return elements;
+        } catch (Exception e) {
+            LOG.debugv("String.Array attribute is not a JSON array, matching it whole: {0}",
+                    attr.getStringValue());
+            return null;
+        }
+    }
+
+    /**
      * Checks if an attribute value matches a single filter policy rule set.
      * Rules must be a JSON array where ANY element matching means the rule passes (OR logic).
      * Non-array rules are treated as non-matching.
@@ -1176,22 +1290,63 @@ public class SnsService implements Resettable, ResourceProvider {
             return false;
         }
         for (JsonNode rule : rules) {
-            if (rule.isTextual() && rule.asText().equals(actualValue)) {
-                return true;
-            }
-            if (rule.isNumber() && actualValue != null) {
-                try {
-                    if (new BigDecimal(actualValue).compareTo(rule.decimalValue()) == 0) {
-                        return true;
-                    }
-                } catch (NumberFormatException ignored) {
-                }
-            }
-            if (rule.isObject() && matchesObjectRule(rule, actualValue)) {
+            if (matchesSingleAttributeRule(actualValue, rule)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** Evaluates one rule out of a rule array against a single string value. */
+    private boolean matchesSingleAttributeRule(String actualValue, JsonNode rule) {
+        if (rule.isTextual()) {
+            return rule.asText().equals(actualValue);
+        }
+        if (rule.isNumber() && actualValue != null) {
+            try {
+                return new BigDecimal(actualValue).compareTo(rule.decimalValue()) == 0;
+            } catch (NumberFormatException ignored) {
+                // A non-numeric attribute simply does not match a numeric rule.
+                return false;
+            }
+        }
+        if (rule.isObject()) {
+            return matchesObjectRule(rule, actualValue);
+        }
+        return false;
+    }
+
+    /** True when at least one clause of a {@code $or} array matches. */
+    private boolean anyClauseMatches(JsonNode clauses, Predicate<JsonNode> matches) {
+        for (JsonNode clause : clauses) {
+            if (matches.test(clause)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * AWS reads {@code $or} as an operator only when its value is an array holding at least two
+     * objects, none of which use a reserved operator name as a field name. Anything else is an
+     * ordinary key named {@code $or} and is matched as one.
+     */
+    private static boolean isOrOperator(String key, JsonNode value) {
+        if (!"$or".equals(key) || value == null || !value.isArray() || value.size() < 2) {
+            return false;
+        }
+        for (JsonNode clause : value) {
+            if (!clause.isObject()) {
+                return false;
+            }
+            Iterator<String> names = clause.fieldNames();
+            while (names.hasNext()) {
+                if (RESERVED_POLICY_KEYWORDS.contains(names.next())) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /**
