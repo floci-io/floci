@@ -315,7 +315,11 @@ public class CloudFormationTemplateEngine {
             return "";
         }
         String delimiter = join.get(0).asText("");
-        return String.join(delimiter, resolveList(join.get(1)));
+        // CDK splices a dynamic reference across fragments, for example
+        // ["{{resolve:secretsmanager:", {"Ref": "Secret"}, ":SecretString:password::}}"], so the
+        // fragments are only intrinsic-resolved here and the caller resolves dynamic references on
+        // the concatenated string. Resolving them per fragment rejects every fragment as unclosed.
+        return String.join(delimiter, resolveList(join.get(1), false));
     }
 
     private String resolveSelect(JsonNode select) {
@@ -336,12 +340,21 @@ public class CloudFormationTemplateEngine {
      * two such lists, or a comma-delimited scalar (e.g. a {@code Ref} to a {@code List<>} parameter).
      */
     private List<String> resolveList(JsonNode node) {
+        return resolveList(node, true);
+    }
+
+    /**
+     * @param resolveDynamicReferences whether scalar elements pass through the dynamic-reference
+     *                                 stage individually; {@code Fn::Join} passes {@code false}
+     *                                 because a reference may span several fragments.
+     */
+    private List<String> resolveList(JsonNode node, boolean resolveDynamicReferences) {
         List<String> out = new ArrayList<>();
         if (node == null || node.isNull() || node.isMissingNode()) {
             return out;
         }
         if (node.isArray()) {
-            return resolveListElements(node);
+            return resolveListElements(node, resolveDynamicReferences);
         }
         if (node.isObject()) {
             if (node.has("Fn::If")) {
@@ -350,7 +363,7 @@ public class CloudFormationTemplateEngine {
                 // to the scalar branch below, which would stringify a list-shaped branch instead
                 // of splitting it.
                 JsonNode branch = selectIfBranch(node.get("Fn::If"));
-                return branch == null ? out : resolveList(branch);
+                return branch == null ? out : resolveList(branch, resolveDynamicReferences);
             }
             if (node.has("Fn::GetAZs")) {
                 return resolveAvailabilityZones(node.get("Fn::GetAZs"));
@@ -362,7 +375,7 @@ public class CloudFormationTemplateEngine {
                 return resolveSplit(node.get("Fn::Split"));
             }
         }
-        String scalar = resolve(node);
+        String scalar = resolveDynamicReferences ? resolve(node) : resolveIntrinsic(node);
         if (!scalar.isEmpty()) {
             out.addAll(Arrays.asList(scalar.split(",", -1)));
         }
@@ -378,12 +391,16 @@ public class CloudFormationTemplateEngine {
      * so dropping a blank element ahead of the selected index would shift every later index.
      */
     private List<String> resolveListElements(JsonNode node) {
+        return resolveListElements(node, true);
+    }
+
+    private List<String> resolveListElements(JsonNode node, boolean resolveDynamicReferences) {
         List<String> out = new ArrayList<>();
         for (JsonNode element : node) {
             if (isListValuedIntrinsic(element)) {
-                out.addAll(resolveList(element));
+                out.addAll(resolveList(element, resolveDynamicReferences));
             } else {
-                out.add(resolve(element));
+                out.add(resolveDynamicReferences ? resolve(element) : resolveIntrinsic(element));
             }
         }
         return out;

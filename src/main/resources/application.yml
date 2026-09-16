@@ -116,6 +116,10 @@ quarkus:
 floci:
   port: 4566
   base-url: "http://localhost:4566"
+  network:
+    security-group-enforcement:
+      enabled: false
+      helper-image: floci/network-helper:local
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
   default-region: us-east-1
@@ -160,6 +164,8 @@ floci:
       acm:
         flush-interval-ms: 5000
       opensearch:
+        flush-interval-ms: 5000
+      sagemaker:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
@@ -319,6 +325,9 @@ floci:
         enabled: false
     apigateway:
       enabled: true
+      vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL mapping template may execute (truncates the loop, does not fail the template)
+      vtl-max-output-chars: 1048576        # Maximum characters a VTL mapping template may render before it fails
+      vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL mapping template may spend evaluating before it fails
     apigatewayv2:
       enabled: true
     iam:
@@ -536,6 +545,18 @@ floci:
       # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
       # Set an absolute http:// or https:// URL here only to override that derivation.
       insecure-skip-tls-verify: false
+      # The console-contract keys below are deliberately unset. Floci reads the console's own
+      # io.floci.console.* image labels first, then a built-in profile, then the contract defaults
+      # (/api/health, port 4500, status: ok). Setting a value here overrides all of that, so only
+      # do it for a console that describes itself neither way. See docs/ui/console-contract.md.
+      # internal-port: 4500
+      # endpoint-env: AWS_ENDPOINT_URL
+      # status-path: /api/health
+      # status-ready-field: status      # "none" means any 200 counts as ready
+      # status-ready-value: ok
+      # status-unavailable-value: unavailable
+      # extra-env:                     # PORT and AWS_ENDPOINT_URL are ignored here: use
+      #   - MY_CONSOLE_FLAG=true       # internal-port and endpoint above instead
     bedrock:
       enabled: true
     bedrock-runtime:
@@ -579,6 +600,9 @@ floci:
       enabled: true
       mock: false
     codebuild:
+      enabled: true
+      # docker-network: floci-network
+    sagemaker:
       enabled: true
       # docker-network: floci-network
     batch:
@@ -646,6 +670,9 @@ floci:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
+      vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL resolver template may execute (truncates the loop, does not fail the template)
+      vtl-max-output-chars: 1048576        # Maximum characters a VTL resolver template may render before it fails
+      vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL resolver template may spend evaluating before it fails
     s3vectors:
       enabled: true
     s3tables:
@@ -740,6 +767,8 @@ floci:
       enabled: true
       # invoke-response: '{"output":"yes"}'   # Body returned by InvokeAgentRuntime
       # validate-runtime-exists: false        # true = reject unknown runtime ARNs
+      # harness-echo-prefix: 'You said: '      # Prefix on the reply InvokeHarness streams back
+      # harness-empty-reply: 'No user message was supplied.'
     bedrock-agent-core-control:
       enabled: true
     servicequotas:

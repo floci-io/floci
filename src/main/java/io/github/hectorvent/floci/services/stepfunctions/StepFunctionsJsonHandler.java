@@ -393,7 +393,8 @@ public class StepFunctionsJsonHandler {
      * {@code arn:aws:states:::aws-sdk:sfn:describeMapRun} Task integration renders the same node in
      * PascalCase, so this is the one place the response is described.
      *
-     * <p>Both tolerances and {@code redriveCount} are zero because Floci implements neither, and
+     * <p>The tolerances are the ones the Map state declared, and default to zero.
+     * {@code redriveCount} is zero because Floci does not implement redrive, and
      * {@code redriveDate} is absent until a run is redriven, which no run here ever is.
      */
     static ObjectNode describeMapRunResponse(ObjectMapper objectMapper, MapRun mapRun) {
@@ -404,26 +405,26 @@ public class StepFunctionsJsonHandler {
         response.put("startDate", mapRun.getStartDate());
         response.put("stopDate", mapRun.getStopDate());
         response.put("maxConcurrency", mapRun.getMaxConcurrency());
-        response.put("toleratedFailurePercentage", 0.0);
-        response.put("toleratedFailureCount", 0);
-        putMapRunCounts(response.putObject("itemCounts"), mapRun);
-        // One child execution per item: ItemBatcher is not applied, so no execution covers a batch.
-        putMapRunCounts(response.putObject("executionCounts"), mapRun);
+        response.put("toleratedFailurePercentage", mapRun.getToleratedFailurePercentage());
+        response.put("toleratedFailureCount", mapRun.getToleratedFailureCount());
+        putMapRunCounts(response.putObject("itemCounts"), mapRun.getItemCount(),
+                mapRun.getSucceededCount(), mapRun.getFailedCount());
+        // An ItemBatcher run has one execution per batch, so the two blocks differ there.
+        putMapRunCounts(response.putObject("executionCounts"), mapRun.getExecutionCount(),
+                mapRun.getSucceededExecutionCount(), mapRun.getFailedExecutionCount());
         response.put("redriveCount", 0);
         return response;
     }
 
     /** A failed item's result counts as written, as on AWS. */
-    private static void putMapRunCounts(ObjectNode counts, MapRun mapRun) {
-        var succeeded = mapRun.getSucceededCount();
-        var failed = mapRun.getFailedCount();
+    private static void putMapRunCounts(ObjectNode counts, int total, int succeeded, int failed) {
         counts.put("pending", 0);
         counts.put("running", 0);
         counts.put("succeeded", succeeded);
         counts.put("failed", failed);
         counts.put("timedOut", 0);
-        counts.put("aborted", mapRun.getItemCount() - succeeded - failed);
-        counts.put("total", mapRun.getItemCount());
+        counts.put("aborted", total - succeeded - failed);
+        counts.put("total", total);
         counts.put("resultsWritten", succeeded + failed);
         counts.put("failuresNotRedrivable", 0);
         counts.put("pendingRedrive", 0);

@@ -1,8 +1,7 @@
-package io.github.hectorvent.floci.services.bedrockruntime.backend;
+package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsEventStreamEncoder;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -10,19 +9,19 @@ import java.io.UncheckedIOException;
 import java.util.LinkedHashMap;
 
 /**
- * Frames Bedrock ConverseStream events (messageStart, contentBlockDelta, ...) as
+ * Frames streaming events (messageStart, contentBlockDelta, ...) as
  * {@code application/vnd.amazon.eventstream} messages and writes each one to the response
  * {@link OutputStream} as soon as it's known, so SDK clients see incremental delivery instead
  * of the whole response landing at once - the same binary framing S3 Select and Kinesis
  * SubscribeToShard build elsewhere in Floci, just written frame-by-frame instead of batched.
  */
-final class BedrockStreamEncoder {
+public final class AwsEventStreamWriter {
 
-    private BedrockStreamEncoder() {
+    private AwsEventStreamWriter() {
     }
 
     /** Writes a normal event frame ({@code :message-type: event}), e.g. messageStart, contentBlockDelta. */
-    static void writeEvent(ObjectMapper mapper, OutputStream out, String eventType, ObjectNode payload) {
+    public static void writeEvent(ObjectMapper mapper, OutputStream out, String eventType, ObjectNode payload) {
         writeFrame(mapper, out, "event", ":event-type", eventType, payload);
     }
 
@@ -33,7 +32,7 @@ final class BedrockStreamEncoder {
      * pick the matching modeled exception class (e.g. ModelStreamErrorException), the same way
      * it reads {@code x-amzn-ErrorType} for a regular non-streaming error response.
      */
-    static void writeException(ObjectMapper mapper, OutputStream out, String exceptionType, ObjectNode payload) {
+    public static void writeException(ObjectMapper mapper, OutputStream out, String exceptionType, ObjectNode payload) {
         writeFrame(mapper, out, "exception", ":exception-type", exceptionType, payload);
     }
 

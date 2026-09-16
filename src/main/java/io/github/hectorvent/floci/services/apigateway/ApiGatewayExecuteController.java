@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponseType;
 import io.github.hectorvent.floci.services.apigateway.model.Integration;
 import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
@@ -41,8 +43,12 @@ import jakarta.ws.rs.core.*;
 import org.jboss.logging.Logger;
 
 import java.net.URLDecoder;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -136,6 +142,21 @@ public class ApiGatewayExecuteController {
             "^arn:aws[^:]*:elasticloadbalancing:([^:]+):[^:]*:listener/(?:app|net)/.+$");
 
     private record AuthorizerResult(Response errorResponse, String principalId, Map<String, Object> context) {}
+
+    /**
+     * What a gateway-generated error needs in order to render the REST API's gateway response for
+     * it: where the request landed and the raw request, for {@code method.request.*},
+     * {@code context.*} and {@code stageVariables.*} parameter sources. The resource is null until
+     * routing has matched one.
+     */
+    private record GatewayResponseScope(String region, String apiId, String stageName, Stage stage,
+                                        String httpMethod, String path, ApiGatewayResource resource,
+                                        HttpHeaders headers, UriInfo uriInfo, byte[] body) {
+        GatewayResponseScope withResource(ApiGatewayResource matched) {
+            return new GatewayResponseScope(region, apiId, stageName, stage, httpMethod, path, matched,
+                    headers, uriInfo, body);
+        }
+    }
 
     // ──────────────────────────── @connections API ────────────────────────────
 
@@ -327,12 +348,14 @@ public class ApiGatewayExecuteController {
         }
 
         String path = "/" + (proxy == null ? "" : proxy);
+        GatewayResponseScope scope = new GatewayResponseScope(region, apiId, stageName, stage, httpMethod, path,
+                null, headers, uriInfo, body);
 
         // Find matching resource and method
         List<ApiGatewayResource> resources = apiGatewayService.getResources(region, apiId);
         List<ApiGatewayResource> matchedResources = matchResources(resources, path);
         if (matchedResources.isEmpty()) {
-            return restNoMatch();
+            return restNoMatch(scope);
         }
 
         ApiGatewayResource matched = null;
@@ -360,8 +383,9 @@ public class ApiGatewayExecuteController {
         }
 
         if (matched == null) {
-            return restNoMatch();
+            return restNoMatch(scope);
         }
+        scope = scope.withResource(matched);
 
         // 1. Authorizer
         ResolvedApiKey resolvedApiKey = resolveApiKeyForRequest(region, apiId, stageName, headers);
@@ -374,32 +398,28 @@ public class ApiGatewayExecuteController {
             ExecuteApiSigV4Authorizer.Result iamResult =
                     sigV4Authorizer.authorize(httpMethod, headers, uriInfo, body, routeContext.signedRequestPath());
             if (!iamResult.authorized()) {
-                return restIamRejection(iamResult);
+                return restIamRejection(scope, iamResult);
             }
             iamIdentity = iamResult.identity();
         }
 
-        AuthorizerResult authorizerResult = invokeAuthorizer(region, apiId, stageName, httpMethod, path, matched.getPath(), matched.getId(), stage, method, headers, uriInfo, resolvedApiKey);
+        AuthorizerResult authorizerResult = invokeAuthorizer(scope, region, apiId, stageName, httpMethod, path, matched.getPath(), matched.getId(), stage, method, headers, uriInfo, resolvedApiKey);
         if (authorizerResult.errorResponse() != null) return authorizerResult.errorResponse();
 
         // API Gateway checks the API key requirement after authorization but before request
         // validation and throttling. resolvedApiKey is null when the header is missing or matches
         // no enabled key linked to this (apiId, stage) through a usage plan.
         if (method.isApiKeyRequired() && resolvedApiKey == null) {
-            return Response.status(403)
-                    .entity(jsonMessage("Forbidden"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.INVALID_API_KEY, 403, "Forbidden");
         }
 
         // 2. Request validation
-        Response validationResponse = validateRequest(region, apiId, method, headers, uriInfo, body);
+        Response validationResponse = validateRequest(scope, region, apiId, method, headers, uriInfo, body);
         if (validationResponse != null) return validationResponse;
 
         Integration integration = method.getMethodIntegration();
         if (integration == null) {
-            return Response.status(500)
-                    .entity(jsonMessage("No integration configured"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500, "No integration configured");
         }
 
         LOG.debugv("execute-api: {0} {1}/{2}{3} → {4}", httpMethod, apiId, stageName, path,
@@ -409,26 +429,24 @@ public class ApiGatewayExecuteController {
         // report it rather than failing with an NPE inside the switch.
         String integrationType = integration.getType();
         if (integrationType == null || integrationType.isBlank()) {
-            return Response.status(500)
-                    .entity(jsonMessage("No integration type configured"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
+                    "No integration type configured");
         }
 
         return switch (integrationType.toUpperCase(Locale.ROOT)) {
-            case "AWS_PROXY" -> invokeProxy(region, apiId, httpMethod, path, proxy, stageName,
+            case "AWS_PROXY" -> invokeProxy(scope, region, apiId, httpMethod, path, proxy, stageName,
                     matched, stage, integration, headers, uriInfo, body, authorizerResult, resolvedApiKey,
                     iamIdentity);
-            case "AWS" -> invokeAwsIntegration(region, httpMethod, path, stageName,
+            case "AWS" -> invokeAwsIntegration(scope, region, httpMethod, path, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
-            case "HTTP_PROXY" -> invokeHttpProxy(apiId, httpMethod, path, proxy, stageName,
+            case "HTTP_PROXY" -> invokeHttpProxy(scope, apiId, httpMethod, path, proxy, stageName,
                     matched, integration, headers, uriInfo, body);
-            case "HTTP" -> invokeHttpIntegration(apiId, httpMethod, path, proxy, stageName,
+            case "HTTP" -> invokeHttpIntegration(scope, apiId, httpMethod, path, proxy, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
-            case "MOCK" -> invokeMock(region, httpMethod, path, stageName,
+            case "MOCK" -> invokeMock(scope, region, httpMethod, path, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
-            default -> Response.status(500)
-                    .entity(jsonMessage("Unsupported integration type: " + integration.getType()))
-                    .type(MediaType.APPLICATION_JSON).build();
+            default -> gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
+                    "Unsupported integration type: " + integration.getType());
         };
     }
 
@@ -439,7 +457,8 @@ public class ApiGatewayExecuteController {
 
     // ──────────────────────────── AWS_PROXY ────────────────────────────
 
-    private Response invokeProxy(String region, String apiId, String httpMethod, String path, String proxy,
+    private Response invokeProxy(GatewayResponseScope scope, String region, String apiId, String httpMethod,
+                                 String path, String proxy,
                                  String stageName, ApiGatewayResource resource,
                                  Stage stage,
                                  Integration integration, HttpHeaders headers,
@@ -448,9 +467,8 @@ public class ApiGatewayExecuteController {
                                  ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
         String functionName = functionNameFromUri(integration.getUri());
         if (functionName == null) {
-            return Response.status(500)
-                    .entity(jsonMessage("Cannot resolve function from URI: " + integration.getUri()))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
+                    "Cannot resolve function from URI: " + integration.getUri());
         }
 
         String requestId = UUID.randomUUID().toString();
@@ -461,12 +479,18 @@ public class ApiGatewayExecuteController {
         try {
             InvokeResult result = lambdaService.invoke(region, functionName, eventJson.getBytes(),
                     InvocationType.RequestResponse);
-            return buildProxyResponse(result, false);
+            Response response = buildProxyResponse(result, false);
+            if (response.getStatus() == 502 && isGatewayGeneratedProxyFailure(result)) {
+                // A function error or a payload that is not a proxy response is answered by the
+                // gateway itself, so a configured INTEGRATION_FAILURE / DEFAULT_5XX shapes it.
+                return gatewayResponseOr(response, scope, GatewayResponseType.INTEGRATION_FAILURE,
+                        "Internal server error");
+            }
+            return response;
         } catch (AwsException e) {
             if (e.getHttpStatus() == 404) {
-                return Response.status(404)
-                        .entity(jsonMessage("Function not found: " + functionName))
-                        .type(MediaType.APPLICATION_JSON).build();
+                return gatewayResponse(scope, GatewayResponseType.INTEGRATION_FAILURE, 404,
+                        "Function not found: " + functionName);
             }
             throw e;
         }
@@ -482,15 +506,14 @@ public class ApiGatewayExecuteController {
      * error statuses, which must not be remapped into a gateway error. Only
      * {@code integration.request.*} parameter mapping applies on the way out.
      */
-    private Response invokeHttpProxy(String apiId, String httpMethod, String path, String proxy,
-                                     String stageName, ApiGatewayResource resource,
+    private Response invokeHttpProxy(GatewayResponseScope scope, String apiId, String httpMethod, String path,
+                                     String proxy, String stageName, ApiGatewayResource resource,
                                      Integration integration, HttpHeaders headers,
                                      UriInfo uriInfo, byte[] body) {
         String uri = integration.getUri();
         if (uri == null || uri.isBlank()) {
-            return Response.status(500)
-                    .entity(jsonMessage("No integration URI configured"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
+                    "No integration URI configured");
         }
 
         // Two views of the same inbound data. The multi-value maps are what gets forwarded: a
@@ -590,16 +613,15 @@ public class ApiGatewayExecuteController {
      * {@code selectionPattern} is matched against the backend's HTTP status code (for
      * {@code AWS}/Lambda integrations it is matched against the error message instead).
      */
-    private Response invokeHttpIntegration(String apiId, String httpMethod, String path, String proxy,
-                                           String stageName, ApiGatewayResource resource,
+    private Response invokeHttpIntegration(GatewayResponseScope scope, String apiId, String httpMethod, String path,
+                                           String proxy, String stageName, ApiGatewayResource resource,
                                            Integration integration, HttpHeaders headers,
                                            UriInfo uriInfo, byte[] body,
                                            AuthorizerResult authorizerResult) {
         String uri = integration.getUri();
         if (uri == null || uri.isBlank()) {
-            return Response.status(500)
-                    .entity(jsonMessage("No integration URI configured"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
+                    "No integration URI configured");
         }
 
         String requestId = UUID.randomUUID().toString();
@@ -650,7 +672,7 @@ public class ApiGatewayExecuteController {
         }
 
         RequestTemplateResult requestTemplateResult =
-                applyRequestTemplates(integration, incomingContentType, bodyStr, vtlCtx);
+                applyRequestTemplates(scope, integration, incomingContentType, bodyStr, vtlCtx);
         if (requestTemplateResult.rejection() != null) return requestTemplateResult.rejection();
         String transformedBody = requestTemplateResult.body();
 
@@ -712,7 +734,22 @@ public class ApiGatewayExecuteController {
                 defaultContentType);
     }
 
-    private AuthorizerResult invokeAuthorizer(String region, String apiId, String stageName,
+    private boolean isGatewayGeneratedProxyFailure(InvokeResult result) {
+        if (result.getFunctionError() != null) {
+            return true;
+        }
+        byte[] payload = result.getPayload();
+        if (payload == null || payload.length == 0) {
+            return false;
+        }
+        try {
+            return !objectMapper.readTree(payload).isObject();
+        } catch (IOException e) {
+            return true;
+        }
+    }
+
+    private AuthorizerResult invokeAuthorizer(GatewayResponseScope scope, String region, String apiId, String stageName,
                                               String httpMethod, String requestPath, String resourcePath,
                                               String resourceId,
                                               Stage stage,
@@ -734,14 +771,16 @@ public class ApiGatewayExecuteController {
             try {
                 InvokeResult result = lambdaService.invoke(region, lambdaName, event.getBytes(), InvocationType.RequestResponse);
                 if (result.getFunctionError() != null) {
-                    return new AuthorizerResult(Response.status(403).build(), null, null);
+                    return new AuthorizerResult(gatewayResponseOr(Response.status(403).build(), scope,
+                            GatewayResponseType.AUTHORIZER_FAILURE, null), null, null);
                 }
 
                 JsonNode policy = objectMapper.readTree(result.getPayload());
                 String effect = policy.path("policyDocument").path("Statement").get(0).path("Effect").asText("Deny");
                 if ("Deny".equalsIgnoreCase(effect)) {
                     return new AuthorizerResult(
-                            Response.status(403).entity(jsonMessage("User is not authorized to access this resource")).build(),
+                            gatewayResponse(scope, GatewayResponseType.ACCESS_DENIED, 403,
+                                    "User is not authorized to access this resource"),
                             null,
                             null);
                 }
@@ -750,13 +789,14 @@ public class ApiGatewayExecuteController {
                 return new AuthorizerResult(null, principalId, context);
             } catch (Exception e) {
                 LOG.warnv("Authorizer failure: {0}", e.getMessage());
-                return new AuthorizerResult(Response.status(500).build(), null, null);
+                return new AuthorizerResult(gatewayResponseOr(Response.status(500).build(), scope,
+                        GatewayResponseType.AUTHORIZER_FAILURE, null), null, null);
             }
         }
         return new AuthorizerResult(null, null, null);
     }
 
-    private Response validateRequest(String region, String apiId, MethodConfig method,
+    private Response validateRequest(GatewayResponseScope scope, String region, String apiId, MethodConfig method,
                                       HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         String validatorId = method.getRequestValidatorId();
         if (validatorId == null) return null;
@@ -780,16 +820,14 @@ public class ApiGatewayExecuteController {
                     if (paramKey.startsWith("method.request.querystring.")) {
                         String name = paramKey.substring("method.request.querystring.".length());
                         if (!queryParams.containsKey(name) || queryParams.getFirst(name) == null) {
-                            return Response.status(400)
-                                    .entity(jsonMessage("Missing required request parameter in QUERY_STRING: '" + name + "'"))
-                                    .type(MediaType.APPLICATION_JSON).build();
+                            return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_PARAMETERS, 400,
+                                    "Missing required request parameter in QUERY_STRING: '" + name + "'");
                         }
                     } else if (paramKey.startsWith("method.request.header.")) {
                         String name = paramKey.substring("method.request.header.".length());
                         if (headers.getHeaderString(name) == null) {
-                            return Response.status(400)
-                                    .entity(jsonMessage("Missing required request parameter in HEADER: '" + name + "'"))
-                                    .type(MediaType.APPLICATION_JSON).build();
+                            return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_PARAMETERS, 400,
+                                    "Missing required request parameter in HEADER: '" + name + "'");
                         }
                     }
                 }
@@ -814,9 +852,8 @@ public class ApiGatewayExecuteController {
                         if (schemaStr != null && !schemaStr.isBlank()) {
                             String bodyStr = body != null ? new String(body, StandardCharsets.UTF_8) : "";
                             if (bodyStr.isBlank()) {
-                                return Response.status(400)
-                                        .entity(jsonMessage("Invalid request body"))
-                                        .type(MediaType.APPLICATION_JSON).build();
+                                return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_BODY, 400,
+                                        "Invalid request body");
                             }
                             JsonNode schemaNode = objectMapper.readTree(schemaStr);
                             JsonNode bodyNode = objectMapper.readTree(bodyStr);
@@ -828,17 +865,15 @@ public class ApiGatewayExecuteController {
                             var errors = schema.validate(bodyNode);
                             if (!errors.isEmpty()) {
                                 String errorMsg = errors.iterator().next().getMessage();
-                                return Response.status(400)
-                                        .entity(jsonMessage("Invalid request body: " + errorMsg))
-                                        .type(MediaType.APPLICATION_JSON).build();
+                                return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_BODY, 400,
+                                        "Invalid request body: " + errorMsg, errorMsg);
                             }
                         }
                     } catch (AwsException e) {
                         // Model not found — skip body validation
                     } catch (Exception e) {
-                        return Response.status(400)
-                                .entity(jsonMessage("Invalid request body"))
-                                .type(MediaType.APPLICATION_JSON).build();
+                        return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_BODY, 400,
+                                "Invalid request body");
                     }
                 }
             }
@@ -1264,16 +1299,15 @@ public class ApiGatewayExecuteController {
         return result.isEmpty() ? null : result;
     }
 
-    private Response invokeAwsIntegration(String region, String httpMethod, String path,
+    private Response invokeAwsIntegration(GatewayResponseScope scope, String region, String httpMethod, String path,
                                           String stageName, ApiGatewayResource resource,
                                           Integration integration, HttpHeaders headers,
                                           UriInfo uriInfo, byte[] body,
                                           AuthorizerResult authorizerResult) {
         AwsServiceRouter.IntegrationTarget target = serviceRouter.parseIntegrationUri(integration.getUri());
         if (target == null) {
-            return Response.status(500)
-                    .entity(jsonMessage("Cannot parse AWS integration URI: " + integration.getUri()))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
+                    "Cannot parse AWS integration URI: " + integration.getUri());
         }
 
         String requestId = UUID.randomUUID().toString();
@@ -1328,7 +1362,7 @@ public class ApiGatewayExecuteController {
 
         // Content-Type negotiation and passthrough behavior
         RequestTemplateResult requestTemplateResult =
-                applyRequestTemplates(integration, incomingContentType, bodyStr, vtlCtx);
+                applyRequestTemplates(scope, integration, incomingContentType, bodyStr, vtlCtx);
         if (requestTemplateResult.rejection() != null) return requestTemplateResult.rejection();
         String transformedBody = requestTemplateResult.body();
 
@@ -1472,11 +1506,11 @@ public class ApiGatewayExecuteController {
      * {@code passthroughBehavior} when no template matches. Shared by the {@code AWS} and
      * {@code HTTP} (non-proxy) integration types, which negotiate identically.
      */
-    private RequestTemplateResult applyRequestTemplates(Integration integration, String incomingContentType,
-                                                        String bodyStr, VtlTemplateEngine.VtlContext vtlCtx) {
-        Response unsupportedMediaType = Response.status(415)
-                .entity(jsonMessage("Unsupported Media Type"))
-                .type(MediaType.APPLICATION_JSON).build();
+    private RequestTemplateResult applyRequestTemplates(GatewayResponseScope scope, Integration integration,
+                                                        String incomingContentType, String bodyStr,
+                                                        VtlTemplateEngine.VtlContext vtlCtx) {
+        Response unsupportedMediaType = gatewayResponse(scope, GatewayResponseType.UNSUPPORTED_MEDIA_TYPE, 415,
+                "Unsupported Media Type");
         Map<String, String> requestTemplates = integration.getRequestTemplates();
 
         if (requestTemplates == null || requestTemplates.isEmpty()) {
@@ -1667,8 +1701,8 @@ public class ApiGatewayExecuteController {
 
     // ──────────────────────────── MOCK ────────────────────────────
 
-    private Response invokeMock(String region, String httpMethod, String path, String stageName,
-                                ApiGatewayResource resource, Integration integration,
+    private Response invokeMock(GatewayResponseScope scope, String region, String httpMethod, String path,
+                                String stageName, ApiGatewayResource resource, Integration integration,
                                 HttpHeaders headers, UriInfo uriInfo, byte[] body,
                                 AuthorizerResult authorizerResult) {
         String requestId = UUID.randomUUID().toString();
@@ -1709,17 +1743,13 @@ public class ApiGatewayExecuteController {
         Integer mockStatus = resolveMockStatusCode(integration, resource, httpMethod, headers, bodyStr, vtlCtx);
         if (mockStatus == null) {
             // A request template that does not render is a configuration error on AWS too.
-            return Response.status(500)
-                    .entity(jsonMessage("Internal server error"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500, "Internal server error");
         }
         IntegrationResponse ir = selectMockIntegrationResponse(integrationResponses, mockStatus);
         if (ir == null) {
             LOG.warnv("execute-api: MOCK {0} {1} produced statusCode {2} but no integration response "
                     + "matches it and none is the default", httpMethod, resource.getPath(), mockStatus);
-            return Response.status(500)
-                    .entity(jsonMessage("Internal server error"))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500, "Internal server error");
         }
 
         String template = ir.responseTemplates() != null
@@ -2329,7 +2359,7 @@ public class ApiGatewayExecuteController {
 
     // ──────────────────────────── AWS_IAM (SigV4) rejections ────────────────────────────
 
-    private record RestIamError(String errorType, String message) {}
+    private record RestIamError(String errorType, String message, GatewayResponseType responseType) {}
 
     /**
      * Renders a failed AWS_IAM check the way a REST API does: always {@code 403}, with the message
@@ -2337,26 +2367,26 @@ public class ApiGatewayExecuteController {
      * omits the canonical-string dump real AWS appends, which is a debugging aid rather than part of
      * the contract; the reason is logged instead.
      */
-    private Response restIamRejection(ExecuteApiSigV4Authorizer.Result result) {
+    private Response restIamRejection(GatewayResponseScope scope, ExecuteApiSigV4Authorizer.Result result) {
         LOG.debugv("execute-api AWS_IAM rejected a REST request: {0} ({1})",
                 result.failure(), result.detail());
         RestIamError error = switch (result.failure()) {
             case MISSING -> new RestIamError("MissingAuthenticationTokenException",
-                    "Missing Authentication Token");
+                    "Missing Authentication Token", GatewayResponseType.MISSING_AUTHENTICATION_TOKEN);
             case MALFORMED -> new RestIamError("IncompleteSignatureException",
-                    "Incomplete Signature");
+                    "Incomplete Signature", GatewayResponseType.INVALID_SIGNATURE);
             case UNKNOWN_KEY -> new RestIamError("UnrecognizedClientException",
-                    "The security token included in the request is invalid.");
+                    "The security token included in the request is invalid.", GatewayResponseType.ACCESS_DENIED);
             case EXPIRED -> new RestIamError("InvalidSignatureException",
-                    "Signature expired");
+                    "Signature expired", GatewayResponseType.EXPIRED_TOKEN);
             case MISMATCH -> new RestIamError("InvalidSignatureException",
                     "The request signature we calculated does not match the signature you provided."
-                            + " Check your AWS Secret Access Key and signing method.");
+                            + " Check your AWS Secret Access Key and signing method.",
+                    GatewayResponseType.INVALID_SIGNATURE);
         };
-        return Response.status(403)
+        return gatewayResponseBuilder(scope, error.responseType(), 403, error.message(), null)
                 .header("x-amzn-ErrorType", error.errorType())
-                .entity(jsonMessage(error.message()))
-                .type(MediaType.APPLICATION_JSON).build();
+                .build();
     }
 
     /**
@@ -2371,12 +2401,15 @@ public class ApiGatewayExecuteController {
      *
      * <p>HTTP APIs are unaffected: they answer an unmatched route with {@code 404}
      * {@code {"message":"Not Found"}}, which the v2 dispatch path continues to do.
+     *
+     * <p>Being gateway-generated, the answer is shaped by the API's
+     * {@code MISSING_AUTHENTICATION_TOKEN} (or {@code DEFAULT_4XX}) gateway response.
      */
-    private Response restNoMatch() {
-        return Response.status(403)
+    private Response restNoMatch(GatewayResponseScope scope) {
+        return gatewayResponseBuilder(scope, GatewayResponseType.MISSING_AUTHENTICATION_TOKEN, 403,
+                "Missing Authentication Token", null)
                 .header("x-amzn-ErrorType", "MissingAuthenticationTokenException")
-                .entity(jsonMessage("Missing Authentication Token"))
-                .type(MediaType.APPLICATION_JSON).build();
+                .build();
     }
 
     /**
@@ -2988,6 +3021,282 @@ public class ApiGatewayExecuteController {
         } catch (IllegalArgumentException e) {
             return false;
         }
+    }
+
+
+    // ──────────────────────────── Gateway responses ────────────────────────────
+
+    private static final String GATEWAY_RESPONSE_HEADER_PREFIX = "gatewayresponse.header.";
+    private static final DateTimeFormatter GATEWAY_REQUEST_TIME =
+            DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z");
+
+    /**
+     * The {@code {"message": ...}} answer a REST API gives when it, rather than the integration,
+     * produces the response, shaped by the API's gateway response for {@code type}: the customised
+     * type itself, else its DEFAULT_4XX / DEFAULT_5XX, else the plain body Floci always sent.
+     */
+    private Response gatewayResponse(GatewayResponseScope scope, GatewayResponseType type, int status,
+                                     String message) {
+        return gatewayResponse(scope, type, status, message, null);
+    }
+
+    private Response gatewayResponse(GatewayResponseScope scope, GatewayResponseType type, int status,
+                                     String message, String validationError) {
+        return gatewayResponseBuilder(scope, type, status, message, validationError).build();
+    }
+
+    private Response.ResponseBuilder gatewayResponseBuilder(GatewayResponseScope scope, GatewayResponseType type,
+                                                            int status, String message, String validationError) {
+        GatewayResponse configured = apiGatewayService.resolveGatewayResponse(scope.region(), scope.apiId(),
+                type, status);
+        if (configured == null) {
+            return Response.status(status).entity(jsonMessage(message)).type(MediaType.APPLICATION_JSON);
+        }
+        return renderGatewayResponse(scope, configured, type, status, message, validationError);
+    }
+
+    /**
+     * For the sites whose uncustomised answer is not the {@code {"message"}} body (a bare status,
+     * or the Lambda payload passed through): the answer stays as it was unless the API customised
+     * a gateway response for it.
+     */
+    private Response gatewayResponseOr(Response fallback, GatewayResponseScope scope, GatewayResponseType type,
+                                       String message) {
+        GatewayResponse configured = apiGatewayService.resolveGatewayResponse(scope.region(), scope.apiId(),
+                type, fallback.getStatus());
+        if (configured == null) {
+            return fallback;
+        }
+        return renderGatewayResponse(scope, configured, type, fallback.getStatus(), message, null).build();
+    }
+
+    private Response.ResponseBuilder renderGatewayResponse(GatewayResponseScope scope, GatewayResponse configured,
+                                                           GatewayResponseType type, int status, String message,
+                                                           String validationError) {
+        int finalStatus = status;
+        if (configured.getStatusCode() != null) {
+            try {
+                finalStatus = Integer.parseInt(configured.getStatusCode());
+            } catch (NumberFormatException e) {
+                LOG.warnv("Gateway response {0} of API {1} carries a non-numeric statusCode {2}; keeping {3}",
+                        configured.getResponseType(), scope.apiId(), configured.getStatusCode(), status);
+            }
+        }
+
+        Map<String, String> headerMap = gatewayRequestHeaders(scope.headers());
+        Map<String, String> queryMap = gatewayRequestQuery(scope.uriInfo());
+        Map<String, String> pathMap = gatewayRequestPathParams(scope);
+        Map<String, Object> context = gatewayResponseContext(scope, type, finalStatus, message, validationError);
+
+        String contentType = MediaType.APPLICATION_JSON;
+        String body = jsonMessage(message);
+        Map<String, String> templates = configured.getResponseTemplates();
+        if (!templates.isEmpty()) {
+            String selected = selectGatewayResponseTemplate(templates, scope.headers());
+            contentType = selected;
+            VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
+                    scope.body() != null && scope.body().length > 0
+                            ? new String(scope.body(), StandardCharsets.UTF_8) : null,
+                    headerMap, queryMap, pathMap, scope.stageName(), scope.httpMethod(),
+                    scope.resource() != null ? scope.resource().getPath() : null,
+                    String.valueOf(context.get("requestId")), regionResolver.getAccountId(),
+                    scope.stage() != null ? scope.stage().getVariables() : null, null, context);
+            try {
+                body = vtlEngine.evaluate(templates.get(selected), vtlCtx).body();
+            } catch (RuntimeException e) {
+                LOG.warnv("Gateway response {0} of API {1}: template for {2} failed to render ({3}); "
+                        + "answering with the default body", configured.getResponseType(), scope.apiId(),
+                        selected, e.getMessage());
+            }
+        }
+
+        Response.ResponseBuilder rb = Response.status(finalStatus);
+        for (Map.Entry<String, String> parameter : configured.getResponseParameters().entrySet()) {
+            if (!parameter.getKey().startsWith(GATEWAY_RESPONSE_HEADER_PREFIX)) {
+                continue;
+            }
+            String headerName = parameter.getKey().substring(GATEWAY_RESPONSE_HEADER_PREFIX.length());
+            String headerValue = resolveGatewayResponseParameter(parameter.getValue(), scope, context,
+                    headerMap, queryMap, pathMap);
+            if (headerValue == null) {
+                continue;
+            }
+            if (HttpHeaders.CONTENT_TYPE.equalsIgnoreCase(headerName)) {
+                contentType = headerValue;
+            } else {
+                rb.header(headerName, headerValue);
+            }
+        }
+        return rb.entity(body).type(contentType);
+    }
+
+    /**
+     * AWS picks the template whose content type the request's {@code Accept} header names, and
+     * falls back to {@code application/json}, then to the first template declared.
+     */
+    private static String selectGatewayResponseTemplate(Map<String, String> templates, HttpHeaders headers) {
+        String accept = headers != null ? headers.getHeaderString(HttpHeaders.ACCEPT) : null;
+        if (accept != null) {
+            for (String candidate : accept.split(",")) {
+                String mediaType = candidate.contains(";")
+                        ? candidate.substring(0, candidate.indexOf(';')).trim()
+                        : candidate.trim();
+                if (templates.containsKey(mediaType)) {
+                    return mediaType;
+                }
+            }
+        }
+        if (templates.containsKey(MediaType.APPLICATION_JSON)) {
+            return MediaType.APPLICATION_JSON;
+        }
+        return templates.keySet().iterator().next();
+    }
+
+    private String resolveGatewayResponseParameter(String source, GatewayResponseScope scope,
+                                                   Map<String, Object> context, Map<String, String> headerMap,
+                                                   Map<String, String> queryMap, Map<String, String> pathMap) {
+        if (source == null) {
+            return null;
+        }
+        if (source.length() >= 2 && source.startsWith("'") && source.endsWith("'")) {
+            return source.substring(1, source.length() - 1);
+        }
+        if (source.startsWith("method.request.header.")) {
+            return headerMap.get(source.substring("method.request.header.".length()));
+        }
+        if (source.startsWith("method.request.multivalueheader.")) {
+            return joinedValues(scope.headers() != null ? scope.headers().getRequestHeaders() : null,
+                    source.substring("method.request.multivalueheader.".length()));
+        }
+        if (source.startsWith("method.request.querystring.")) {
+            return queryMap.get(source.substring("method.request.querystring.".length()));
+        }
+        if (source.startsWith("method.request.multivaluequerystring.")) {
+            return joinedValues(scope.uriInfo() != null ? scope.uriInfo().getQueryParameters() : null,
+                    source.substring("method.request.multivaluequerystring.".length()));
+        }
+        if (source.startsWith("method.request.path.")) {
+            return pathMap.get(source.substring("method.request.path.".length()));
+        }
+        if (source.startsWith("context.")) {
+            Object value = contextValue(context, source.substring("context.".length()));
+            return value != null ? String.valueOf(value) : null;
+        }
+        if (source.startsWith("stageVariables.")) {
+            Map<String, String> variables = scope.stage() != null ? scope.stage().getVariables() : null;
+            return variables != null ? variables.get(source.substring("stageVariables.".length())) : null;
+        }
+        return null;
+    }
+
+    private static String joinedValues(MultivaluedMap<String, String> values, String name) {
+        if (values == null) {
+            return null;
+        }
+        for (Map.Entry<String, List<String>> entry : values.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(name) && entry.getValue() != null && !entry.getValue().isEmpty()) {
+                return String.join(",", entry.getValue());
+            }
+        }
+        return null;
+    }
+
+    private static Object contextValue(Map<String, Object> context, String dottedPath) {
+        Object current = context;
+        for (String segment : dottedPath.split("\\.")) {
+            if (!(current instanceof Map<?, ?> map)) {
+                return null;
+            }
+            current = map.get(segment);
+            if (current == null) {
+                return null;
+            }
+        }
+        return current;
+    }
+
+    /**
+     * The {@code $context} a gateway response sees: the same request fields the proxy event
+     * carries, plus {@code error} with the message, its JSON-quoted form, the response type and the
+     * validator's detail, as AWS documents them.
+     */
+    private Map<String, Object> gatewayResponseContext(GatewayResponseScope scope, GatewayResponseType type,
+                                                       int status, String message, String validationError) {
+        String requestId = UUID.randomUUID().toString();
+        String region = scope.region() != null ? scope.region() : regionResolver.getDefaultRegion();
+        ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
+
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("accountId", regionResolver.getAccountId());
+        context.put("apiId", scope.apiId());
+        context.put("domainName", scope.apiId() + ".execute-api." + region + ".amazonaws.com");
+        context.put("domainPrefix", scope.apiId());
+        context.put("extendedRequestId", requestId);
+        context.put("httpMethod", scope.httpMethod());
+        context.put("path", "/" + scope.stageName() + scope.path());
+        context.put("protocol", "HTTP/1.1");
+        context.put("requestId", requestId);
+        context.put("requestTime", GATEWAY_REQUEST_TIME.format(now));
+        context.put("requestTimeEpoch", now.toInstant().toEpochMilli());
+        context.put("resourceId", scope.resource() != null ? scope.resource().getId() : "");
+        context.put("resourcePath", scope.resource() != null ? scope.resource().getPath() : "");
+        context.put("stage", scope.stageName());
+        context.put("status", status);
+
+        Map<String, Object> identity = new LinkedHashMap<>();
+        identity.put("sourceIp", "127.0.0.1");
+        identity.put("userAgent", scope.headers() != null ? scope.headers().getHeaderString("User-Agent") : null);
+        context.put("identity", identity);
+
+        String messageString;
+        try {
+            messageString = objectMapper.writeValueAsString(message);
+        } catch (IOException e) {
+            messageString = "null";
+        }
+        Map<String, Object> error = new LinkedHashMap<>();
+        error.put("message", message);
+        error.put("messageString", messageString);
+        error.put("responseType", type.name());
+        error.put("validationErrorString", validationError != null ? validationError : "");
+        context.put("error", error);
+        return context;
+    }
+
+    private static Map<String, String> gatewayRequestHeaders(HttpHeaders headers) {
+        Map<String, String> headerMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        if (headers == null || headers.getRequestHeaders() == null) {
+            return headerMap;
+        }
+        for (Map.Entry<String, List<String>> entry : headers.getRequestHeaders().entrySet()) {
+            if (entry.getValue() != null && !entry.getValue().isEmpty()) {
+                headerMap.put(entry.getKey(), entry.getValue().get(entry.getValue().size() - 1));
+            }
+        }
+        return headerMap;
+    }
+
+    private static Map<String, String> gatewayRequestQuery(UriInfo uriInfo) {
+        Map<String, String> queryMap = new HashMap<>();
+        if (uriInfo == null || uriInfo.getQueryParameters() == null) {
+            return queryMap;
+        }
+        for (Map.Entry<String, List<String>> entry : uriInfo.getQueryParameters().entrySet()) {
+            if (entry.getValue() != null && !entry.getValue().isEmpty()) {
+                queryMap.put(entry.getKey(), entry.getValue().get(0));
+            }
+        }
+        return queryMap;
+    }
+
+    private Map<String, String> gatewayRequestPathParams(GatewayResponseScope scope) {
+        Map<String, String> pathMap = new HashMap<>();
+        if (scope.resource() == null || scope.resource().getPath() == null) {
+            return pathMap;
+        }
+        pathMap.putAll(extractPathParams(scope.resource().getPath(), scope.path()));
+        pathMap.putAll(greedyPathParam(scope.resource().getPath(), scope.path()));
+        return pathMap;
     }
 
     private String jsonMessage(String message) {

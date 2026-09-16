@@ -1437,8 +1437,12 @@ public class DynamoDbService implements ResourceProvider {
                 throw new TransactionCanceledException(cancellationReasons);
             }
 
-            for (JsonNode transactItem : transactItems) {
-                validateTransactItem(transactItem, region, staged);
+            for (int i = 0; i < transactItems.size(); i++) {
+                try {
+                    validateTransactItem(transactItems.get(i), region, staged);
+                } catch (KeySchemaMismatchException e) {
+                    throw cancelledByMember(transactItems.size(), i, e.getMessage());
+                }
             }
             for (JsonNode transactItem : transactItems) {
                 if (transactItem.has("Put")) {
@@ -1537,6 +1541,58 @@ public class DynamoDbService implements ResourceProvider {
         }
         return new TransactionCanceledException.CancellationReason("ValidationError", null,
                 "Nesting Levels have exceeded supported limits");
+    }
+
+    // AWS checks every member's key against the table schema, in order, before it looks for
+    // duplicate items or evaluates a condition. The first mismatch cancels with that member's
+    // reason alone. An empty key value still fails the whole request.
+    void cancelOnKeySchemaMismatch(List<JsonNode> transactItems, String region) {
+        for (int i = 0; i < transactItems.size(); i++) {
+            try {
+                validateTransactMemberKey(transactItems.get(i), region);
+            } catch (KeySchemaMismatchException e) {
+                throw cancelledByMember(transactItems.size(), i, e.getMessage());
+            }
+        }
+    }
+
+    private void validateTransactMemberKey(JsonNode transactItem, String region) {
+        boolean isPut = transactItem.has("Put");
+        JsonNode target = isPut ? transactItem.get("Put")
+                : transactItem.has("Update") ? transactItem.get("Update")
+                : transactItem.has("Delete") ? transactItem.get("Delete")
+                : transactItem.get("ConditionCheck");
+        JsonNode key = target == null ? null : target.get(isPut ? "Item" : "Key");
+        if (key == null) {
+            return;
+        }
+        String tableName = canonicalTableName(region, target.path("TableName").asText());
+        TableDefinition table = requireActiveTable(regionKey(region, tableName), tableName);
+        List<String> keyNames = table.getSortKeyName() == null
+                ? List.of(table.getPartitionKeyName())
+                : List.of(table.getPartitionKeyName(), table.getSortKeyName());
+        for (String keyName : keyNames) {
+            if (!key.has(keyName)) {
+                throw new KeySchemaMismatchException(isPut
+                        ? "One or more parameter values were invalid: Missing the key " + keyName + " in the item"
+                        : "The provided key element does not match the schema");
+            }
+        }
+        buildItemKey(table, key, isPut ? KeySurface.ITEM_BODY : KeySurface.KEY_ARGUMENT);
+        if (isPut) {
+            validateIndexKeyTypes(table, key, false);
+        }
+    }
+
+    private static TransactionCanceledException cancelledByMember(int memberCount, int failedMember,
+                                                                   String message) {
+        List<TransactionCanceledException.CancellationReason> reasons = new ArrayList<>();
+        for (int i = 0; i < memberCount; i++) {
+            reasons.add(i == failedMember
+                    ? new TransactionCanceledException.CancellationReason("ValidationError", null, message)
+                    : new TransactionCanceledException.CancellationReason("", null));
+        }
+        return new TransactionCanceledException(reasons);
     }
 
     private TransactionCanceledException.CancellationReason evaluateTransactCondition(JsonNode transactItem, String region) {
@@ -3228,12 +3284,11 @@ public class DynamoDbService implements ResourceProvider {
         String expectedType = keyAttributeType(table, keyName);
         if (expectedType != null && !attr.has(expectedType)) {
             if (surface == KeySurface.ITEM_BODY) {
-                throw new AwsException("ValidationException",
+                throw new KeySchemaMismatchException(
                         "One or more parameter values were invalid: Type mismatch for key " + keyName
-                        + " expected: " + expectedType + " actual: " + attr.fieldNames().next(), 400);
+                        + " expected: " + expectedType + " actual: " + attr.fieldNames().next());
             }
-            throw new AwsException("ValidationException",
-                    "The provided key element does not match the schema", 400);
+            throw new KeySchemaMismatchException("The provided key element does not match the schema");
         }
         if (attr.has("S") && attr.get("S").asText().isEmpty()) {
             throw new AwsException("ValidationException",
@@ -3289,10 +3344,10 @@ public class DynamoDbService implements ResourceProvider {
             validateAttributeValueShape(attr);
             String expectedType = keyAttributeType(table, attrName);
             if (expectedType != null && !attr.has(expectedType)) {
-                throw new AwsException("ValidationException",
+                throw new KeySchemaMismatchException(
                         "One or more parameter values were invalid: Type mismatch for Index Key " + attrName
                         + " Expected: " + expectedType + " Actual: " + attr.fieldNames().next()
-                        + " IndexName: " + indexName, 400);
+                        + " IndexName: " + indexName);
             }
             if (attr.has("S") && attr.get("S").asText().isEmpty()) {
                 throw emptyIndexKeyValue("empty string value", indexName, attrName, isUpdate);

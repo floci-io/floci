@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.verifiedpermissions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.junit.jupiter.api.Test;
 
@@ -32,13 +33,13 @@ class VerifiedPermissionsOidcSignatureVerifierTest {
                 () -> VerifiedPermissionsOidcSignatureVerifier.validatePublicHttpsUri(
                         "https://[::1]", "OIDC issuer"));
 
-        assertTrue(VerifiedPermissionsOidcSignatureVerifier.isBlockedPublicAddress(
+        assertTrue(SsrfProtection.isBlockedAddress(
                 InetAddress.getByName("127.0.0.1")));
-        assertTrue(VerifiedPermissionsOidcSignatureVerifier.isBlockedPublicAddress(
+        assertTrue(SsrfProtection.isBlockedAddress(
                 InetAddress.getByName("169.254.169.254")));
-        assertTrue(VerifiedPermissionsOidcSignatureVerifier.isBlockedPublicAddress(
+        assertTrue(SsrfProtection.isBlockedAddress(
                 InetAddress.getByName("10.0.0.1")));
-        assertTrue(VerifiedPermissionsOidcSignatureVerifier.isBlockedPublicAddress(
+        assertTrue(SsrfProtection.isBlockedAddress(
                 InetAddress.getByName("192.168.1.1")));
     }
 

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cur;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.S3DestinationValidation;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cur.model.ReportDefinition;
@@ -244,9 +245,9 @@ public class CurService {
         requireOneOf(d.getFormat(), ALLOWED_FORMATS, "Format");
         requireOneOf(d.getCompression(), ALLOWED_COMPRESSIONS, "Compression");
         requireNonEmpty(d.getS3Bucket(), "S3Bucket");
-        requireValidBucketName(d.getS3Bucket(), "S3Bucket");
+        S3DestinationValidation.requireValidBucketName(d.getS3Bucket(), "S3Bucket");
         if (d.getS3Prefix() != null) {
-            requireSafeKeySegment(d.getS3Prefix(), "S3Prefix");
+            S3DestinationValidation.requireSafeKeySegment(d.getS3Prefix(), "S3Prefix");
         }
         if (d.getS3Prefix() == null) {
             d.setS3Prefix("");
@@ -293,40 +294,4 @@ public class CurService {
         }
     }
 
-    private static void requireValidBucketName(String bucket, String field) {
-        if (bucket.length() < 3 || bucket.length() > 63) {
-            throw new AwsException("ValidationException",
-                    field + " must be between 3 and 63 characters.", 400);
-        }
-        for (int i = 0; i < bucket.length(); i++) {
-            char c = bucket.charAt(i);
-            boolean valid = (c >= 'a' && c <= 'z')
-                    || (c >= '0' && c <= '9')
-                    || c == '-' || c == '.';
-            if (!valid) {
-                throw new AwsException("ValidationException",
-                        field + " contains invalid characters.", 400);
-            }
-        }
-        if (bucket.startsWith("-") || bucket.endsWith("-")
-                || bucket.startsWith(".") || bucket.endsWith(".")
-                || bucket.contains("..")) {
-            throw new AwsException("ValidationException",
-                    field + " is not a valid S3 bucket name.", 400);
-        }
-    }
-
-    private static void requireSafeKeySegment(String value, String field) {
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            boolean ok = (c >= 'A' && c <= 'Z')
-                    || (c >= 'a' && c <= 'z')
-                    || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '.' || c == '/';
-            if (!ok) {
-                throw new AwsException("ValidationException",
-                        field + " contains characters not permitted in an S3 key segment.", 400);
-            }
-        }
-    }
 }

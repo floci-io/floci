@@ -286,6 +286,45 @@ class CloudFrontControllerTest {
     }
 
     @Test
+    void orderedCacheBehaviorRoundTripsRealtimeLogConfigArn() {
+        // A hand-written parser copy-pasted for CacheBehavior once silently dropped
+        // RealtimeLogConfigArn, since only the DefaultCacheBehavior copy captured it.
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+
+        String body = distributionConfigBody("").replace("</DefaultCacheBehavior>", """
+                </DefaultCacheBehavior>
+                <CacheBehaviors><Quantity>1</Quantity><Items><CacheBehavior>
+                  <PathPattern>/api/*</PathPattern>
+                  <TargetOriginId>o1</TargetOriginId>
+                  <ViewerProtocolPolicy>https-only</ViewerProtocolPolicy>
+                  <RealtimeLogConfigArn>arn:aws:cloudfront::000000000000:realtime-log-config/rtlc-1</RealtimeLogConfigArn>
+                </CacheBehavior></Items></CacheBehaviors>
+                """);
+
+        ArgumentCaptor<Distribution> captor = ArgumentCaptor.forClass(Distribution.class);
+        when(service.createDistribution(captor.capture(), any())).thenAnswer(inv -> {
+            Distribution d = inv.getArgument(0);
+            d.setId("dist-3");
+            d.setEtag("etag-3");
+            return d;
+        });
+        try (Response created = controller.createDistribution(null, body)) {
+            assertEquals(201, created.getStatus());
+        }
+        when(service.getDistribution("dist-3")).thenReturn(captor.getValue());
+
+        try (Response cfg = controller.getDistributionConfig("dist-3")) {
+            String xml = (String) cfg.getEntity();
+            int start = xml.indexOf("<CacheBehaviors>");
+            String cacheBehaviorsBlock = xml.substring(start);
+            assertEquals(
+                    "arn:aws:cloudfront::000000000000:realtime-log-config/rtlc-1",
+                    XmlParser.extractFirst(cacheBehaviorsBlock, "RealtimeLogConfigArn", null));
+        }
+    }
+
+    @Test
     void invalidLambdaFunctionAssociationEventTypeIsRejected() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);

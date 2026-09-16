@@ -3,13 +3,16 @@ package io.github.hectorvent.floci.services.rds.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
 public class DbSnapshot {
 
     private String dbSnapshotIdentifier;
+    private String dbSnapshotArn;
     private String dbInstanceIdentifier;
     private Instant snapshotCreateTime;
     private DatabaseEngine engine;
@@ -27,6 +30,8 @@ public class DbSnapshot {
     private String dbName;
     private String dbInstanceClass;
     private Map<String, String> tags = new LinkedHashMap<>();
+    /** Account IDs authorized to copy/restore this snapshot; the "restore" DBSnapshotAttribute. */
+    private List<String> restoreAccountIds = new ArrayList<>();
 
     public DbSnapshot() {}
 
@@ -54,6 +59,9 @@ public class DbSnapshot {
 
     public String getDbSnapshotIdentifier() { return dbSnapshotIdentifier; }
     public void setDbSnapshotIdentifier(String dbSnapshotIdentifier) { this.dbSnapshotIdentifier = dbSnapshotIdentifier; }
+
+    public String getDbSnapshotArn() { return dbSnapshotArn; }
+    public void setDbSnapshotArn(String dbSnapshotArn) { this.dbSnapshotArn = dbSnapshotArn; }
 
     public String getDbInstanceIdentifier() { return dbInstanceIdentifier; }
     public void setDbInstanceIdentifier(String dbInstanceIdentifier) { this.dbInstanceIdentifier = dbInstanceIdentifier; }
@@ -99,6 +107,11 @@ public class DbSnapshot {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    public List<String> getRestoreAccountIds() { return restoreAccountIds; }
+    public void setRestoreAccountIds(List<String> restoreAccountIds) {
+        this.restoreAccountIds = restoreAccountIds != null ? restoreAccountIds : new ArrayList<>();
+    }
 
     public String getDbName() { return dbName; }
     public void setDbName(String dbName) { this.dbName = dbName; }

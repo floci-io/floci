@@ -1,12 +1,15 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -23,6 +26,11 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static final String CUSTOM_AUTH =
             "AWS4-HMAC-SHA256 Credential=111122223333/20260205/eu-west-1/cloudformation/aws4_request";
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @Test
     void retainKeepsANonEmptyBucketAndTheStackStillCompletesTheDelete() throws InterruptedException {
@@ -560,6 +568,102 @@ class CloudFormationDeletionPolicyIntegrationTest {
         try {
             assertThat(describeStacks(parentStackId), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
             assertBucketDeleted(bucketName);
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    /**
+     * Reproduces the failure-propagation bug: a nested stack whose own resource loop fails rolls
+     * back internally to a clean slate ({@code ROLLBACK_COMPLETE}), but {@code executeNestedStack}
+     * used to detect that only by checking for the literal strings {@code CREATE_FAILED} /
+     * {@code UPDATE_FAILED}, status values that {@code rollbackFailedExecution} always overwrites
+     * with a {@code ROLLBACK_*} status before returning. So the check could never match, and the
+     * nested stack's own resource in the parent was reported as {@code CREATE_COMPLETE} regardless.
+     *
+     * <p>With the child silently "succeeding", the parent went on to provision a downstream
+     * resource that does {@code Fn::GetAtt} on one of the child's Outputs, an Output that was
+     * never computed, because {@code executeTemplate} only reaches its Outputs block once the whole
+     * resource loop has succeeded. The GetAtt fell back to a garbage literal string, and that
+     * downstream resource (here, an SSM parameter) was created with it, while the parent stack
+     * incorrectly reported CREATE_COMPLETE overall.
+     *
+     * <p>Correct behavior: the child's failure must surface as a failed {@code ChildStack} resource
+     * in the parent, so the parent's own resource loop stops right there, before ever reaching the
+     * downstream GetAtt consumer, and the whole parent rolls back.
+     */
+    @Test
+    void createStack_nestedStackResourceFailsInternally_parentRollsBackBeforeConsumingItsOutputs()
+            throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "cfn-nested-outputfail-" + suffix;
+        String paramName = "/test/consumer-bucket-name-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                },
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "ChildBucket",
+                  "Properties": {
+                    "Name": "bad-secret-outputfail-%s",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              },
+              "Outputs": {
+                "BucketName": { "Value": { "Ref": "ChildBucket" } }
+              }
+            }
+            """.formatted(bucketName, suffix);
+        given().contentType("application/json").body(childTemplate).when()
+                .put("/nested-stack-templates/child-outputfail-" + suffix + ".json");
+
+        String stackName = "parent-outputfail-" + suffix;
+        String template = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-outputfail-%s.json" }
+                },
+                "ConsumerParam": {
+                  "Type": "AWS::SSM::Parameter",
+                  "DependsOn": "ChildStack",
+                  "Properties": {
+                    "Name": "%s",
+                    "Type": "String",
+                    "Value": { "Fn::GetAtt": ["ChildStack", "Outputs.BucketName"] }
+                  }
+                }
+              }
+            }
+            """.formatted(suffix, paramName);
+
+        String parentStackId = createStack(stackName, template);
+        try {
+            awaitStackStatus(parentStackId, "ROLLBACK_COMPLETE");
+            assertBucketDeleted(bucketName);
+
+            // The parent must have stopped at the failed ChildStack resource and never reached
+            // ConsumerParam: proof the child's failure was detected before its (never-computed)
+            // Outputs were consumed downstream.
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType("application/x-amz-json-1.1")
+                .body("""
+                    { "Name": "%s" }
+                    """.formatted(paramName))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ParameterNotFound"));
         } finally {
             deleteStack(stackName);
         }

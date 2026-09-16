@@ -65,6 +65,14 @@
 | `DescribeConformancePacks` | List conformance packs, paginated via `Limit`/`NextToken` |
 | `DescribeConformancePackStatus` | Get the deployment status of conformance packs |
 
+### Aggregation Authorizations
+
+| Action | Description |
+|---|---|
+| `PutAggregationAuthorization` | Authorize an account and region to aggregate this account's Config data |
+| `DescribeAggregationAuthorizations` | List aggregation authorizations, paginated via `Limit`/`NextToken` |
+| `DeleteAggregationAuthorization` | Revoke an aggregation authorization |
+
 ### Tagging
 
 | Action | Description |
@@ -144,6 +152,14 @@ aws configservice put-conformance-pack \
 # List conformance packs
 aws configservice describe-conformance-packs
 
+# Authorize another account to aggregate this account's data
+aws configservice put-aggregation-authorization \
+  --authorized-account-id 111122223333 \
+  --authorized-aws-region eu-west-1
+
+# List aggregation authorizations
+aws configservice describe-aggregation-authorizations
+
 # Tag a resource
 aws configservice tag-resource \
   --resource-arn arn:aws:config:us-east-1:000000000000:config-rule/config-rule-abc123 \
@@ -174,3 +190,7 @@ aws configservice delete-config-rule --config-rule-name s3-bucket-versioning
       configuration items or snapshots are produced.
     - Conformance pack status is always `CREATE_SUCCESSFUL`; pack templates are stored,
       not evaluated.
+    - `PutAggregationAuthorization` records the authorization and returns its ARN, but no
+      data is aggregated: configuration aggregators are not emulated.
+      `DeleteAggregationAuthorization` on an authorization that does not exist succeeds,
+      because the Config API models no "not found" error for that operation.

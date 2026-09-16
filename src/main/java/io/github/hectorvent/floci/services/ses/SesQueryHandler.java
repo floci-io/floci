@@ -47,14 +47,17 @@ public class SesQueryHandler {
     private final SesService sesService;
     private final SesReceiptRuleService receiptRuleService;
     private final SesIdentityService identityService;
+    private final SesTemplateService templateService;
     private final ObjectMapper objectMapper;
 
     @Inject
     public SesQueryHandler(SesService sesService, SesReceiptRuleService receiptRuleService,
-                           SesIdentityService identityService, ObjectMapper objectMapper) {
+                           SesIdentityService identityService, SesTemplateService templateService,
+                           ObjectMapper objectMapper) {
         this.sesService = sesService;
         this.receiptRuleService = receiptRuleService;
         this.identityService = identityService;
+        this.templateService = templateService;
         this.objectMapper = objectMapper;
     }
 
@@ -506,19 +509,19 @@ public class SesQueryHandler {
 
     private Response handleCreateTemplate(MultivaluedMap<String, String> params, String region) {
         EmailTemplate template = readTemplateParams(params);
-        sesService.createTemplate(template, region);
+        templateService.createTemplate(template, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("CreateTemplate", AwsNamespaces.SES)).build();
     }
 
     private Response handleUpdateTemplate(MultivaluedMap<String, String> params, String region) {
         EmailTemplate template = readTemplateParams(params);
-        sesService.updateTemplate(template, region);
+        templateService.updateTemplate(template, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("UpdateTemplate", AwsNamespaces.SES)).build();
     }
 
     private Response handleGetTemplate(MultivaluedMap<String, String> params, String region) {
         String templateName = getParam(params, "TemplateName");
-        EmailTemplate template = sesService.getTemplate(templateName, region);
+        EmailTemplate template = templateService.getTemplate(templateName, region);
         var xml = new XmlBuilder().start("Template")
                 .elem("TemplateName", template.getTemplateName());
         if (template.getSubject() != null) {
@@ -541,7 +544,7 @@ public class SesQueryHandler {
     }
 
     private Response handleListTemplates(String region) {
-        List<EmailTemplate> templates = sesService.listTemplates(region);
+        List<EmailTemplate> templates = templateService.listTemplates(region);
         var xml = new XmlBuilder().start("TemplatesMetadata");
         for (EmailTemplate t : templates) {
             xml.start("member")
@@ -595,7 +598,7 @@ public class SesQueryHandler {
             throw new AwsException("InvalidParameterValue", "TemplateName is required.", 400);
         }
         String templateDataRaw = getParam(params, "TemplateData");
-        String rendered = sesService.renderTestTemplate(templateName, templateDataRaw, region);
+        String rendered = templateService.renderTestTemplate(templateName, templateDataRaw, region);
         // XML 1.0 character data forbids C0 controls except \t \n \r; strip them
         // so SDK clients can parse the response when template data injects \x01 etc.
         String xmlSafe = stripXml10InvalidChars(rendered);
@@ -698,7 +701,7 @@ public class SesQueryHandler {
                     "Template or TemplateArn is required.", 400);
         }
         String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
-        EmailTemplate template = sesService.getTemplate(resolvedName, region);
+        EmailTemplate template = templateService.getTemplate(resolvedName, region);
         JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
 
         List<BulkEmailEntry> entries = new ArrayList<>();

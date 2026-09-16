@@ -1711,6 +1711,14 @@ public class DynamoDbJsonHandler {
                     "Transaction failed: The total size of all items in the transaction request cannot exceed 4 MB", 400);
         }
 
+        List<JsonNode> transactItems = new ArrayList<>();
+        transactItemsNode.forEach(transactItems::add);
+        try {
+            dynamoDbService.cancelOnKeySchemaMismatch(transactItems, region);
+        } catch (TransactionCanceledException e) {
+            return transactWriteCanceled(e);
+        }
+
         Map<String, TableDefinition> tableCache = new HashMap<>();
         Set<String> seen = new HashSet<>();
         for (JsonNode txItem : transactItemsNode) {
@@ -1731,9 +1739,6 @@ public class DynamoDbJsonHandler {
             }
         }
 
-        List<JsonNode> transactItems = new ArrayList<>();
-        transactItemsNode.forEach(transactItems::add);
-
         // ClientRequestToken makes TransactWriteItems idempotent within ~10 minutes.
         // Forward the token and the raw request body so the service can hash the body
         // and reject replays whose parameters changed.
@@ -1745,23 +1750,27 @@ public class DynamoDbJsonHandler {
             dynamoDbService.transactWriteItems(transactItems, region, clientRequestToken, request);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (TransactionCanceledException e) {
-            ObjectNode body = objectMapper.createObjectNode();
-            body.put("__type", "TransactionCanceledException");
-            body.put("message", e.getMessage());
-            ArrayNode reasons = body.putArray("CancellationReasons");
-            for (TransactionCanceledException.CancellationReason reason : e.getCancellationReasons()) {
-                ObjectNode r = objectMapper.createObjectNode();
-                r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
-                if (!reason.code().isEmpty()) {
-                    r.put("Message", reason.message() != null ? reason.message() : "The conditional request failed");
-                }
-                if (reason.item() != null) {
-                    r.set("Item", reason.item());
-                }
-                reasons.add(r);
-            }
-            return Response.status(400).entity(body).build();
+            return transactWriteCanceled(e);
         }
+    }
+
+    private Response transactWriteCanceled(TransactionCanceledException e) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("__type", "TransactionCanceledException");
+        body.put("message", e.getMessage());
+        ArrayNode reasons = body.putArray("CancellationReasons");
+        for (TransactionCanceledException.CancellationReason reason : e.getCancellationReasons()) {
+            ObjectNode r = objectMapper.createObjectNode();
+            r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
+            if (!reason.code().isEmpty()) {
+                r.put("Message", reason.message() != null ? reason.message() : "The conditional request failed");
+            }
+            if (reason.item() != null) {
+                r.set("Item", reason.item());
+            }
+            reasons.add(r);
+        }
+        return Response.status(400).entity(body).build();
     }
 
     private Response handleTransactGetItems(JsonNode request, String region) {

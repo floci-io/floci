@@ -4,11 +4,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEventService;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.Branch;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.MemoryEvent;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.PayloadType;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.Memory;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -17,13 +20,6 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
-import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEventService;
-import io.github.hectorvent.floci.services.bedrockagentcore.model.Branch;
-import io.github.hectorvent.floci.services.bedrockagentcore.model.MemoryEvent;
-import io.github.hectorvent.floci.services.bedrockagentcore.model.PayloadType;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
@@ -34,6 +30,9 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * AgentCore memory endpoints. The operation is a literal path suffix
@@ -180,33 +179,15 @@ public class BedrockAgentCoreMemoryController {
     }
 
     private static String text(JsonNode node, String field) {
-        JsonNode v = node.get(field);
-        return (v == null || v.isNull()) ? null : v.asText();
+        return BedrockAgentCoreControllerSupport.text(node, field);
     }
 
-    private static java.util.Map<String, String> stringMap(JsonNode node) {
-        if (node == null || !node.isObject()) {
-            return null;
-        }
-        java.util.Map<String, String> map = new java.util.HashMap<>();
-        node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
-        return map;
+    private static Map<String, String> stringMap(JsonNode node) {
+        return BedrockAgentCoreControllerSupport.stringMap(node);
     }
 
     private Response error(Exception e, String action) {
-        if (e instanceof AwsException aws) {
-            return Response.status(aws.getHttpStatus())
-                    .type(MediaType.APPLICATION_JSON)
-                    .header("X-Amzn-Errortype", aws.jsonType())
-                    .entity(new AwsErrorResponse(aws.jsonType(), aws.getMessage()))
-                    .build();
-        }
-        LOG.errorv(e, "Error {0}", action);
-        return Response.status(400)
-                .type(MediaType.APPLICATION_JSON)
-                .header("X-Amzn-Errortype", "ValidationException")
-                .entity(new AwsErrorResponse("ValidationException", e.getMessage()))
-                .build();
+        return BedrockAgentCoreControllerSupport.error(LOG, e, action);
     }
 
     // ── AgentCore Memory events (data plane) ─────────────────────
@@ -233,7 +214,7 @@ public class BedrockAgentCoreMemoryController {
             // AWS answers CreateEvent with 201, not 200.
             return Response.status(201).entity(Map.of("event", event)).build();
         } catch (AwsException e) {
-            return awsError(e);
+            return error(e, "creating event");
         }
     }
 
@@ -260,7 +241,7 @@ public class BedrockAgentCoreMemoryController {
             }
             return Response.ok(response).build();
         } catch (AwsException e) {
-            return awsError(e);
+            return error(e, "listing events");
         }
     }
 
@@ -277,7 +258,7 @@ public class BedrockAgentCoreMemoryController {
             return Response.ok(Map.of("event",
                     eventService.getEvent(memoryId, actorId, sessionId, eventId, region))).build();
         } catch (AwsException e) {
-            return awsError(e);
+            return error(e, "getting event");
         }
     }
 
@@ -295,20 +276,8 @@ public class BedrockAgentCoreMemoryController {
             return Response.ok(Map.of("eventId",
                     eventService.deleteEvent(memoryId, actorId, sessionId, eventId, region))).build();
         } catch (AwsException e) {
-            return awsError(e);
+            return error(e, "deleting event");
         }
-    }
-
-    /**
-     * Renders an {@link AwsException} the way this protocol needs it: the SDK maps the error by the
-     * {@code X-Amzn-Errortype} header, which the shared exception mapper does not set.
-     */
-    private static Response awsError(AwsException e) {
-        return Response.status(e.getHttpStatus())
-                .type(MediaType.APPLICATION_JSON)
-                .header("X-Amzn-Errortype", e.getErrorCode())
-                .entity(new AwsErrorResponse(e.getErrorCode(), e.getMessage()))
-                .build();
     }
 
     /** Request body of {@code CreateEvent}; {@code sessionId} and {@code branch} are optional. */

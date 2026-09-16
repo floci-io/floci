@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.auth.CredentialScope;
+import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
@@ -11,8 +14,6 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -22,10 +23,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 /**
  * Verifies the SigV4 signature on an execute-api data-plane request, so a route or method whose
@@ -61,7 +60,6 @@ public class ExecuteApiSigV4Authorizer {
 
     private static final String ALGORITHM = "AWS4-HMAC-SHA256";
     private static final String SIGNING_SERVICE = "execute-api";
-    private static final String TERMINATOR = "aws4_request";
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
@@ -169,7 +167,7 @@ public class ExecuteApiSigV4Authorizer {
         // signed is /{stage}/{route}, identical across every API on this emulator. Without host in
         // the canonical request, a signature minted for one API replays against any other API that
         // happens to expose the same stage and route.
-        if (!containsHeader(signed.signedHeaders(), "host")) {
+        if (!SigV4RequestValidator.containsHeader(signed.signedHeaders(), "host")) {
             return Result.rejected(Failure.MALFORMED, "SignedHeaders does not cover host");
         }
 
@@ -182,7 +180,7 @@ public class ExecuteApiSigV4Authorizer {
         String secretKey = resolveSecretKey(scope.accessKeyId());
         if (secretKey == null) {
             LOG.debugv("execute-api request references unregistered access key={0}",
-                    sanitizeForLog(scope.accessKeyId()));
+                    SigV4RequestValidator.sanitizeForLog(scope.accessKeyId()));
             return Result.rejected(Failure.UNKNOWN_KEY, "access key is not registered");
         }
 
@@ -194,7 +192,8 @@ public class ExecuteApiSigV4Authorizer {
         String payloadHash = payloadHash(headers, body, presigned, signed.signedHeaders());
         String canonicalHeaders = canonicalHeaders(signed.signedHeaders(), headers, uriInfo);
         String canonicalQueryString = canonicalQueryString(uriInfo.getRequestUri().getRawQuery(), presigned);
-        byte[] signingKey = deriveSigningKey(secretKey, scope.date(), scope.region(), scope.service());
+        byte[] signingKey = SigV4RequestValidator.deriveSigningKey(
+                secretKey, scope.date(), scope.region(), scope.service());
 
         String rawPath = signedRequestPath != null
                 ? signedRequestPath
@@ -209,8 +208,9 @@ public class ExecuteApiSigV4Authorizer {
             String stringToSign = ALGORITHM + "\n"
                     + signed.amzDate() + "\n"
                     + scope.credentialScope() + "\n"
-                    + sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
-            String expected = hexEncode(hmacSha256(signingKey, stringToSign));
+                    + SigV4RequestValidator.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
+            String expected = SigV4RequestValidator.hexEncode(
+                    SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
             if (MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
                     signed.signature().getBytes(StandardCharsets.UTF_8))) {
                 return new Result(null, null, resolveIdentity(scope.accessKeyId()));
@@ -218,7 +218,7 @@ public class ExecuteApiSigV4Authorizer {
         }
 
         LOG.debugv("execute-api SigV4 signature mismatch for accessKey={0}",
-                sanitizeForLog(scope.accessKeyId()));
+                SigV4RequestValidator.sanitizeForLog(scope.accessKeyId()));
         return Result.rejected(Failure.MISMATCH, "signature does not match");
     }
 
@@ -270,7 +270,7 @@ public class ExecuteApiSigV4Authorizer {
         }
         if (iamService.resolveAccountId(accessKeyId).isEmpty()) {
             LOG.debugv("execute-api request uses an expired or inactive credential: accessKey={0}",
-                    sanitizeForLog(accessKeyId));
+                    SigV4RequestValidator.sanitizeForLog(accessKeyId));
             return null;
         }
         return secretKey;
@@ -307,7 +307,7 @@ public class ExecuteApiSigV4Authorizer {
         }
         if (isBlank(presented)) {
             LOG.debugv("execute-api request uses temporary credential accessKey={0} with no {1}",
-                    sanitizeForLog(accessKeyId), SECURITY_TOKEN);
+                    SigV4RequestValidator.sanitizeForLog(accessKeyId), SECURITY_TOKEN);
             return Result.rejected(Failure.UNKNOWN_KEY, "temporary credential presents no session token");
         }
         String issued = iamService.findSessionToken(accessKeyId).orElse(null);
@@ -317,7 +317,7 @@ public class ExecuteApiSigV4Authorizer {
         if (!MessageDigest.isEqual(issued.getBytes(StandardCharsets.UTF_8),
                 presented.getBytes(StandardCharsets.UTF_8))) {
             LOG.debugv("execute-api request presents a session token that does not match the one"
-                    + " issued for accessKey={0}", sanitizeForLog(accessKeyId));
+                    + " issued for accessKey={0}", SigV4RequestValidator.sanitizeForLog(accessKeyId));
             return Result.rejected(Failure.UNKNOWN_KEY, "session token does not match the issued credential");
         }
         return null;
@@ -347,28 +347,20 @@ public class ExecuteApiSigV4Authorizer {
                                  String amzDate, Long expiresSeconds) {}
 
     private static SignedRequest headerSignedRequest(String authorization, HttpHeaders headers) {
-        String trimmed = authorization.trim();
-        if (!trimmed.regionMatches(true, 0, ALGORITHM, 0, ALGORITHM.length())) {
+        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
+        if (parsed == null) {
             return null;
         }
-        Map<String, String> parameters = new LinkedHashMap<>();
-        for (String part : trimmed.substring(ALGORITHM.length()).split(",")) {
-            int equals = part.indexOf('=');
-            if (equals > 0) {
-                parameters.put(part.substring(0, equals).trim(), part.substring(equals + 1).trim());
-            }
-        }
-        String credential = parameters.get("Credential");
-        String signedHeaders = parameters.get("SignedHeaders");
-        String signature = parameters.get("Signature");
         String amzDate = headers.getHeaderString("X-Amz-Date");
         if (amzDate == null || amzDate.isBlank()) {
             amzDate = headers.getHeaderString("Date");
         }
-        if (isBlank(credential) || isBlank(signedHeaders) || isBlank(signature) || isBlank(amzDate)) {
+        if (isBlank(parsed.credential()) || isBlank(parsed.signedHeaders())
+                || isBlank(parsed.signature()) || isBlank(amzDate)) {
             return null;
         }
-        return new SignedRequest(credential, signedHeaders.toLowerCase(Locale.ROOT), signature, amzDate, null);
+        return new SignedRequest(parsed.credential(), parsed.signedHeaders().toLowerCase(Locale.ROOT),
+                parsed.signature(), amzDate, null);
     }
 
     private static SignedRequest presignedRequest(MultivaluedMap<String, String> queryParameters) {
@@ -385,34 +377,11 @@ public class ExecuteApiSigV4Authorizer {
             expiresSeconds = expires == null ? null : Long.valueOf(expires.trim());
         } catch (NumberFormatException e) {
             LOG.debugv("execute-api presigned request carries a non-numeric X-Amz-Expires: {0}",
-                    sanitizeForLog(expires));
+                    SigV4RequestValidator.sanitizeForLog(expires));
             expiresSeconds = null;
         }
         return new SignedRequest(credential, signedHeaders.toLowerCase(Locale.ROOT), signature,
                 amzDate, expiresSeconds);
-    }
-
-    private record CredentialScope(String accessKeyId, String date, String region, String service) {
-
-        String credentialScope() {
-            return date + "/" + region + "/" + service + "/" + TERMINATOR;
-        }
-
-        /** {@code credential} is expected already percent-decoded: a header credential is never
-         *  encoded, and JAX-RS decodes the presigned {@code X-Amz-Credential} before we see it. */
-        static CredentialScope parse(String credential) {
-            if (credential == null) {
-                return null;
-            }
-            String[] parts = credential.split("/");
-            if (parts.length != 5 || !TERMINATOR.equals(parts[4])) {
-                return null;
-            }
-            if (parts[0].isBlank() || parts[1].length() != 8 || parts[2].isBlank() || parts[3].isBlank()) {
-                return null;
-            }
-            return new CredentialScope(parts[0], parts[1], parts[2], parts[3].toLowerCase(Locale.ROOT));
-        }
     }
 
     // ──────────────────────────── Canonical request ────────────────────────────
@@ -474,7 +443,7 @@ public class ExecuteApiSigV4Authorizer {
         StringBuilder canonical = new StringBuilder();
         for (String name : signedHeaders.split(";")) {
             String value = "host".equals(name) ? hostHeader(headers, uriInfo) : headerValue(headers, name);
-            canonical.append(name).append(':').append(normalizeHeaderValue(value)).append('\n');
+            canonical.append(name).append(':').append(SigV4RequestValidator.normalizeHeaderValue(value)).append('\n');
         }
         return canonical.toString();
     }
@@ -501,10 +470,6 @@ public class ExecuteApiSigV4Authorizer {
                 : String.valueOf(requestUri.getHost());
     }
 
-    private static String normalizeHeaderValue(String value) {
-        return value == null ? "" : value.trim().replaceAll("\\s+", " ");
-    }
-
     /**
      * The payload hash the canonical request must carry.
      *
@@ -523,65 +488,17 @@ public class ExecuteApiSigV4Authorizer {
                                String signedHeaders) throws Exception {
         String declared = headers == null ? null : headers.getHeaderString("x-amz-content-sha256");
         if (declared != null && !declared.isBlank()
-                && containsHeader(signedHeaders, "x-amz-content-sha256")
-                && !isSha256Hex(declared.trim())) {
+                && SigV4RequestValidator.containsHeader(signedHeaders, "x-amz-content-sha256")
+                && !SigV4RequestValidator.isSha256Hex(declared.trim())) {
             return declared.trim();
         }
         if (presigned) {
             return "UNSIGNED-PAYLOAD";
         }
-        return sha256Hex(body == null ? new byte[0] : body);
-    }
-
-    private static boolean containsHeader(String signedHeaders, String name) {
-        for (String header : signedHeaders.split(";")) {
-            if (name.equals(header)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isSha256Hex(String value) {
-        if (value.length() != 64) {
-            return false;
-        }
-        for (int index = 0; index < value.length(); index++) {
-            if (Character.digit(value.charAt(index), 16) < 0) {
-                return false;
-            }
-        }
-        return true;
+        return SigV4RequestValidator.sha256Hex(body == null ? new byte[0] : body);
     }
 
     // ──────────────────────────── Crypto and encoding helpers ────────────────────────────
-
-    private static byte[] deriveSigningKey(String secretKey, String date, String region, String service)
-            throws Exception {
-        byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
-        byte[] kDate = hmacSha256(kSecret, date);
-        byte[] kRegion = hmacSha256(kDate, region);
-        byte[] kService = hmacSha256(kRegion, service);
-        return hmacSha256(kService, TERMINATOR);
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String sha256Hex(byte[] input) throws Exception {
-        return hexEncode(MessageDigest.getInstance("SHA-256").digest(input));
-    }
-
-    private static String hexEncode(byte[] bytes) {
-        StringBuilder hex = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-        }
-        return hex.toString();
-    }
 
     /** RFC 3986 percent-encoding as SigV4 defines it: {@code /} is escaped, {@code -._~} are not. */
     private static String uriEncode(String value) {
@@ -615,10 +532,5 @@ public class ExecuteApiSigV4Authorizer {
 
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
-    }
-
-    /** Strips control characters from attacker-controlled values before they reach a log line. */
-    private static String sanitizeForLog(String value) {
-        return value == null ? null : value.replaceAll("\\p{Cntrl}", "");
     }
 }

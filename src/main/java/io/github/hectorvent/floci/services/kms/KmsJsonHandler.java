@@ -147,36 +147,7 @@ public class KmsJsonHandler {
         String granteePrincipal = request.path("GranteePrincipal").isMissingNode() ? null : request.path("GranteePrincipal").asText(null);
 
         Map<String, Object> result = service.listGrants(keyId, region, marker, limit, grantId, granteePrincipal);
-
-        ObjectNode response = objectMapper.createObjectNode();
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> grants = (List<Map<String, Object>>) result.get("Grants");
-        ArrayNode array = response.putArray("Grants");
-        for (Map<String, Object> grant : grants) {
-            ObjectNode entry = array.addObject();
-            entry.put("GrantId", (String) grant.get("GrantId"));
-            entry.put("KeyId", (String) grant.get("KeyId"));
-            entry.put("GranteePrincipal", (String) grant.get("GranteePrincipal"));
-            entry.put("CreationDate", ((Number) grant.get("CreationDate")).longValue());
-            if (grant.get("Name") != null) {
-                entry.put("Name", (String) grant.get("Name"));
-            }
-            if (grant.get("Constraints") != null) {
-                entry.set("Constraints", objectMapper.valueToTree(grant.get("Constraints")));
-            }
-            ArrayNode operations = entry.putArray("Operations");
-            @SuppressWarnings("unchecked")
-            List<String> operationValues = (List<String>) grant.get("Operations");
-            operationValues.forEach(operations::add);
-            if (grant.get("RetiringPrincipal") != null) {
-                entry.put("RetiringPrincipal", (String) grant.get("RetiringPrincipal"));
-            }
-        }
-        response.put("Truncated", (boolean) result.get("Truncated"));
-        if (Boolean.TRUE.equals(result.get("Truncated"))) {
-            response.put("NextMarker", (String) result.get("NextMarker"));
-        }
-        return Response.ok(response).build();
+        return grantListResponse(result);
     }
 
     private Response handleListRetirableGrants(JsonNode request, String region) {
@@ -186,6 +157,10 @@ public class KmsJsonHandler {
 
         Map<String, Object> result = service.listRetirableGrants(retiringPrincipal, region, marker, limit);
 
+        return grantListResponse(result);
+    }
+
+    private Response grantListResponse(Map<String, Object> result) {
         ObjectNode response = objectMapper.createObjectNode();
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> grants = (List<Map<String, Object>>) result.get("Grants");

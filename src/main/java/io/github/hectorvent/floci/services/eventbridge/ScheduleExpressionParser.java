@@ -1,10 +1,9 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
 import com.cronutils.model.Cron;
-import com.cronutils.model.definition.CronDefinition;
-import com.cronutils.model.definition.CronDefinitionBuilder;
 import com.cronutils.model.time.ExecutionTime;
 import com.cronutils.parser.CronParser;
+import io.github.hectorvent.floci.core.common.AwsCronDefinitions;
 
 import java.time.ZonedDateTime;
 import java.util.regex.Matcher;
@@ -20,24 +19,7 @@ public final class ScheduleExpressionParser {
             "^cron\\((.+)\\)$",
             Pattern.CASE_INSENSITIVE);
 
-    private static final CronParser CRON_PARSER;
-
-    static {
-        CronDefinition definition = CronDefinitionBuilder.defineCron()
-                .withSeconds().and()
-                .withMinutes().and()
-                .withHours().and()
-                .withDayOfMonth().supportsHash().supportsL().supportsW().supportsQuestionMark().and()
-                .withMonth().and()
-                // AWS numbers day-of-week 1-7 as SUN-SAT, not the Unix 0-6 SUN-SAT that cron-utils
-                // defaults to, so Monday is 2. Without this every numeric day fires one day late and
-                // 7 (Saturday) does not parse at all.
-                .withDayOfWeek().withValidRange(1, 7).withMondayDoWValue(2)
-                .supportsHash().supportsL().supportsW().supportsQuestionMark().and()
-                .withYear().optional().and()
-                .instance();
-        CRON_PARSER = new CronParser(definition);
-    }
+    private static final CronParser CRON_PARSER = AwsCronDefinitions.newParser();
 
     private ScheduleExpressionParser() {}
 

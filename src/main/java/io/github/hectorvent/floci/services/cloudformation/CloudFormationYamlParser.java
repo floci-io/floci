@@ -26,7 +26,7 @@ public class CloudFormationYamlParser {
 
     private final ObjectMapper objectMapper;
 
-    CloudFormationYamlParser(ObjectMapper objectMapper) {
+    public CloudFormationYamlParser(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
     }
 

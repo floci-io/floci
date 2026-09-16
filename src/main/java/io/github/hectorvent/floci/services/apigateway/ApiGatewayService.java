@@ -14,6 +14,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
@@ -35,6 +36,8 @@ import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponseType;
 import io.github.hectorvent.floci.services.apigateway.model.Integration;
 import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
@@ -77,6 +80,7 @@ public class ApiGatewayService {
     private final StorageBackend<String, UsagePlan> usagePlanStore;
     private final StorageBackend<String, UsagePlanKey> usagePlanKeyStore;
     private final StorageBackend<String, RequestValidator> requestValidatorStore;
+    private final StorageBackend<String, GatewayResponse> gatewayResponseStore;
     private final StorageBackend<String, Model> modelStore;
     private final StorageBackend<String, Account> accountStore;
     private final StorageBackend<String, CustomDomain> domainStore;
@@ -124,6 +128,9 @@ public class ApiGatewayService {
                 new TypeReference<>() {
                 });
         this.requestValidatorStore = storageFactory.create("apigateway", "apigateway-validators.json",
+                new TypeReference<>() {
+                });
+        this.gatewayResponseStore = storageFactory.create("apigateway", "apigateway-gatewayresponses.json",
                 new TypeReference<>() {
                 });
         this.modelStore = storageFactory.create("apigateway", "apigateway-models.json",
@@ -318,6 +325,7 @@ public class ApiGatewayService {
         stageStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(stageStore::delete);
         modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
         requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
+        gatewayResponseStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(gatewayResponseStore::delete);
         LOG.infov("Deleted REST API: {0} in {1}", apiId, region);
     }
 
@@ -384,6 +392,61 @@ public class ApiGatewayService {
 
     // ──────────────────────────── Method CRUD ────────────────────────────
 
+    /**
+     * The character set API Gateway allows in a method request parameter name. Measured against real
+     * AWS (us-west-2): {@code PutMethod} and an OpenAPI import both reject anything outside it with
+     * {@link #PARAMETER_NAME_ERROR}, quoting this exact expression. {@code $ : . _ -} are allowed,
+     * so {@code filter.a} imports; brackets are not, so a JSON:API style {@code filter[a]} does not.
+     *
+     * <p>This limitation is undocumented, and the runtime behaves differently: a request carrying
+     * {@code ?filter[a]=1} reaches a Lambda proxy integration with the brackets intact. Only the
+     * declared parameter name is restricted.
+     */
+    private static final Pattern REQUEST_PARAMETER_NAME = Pattern.compile("^[a-zA-Z0-9:._$-]+$");
+
+    private static final String PARAMETER_NAME_ERROR =
+            "Invalid mapping expression specified: Validation Result: warnings : [], errors : "
+                    + "[Parameter name should match the following regular expression: ^[a-zA-Z0-9:._$-]+$]";
+
+    private static final List<String> REQUEST_PARAMETER_PREFIXES = List.of(
+            "method.request.querystring.", "method.request.header.", "method.request.path.");
+
+    /**
+     * Rethrows a parameter-name rejection using the envelope an import reports it under. Direct
+     * {@code PutMethod} surfaces the bare message; {@code ImportRestApi}/{@code PutRestApi} name the
+     * method and path first, both measured against real AWS.
+     */
+    private static AwsException importParameterNameFailure(String httpMethod, String path, AwsException cause) {
+        return new AwsException("BadRequestException",
+                "Errors found during import:\tUnable to put method '" + httpMethod
+                        + "' on resource at path '" + path + "': " + cause.getMessage(),
+                400);
+    }
+
+    /**
+     * Validates the names in a method's {@code requestParameters} map, which are of the form
+     * {@code method.request.<location>.<name>}. A name may itself contain dots ({@code filter.a}),
+     * so everything after the location prefix is the name. Keys that do not carry a recognised
+     * prefix are left alone: AWS rejects those with a different message that is not measured here.
+     *
+     * @throws AwsException if any parameter name falls outside {@link #REQUEST_PARAMETER_NAME}
+     */
+    private static void validateRequestParameterNames(Map<String, ?> requestParameters) {
+        if (requestParameters == null) return;
+        for (String key : requestParameters.keySet()) {
+            if (key == null) continue;
+            for (String prefix : REQUEST_PARAMETER_PREFIXES) {
+                if (key.startsWith(prefix)) {
+                    String name = key.substring(prefix.length());
+                    if (!REQUEST_PARAMETER_NAME.matcher(name).matches()) {
+                        throw new AwsException("BadRequestException", PARAMETER_NAME_ERROR, 400);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     public MethodConfig putMethod(String region, String apiId, String resourceId, String httpMethod, Map<String, Object> request) {
         ApiGatewayResource resource = getResource(region, apiId, resourceId);
         MethodConfig method = new MethodConfig();
@@ -395,6 +458,7 @@ public class ApiGatewayService {
 
         @SuppressWarnings("unchecked")
         Map<String, Boolean> reqParams = (Map<String, Boolean>) request.get("requestParameters");
+        validateRequestParameterNames(reqParams);
         if (reqParams != null) method.setRequestParameters(reqParams);
 
         @SuppressWarnings("unchecked")
@@ -1334,6 +1398,234 @@ public class ApiGatewayService {
         usagePlanKeyStore.delete(usagePlanKeyPathKey(region, usagePlanId, keyId));
     }
 
+
+    // ──────────────────────────── Gateway Responses ────────────────────────────
+
+    private static final String GATEWAY_RESPONSE_HEADER_PREFIX = "gatewayresponse.header.";
+    private static final List<String> GATEWAY_RESPONSE_PARAMETER_SOURCES = List.of(
+            "method.request.header.", "method.request.querystring.", "method.request.path.",
+            "method.request.multivalueheader.", "method.request.multivaluequerystring.",
+            "context.", "stageVariables.");
+
+    /**
+     * {@code PutGatewayResponse}: an upsert keyed by response type. A {@code statusCode} left out
+     * is stored as null, so the type's own default keeps applying on the execute plane and is what
+     * {@code GetGatewayResponse} reports, exactly as AWS does.
+     */
+    public GatewayResponse putGatewayResponse(String region, String apiId, String responseType,
+                                              Map<String, Object> request) {
+        getRestApi(region, apiId);
+        GatewayResponseType type = requireGatewayResponseType(responseType);
+        Map<String, Object> body = request != null ? request : Map.of();
+
+        GatewayResponse response = new GatewayResponse();
+        response.setResponseType(type.name());
+        response.setStatusCode(validatedGatewayStatusCode(body.get("statusCode")));
+        response.setResponseParameters(validatedGatewayResponseParameters(stringMap(body.get("responseParameters"))));
+        response.setResponseTemplates(stringMap(body.get("responseTemplates")));
+        response.setDefaultResponse(false);
+
+        gatewayResponseStore.put(gatewayResponseKey(region, apiId, type), response);
+        LOG.infov("Put gateway response {0} for API {1}", type, apiId);
+        return response.copy();
+    }
+
+    /** The customised response, or the AWS default (flagged {@code defaultResponse}) when there is none. */
+    public GatewayResponse getGatewayResponse(String region, String apiId, String responseType) {
+        getRestApi(region, apiId);
+        GatewayResponseType type = requireGatewayResponseType(responseType);
+        return gatewayResponseStore.get(gatewayResponseKey(region, apiId, type))
+                .map(GatewayResponse::copy)
+                .orElseGet(() -> GatewayResponse.defaultFor(type));
+    }
+
+    /** Every type, as AWS lists them: customised ones as stored, the rest as their defaults. */
+    public List<GatewayResponse> getGatewayResponses(String region, String apiId) {
+        getRestApi(region, apiId);
+        List<GatewayResponse> responses = new ArrayList<>();
+        for (GatewayResponseType type : GatewayResponseType.values()) {
+            responses.add(gatewayResponseStore.get(gatewayResponseKey(region, apiId, type))
+                    .map(GatewayResponse::copy)
+                    .orElseGet(() -> GatewayResponse.defaultFor(type)));
+        }
+        return responses;
+    }
+
+    /** Removes the customisation so the type falls back to its default. */
+    public void deleteGatewayResponse(String region, String apiId, String responseType) {
+        getRestApi(region, apiId);
+        GatewayResponseType type = requireGatewayResponseType(responseType);
+        String key = gatewayResponseKey(region, apiId, type);
+        if (gatewayResponseStore.get(key).isEmpty()) {
+            throw new AwsException("NotFoundException", "Gateway response not found", 404);
+        }
+        gatewayResponseStore.delete(key);
+    }
+
+    /**
+     * {@code UpdateGatewayResponse}. Paths are {@code /statusCode},
+     * {@code /responseParameters/<name>} and {@code /responseTemplates/<content-type>}, the latter
+     * with JSON-pointer escaping ({@code application~1json}). Patching a type that has no
+     * customisation yet starts from its default, as on AWS.
+     */
+    public GatewayResponse updateGatewayResponse(String region, String apiId, String responseType,
+                                                 List<Map<String, String>> patchOperations) {
+        getRestApi(region, apiId);
+        GatewayResponseType type = requireGatewayResponseType(responseType);
+        if (patchOperations == null) {
+            throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+        }
+        String key = gatewayResponseKey(region, apiId, type);
+        GatewayResponse updated = gatewayResponseStore.get(key)
+                .map(GatewayResponse::copy)
+                .orElseGet(() -> GatewayResponse.defaultFor(type));
+
+        for (Map<String, String> operation : patchOperations) {
+            if (operation == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            String op = operation.get("op");
+            String path = operation.get("path");
+            String value = operation.get("value");
+            if (op == null || path == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            boolean remove = "remove".equals(op);
+            if (!remove && !"add".equals(op) && !"replace".equals(op)) {
+                throw new AwsException("BadRequestException",
+                        "Invalid patch operation '" + op + "'. Must be one of: add, remove, replace", 400);
+            }
+            if (!remove && value == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+
+            if ("/statusCode".equals(path)) {
+                updated.setStatusCode(remove ? null : validatedGatewayStatusCode(value));
+            } else if (path.startsWith("/responseParameters/")) {
+                String name = unescapeJsonPointer(path.substring("/responseParameters/".length()));
+                if (remove) {
+                    updated.getResponseParameters().remove(name);
+                } else {
+                    validatedGatewayResponseParameters(Map.of(name, value));
+                    updated.getResponseParameters().put(name, value);
+                }
+            } else if (path.startsWith("/responseTemplates/")) {
+                String contentType = unescapeJsonPointer(path.substring("/responseTemplates/".length()));
+                if (remove) {
+                    updated.getResponseTemplates().remove(contentType);
+                } else {
+                    updated.getResponseTemplates().put(contentType, value);
+                }
+            } else {
+                throw new AwsException("BadRequestException", "Invalid patch path '" + path + "'", 400);
+            }
+        }
+
+        updated.setDefaultResponse(false);
+        gatewayResponseStore.put(key, updated);
+        return updated.copy();
+    }
+
+    /**
+     * The customisation the execute plane applies for a gateway-generated error: the type's own
+     * when it has one, otherwise the DEFAULT_4XX / DEFAULT_5XX of its class, otherwise null so the
+     * caller answers exactly as it did before gateway responses existed.
+     */
+    public GatewayResponse resolveGatewayResponse(String region, String apiId, GatewayResponseType type,
+                                                  int statusCode) {
+        Optional<GatewayResponse> specific = gatewayResponseStore.get(gatewayResponseKey(region, apiId, type));
+        if (specific.isPresent()) {
+            return specific.get().copy();
+        }
+        if (type.isDefaultType()) {
+            return null;
+        }
+        return gatewayResponseStore.get(gatewayResponseKey(region, apiId, type.fallback(statusCode)))
+                .map(GatewayResponse::copy)
+                .orElse(null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void importGatewayResponses(String region, String apiId, Object extension) {
+        if (!(extension instanceof Map<?, ?> definitions)) {
+            return;
+        }
+        for (Map.Entry<?, ?> entry : definitions.entrySet()) {
+            String responseType = String.valueOf(entry.getKey());
+            Map<String, Object> definition = entry.getValue() instanceof Map<?, ?> map
+                    ? (Map<String, Object>) map
+                    : Map.of();
+            Map<String, Object> request = new HashMap<>();
+            if (definition.get("statusCode") != null) {
+                request.put("statusCode", String.valueOf(definition.get("statusCode")));
+            }
+            request.put("responseParameters", definition.get("responseParameters"));
+            request.put("responseTemplates", definition.get("responseTemplates"));
+            putGatewayResponse(region, apiId, responseType, request);
+        }
+    }
+
+    private static GatewayResponseType requireGatewayResponseType(String responseType) {
+        return GatewayResponseType.fromName(responseType)
+                .orElseThrow(() -> new AwsException("BadRequestException",
+                        "Invalid Gateway response type specified: " + responseType, 400));
+    }
+
+    private static String validatedGatewayStatusCode(Object statusCode) {
+        if (statusCode == null) {
+            return null;
+        }
+        String value = String.valueOf(statusCode);
+        if (!value.matches("[1-5]\\d\\d")) {
+            throw new AwsException("BadRequestException", "Invalid status code specified: " + value, 400);
+        }
+        return value;
+    }
+
+    private static Map<String, String> validatedGatewayResponseParameters(Map<String, String> parameters) {
+        for (Map.Entry<String, String> entry : parameters.entrySet()) {
+            String destination = entry.getKey();
+            String source = entry.getValue();
+            if (!destination.startsWith(GATEWAY_RESPONSE_HEADER_PREFIX)
+                    || destination.length() == GATEWAY_RESPONSE_HEADER_PREFIX.length()) {
+                throw new AwsException("BadRequestException",
+                        "Invalid mapping expression specified: " + destination, 400);
+            }
+            if (!isValidGatewayResponseParameterSource(source)) {
+                throw new AwsException("BadRequestException",
+                        "Invalid mapping expression specified: " + source, 400);
+            }
+        }
+        return parameters;
+    }
+
+    private static boolean isValidGatewayResponseParameterSource(String source) {
+        if (source == null) {
+            return false;
+        }
+        if (source.length() >= 2 && source.startsWith("'") && source.endsWith("'")) {
+            return true;
+        }
+        for (String prefix : GATEWAY_RESPONSE_PARAMETER_SOURCES) {
+            if (source.startsWith(prefix) && source.length() > prefix.length()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, String> stringMap(Object value) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (entry.getKey() != null && entry.getValue() != null) {
+                    out.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+                }
+            }
+        }
+        return out;
+    }
+
     // ──────────────────────────── Request Validators ────────────────────────────
 
     public RequestValidator createRequestValidator(String region, String apiId, Map<String, Object> request) {
@@ -2232,11 +2524,12 @@ public class ApiGatewayService {
             resourceStore.put(resourceKey(region, apiId, root.getId()), root);
         }
 
-        // Clear existing models, validators, and authorizers before rebuilding them from the spec.
+        // Clear existing models, validators, authorizers and gateway responses before rebuilding them from the spec.
         String prefix = region + "::" + apiId + "::";
         modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
         requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
         authorizerStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(authorizerStore::delete);
+        gatewayResponseStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(gatewayResponseStore::delete);
 
         // Update API metadata from spec
         if (openAPI.getInfo() != null) {
@@ -2485,6 +2778,8 @@ public class ApiGatewayService {
             if (defaultValidator != null && validatorNameToId.containsKey(defaultValidator)) {
                 validatorNameToId.put("__default__", validatorNameToId.get(defaultValidator));
             }
+
+            importGatewayResponses(region, apiId, topExtensions.get("x-amazon-apigateway-gateway-responses"));
         }
 
         // Import security schemes: create an Authorizer for each x-amazon-apigateway-authorizer scheme
@@ -2555,8 +2850,15 @@ public class ApiGatewayService {
             if (operations != null) {
                 for (var opEntry : operations.entrySet()) {
                     String httpMethod = opEntry.getKey().name().toUpperCase();
-                    applyOperation(region, apiId, resourceId, httpMethod, opEntry.getValue(), openAPI,
-                            schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                    try {
+                        applyOperation(region, apiId, resourceId, httpMethod, opEntry.getValue(), openAPI,
+                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                    } catch (AwsException e) {
+                        if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
+                            throw importParameterNameFailure(httpMethod, path, e);
+                        }
+                        throw e;
+                    }
                 }
             }
 
@@ -2571,8 +2873,15 @@ public class ApiGatewayService {
                     try {
                         Operation anyOperation = io.swagger.v3.core.util.Json.mapper()
                                 .convertValue(anyMethodExt, Operation.class);
-                        applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
-                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                        try {
+                            applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
+                                    schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                        } catch (AwsException e) {
+                            if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
+                                throw importParameterNameFailure("ANY", path, e);
+                            }
+                            throw e;
+                        }
                     } catch (IllegalArgumentException e) {
                         throw new AwsException("BadRequestException",
                                 "Invalid x-amazon-apigateway-any-method definition for path " + path + ": "
@@ -2783,6 +3092,10 @@ public class ApiGatewayService {
 
     private String requestValidatorKey(String region, String apiId, String validatorId) {
         return region + "::" + apiId + "::" + validatorId;
+    }
+
+    private String gatewayResponseKey(String region, String apiId, GatewayResponseType type) {
+        return region + "::" + apiId + "::" + type.name();
     }
 
     private String modelKey(String region, String apiId, String modelName) {

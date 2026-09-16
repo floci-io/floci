@@ -12,6 +12,10 @@ quarkus:
 
 floci:
   base-url: "http://localhost:4566"
+  network:
+    security-group-enforcement:
+      enabled: true
+      helper-image: floci/network-helper:local
   default-region: us-east-1
   default-account-id: "000000000000"
   ai-mock-config-file: ${AI_MOCK_CONFIG:src/test/resources/fixtures/ai-mock-config.json}
@@ -39,6 +43,8 @@ floci:
       acm:
         flush-interval-ms: 60000
       opensearch:
+        flush-interval-ms: 60000
+      sagemaker:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
@@ -135,6 +141,9 @@ floci:
         enabled: true
     apigateway:
       enabled: true
+      vtl-max-loops: 10000
+      vtl-max-output-chars: 1048576
+      vtl-timeout-millis: 5000
     apigatewayv2:
       enabled: true
     iam:
@@ -308,6 +317,9 @@ floci:
     codebuild:
       enabled: true
       # docker-network: floci-network
+    sagemaker:
+      enabled: true
+      # docker-network: floci-network
     batch:
       enabled: true
       runner-mode: immediate
@@ -368,6 +380,9 @@ floci:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
+      vtl-max-loops: 10000
+      vtl-max-output-chars: 1048576
+      vtl-timeout-millis: 5000
     s3vectors:
       enabled: true
     s3tables:

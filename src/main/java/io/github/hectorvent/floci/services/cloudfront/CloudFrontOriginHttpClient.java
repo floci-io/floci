@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import org.apache.hc.client5.http.DnsResolver;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.apache.hc.client5.http.config.ConnectionConfig;
@@ -205,7 +206,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
             }
             if (!allowedHosts.contains(normalizedHost)) {
                 for (InetAddress address : addresses) {
-                    if (CloudFrontServingController.isBlockedOriginAddress(address)) {
+                    if (SsrfProtection.isBlockedAddress(address)) {
                         throw new UnknownHostException(
                                 "CloudFront origin host resolves to a blocked address: " + normalizedHost);
                     }
