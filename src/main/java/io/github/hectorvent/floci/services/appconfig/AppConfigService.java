@@ -5,12 +5,24 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.appconfig.model.*;
+import io.github.hectorvent.floci.services.appconfig.model.Application;
+import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
+import io.github.hectorvent.floci.services.appconfig.model.Deployment;
+import io.github.hectorvent.floci.services.appconfig.model.DeploymentStrategy;
+import io.github.hectorvent.floci.services.appconfig.model.DeploymentSummary;
+import io.github.hectorvent.floci.services.appconfig.model.Environment;
+import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersion;
+import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersionSummary;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
 public class AppConfigService {
@@ -23,6 +35,8 @@ public class AppConfigService {
     private final StorageBackend<String, HostedConfigurationVersion> versionStore;
     private final StorageBackend<String, Deployment> deploymentStore;
     private final StorageBackend<String, String> activeConfigStore; // envId::profileId -> versionNumber
+    private final Map<String, DeploymentPageToken> deploymentPageTokens = new ConcurrentHashMap<>();
+    private static final int MAX_DEPLOYMENT_PAGE_TOKENS = 1000;
 
     @Inject
     public AppConfigService(StorageFactory storageFactory, EmulatorConfig config) {
@@ -292,6 +306,81 @@ public class AppConfigService {
     public Deployment getDeployment(String appId, String envId, int deploymentNumber) {
         return deploymentStore.get(appId + "::" + envId + "::" + deploymentNumber)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment not found", 404));
+    }
+
+    public DeploymentPage listDeployments(String appId, String envId, Integer maxResults, String nextToken) {
+        getEnvironment(appId, envId);
+        int pageSize = maxResults == null ? 50 : maxResults;
+        if (pageSize < 1 || pageSize > 50) {
+            throw new AwsException("BadRequestException", "max_results must be between 1 and 50", 400);
+        }
+
+        String scope = appId + "::" + envId;
+        int start = 0;
+        if (nextToken != null) {
+            DeploymentPageToken token = deploymentPageTokens.get(nextToken);
+            if (token == null || !token.scope().equals(scope)) {
+                throw new AwsException("BadRequestException", "Invalid next_token", 400);
+            }
+            start = token.offset();
+        }
+
+        List<Deployment> deployments = deploymentStore.scan(k -> true).stream()
+                .filter(deployment -> appId.equals(deployment.getApplicationId()))
+                .filter(deployment -> envId.equals(deployment.getEnvironmentId()))
+                .sorted(Comparator.comparingInt(Deployment::getDeploymentNumber).reversed())
+                .toList();
+        if (start > deployments.size()) {
+            throw new AwsException("BadRequestException", "Invalid next_token", 400);
+        }
+
+        int end = Math.min(start + pageSize, deployments.size());
+        List<DeploymentSummary> items = deployments.subList(start, end).stream()
+                .map(this::toDeploymentSummary)
+                .toList();
+        String resultToken = null;
+        if (end < deployments.size()) {
+            resultToken = createDeploymentPageToken(scope, end);
+        } else if (nextToken != null) {
+            deploymentPageTokens.remove(nextToken);
+        }
+        return new DeploymentPage(items, resultToken);
+    }
+
+    private DeploymentSummary toDeploymentSummary(Deployment deployment) {
+        DeploymentSummary summary = new DeploymentSummary();
+        summary.setConfigurationProfileId(deployment.getConfigurationProfileId());
+        summary.setConfigurationVersion(deployment.getConfigurationVersion());
+        summary.setDeploymentNumber(deployment.getDeploymentNumber());
+        summary.setState(deployment.getState());
+        summary.setConfigurationName(deployment.getConfigurationName());
+        ConfigurationProfile profile = profileStore.get(deployment.getConfigurationProfileId()).orElse(null);
+        if (profile != null) {
+            summary.setConfigurationName(profile.getName());
+            summary.setType(profile.getType());
+        }
+        DeploymentStrategy strategy = getDeploymentStrategy(deployment.getDeploymentStrategyId());
+        summary.setDeploymentDurationInMinutes(strategy.getDeploymentDurationInMinutes());
+        summary.setFinalBakeTimeInMinutes(strategy.getFinalBakeTimeInMinutes());
+        summary.setGrowthFactor(strategy.getGrowthFactor());
+        summary.setGrowthType(strategy.getGrowthType());
+        summary.setPercentageComplete("COMPLETE".equals(deployment.getState()) ? 100.0f : 0.0f);
+        return summary;
+    }
+
+    private String createDeploymentPageToken(String scope, int offset) {
+        while (deploymentPageTokens.size() >= MAX_DEPLOYMENT_PAGE_TOKENS) {
+            deploymentPageTokens.keySet().stream().findFirst().ifPresent(deploymentPageTokens::remove);
+        }
+        String token = UUID.randomUUID().toString().replace("-", "");
+        deploymentPageTokens.put(token, new DeploymentPageToken(scope, offset));
+        return token;
+    }
+
+    private record DeploymentPageToken(String scope, int offset) {
+    }
+
+    public record DeploymentPage(List<DeploymentSummary> items, String nextToken) {
     }
 
     public String getActiveVersion(String envId, String profileId) {
