@@ -3013,6 +3013,258 @@ class StepFunctionsJsonataIntegrationTest {
         assertEquals("workers/b.json", items.get(1).path("key").asText());
     }
 
+    /**
+     * MaxItemsPath and the JSONata MaxItems expression were checked against real Step Functions
+     * (us-east-1, 2026-09-16) on both readers: the value is read from the Map state input, AWS
+     * renders it and parses that text so the string "2" is a limit of 2 and 2.0 is not an integer,
+     * 0 means no limit, and the two dynamic forms report a bad value with different errors.
+     */
+    @Test
+    void distributedMapWithListObjectsV2ItemReader_maxItemsPathLimitsTheListing() throws Exception {
+        createBucket("map-inputs-list-objects-max-path");
+        putObject("map-inputs-list-objects-max-path", "workers/a.json", "[]");
+        putObject("map-inputs-list-objects-max-path", "workers/b.json", "[]");
+        putObject("map-inputs-list-objects-max-path", "workers/c.json", "[]");
+
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItemsPath": "$.limit"
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-list-objects-max-path",
+                    "Prefix": "workers/"
+                }
+                """);
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-max-path-test", definition);
+
+        JsonNode limited = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":2}")));
+        assertEquals(2, limited.size());
+        assertEquals("workers/a.json", limited.get(0).path("Key").asText());
+        assertEquals("workers/b.json", limited.get(1).path("Key").asText());
+
+        JsonNode fromString = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":\"2\"}")));
+        assertEquals(2, fromString.size());
+
+        JsonNode unlimited = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":0}")));
+        assertEquals(3, unlimited.size());
+
+        JsonNode aboveCount = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":99}")));
+        assertEquals(3, aboveCount.size());
+    }
+
+    @Test
+    void distributedMapWithListObjectsV2ItemReader_maxItemsPathRejectsANegativeLimit() throws Exception {
+        createBucket("map-inputs-list-objects-max-path-negative");
+        putObject("map-inputs-list-objects-max-path-negative", "workers/a.json", "[]");
+
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItemsPath": "$.limit"
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-list-objects-max-path-negative",
+                    "Prefix": "workers/"
+                }
+                """);
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-max-path-negative-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":-1}"));
+
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+        assertEquals("field MaxItems must be positive", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void distributedMapWithListObjectsV2ItemReader_maxItemsPathRejectsAValueThatIsNotAnInteger() throws Exception {
+        createBucket("map-inputs-list-objects-max-path-invalid");
+        putObject("map-inputs-list-objects-max-path-invalid", "workers/a.json", "[]");
+
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItemsPath": "$.limit"
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-list-objects-max-path-invalid",
+                    "Prefix": "workers/"
+                }
+                """);
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-max-path-invalid-test", definition);
+
+        Response notAnInteger = waitForExecutionFailure(startExecution(smArn, "{\"limit\":2.5}"));
+        assertEquals("States.Runtime", notAnInteger.jsonPath().getString("error"));
+        assertEquals("An error occurred while executing the state 'ProcessWorkers' (entered at the event id #2). "
+                + "The MaxItemsPath field refers to value \"2.5\" which is not a valid integer: $.limit",
+                notAnInteger.jsonPath().getString("cause"));
+
+        Response nullValue = waitForExecutionFailure(startExecution(smArn, "{\"limit\":null}"));
+        assertEquals("States.Runtime", nullValue.jsonPath().getString("error"));
+        assertEquals("An error occurred while executing the state 'ProcessWorkers' (entered at the event id #2). "
+                + "The MaxItemsPath field refers to value \"null\" which is not a valid integer: $.limit",
+                nullValue.jsonPath().getString("cause"));
+
+        // AWS parses the rendered value as a 64-bit integer, so this one is not an integer to it.
+        Response aboveLong = waitForExecutionFailure(startExecution(smArn, "{\"limit\":9223372036854775808}"));
+        assertEquals("States.Runtime", aboveLong.jsonPath().getString("error"));
+        assertEquals("An error occurred while executing the state 'ProcessWorkers' (entered at the event id #2). "
+                + "The MaxItemsPath field refers to value \"9223372036854775808\" which is not a valid integer: "
+                + "$.limit",
+                aboveLong.jsonPath().getString("cause"));
+
+        Response missing = waitForExecutionFailure(startExecution(smArn, "{}"));
+        assertEquals("States.Runtime", missing.jsonPath().getString("error"));
+        assertEquals("An error occurred while executing the state 'ProcessWorkers' (entered at the event id #2). "
+                + "The MaxItemsPath parameter does not reference an input value: $.limit",
+                missing.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void distributedMapWithGetObjectItemReader_maxItemsPathLimitsTheItems() throws Exception {
+        createBucket("map-inputs-get-object-max-path");
+        putObject("map-inputs-get-object-max-path", "workers.json", "[{\"v\":1},{\"v\":2},{\"v\":3}]");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON",
+                                    "MaxItemsPath": "$.limit"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-get-object-max-path",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+        String smArn = createStateMachine("map-itemreader-s3-get-object-max-path-test", definition);
+
+        JsonNode limited = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":2}")));
+        assertEquals(2, limited.size());
+        assertEquals(1, limited.get(0).path("v").asInt());
+        assertEquals(2, limited.get(1).path("v").asInt());
+
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":-1}"));
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+        assertEquals("field MaxItems must be positive", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void distributedMapWithListObjectsV2ItemReader_jsonataMaxItemsExpressionLimitsTheListing() throws Exception {
+        createBucket("map-inputs-list-objects-max-jsonata");
+        putObject("map-inputs-list-objects-max-jsonata", "workers/a.json", "[]");
+        putObject("map-inputs-list-objects-max-jsonata", "workers/b.json", "[]");
+        putObject("map-inputs-list-objects-max-jsonata", "workers/c.json", "[]");
+
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-max-jsonata-test",
+                jsonataMaxItemsDefinition("map-inputs-list-objects-max-jsonata"));
+
+        JsonNode limited = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":2}")));
+        assertEquals(2, limited.size());
+        assertEquals("workers/a.json", limited.get(0).path("Key").asText());
+        assertEquals("workers/b.json", limited.get(1).path("Key").asText());
+
+        JsonNode unlimited = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":0}")));
+        assertEquals(3, unlimited.size());
+    }
+
+    @Test
+    void distributedMapWithListObjectsV2ItemReader_jsonataMaxItemsExpressionRejectsABadResult() throws Exception {
+        createBucket("map-inputs-list-objects-max-jsonata-bad");
+        putObject("map-inputs-list-objects-max-jsonata-bad", "workers/a.json", "[]");
+
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-max-jsonata-bad-test",
+                jsonataMaxItemsDefinition("map-inputs-list-objects-max-jsonata-bad"));
+        String prefix = "An error occurred while executing the state 'ProcessWorkers' (entered at the event id #2). ";
+
+        Response wrongType = waitForExecutionFailure(startExecution(smArn, "{\"limit\":\"2\"}"));
+        assertEquals("States.QueryEvaluationError", wrongType.jsonPath().getString("error"));
+        assertEquals(prefix + "The JSONata expression '$states.input.limit' specified for the field "
+                + "'ItemReader/ReaderConfig/MaxItems' returned an unexpected result type. "
+                + "Expected 'number', but was 'string' for value: \"2\"",
+                wrongType.jsonPath().getString("cause"));
+
+        Response nullResult = waitForExecutionFailure(startExecution(smArn, "{\"limit\":null}"));
+        assertEquals("States.QueryEvaluationError", nullResult.jsonPath().getString("error"));
+        assertEquals(prefix + "The JSONata expression '$states.input.limit' specified for the field "
+                + "'ItemReader/ReaderConfig/MaxItems' returned an unexpected result type. "
+                + "Expected 'number', but was 'null' for value: null",
+                nullResult.jsonPath().getString("cause"));
+
+        Response notAnInteger = waitForExecutionFailure(startExecution(smArn, "{\"limit\":2.5}"));
+        assertEquals("States.QueryEvaluationError", notAnInteger.jsonPath().getString("error"));
+        assertEquals(prefix + "The ItemReader/ReaderConfig/MaxItems field cannot be parsed as an integer: 2.5",
+                notAnInteger.jsonPath().getString("cause"));
+
+        Response negative = waitForExecutionFailure(startExecution(smArn, "{\"limit\":-1}"));
+        assertEquals("States.QueryEvaluationError", negative.jsonPath().getString("error"));
+        assertEquals(prefix + "ItemReader/ReaderConfig/MaxItems cannot be negative but was: -1",
+                negative.jsonPath().getString("cause"));
+
+        Response missing = waitForExecutionFailure(startExecution(smArn, "{}"));
+        assertEquals("States.QueryEvaluationError", missing.jsonPath().getString("error"));
+        assertEquals(prefix + "The JSONata expression '$states.input.limit' specified for the field "
+                + "'ItemReader/ReaderConfig/MaxItems' returned nothing (undefined).",
+                missing.jsonPath().getString("cause"));
+    }
+
+    private static String jsonataMaxItemsDefinition(String bucket) {
+        return String.format("""
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:listObjectsV2",
+                                "ReaderConfig": {
+                                    "MaxItems": "{%% $states.input.limit %%}"
+                                },
+                                "Arguments": {
+                                    "Bucket": "%s",
+                                    "Prefix": "workers/"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """, bucket);
+    }
+
     @Test
     void distributedMapWithListObjectsV2ItemReader_readsMoreThanOneThousandObjects() throws Exception {
         // In-process puts; 1001 REST puts are slow.

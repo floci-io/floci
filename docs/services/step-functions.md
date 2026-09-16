@@ -131,8 +131,10 @@ iterations.
 `arn:aws:states:::s3:listObjectsV2`. The listing reads every page under `Prefix`, and each item
 carries the AWS fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`.
 An empty prefix gives zero iterations and the Map succeeds. `ReaderConfig.MaxItems` applies to
-both readers; `MaxItemsPath` is not supported. The `CSV`, `JSONL`, `PARQUET` and `MANIFEST` input
-types are accepted by `CreateStateMachine` and fail the execution with `States.ItemReaderFailed`.
+both readers. A JSONPath state machine may read the limit from the Map state input with
+`MaxItemsPath`, and a JSONata one may write `MaxItems` as an expression. A limit of `0` reads
+every item. The `CSV`, `JSONL`, `PARQUET` and `MANIFEST` input types are accepted by
+`CreateStateMachine` and fail the execution with `States.ItemReaderFailed`.
 
 ## Distributed Map ItemBatcher
 

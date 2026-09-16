@@ -162,6 +162,9 @@ public class AslExecutor {
     private static final int INLINE_MAP_MAX_CONCURRENCY = 40;
     private static final int DISTRIBUTED_MAP_MAX_CONCURRENCY = 10_000;
 
+    /** How a JSONata cause names ReaderConfig.MaxItems. */
+    private static final String MAX_ITEMS_FIELD = "ItemReader/ReaderConfig/MaxItems";
+
     // ecs:runTask.sync polling — wait up to ~60s for the task to reach STOPPED.
     private static final int ECS_SYNC_POLL_ATTEMPTS = 600;
     private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
@@ -3088,20 +3091,21 @@ public class AslExecutor {
         if (bucket == null || key == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket and Key");
         }
+        int maxItems = resolveMaxItems(itemReader, input, jsonata, context, variables);
 
         try {
             S3Object object = s3Service.getObject(bucket, key);
             JsonNode items = objectMapper.readTree(object.getData());
             items = applyItemsPointer(itemReader, items);
             if (items.isObject()) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, normalizeObjectItems(items)),
+                return new ResolvedMapItems(applyMaxItems(maxItems, normalizeObjectItems(items)),
                         MapItemsSource.ITEM_READER_OBJECT);
             }
             if (!items.isArray()) {
                 throw new FailStateException("States.ItemReaderFailed",
                         "Attempting to map over non-iterable node.");
             }
-            return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
+            return new ResolvedMapItems(applyMaxItems(maxItems, items), MapItemsSource.ITEM_READER_ARRAY);
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
         } catch (FailStateException e) {
@@ -3132,7 +3136,7 @@ public class AslExecutor {
         String prefix = parameters.path("Prefix").asText(null);
 
         ArrayNode items = objectMapper.createArrayNode();
-        int maxItems = maxItems(itemReader);
+        int maxItems = resolveMaxItems(itemReader, input, jsonata, context, variables);
         try {
             // MaxItems keeps the first keys in order, so the listing itself is capped.
             for (S3Object object : s3Service.listObjects(bucket, prefix, null,
@@ -3187,12 +3191,83 @@ public class AslExecutor {
         return pointedItems;
     }
 
-    private int maxItems(JsonNode itemReader) {
-        return itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+    /**
+     * The ItemReader's item ceiling: a literal {@code MaxItems}, a {@code MaxItemsPath} read from
+     * the Map state input, or a JSONata {@code MaxItems} expression. An absent field is 0, and AWS
+     * reads 0 as no limit.
+     *
+     * <p>The two dynamic forms report a bad value differently, as checked against AWS. A path that
+     * matches nothing, or a value that does not parse as an integer, fails with States.Runtime.
+     * A negative one fails later, with States.ItemReaderFailed. An expression fails with
+     * States.QueryEvaluationError in all three cases. AWS validates a literal at
+     * {@code CreateStateMachine} time, which Floci does not, so a bad literal reaches this point
+     * and reads as no limit.
+     */
+    private int resolveMaxItems(JsonNode itemReader, JsonNode mapInput, boolean jsonata,
+                                JsonNode context, ObjectNode variables) {
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        if (readerConfig.has("MaxItemsPath")) {
+            return maxItemsFromPath(readerConfig.get("MaxItemsPath").asText(), mapInput);
+        }
+        JsonNode maxItems = readerConfig.path("MaxItems");
+        if (jsonata && maxItems.isTextual() && JsonataEvaluator.isExpression(maxItems.asText())) {
+            return maxItemsFromExpression(maxItems.asText(), mapInput, context, variables);
+        }
+        return maxItems.asInt(0);
     }
 
-    private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
-        int maxItems = maxItems(itemReader);
+    /**
+     * MaxItemsPath takes no Context Object, as AWS rejects a {@code $$} reference here the way it
+     * rejects one on MaxConcurrencyPath. Only ItemsPath accepts one.
+     */
+    private int maxItemsFromPath(String path, JsonNode mapInput) {
+        JsonNode value = resolvePathNode(path, mapInput);
+        if (value.isMissingNode()) {
+            throw new FailStateException("States.Runtime",
+                    "The MaxItemsPath parameter does not reference an input value: " + path);
+        }
+        // AWS renders the value and parses that text as a 64-bit integer, so the string "2" is
+        // accepted, and 2.0 and a value above Long.MAX_VALUE are not.
+        String rendered = value.isTextual() ? value.asText() : value.toString();
+        long limit;
+        try {
+            limit = Long.parseLong(rendered);
+        } catch (NumberFormatException e) {
+            throw new FailStateException("States.Runtime", "The MaxItemsPath field refers to value \""
+                    + rendered + "\" which is not a valid integer: " + path);
+        }
+        if (limit < 0) {
+            throw new FailStateException("States.ItemReaderFailed", "field MaxItems must be positive", true);
+        }
+        return (int) Math.min(limit, Integer.MAX_VALUE);
+    }
+
+    private int maxItemsFromExpression(String expression, JsonNode mapInput, JsonNode context,
+                                       ObjectNode variables) {
+        JsonNode statesVar = buildStatesVar(mapInput, null, context);
+        JsonNode value = jsonataEvaluator.evaluateField(expression, MAX_ITEMS_FIELD, statesVar, variables);
+        if (!value.isNumber()) {
+            throw new FailStateException("States.QueryEvaluationError",
+                    "The JSONata expression '" + JsonataEvaluator.unwrap(expression)
+                            + "' specified for the field '" + MAX_ITEMS_FIELD
+                            + "' returned an unexpected result type. Expected 'number', but was '"
+                            + value.getNodeType().name().toLowerCase(Locale.ROOT) + "' for value: " + value,
+                    MAX_ITEMS_FIELD);
+        }
+        if (!value.isIntegralNumber()) {
+            throw new FailStateException("States.QueryEvaluationError",
+                    "The " + MAX_ITEMS_FIELD + " field cannot be parsed as an integer: " + value.asText(),
+                    MAX_ITEMS_FIELD);
+        }
+        BigInteger limit = value.bigIntegerValue();
+        if (limit.signum() < 0) {
+            throw new FailStateException("States.QueryEvaluationError",
+                    MAX_ITEMS_FIELD + " cannot be negative but was: " + value.asText(), MAX_ITEMS_FIELD);
+        }
+        return limit.compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0 ? Integer.MAX_VALUE : limit.intValue();
+    }
+
+    private JsonNode applyMaxItems(int maxItems, JsonNode items) {
         if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
             return items;
         }
