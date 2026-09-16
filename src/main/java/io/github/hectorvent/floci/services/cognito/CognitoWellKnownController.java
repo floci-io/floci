@@ -10,6 +10,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.math.BigInteger;
+import java.security.interfaces.RSAPublicKey;
+import java.util.Arrays;
 import java.util.Base64;
 
 /**
@@ -43,7 +45,7 @@ public class CognitoWellKnownController {
     public Response getJwks(@PathParam("poolId") String poolId) {
         UserPool pool = cognitoService.describeUserPool(poolId);
         String kid = cognitoService.getSigningKeyId(pool);
-        var publicKey = cognitoService.getSigningPublicKey(pool);
+        RSAPublicKey publicKey = cognitoService.getSigningPublicKey(pool);
         String modulus = base64UrlEncodeUnsigned(publicKey.getModulus());
         String exponent = base64UrlEncodeUnsigned(publicKey.getPublicExponent());
 
@@ -63,7 +65,7 @@ public class CognitoWellKnownController {
         String userInfoEndpoint = cognitoService.getUserInfoEndpoint(pool.getId());
 
         String body = """
-                {"issuer":"%s","jwks_uri":"%s","token_endpoint":"%s","userinfo_endpoint":"%s","subject_types_supported":["public"],"response_types_supported":[],"grant_types_supported":["client_credentials"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post"],"id_token_signing_alg_values_supported":["RS256"]}
+                {"issuer":"%s","jwks_uri":"%s","token_endpoint":"%s","userinfo_endpoint":"%s","subject_types_supported":["public"],"response_types_supported":["code"],"grant_types_supported":["client_credentials","authorization_code"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post"],"id_token_signing_alg_values_supported":["RS256"]}
                 """.formatted(issuer, jwksUri, tokenEndpoint, userInfoEndpoint).strip();
         return Response.ok(body).build();
     }
@@ -71,7 +73,7 @@ public class CognitoWellKnownController {
     private String base64UrlEncodeUnsigned(BigInteger value) {
         byte[] bytes = value.toByteArray();
         if (bytes.length > 1 && bytes[0] == 0) {
-            bytes = java.util.Arrays.copyOfRange(bytes, 1, bytes.length);
+            bytes = Arrays.copyOfRange(bytes, 1, bytes.length);
         }
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }

@@ -16,7 +16,8 @@ import java.util.Optional;
 
 /**
  * Routes Cognito custom-domain requests by Host. On AWS a custom domain serves
- * {@code https://<domain>/oauth2/token} and {@code /oauth2/userInfo}; Floci maps those onto
+ * {@code https://<domain>/oauth2/token}, {@code /oauth2/userInfo}, {@code /oauth2/authorize}, and
+ * {@code /oauth2/idpresponse}; Floci maps those onto
  * the {@code /cognito-idp/oauth2/...} handlers and pins the pool and the account that own the
  * domain, since the request itself carries no AWS credential.
  */

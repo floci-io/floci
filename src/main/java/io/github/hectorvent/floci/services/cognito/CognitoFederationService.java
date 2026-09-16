@@ -67,6 +67,10 @@ public class CognitoFederationService {
     public String completeAuthorization(String state, String providerCode) {
         CognitoAuthorizationTransaction transaction = stateStore.consumeTransaction(state)
                 .orElseThrow(() -> new AwsException("InvalidParameterException", "Invalid federation state", 400));
+        return completeAuthorization(transaction, providerCode);
+    }
+
+    String completeAuthorization(CognitoAuthorizationTransaction transaction, String providerCode) {
         IdentityProvider provider = cognitoService.describeIdentityProvider(
                 transaction.userPoolId(), transaction.providerName());
         requireOidcProvider(provider);

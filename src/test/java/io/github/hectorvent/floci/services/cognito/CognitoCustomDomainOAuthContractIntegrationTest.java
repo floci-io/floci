@@ -98,7 +98,7 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
 
     @Test
     @Order(4)
-    void unsupportedGrantTypeIsRefused() {
+    void authorizationCodeGrantRequiresItsMandatoryParameters() {
         given()
                 .header("Host", DOMAIN)
                 .header("Authorization", basic(clientA, secretA))
@@ -108,7 +108,7 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
                 .post("/oauth2/token")
         .then()
                 .statusCode(400)
-                .body("error", equalTo("unsupported_grant_type"));
+                .body("error", equalTo("invalid_request"));
     }
 
     @Test
@@ -175,11 +175,11 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
                 .header("WWW-Authenticate", startsWith("Bearer error=\"invalid_token\""));
     }
 
-    /** Floci has no hosted UI: the other endpoints AWS serves on a domain are absent, not stubbed. */
+    /** Floci has no hosted UI revoke endpoint. */
     @Test
     @Order(9)
-    void otherHostedUiPathsAreNotServed() {
-        for (String path : List.of("/oauth2/authorize", "/oauth2/revoke", "/oauth2/idpresponse")) {
+    void revokeEndpointIsNotServed() {
+        for (String path : List.of("/oauth2/revoke")) {
             given()
                     .header("Host", DOMAIN)
             .when()
