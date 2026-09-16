@@ -1,10 +1,13 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.core.waiters.WaiterResponse;
 import software.amazon.awssdk.services.eks.EksClient;
 import software.amazon.awssdk.services.eks.model.*;
+import software.amazon.awssdk.services.eks.waiters.EksWaiter;
 import software.amazon.awssdk.services.iam.IamClient;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 
@@ -22,8 +25,8 @@ class EksAccessEntryTest {
                     .assumeRolePolicyDocument("{}")).role().arn();
             String second = iam.createRole(builder -> builder.roleName(secondRole)
                     .assumeRolePolicyDocument("{}")).role().arn();
-            createCluster(eks, cluster, first);
             try {
+                createCluster(eks, cluster, first);
                 CreateAccessEntryRequest request = CreateAccessEntryRequest.builder().clusterName(cluster)
                         .principalArn(first).type("EC2_LINUX").tags(Map.of("team", "platform"))
                         .clientRequestToken("sdk-retry").build();
@@ -62,5 +65,13 @@ class EksAccessEntryTest {
                 .resourcesVpcConfig(VpcConfigRequest.builder().build())
                 .accessConfig(CreateAccessConfigRequest.builder().authenticationMode(AuthenticationMode.API)
                         .bootstrapClusterCreatorAdminPermissions(false).build()));
+        try (EksWaiter waiter = eks.waiter()) {
+            WaiterResponse<DescribeClusterResponse> result = waiter.waitUntilClusterActive(
+                    request -> request.name(name),
+                    configuration -> configuration.waitTimeout(Duration.ofMinutes(3)));
+            assertThat(result.matched().response())
+                    .withFailMessage("Cluster %s did not become ACTIVE: %s", name, result.matched().exception())
+                    .isPresent();
+        }
     }
 }
