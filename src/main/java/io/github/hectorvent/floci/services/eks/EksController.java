@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.CreateAccessEntryRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
@@ -147,9 +148,10 @@ public class EksController {
     @GET
     @Path("/clusters/{name}/access-entries")
     public Response listAccessEntries(@PathParam("name") String name,
-                                     @QueryParam("maxResults") Integer maxResults,
+                                     @QueryParam("maxResults") String maxResults,
                                      @QueryParam("nextToken") String nextToken) {
-        EksAccessEntryService.Page page = accessEntries.list(eksService.describeCluster(name), maxResults, nextToken);
+        EksAccessEntryService.Page page = accessEntries.list(eksService.describeCluster(name),
+                Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
         return Response.ok(page.nextToken() == null ? Map.of("accessEntries", page.accessEntries())
                 : Map.of("accessEntries", page.accessEntries(), "nextToken", page.nextToken())).build();
     }

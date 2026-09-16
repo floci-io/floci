@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -60,6 +62,24 @@ class EksAccessEntryIntegrationTest {
                     .then().statusCode(200);
             given().header("Authorization", auth(account, "iam")).contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "DeleteRole").formParam("RoleName", role).post("/").then().statusCode(200);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"abc", "1.5", "2147483648", "0", "-1", "101"})
+    void invalidMaxResultsReturnsAwsJsonError(String maxResults) {
+        String account = "135791357913";
+        String name = "pagination-" + UUID.randomUUID().toString().substring(0, 8);
+        createCluster(account, name, "API");
+        try {
+            given().header("Authorization", auth(account, "eks")).queryParam("maxResults", maxResults)
+                    .get("/clusters/" + name + "/access-entries").then().statusCode(400)
+                    .contentType(containsString("application/json"))
+                    .body("__type", equalTo("InvalidParameterException"))
+                    .body("message", not(emptyOrNullString()));
+        } finally {
+            given().header("Authorization", auth(account, "eks")).delete("/clusters/" + name)
+                    .then().statusCode(200);
         }
     }
 
