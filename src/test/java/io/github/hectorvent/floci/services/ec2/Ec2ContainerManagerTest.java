@@ -894,6 +894,16 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void instanceProfileEnvironmentLetsTheSdkUseImds() {
+        List<String> environment = Ec2ContainerManager.localAwsEnvironment(
+                "us-west-2", "http://floci:4566", "http://floci:9169", true);
+        assertTrue(environment.contains("AWS_EC2_METADATA_SERVICE_ENDPOINT=http://floci:9169"));
+        assertTrue(environment.contains("AWS_ENDPOINT_URL=http://floci:4566"));
+        assertFalse(environment.stream().anyMatch(value -> value.startsWith("AWS_ACCESS_KEY_ID=")
+                || value.startsWith("AWS_SECRET_ACCESS_KEY=") || value.startsWith("AWS_SESSION_TOKEN=")));
+    }
+
+    @Test
     void localAwsEnvironmentProvidesCliCredentialsAndFlociEndpoint() {
         assertEquals(
                 java.util.List.of(

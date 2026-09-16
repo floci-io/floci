@@ -151,6 +151,7 @@ class EmulatorLifecycleTest {
         inOrder.verify(initLifecycleState).markBootCompleted();
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(iamService).sweepOrphanedLambdaExecutionRoleSessions();
+        inOrder.verify(iamService).sweepOrphanedEc2InstanceSessions();
         inOrder.verify(rdsService).restorePersistedRuntime();
     }
 

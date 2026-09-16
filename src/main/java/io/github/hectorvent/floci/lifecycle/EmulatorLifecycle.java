@@ -193,6 +193,10 @@ public class EmulatorLifecycle {
         if (sweptSessions > 0) {
             LOG.infov("Removed {0} orphaned Lambda execution-role session(s)", sweptSessions);
         }
+        int sweptEc2Sessions = iamService.sweepOrphanedEc2InstanceSessions();
+        if (sweptEc2Sessions > 0) {
+            LOG.infov("Removed {0} orphaned EC2 instance session(s)", sweptEc2Sessions);
+        }
         schemaCreationWorker.recoverOrphans();
         schemaCreationWorker.rehydrateSchemas();
         stepFunctionsService.abortAbandonedExecutions();
