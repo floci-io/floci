@@ -132,6 +132,18 @@ class CognitoFederationServiceTest {
     }
 
     @Test
+    void beginAuthorizationStoresRelyingPartyStateInTransaction() {
+        createDefaultProvider();
+
+        String redirect = federationService.beginAuthorization(
+                pool.getId(), "cognito-client", "https://application.example.test/callback",
+                List.of("openid"), "nonce-value", "ExampleOidc", "relying-party-state");
+
+        CognitoAuthorizationTransaction transaction = stateStore.consumeTransaction(queryValue(redirect, "state")).orElseThrow();
+        assertEquals("relying-party-state", transaction.relyingPartyState());
+    }
+
+    @Test
     void completeAuthorizationRejectsNonOidcProvider() {
         createProvider("ExampleGoogle", "Google", Map.of(
                 "client_id", "provider-client",
@@ -377,7 +389,7 @@ class CognitoFederationServiceTest {
     private String putTransaction(String providerName) {
         return stateStore.putTransaction(new CognitoAuthorizationTransaction(
                 pool.getId(), "cognito-client", "https://application.example.test/callback",
-                List.of("openid"), "nonce-value", providerName, CLOCK.instant().plusSeconds(60)));
+                List.of("openid"), "nonce-value", providerName, null, CLOCK.instant().plusSeconds(60)));
     }
 
     private String endpoint(String path) {

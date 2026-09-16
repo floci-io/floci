@@ -42,6 +42,11 @@ public class CognitoFederationService {
 
     public String beginAuthorization(String userPoolId, String clientId, String redirectUri, List<String> scopes,
                                      String nonce, String providerName) {
+        return beginAuthorization(userPoolId, clientId, redirectUri, scopes, nonce, providerName, null);
+    }
+
+    public String beginAuthorization(String userPoolId, String clientId, String redirectUri, List<String> scopes,
+                                     String nonce, String providerName, String relyingPartyState) {
         IdentityProvider provider = cognitoService.describeIdentityProvider(userPoolId, providerName);
         requireOidcProvider(provider);
         String authorizeEndpoint = requiredProviderDetail(provider, "authorize_url", "authorize endpoint");
@@ -49,7 +54,7 @@ public class CognitoFederationService {
         validateAuthorizeEndpoint(authorizeEndpoint, provider.getProviderName());
         Instant expiresAt = clock.instant().plus(TRANSACTION_LIFETIME);
         CognitoAuthorizationTransaction transaction = new CognitoAuthorizationTransaction(
-                userPoolId, clientId, redirectUri, scopes, nonce, providerName, expiresAt);
+                userPoolId, clientId, redirectUri, scopes, nonce, providerName, relyingPartyState, expiresAt);
         String state = stateStore.putTransaction(transaction);
 
         Map<String, String> parameters = new LinkedHashMap<>();

@@ -43,6 +43,18 @@ public class CognitoFederationStateStore {
         return consume(authorizationCodes, code, CognitoAuthorizationCode::expiresAt);
     }
 
+    public Optional<CognitoAuthorizationCode> findAuthorizationCode(String code) {
+        CognitoAuthorizationCode authorizationCode = authorizationCodes.get(code);
+        if (authorizationCode == null) {
+            return Optional.empty();
+        }
+        if (isExpired(authorizationCode.expiresAt())) {
+            authorizationCodes.remove(code, authorizationCode);
+            return Optional.empty();
+        }
+        return Optional.of(authorizationCode);
+    }
+
     private <T> String put(ConcurrentHashMap<String, T> store, T value) {
         String key;
         do {

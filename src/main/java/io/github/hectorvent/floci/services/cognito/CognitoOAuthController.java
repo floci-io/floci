@@ -64,7 +64,8 @@ public class CognitoOAuthController {
                               @QueryParam("response_type") String responseType,
                               @QueryParam("scope") String scope,
                               @QueryParam("nonce") String nonce,
-                              @QueryParam("identity_provider") String providerName) {
+                              @QueryParam("identity_provider") String providerName,
+                              @QueryParam("state") String relyingPartyState) {
         if (!"code".equals(trimToNull(responseType))) {
             return oauthError("unsupported_response_type", "Only response_type=code is supported");
         }
@@ -91,7 +92,7 @@ public class CognitoOAuthController {
 
         try {
             String location = federationService.beginAuthorization(client.getUserPoolId(), clientId, redirectUri,
-                    splitScopes(scope), trimToNull(nonce), providerName);
+                    splitScopes(scope), trimToNull(nonce), providerName, relyingPartyState);
             return Response.status(Response.Status.FOUND).location(URI.create(location)).build();
         } catch (AwsException e) {
             return oauthError("invalid_request", e.getMessage());
@@ -121,6 +122,7 @@ public class CognitoOAuthController {
             Map<String, String> errorParameters = new LinkedHashMap<>();
             errorParameters.put("error", error);
             errorParameters.put("error_description", errorDescription == null ? "" : errorDescription);
+            putRelyingPartyState(errorParameters, transaction.get());
             return redirect(transaction.get().redirectUri(), errorParameters);
         }
         if (trimToNull(providerCode) == null) {
@@ -128,7 +130,10 @@ public class CognitoOAuthController {
         }
         try {
             String authorizationCode = federationService.completeAuthorization(transaction.get(), providerCode);
-            return redirect(transaction.get().redirectUri(), Map.of("code", authorizationCode));
+            Map<String, String> parameters = new LinkedHashMap<>();
+            parameters.put("code", authorizationCode);
+            putRelyingPartyState(parameters, transaction.get());
+            return redirect(transaction.get().redirectUri(), parameters);
         } catch (AwsException e) {
             return oauthError("invalid_request", e.getMessage());
         }
@@ -217,29 +222,32 @@ public class CognitoOAuthController {
         if (code == null || redirectUri == null) {
             return oauthError("invalid_request", "code and redirect_uri are required");
         }
-        Optional<CognitoAuthorizationCode> authorizationCode = stateStore.consumeAuthorizationCode(code);
-        if (authorizationCode.isEmpty()) {
-            return oauthError("invalid_grant", "Authorization code is invalid or has expired");
-        }
-        CognitoAuthorizationCode consumedCode = authorizationCode.get();
-        if (!clientId.equals(consumedCode.clientId()) || !redirectUri.equals(consumedCode.redirectUri())
-                || (domainPoolId != null && !domainPoolId.equals(consumedCode.userPoolId()))) {
-            return oauthError("invalid_grant", "Authorization code was not issued to this client");
-        }
-
         UserPoolClient client;
         try {
             client = cognitoService.findClientById(clientId);
         } catch (AwsException e) {
             return oauthError("invalid_client", "Client not found");
         }
-        if (!consumedCode.userPoolId().equals(client.getUserPoolId())) {
-            return oauthError("invalid_grant", "Authorization code was not issued to this client");
-        }
         if (client.getClientSecret() != null && !client.getClientSecret().isBlank()
                 && !client.getClientSecret().equals(clientSecret)) {
             return oauthError("invalid_client", "Client secret is invalid");
         }
+
+        Optional<CognitoAuthorizationCode> authorizationCode = stateStore.findAuthorizationCode(code);
+        if (authorizationCode.isEmpty()) {
+            return oauthError("invalid_grant", "Authorization code is invalid or has expired");
+        }
+        CognitoAuthorizationCode storedCode = authorizationCode.get();
+        if (!clientId.equals(storedCode.clientId()) || !redirectUri.equals(storedCode.redirectUri())
+                || (domainPoolId != null && !domainPoolId.equals(storedCode.userPoolId()))
+                || !storedCode.userPoolId().equals(client.getUserPoolId())) {
+            return oauthError("invalid_grant", "Authorization code was not issued to this client");
+        }
+        Optional<CognitoAuthorizationCode> consumed = stateStore.consumeAuthorizationCode(code);
+        if (consumed.isEmpty()) {
+            return oauthError("invalid_grant", "Authorization code is invalid or has expired");
+        }
+        CognitoAuthorizationCode consumedCode = consumed.get();
         try {
             UserPool pool = cognitoService.describeUserPool(consumedCode.userPoolId());
             CognitoUser user = cognitoService.adminGetUser(consumedCode.userPoolId(), consumedCode.userId());
@@ -271,6 +279,12 @@ public class CognitoOAuthController {
             first = false;
         }
         return Response.status(Response.Status.FOUND).location(URI.create(location.toString())).build();
+    }
+
+    private void putRelyingPartyState(Map<String, String> parameters, CognitoAuthorizationTransaction transaction) {
+        if (transaction.relyingPartyState() != null) {
+            parameters.put("state", transaction.relyingPartyState());
+        }
     }
 
     private List<String> splitScopes(String scope) {

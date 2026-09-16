@@ -54,10 +54,12 @@ class CognitoOAuthControllerTest {
 
     @Test
     void authorizeRedirectsToConfiguredIdentityProvider() {
-        when(federationService.beginAuthorization(POOL_ID, CLIENT_ID, CALLBACK_URI, List.of("openid"), "nonce", "ExampleOidc"))
+        when(federationService.beginAuthorization(POOL_ID, CLIENT_ID, CALLBACK_URI, List.of("openid"), "nonce", "ExampleOidc",
+                " relying-party-state "))
                 .thenReturn("https://provider.example.test/authorize?state=provider-state");
 
-        Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", "nonce", "ExampleOidc");
+        Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", "nonce",
+                "ExampleOidc", " relying-party-state ");
 
         assertEquals(302, response.getStatus());
         assertEquals("https://provider.example.test/authorize?state=provider-state", response.getHeaderString("Location"));
@@ -68,21 +70,23 @@ class CognitoOAuthControllerTest {
         when(cognitoService.findClientById("missing-client"))
                 .thenThrow(new AwsException("ResourceNotFoundException", "Client not found", 400));
 
-        Response response = controller.authorize(requestContext(null), "missing-client", CALLBACK_URI, "code", "openid", null, "ExampleOidc");
+        Response response = controller.authorize(requestContext(null), "missing-client", CALLBACK_URI, "code", "openid", null,
+                "ExampleOidc", null);
 
         assertOAuthError(response, "invalid_client");
     }
 
     @Test
     void authorizeReturnsInvalidRequestForUnregisteredRedirectUri() {
-        Response response = controller.authorize(requestContext(null), CLIENT_ID, "https://other.example.test/callback", "code", "openid", null, "ExampleOidc");
+        Response response = controller.authorize(requestContext(null), CLIENT_ID, "https://other.example.test/callback", "code", "openid",
+                null, "ExampleOidc", null);
 
         assertOAuthError(response, "invalid_request");
     }
 
     @Test
     void authorizeReturnsUnsupportedResponseTypeForTokenResponse() {
-        Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "token", "openid", null, "ExampleOidc");
+        Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "token", "openid", null, "ExampleOidc", null);
 
         assertOAuthError(response, "unsupported_response_type");
     }
@@ -96,24 +100,25 @@ class CognitoOAuthControllerTest {
 
     @Test
     void idpResponseRedirectsProviderErrorToApplication() {
-        String state = putTransaction();
+        String state = putTransaction("relying-party-state");
 
         Response response = controller.idpResponse(requestContext(null), state, null, "access_denied", "The provider refused access");
 
         assertEquals(302, response.getStatus());
-        assertEquals(CALLBACK_URI + "?error=access_denied&error_description=The+provider+refused+access", response.getHeaderString("Location"));
+        assertEquals(CALLBACK_URI + "?error=access_denied&error_description=The+provider+refused+access&state=relying-party-state",
+                response.getHeaderString("Location"));
     }
 
     @Test
     void idpResponseRedirectsAuthorizationCodeToApplication() {
-        String state = putTransaction();
+        String state = putTransaction("relying-party-state");
         when(federationService.completeAuthorization(any(CognitoAuthorizationTransaction.class), eq("provider-code")))
                 .thenReturn("authorization-code");
 
         Response response = controller.idpResponse(requestContext(null), state, "provider-code", null, null);
 
         assertEquals(302, response.getStatus());
-        assertEquals(CALLBACK_URI + "?code=authorization-code", response.getHeaderString("Location"));
+        assertEquals(CALLBACK_URI + "?code=authorization-code&state=relying-party-state", response.getHeaderString("Location"));
     }
 
     @Test
@@ -152,6 +157,57 @@ class CognitoOAuthControllerTest {
     }
 
     @Test
+    void tokenDoesNotConsumeAuthorizationCodeWhenRedirectUriIsInvalid() {
+        String code = putAuthorizationCode();
+
+        Response invalid = controller.token(null, requestContext(null), form("grant_type", "authorization_code", "client_id", CLIENT_ID,
+                "code", code, "redirect_uri", "https://application.example.test/other"));
+        Response valid = controller.token(null, requestContext(null), validAuthorizationCodeForm(code));
+
+        assertOAuthError(invalid, "invalid_grant");
+        assertEquals(200, valid.getStatus());
+    }
+
+    @Test
+    void tokenDoesNotConsumeAuthorizationCodeWhenClientDoesNotMatch() {
+        UserPoolClient otherClient = client("other-client");
+        when(cognitoService.findClientById("other-client")).thenReturn(otherClient);
+        String code = putAuthorizationCode();
+
+        Response invalid = controller.token(null, requestContext(null), form("grant_type", "authorization_code", "client_id", "other-client",
+                "code", code, "redirect_uri", CALLBACK_URI));
+        Response valid = controller.token(null, requestContext(null), validAuthorizationCodeForm(code));
+
+        assertOAuthError(invalid, "invalid_grant");
+        assertEquals(200, valid.getStatus());
+    }
+
+    @Test
+    void tokenDoesNotConsumeAuthorizationCodeWhenClientSecretIsInvalid() {
+        client.setClientSecret("correct-secret");
+        String code = putAuthorizationCode();
+
+        Response invalid = controller.token(null, requestContext(null), form("grant_type", "authorization_code", "client_id", CLIENT_ID,
+                "client_secret", "wrong-secret", "code", code, "redirect_uri", CALLBACK_URI));
+        Response valid = controller.token(null, requestContext(null), form("grant_type", "authorization_code", "client_id", CLIENT_ID,
+                "client_secret", "correct-secret", "code", code, "redirect_uri", CALLBACK_URI));
+
+        assertOAuthError(invalid, "invalid_client");
+        assertEquals(200, valid.getStatus());
+    }
+
+    @Test
+    void tokenDoesNotConsumeAuthorizationCodeWhenDomainDoesNotMatch() {
+        String code = putAuthorizationCode();
+
+        Response invalid = controller.token(null, requestContext("other-pool"), validAuthorizationCodeForm(code));
+        Response valid = controller.token(null, requestContext(null), validAuthorizationCodeForm(code));
+
+        assertOAuthError(invalid, "invalid_grant");
+        assertEquals(200, valid.getStatus());
+    }
+
+    @Test
     void tokenRejectsMismatchedBasicAndFormClientAuthentication() {
         Response response = controller.token(basicAuthorization(CLIENT_ID, "header-secret"), requestContext(null),
                 form("grant_type", "authorization_code", "client_id", CLIENT_ID, "client_secret", "form-secret",
@@ -160,14 +216,33 @@ class CognitoOAuthControllerTest {
         assertOAuthError(response, "invalid_request");
     }
 
-    private String putTransaction() {
+    private String putTransaction(String relyingPartyState) {
         return stateStore.putTransaction(new CognitoAuthorizationTransaction(POOL_ID, CLIENT_ID, CALLBACK_URI,
-                List.of("openid"), "nonce", "ExampleOidc", CLOCK.instant().plusSeconds(60)));
+                List.of("openid"), "nonce", "ExampleOidc", relyingPartyState, CLOCK.instant().plusSeconds(60)));
+    }
+
+    private String putAuthorizationCode() {
+        String code = stateStore.putAuthorizationCode(new CognitoAuthorizationCode(
+                POOL_ID, CLIENT_ID, "federated-user", CALLBACK_URI, List.of("openid"), CLOCK.instant().plusSeconds(60)));
+        when(cognitoService.describeUserPool(POOL_ID)).thenReturn(pool());
+        when(cognitoService.adminGetUser(POOL_ID, "federated-user")).thenReturn(user());
+        when(cognitoService.generateAuthResult(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null)))
+                .thenReturn(Map.of("AccessToken", "access-token", "IdToken", "id-token", "RefreshToken", "refresh-token",
+                        "ExpiresIn", 3600, "TokenType", "Bearer"));
+        return code;
+    }
+
+    private static MultivaluedHashMap<String, String> validAuthorizationCodeForm(String code) {
+        return form("grant_type", "authorization_code", "client_id", CLIENT_ID, "code", code, "redirect_uri", CALLBACK_URI);
     }
 
     private static UserPoolClient client() {
+        return client(CLIENT_ID);
+    }
+
+    private static UserPoolClient client(String clientId) {
         UserPoolClient result = new UserPoolClient();
-        result.setClientId(CLIENT_ID);
+        result.setClientId(clientId);
         result.setUserPoolId(POOL_ID);
         result.setAllowedOAuthFlowsUserPoolClient(true);
         result.setAllowedOAuthFlows(List.of("code"));

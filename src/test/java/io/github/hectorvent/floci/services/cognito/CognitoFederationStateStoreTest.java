@@ -128,7 +128,7 @@ class CognitoFederationStateStoreTest {
     private CognitoAuthorizationTransaction transaction(Instant expiresAt) {
         return new CognitoAuthorizationTransaction(
             "pool-id", "client-id", "https://example.com/callback", List.of("openid", "email"),
-            "nonce", "ExampleOidc", expiresAt
+            "nonce", "ExampleOidc", null, expiresAt
         );
     }
 

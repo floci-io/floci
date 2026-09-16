@@ -10,6 +10,7 @@ public record CognitoAuthorizationTransaction(
         List<String> scopes,
         String nonce,
         String providerName,
+        String relyingPartyState,
         Instant expiresAt) {
 
     public CognitoAuthorizationTransaction {
