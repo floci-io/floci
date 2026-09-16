@@ -22,6 +22,7 @@ public class Instance {
     private String subnetId;
     private String vpcId;
     private String privateIpAddress;
+    private String logicalPrivateIpAddress;
     private String publicIpAddress;
     private String privateDnsName;
     private String publicDnsName;
@@ -118,6 +119,10 @@ public class Instance {
 
     public String getPrivateIpAddress() { return privateIpAddress; }
     public void setPrivateIpAddress(String privateIpAddress) { this.privateIpAddress = privateIpAddress; }
+    public String getLogicalPrivateIpAddress() { return logicalPrivateIpAddress; }
+    public void setLogicalPrivateIpAddress(String logicalPrivateIpAddress) {
+        this.logicalPrivateIpAddress = logicalPrivateIpAddress;
+    }
 
     public String getPublicIpAddress() { return publicIpAddress; }
     public void setPublicIpAddress(String publicIpAddress) { this.publicIpAddress = publicIpAddress; }

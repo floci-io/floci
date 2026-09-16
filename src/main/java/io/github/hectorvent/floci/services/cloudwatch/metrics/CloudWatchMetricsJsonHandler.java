@@ -157,7 +157,8 @@ public class CloudWatchMetricsJsonHandler {
         alarm.setPeriod(request.path("Period").asInt(60));
         alarm.setUnit(request.path("Unit").asText(null));
         alarm.setEvaluationPeriods(request.path("EvaluationPeriods").asInt(1));
-        alarm.setDatapointsToAlarm(request.path("DatapointsToAlarm").asInt(alarm.getEvaluationPeriods()));
+        alarm.setDatapointsToAlarm(request.hasNonNull("DatapointsToAlarm")
+                ? request.path("DatapointsToAlarm").asInt() : null);
         alarm.setThreshold(request.path("Threshold").asDouble(0));
         alarm.setComparisonOperator(request.path("ComparisonOperator").asText(null));
         alarm.setTreatMissingData(request.path("TreatMissingData").asText(null));
@@ -221,15 +222,19 @@ public class CloudWatchMetricsJsonHandler {
                 dimNode.put("Value", d.value());
             });
             node.put("Period", a.getPeriod());
+            if (a.getUnit() != null) node.put("Unit", a.getUnit());
             node.put("EvaluationPeriods", a.getEvaluationPeriods());
+            if (a.getDatapointsToAlarm() != null) {
+                node.put("DatapointsToAlarm", a.getDatapointsToAlarm());
+            }
             node.put("Threshold", a.getThreshold());
             if (a.getComparisonOperator() != null) node.put("ComparisonOperator", a.getComparisonOperator());
+            if (a.getTreatMissingData() != null) node.put("TreatMissingData", a.getTreatMissingData());
             node.put("ActionsEnabled", a.isActionsEnabled());
             if (a.getStateValue() != null) node.put("StateValue", a.getStateValue());
             if (a.getStateReason() != null) node.put("StateReason", a.getStateReason());
             if (a.getStateReasonData() != null) node.put("StateReasonData", a.getStateReasonData());
             node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
-
         }
         return Response.ok(response).build();
     }

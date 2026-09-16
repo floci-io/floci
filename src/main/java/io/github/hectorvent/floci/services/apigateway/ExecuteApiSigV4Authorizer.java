@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.auth.CredentialScope;
+import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -22,10 +23,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 /**
  * Verifies the SigV4 signature on an execute-api data-plane request, so a route or method whose
@@ -168,7 +167,7 @@ public class ExecuteApiSigV4Authorizer {
         // signed is /{stage}/{route}, identical across every API on this emulator. Without host in
         // the canonical request, a signature minted for one API replays against any other API that
         // happens to expose the same stage and route.
-        if (!containsHeader(signed.signedHeaders(), "host")) {
+        if (!SigV4RequestValidator.containsHeader(signed.signedHeaders(), "host")) {
             return Result.rejected(Failure.MALFORMED, "SignedHeaders does not cover host");
         }
 
@@ -348,28 +347,20 @@ public class ExecuteApiSigV4Authorizer {
                                  String amzDate, Long expiresSeconds) {}
 
     private static SignedRequest headerSignedRequest(String authorization, HttpHeaders headers) {
-        String trimmed = authorization.trim();
-        if (!trimmed.regionMatches(true, 0, ALGORITHM, 0, ALGORITHM.length())) {
+        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
+        if (parsed == null) {
             return null;
         }
-        Map<String, String> parameters = new LinkedHashMap<>();
-        for (String part : trimmed.substring(ALGORITHM.length()).split(",")) {
-            int equals = part.indexOf('=');
-            if (equals > 0) {
-                parameters.put(part.substring(0, equals).trim(), part.substring(equals + 1).trim());
-            }
-        }
-        String credential = parameters.get("Credential");
-        String signedHeaders = parameters.get("SignedHeaders");
-        String signature = parameters.get("Signature");
         String amzDate = headers.getHeaderString("X-Amz-Date");
         if (amzDate == null || amzDate.isBlank()) {
             amzDate = headers.getHeaderString("Date");
         }
-        if (isBlank(credential) || isBlank(signedHeaders) || isBlank(signature) || isBlank(amzDate)) {
+        if (isBlank(parsed.credential()) || isBlank(parsed.signedHeaders())
+                || isBlank(parsed.signature()) || isBlank(amzDate)) {
             return null;
         }
-        return new SignedRequest(credential, signedHeaders.toLowerCase(Locale.ROOT), signature, amzDate, null);
+        return new SignedRequest(parsed.credential(), parsed.signedHeaders().toLowerCase(Locale.ROOT),
+                parsed.signature(), amzDate, null);
     }
 
     private static SignedRequest presignedRequest(MultivaluedMap<String, String> queryParameters) {
@@ -497,35 +488,14 @@ public class ExecuteApiSigV4Authorizer {
                                String signedHeaders) throws Exception {
         String declared = headers == null ? null : headers.getHeaderString("x-amz-content-sha256");
         if (declared != null && !declared.isBlank()
-                && containsHeader(signedHeaders, "x-amz-content-sha256")
-                && !isSha256Hex(declared.trim())) {
+                && SigV4RequestValidator.containsHeader(signedHeaders, "x-amz-content-sha256")
+                && !SigV4RequestValidator.isSha256Hex(declared.trim())) {
             return declared.trim();
         }
         if (presigned) {
             return "UNSIGNED-PAYLOAD";
         }
         return SigV4RequestValidator.sha256Hex(body == null ? new byte[0] : body);
-    }
-
-    private static boolean containsHeader(String signedHeaders, String name) {
-        for (String header : signedHeaders.split(";")) {
-            if (name.equals(header)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isSha256Hex(String value) {
-        if (value.length() != 64) {
-            return false;
-        }
-        for (int index = 0; index < value.length(); index++) {
-            if (Character.digit(value.charAt(index), 16) < 0) {
-                return false;
-            }
-        }
-        return true;
     }
 
     // ──────────────────────────── Crypto and encoding helpers ────────────────────────────

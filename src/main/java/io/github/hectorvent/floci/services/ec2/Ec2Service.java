@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.jboss.logging.Logger;
 
@@ -437,6 +438,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         for (String key : instances.keys()) {
             Instance instance = instances.get(key).orElse(null);
             if (!needsMetadataRegistration(instance)) {
+                continue;
+            }
+            try {
+                restoreInstanceFirewall(instance);
+            } catch (Exception e) {
+                LOG.warnv("Could not restore EC2 firewall for {0}: {1}", instance.getInstanceId(), e.getMessage());
+                containerManager.stopForShutdown(instance);
+                instance.setState(InstanceState.stopped());
+                instances.put(key, instance);
                 continue;
             }
             if (containerManager.restoreMetadataRegistration(instance)) {
@@ -1053,6 +1063,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             list.setState("modify-complete");
             managedPrefixLists.put(key(region, prefixListId), list);
+            reconcileFirewallPolicies(region);
             return list;
         }
     }
@@ -1063,6 +1074,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             requireCustomerManaged(list, "deleted");
             managedPrefixLists.delete(key(region, prefixListId));
             tags.delete(prefixListId);
+            reconcileFirewallPolicies(region);
             // AWS reports delete-complete on the returned object even though it is now gone.
             list.setState("delete-complete");
             return list;
@@ -2731,7 +2743,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 }
             }
             for (Instance inst : launched) {
-                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst));
+                List<SecurityGroup> policyGroups = inst.getSecurityGroups().stream()
+                        .map(group -> securityGroups.get(key(region, group.getGroupId()))
+                                .orElseThrow(() -> new IllegalStateException("Missing security group " + group.getGroupId())))
+                        .toList();
+                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst),
+                        policyGroups, policyPrefixLists(region, policyGroups));
             }
         }
 
@@ -2804,12 +2821,52 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 sgs, config.services().ec2().maxPublishedPortsPerInstance());
     }
 
+    private Map<String, List<String>> policyPrefixLists(String region, List<SecurityGroup> groups) {
+        Map<String, List<String>> resolved = new LinkedHashMap<>();
+        for (SecurityGroup group : groups) {
+            Stream.concat(group.getIpPermissions().stream(),
+                            group.getIpPermissionsEgress().stream())
+                    .flatMap(permission -> permission.getPrefixListIds().stream())
+                    .map(PrefixListId::getPrefixListId).distinct()
+                    .forEach(id -> resolved.put(id, managedPrefixLists.get(key(region, id)).isEmpty()
+                            ? List.of() : getManagedPrefixListEntries(region, id, null).stream()
+                            .map(PrefixListEntry::getCidr).toList()));
+        }
+        return resolved;
+    }
+
+    private boolean securityGroupEnforcementEnabled() {
+        return config.network() != null && config.network().securityGroupEnforcement() != null
+                && config.network().securityGroupEnforcement().enabled();
+    }
+
+    private void reconcileFirewallPolicies(String region) {
+        if (!securityGroupEnforcementEnabled() || config.services().ec2().mock()) {
+            return;
+        }
+        List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
+        Map<String, SecurityGroup> byId = current.stream()
+                .collect(Collectors.toMap(SecurityGroup::getGroupId, Function.identity()));
+        containerManager.refreshSecurityGroups(region, byId, policyPrefixLists(region, current));
+    }
+
+    private void restoreInstanceFirewall(Instance instance) {
+        if (!securityGroupEnforcementEnabled()) {
+            return;
+        }
+        String region = instance.getRegion();
+        List<SecurityGroup> attached = instance.getSecurityGroups().stream()
+                .map(group -> getRequiredSecurityGroup(region, group.getGroupId())).toList();
+        containerManager.restoreSecurityGroups(instance, region, attached, policyPrefixLists(region, attached));
+    }
+
     /**
      * Re-publishes host forwards for every running instance attached to the given security group,
      * so ports opened or closed via authorize/revoke ingress take effect on already-running
      * instances. No-op in mock mode or when publishing is disabled.
      */
     private void reconcilePublishedPortsForGroup(String region, String groupId) {
+        reconcileFirewallPolicies(region);
         if (!config.services().ec2().publishSecurityGroupPorts() || config.services().ec2().mock()) {
             return;
         }
@@ -3084,6 +3141,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if (config.services().ec2().mock()) {
                 inst.setState(InstanceState.running());
             } else {
+                restoreInstanceFirewall(inst);
                 containerManager.start(inst);
             }
             instances.put(key(region, id), inst);
@@ -3297,7 +3355,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<GroupIdentifier> identifiers = new ArrayList<>();
         for (String groupId : groupIds) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            if (!Objects.equals(inst.getVpcId(), sg.getVpcId())) {
+                throw new AwsException("InvalidGroup.NotFound", "Security group is not in the instance VPC", 400);
+            }
             identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
+        }
+
+        if (securityGroupEnforcementEnabled() && !config.services().ec2().mock()
+                && inst.getState() != null && "running".equals(inst.getState().getName())
+                && inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {
+            List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
+            Map<String, SecurityGroup> byId = current.stream().collect(Collectors.toMap(
+                    SecurityGroup::getGroupId, Function.identity()));
+            containerManager.updateSecurityGroups(inst.getNetworkInterfaces().getFirst().getNetworkInterfaceId(),
+                    new HashSet<>(groupIds), byId, policyPrefixLists(region, current));
         }
 
         inst.setSecurityGroups(new ArrayList<>(identifiers));
@@ -4122,6 +4193,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
         }
+        reconcileFirewallPolicies(region);
         return rules;
     }
 
@@ -4266,6 +4338,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
         }
+        reconcileFirewallPolicies(region);
     }
 
     /**
@@ -4302,6 +4375,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         if (!rule.isEgress()) {
             reconcilePublishedPortsForGroup(region, groupId);
+        } else {
+            reconcileFirewallPolicies(region);
         }
         return true;
     }
@@ -7790,10 +7865,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             for (String sgId : securityGroupIds) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, sgId);
+                if (!subnet.getVpcId().equals(sg.getVpcId())) {
+                    throw new AwsException("InvalidGroup.NotFound",
+                            "Security group " + sgId + " does not belong to the subnet VPC", 400);
+                }
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
             }
         } else {
-            SecurityGroup defaultSg = securityGroups.get(key(region, resolveDefaultSecurityGroupId(region))).orElse(null);
+            SecurityGroup defaultSg = securityGroups.scan(k -> k.startsWith(region + "::")).stream()
+                    .filter(group -> subnet.getVpcId().equals(group.getVpcId())
+                            && "default".equals(group.getGroupName()))
+                    .findFirst().orElse(null);
             if (defaultSg != null) {
                 sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
             }

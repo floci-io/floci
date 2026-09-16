@@ -137,11 +137,13 @@ public class LambdaLayerService {
                     "Request must be smaller than 52428800 bytes.", 413);
         }
 
+        String accountId = regionResolver.getAccountId();
+
         // Determine the next version number
         long nextVersion = layerStore.getLatestVersion(region, layerName) + 1;
 
         // Extract the layer zip to disk
-        Path layerPath = getLayerCodePath(layerName, nextVersion);
+        Path layerPath = getLayerCodePath(accountId, region, layerName, nextVersion);
         try {
             zipExtractor.extractTo(zipBytes, layerPath, configuredZipMaxEntries());
         } catch (IOException e) {
@@ -153,7 +155,6 @@ public class LambdaLayerService {
         String codeSha256 = computeSha256(zipBytes);
 
         // Build the layer version
-        String accountId = regionResolver.getAccountId();
         String layerArn = AwsArnUtils.Arn.of("lambda", region, accountId, "layer:" + layerName).toString();
         String layerVersionArn = layerArn + ":" + nextVersion;
 
@@ -572,12 +573,19 @@ public class LambdaLayerService {
                 "Layer content must include either ZipFile or S3Bucket/S3Key", 400);
     }
 
-    private Path getLayerCodePath(String layerName, long version) {
-        String sanitized = layerName.replaceAll("[^a-zA-Z0-9_\\-.]", "_");
+    private Path getLayerCodePath(String accountId, String region, String layerName, long version) {
         return Path.of(config.services().lambda().codePath())
                 .resolve("layers")
-                .resolve(sanitized)
+                .resolve(pathSegment(accountId))
+                .resolve(pathSegment(region))
+                .resolve(pathSegment(layerName))
                 .resolve(String.valueOf(version));
+    }
+
+    // Request region and configured account become path segments, so "." or ".." cannot navigate.
+    private static String pathSegment(String value) {
+        String sanitized = value.replaceAll("[^a-zA-Z0-9_\\-.]", "_");
+        return sanitized.isEmpty() || sanitized.chars().allMatch(c -> c == '.') ? "_" : sanitized;
     }
 
     private String computeSha256(byte[] data) {

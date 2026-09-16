@@ -42,10 +42,23 @@ class Ec2NetworkInterfaceIntegrationTest {
     @Test
     @Order(1)
     void discoverDefaultSubnetAndSecurityGroup() {
+        String vpcId = given()
+            .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "is-default")
+            .formParam("Filter.1.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeVpcsResponse.vpcSet.item[0].vpcId");
+
         subnetId = given()
             .formParam("Action", "DescribeSubnets")
             .formParam("Filter.1.Name", "default-for-az")
             .formParam("Filter.1.Value.1", "true")
+            .formParam("Filter.2.Name", "vpc-id")
+            .formParam("Filter.2.Value.1", vpcId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -57,6 +70,8 @@ class Ec2NetworkInterfaceIntegrationTest {
             .formParam("Action", "DescribeSecurityGroups")
             .formParam("Filter.1.Name", "group-name")
             .formParam("Filter.1.Value.1", "default")
+            .formParam("Filter.2.Name", "vpc-id")
+            .formParam("Filter.2.Value.1", vpcId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")

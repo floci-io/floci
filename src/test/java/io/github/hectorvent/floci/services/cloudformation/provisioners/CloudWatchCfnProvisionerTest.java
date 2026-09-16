@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -107,18 +108,29 @@ class CloudWatchCfnProvisionerTest {
 
         assertEquals(60, alarm.getPeriod());
         assertEquals(1, alarm.getEvaluationPeriods());
-        // DatapointsToAlarm defaults to EvaluationPeriods rather than to a fixed number.
-        assertEquals(1, alarm.getDatapointsToAlarm());
+        // A template that names no M leaves the alarm without one, so DescribeAlarms omits the
+        // member the way AWS does. AlarmEvaluator still evaluates M out of N off EvaluationPeriods.
+        assertNull(alarm.getDatapointsToAlarm());
     }
 
     @Test
-    void datapointsToAlarmDefaultsToEvaluationPeriods() {
+    void datapointsToAlarmIsAbsentUntilTheTemplateNamesOne() {
         MetricAlarm alarm = provisionAndCapture("""
                 {"AlarmName": "a", "EvaluationPeriods": "5"}
                 """);
 
         assertEquals(5, alarm.getEvaluationPeriods());
-        assertEquals(5, alarm.getDatapointsToAlarm());
+        assertNull(alarm.getDatapointsToAlarm());
+    }
+
+    @Test
+    void datapointsToAlarmIsKeptWhenTheTemplateNamesOne() {
+        MetricAlarm alarm = provisionAndCapture("""
+                {"AlarmName": "a", "EvaluationPeriods": "5", "DatapointsToAlarm": "2"}
+                """);
+
+        assertEquals(5, alarm.getEvaluationPeriods());
+        assertEquals(2, alarm.getDatapointsToAlarm());
     }
 
     /** ActionsEnabled is true on AWS unless explicitly disabled, so an absent property means true. */

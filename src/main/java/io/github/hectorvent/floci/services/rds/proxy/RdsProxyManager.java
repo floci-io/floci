@@ -35,13 +35,24 @@ public class RdsProxyManager {
                                         String advertisedHost,
                                         String masterUsername, String masterPassword, String dbName,
                                         RdsAuthProxy.MasterPasswordCheck passwordValidator) {
+        startProxy(instanceId, engine, iamEnabled, proxyPort, backendHost, backendPort,
+                advertisedHost, masterUsername, masterPassword, dbName, passwordValidator,
+                new RdsMysqlBinding(advertisedHost, proxyPort, regionFromRelayKey(instanceId)));
+    }
+
+    public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
+                                        int proxyPort, String backendHost, int backendPort,
+                                        String advertisedHost,
+                                        String masterUsername, String masterPassword, String dbName,
+                                        RdsAuthProxy.MasterPasswordCheck passwordValidator,
+                                        RdsMysqlBinding mysqlBinding) {
         tlsCertificates.ensureHost(advertisedHost);
         EmulatorConfig.RdsServiceConfig rdsConfig = config.services().rds();
         RdsAuthProxy proxy = new RdsAuthProxy(
                 instanceId, backendHost, backendPort, engine, iamEnabled,
                 masterUsername, masterPassword, dbName, sigV4Validator, tlsCertificates, passwordValidator,
                 rdsConfig.proxyHandshakeTimeoutMillis(), rdsConfig.proxyBackendConnectTimeoutMillis(),
-                rdsConfig.proxyMaxConnections());
+                rdsConfig.proxyMaxConnections(), mysqlBinding);
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {
@@ -78,6 +89,17 @@ public class RdsProxyManager {
                 throw failure;
             }
         }
+    }
+
+    private String regionFromRelayKey(String relayKey) {
+        int arnStart = relayKey.indexOf("arn:");
+        if (arnStart >= 0) {
+            String[] parts = relayKey.substring(arnStart).split(":", 6);
+            if (parts.length > 3 && !parts[3].isBlank()) {
+                return parts[3];
+            }
+        }
+        return config.defaultRegion();
     }
 
     public synchronized void updateMasterPassword(String instanceId, String newPassword) {

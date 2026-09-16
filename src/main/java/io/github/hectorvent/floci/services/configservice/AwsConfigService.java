@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
 import io.github.hectorvent.floci.services.configservice.model.Compliance;
 import io.github.hectorvent.floci.services.configservice.model.ComplianceByConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ComplianceByResource;
@@ -40,6 +41,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -70,6 +72,10 @@ public class AwsConfigService {
     private static final int MAX_COMPLIANCE_RESOURCE_TYPES = 100;
     /** {@code DescribeConfigRulesRequest.ConfigRuleNames} is {@code max: 25}. */
     private static final int MAX_DESCRIBE_CONFIG_RULE_NAMES = 25;
+    /** {@code DescribeAggregationAuthorizationsRequest.Limit} is {@code max: 100}. */
+    private static final int MAX_AGGREGATION_AUTHORIZATIONS_LIMIT = 100;
+    /** {@code AuthorizedAccountId} is modeled with {@code pattern: \d{12}}. */
+    private static final Pattern AUTHORIZED_ACCOUNT_ID_PATTERN = Pattern.compile("\\d{12}");
     private static final int RULE_CONTRIBUTOR_CAP = 25;
     private static final int RESOURCE_CONTRIBUTOR_CAP = 100;
 
@@ -80,6 +86,8 @@ public class AwsConfigService {
     private Map<String, Map<String, ConfigRule>> configRules = new ConcurrentHashMap<>();
     // region -> packName -> pack (nested)
     private Map<String, Map<String, ConformancePack>> conformancePacks = new ConcurrentHashMap<>();
+    // region -> authorizationKey("accountId|region") -> authorization (nested)
+    private Map<String, Map<String, AggregationAuthorization>> aggregationAuthorizations = new ConcurrentHashMap<>();
     // region -> ruleName -> resourceKey("Type|Id") -> evaluation (doubly nested)
     private Map<String, Map<String, Map<String, ConfigEvaluation>>> evaluations = new ConcurrentHashMap<>();
 
@@ -120,6 +128,8 @@ public class AwsConfigService {
                 new TypeReference<Map<String, Map<String, ConfigRule>>>() {});
         this.conformancePacks = storageBacked("config-conformance-packs.json",
                 new TypeReference<Map<String, Map<String, ConformancePack>>>() {});
+        this.aggregationAuthorizations = storageBacked("config-aggregation-authorizations.json",
+                new TypeReference<Map<String, Map<String, AggregationAuthorization>>>() {});
         this.evaluations = storageBacked("config-evaluations.json",
                 new TypeReference<Map<String, Map<String, Map<String, ConfigEvaluation>>>>() {});
         this.configurationRecorders = storageBacked("config-recorders.json",
@@ -132,6 +142,7 @@ public class AwsConfigService {
                 new TypeReference<Map<String, Map<String, String>>>() {});
         normalizeRegionMaps(configRules);
         normalizeRegionMaps(conformancePacks);
+        normalizeRegionMaps(aggregationAuthorizations);
         normalizeRegionMaps(tags);
         normalizeEvaluationMaps();
     }
@@ -878,6 +889,88 @@ public class AwsConfigService {
         return paginate(result, limit, nextToken, 20, 20, "InvalidLimitException");
     }
 
+    // --- Aggregation Authorizations ---
+
+    /** Put is an upsert, and request tags are applied at creation only. A Put that finds the
+     *  authorization already there ignores its Tags, leaving whatever TagResource/UntagResource
+     *  last set, so re-putting with a different tag set is not a way to retag.
+     *
+     *  <p>The get-then-put runs under the same lock delete takes, because idempotency that is
+     *  only probable is not idempotency: two concurrent Puts for one account/Region would
+     *  otherwise both find nothing and both create, and the second would overwrite the first's
+     *  CreationTime and re-apply creation tags over a set TagResource may already have changed. */
+    public AggregationAuthorization putAggregationAuthorization(String region, String authorizedAccountId,
+            String authorizedAwsRegion, List<Map<String, String>> tagList) {
+        requireAuthorizationKey(authorizedAccountId, authorizedAwsRegion);
+        synchronized (lockFor(authorizationLockKey(region, authorizedAccountId, authorizedAwsRegion))) {
+            Map<String, AggregationAuthorization> store = authorizationsFor(region);
+            String key = authorizationKey(authorizedAccountId, authorizedAwsRegion);
+            AggregationAuthorization existing = store.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            AggregationAuthorization authorization = new AggregationAuthorization(
+                    aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion),
+                    authorizedAccountId, authorizedAwsRegion, now());
+            store.put(key, authorization);
+            persistRegion(aggregationAuthorizations, region);
+            if (tagList != null && !tagList.isEmpty()) {
+                tagResource(authorization.aggregationAuthorizationArn(), tagList);
+            }
+            return authorization;
+        }
+    }
+
+    public Paged<AggregationAuthorization> describeAggregationAuthorizations(String region, Integer limit,
+            String nextToken) {
+        Comparator<AggregationAuthorization> byAuthorizedTarget =
+                Comparator.comparing(AggregationAuthorization::authorizedAccountId)
+                        .thenComparing(AggregationAuthorization::authorizedAwsRegion);
+        List<AggregationAuthorization> result = new ArrayList<>(authorizationsFor(region).values());
+        result.sort(byAuthorizedTarget);
+        return paginate(result, limit, nextToken, MAX_AGGREGATION_AUTHORIZATIONS_LIMIT,
+                MAX_AGGREGATION_AUTHORIZATIONS_LIMIT, "InvalidLimitException");
+    }
+
+    /** The Config model declares no "not found" error for this operation, so deleting an
+     *  authorization that is not there succeeds. Only the parameters are validated.
+     *
+     *  <p>The ARN is derived from the key rather than read off the removed entry, and its tags are
+     *  dropped whether or not an entry was there. Put reuses that same deterministic ARN, so a
+     *  delete that removed the authorization but did not reach the tags would otherwise leave them
+     *  to resurface on the next put, and the retry that should clean them up would find the
+     *  authorization already gone. */
+    public void deleteAggregationAuthorization(String region, String authorizedAccountId,
+            String authorizedAwsRegion) {
+        requireAuthorizationKey(authorizedAccountId, authorizedAwsRegion);
+        synchronized (lockFor(authorizationLockKey(region, authorizedAccountId, authorizedAwsRegion))) {
+            Map<String, AggregationAuthorization> store = authorizationsFor(region);
+            AggregationAuthorization removed =
+                    store.remove(authorizationKey(authorizedAccountId, authorizedAwsRegion));
+            if (removed != null) {
+                persistRegion(aggregationAuthorizations, region);
+            }
+            tags.remove(aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion));
+        }
+    }
+
+    private String aggregationAuthorizationArn(String region, String authorizedAccountId,
+            String authorizedAwsRegion) {
+        return AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
+                "aggregation-authorization/" + authorizedAccountId + "/" + authorizedAwsRegion).toString();
+    }
+
+    private void requireAuthorizationKey(String authorizedAccountId, String authorizedAwsRegion) {
+        if (isBlank(authorizedAccountId) || !AUTHORIZED_ACCOUNT_ID_PATTERN.matcher(authorizedAccountId).matches()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "AuthorizedAccountId must be a 12 digit AWS account ID.", 400);
+        }
+        if (isBlank(authorizedAwsRegion)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "AuthorizedAwsRegion must be specified.", 400);
+        }
+    }
+
     // --- Tagging ---
 
     public void tagResource(String arn, List<Map<String, String>> tagList) {
@@ -943,6 +1036,23 @@ public class AwsConfigService {
 
     private Map<String, ConformancePack> packsFor(String region) {
         return conformancePacks.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    }
+
+    private Map<String, AggregationAuthorization> authorizationsFor(String region) {
+        return aggregationAuthorizations.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    }
+
+    private static String authorizationKey(String authorizedAccountId, String authorizedAwsRegion) {
+        return authorizedAccountId + "|" + authorizedAwsRegion;
+    }
+
+    /** Aggregation authorizations share {@link #ruleLocks} with the config rules, so their keys
+     *  are namespaced apart. A config rule name cannot contain '|', but making the two key spaces
+     *  disjoint by construction costs nothing and does not depend on that staying true. */
+    private static String authorizationLockKey(String region, String authorizedAccountId,
+            String authorizedAwsRegion) {
+        return "aggregation-authorization|" + region + "|"
+                + authorizationKey(authorizedAccountId, authorizedAwsRegion);
     }
 
     private Map<String, Map<String, ConfigEvaluation>> evaluationsFor(String region) {

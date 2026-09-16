@@ -413,22 +413,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true);
             boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
             String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
-            if (engineMode == null && !storageEncrypted) {
-                if (serverlessV2MinCapacity == null && serverlessV2MaxCapacity == null
-                        && serverlessV2SecondsUntilAutoPause == null) {
-                    cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region);
-                } else {
-                    cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
-                            serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
-                }
-            } else {
-                cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                        masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
-                        serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
-                        false, null, engineMode, storageEncrypted);
-            }
+            cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
+                    masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
+                    serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
+                    false, null, engineMode, storageEncrypted);
         }
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());

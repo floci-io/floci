@@ -7,6 +7,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Validates RDS IAM auth tokens (SigV4 presigned URLs).
@@ -40,6 +42,10 @@ public class RdsSigV4Validator {
      * @return true if the token signature is valid, the DBUser matches, and the token is not expired
      */
     public boolean validate(String token, String clientUsername) {
+        return validate(token, clientUsername, null);
+    }
+
+    public boolean validate(String token, String clientUsername, RdsMysqlBinding binding) {
         try {
             URI uri = URI.create("http://" + token);
             String host = uri.getHost();
@@ -54,11 +60,29 @@ public class RdsSigV4Validator {
             // RDS tokens sign host:port in the canonical host header
             String authority = (port > 0) ? host + ":" + port : host;
 
+            if (binding != null && (!binding.advertisedHost().equalsIgnoreCase(host)
+                    || binding.publishedPort() != port
+                    || !credentialMatches(rawQuery, binding.region()))) {
+                return false;
+            }
+
             return requestValidator.validate(rawQuery, authority, "DBUser", true, clientUsername, "RDS IAM token");
         } catch (Exception e) {
             LOG.debugv("RDS IAM token validation error: {0}", e.getMessage());
             return false;
         }
+    }
+
+    private static boolean credentialMatches(String rawQuery, String region) {
+        for (String pair : rawQuery.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq >= 0 && "X-Amz-Credential".equals(pair.substring(0, eq))) {
+                String[] parts = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8)
+                        .split("/");
+                return parts.length >= 5 && region.equals(parts[2]) && "rds-db".equals(parts[3]);
+            }
+        }
+        return false;
     }
 
     /**

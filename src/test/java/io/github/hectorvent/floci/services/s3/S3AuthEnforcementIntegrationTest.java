@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
+import io.restassured.specification.RequestSpecification;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -1957,6 +1958,109 @@ class S3AuthEnforcementIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("AuthorizationHeaderMalformed"));
+    }
+
+    @Test
+    @Order(54)
+    void presignedPutCorsPreflightSkipsOnlyPreflightSignatureValidation() {
+        String bucket = "auth-presigned-cors-" + Long.toUnsignedString(System.nanoTime(), 36);
+        String key = "upload.txt";
+        String path = "/" + bucket + "/" + key;
+        String signature = presignedSignature("PUT", path, "test", "test", "3600");
+        String tamperedSignature = signature.substring(0, signature.length() - 1)
+                + (signature.endsWith("0") ? "1" : "0");
+        String corsConfiguration = """
+                <CORSConfiguration>
+                  <CORSRule>
+                    <AllowedOrigin>https://app.example.com</AllowedOrigin>
+                    <AllowedMethod>PUT</AllowedMethod>
+                    <AllowedHeader>content-type</AllowedHeader>
+                    <MaxAgeSeconds>600</MaxAgeSeconds>
+                  </CORSRule>
+                </CORSConfiguration>
+                """;
+
+        try {
+            given()
+                .filter(LOCAL_SIGNER)
+            .when()
+                .put("/" + bucket)
+            .then()
+                .statusCode(200);
+
+            given()
+                .filter(LOCAL_SIGNER)
+                .contentType("application/xml")
+                .body(corsConfiguration)
+            .when()
+                .put("/" + bucket + "?cors")
+            .then()
+                .statusCode(200);
+
+            presignedRequest(signature)
+                .header("Origin", "https://app.example.com")
+                .header("Access-Control-Request-Method", "PUT")
+                .header("Access-Control-Request-Headers", "content-type")
+            .when()
+                .options(path)
+            .then()
+                .statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo("https://app.example.com"))
+                .header("Access-Control-Allow-Methods", containsString("PUT"))
+                .header("Access-Control-Allow-Headers", equalTo("content-type"))
+                .header("Access-Control-Max-Age", equalTo("600"));
+
+            // OPTIONS alone is not a CORS preflight and must not turn a PUT signature into a
+            // general authentication bypass.
+            presignedRequest(signature)
+            .when()
+                .options(path)
+            .then()
+                .statusCode(403)
+                .body(containsString("SignatureDoesNotMatch"));
+
+            // Origin without Access-Control-Request-Method is not a preflight either.
+            presignedRequest(signature)
+                .header("Origin", "https://app.example.com")
+            .when()
+                .options(path)
+            .then()
+                .statusCode(403)
+                .body(containsString("SignatureDoesNotMatch"));
+
+            presignedRequest(tamperedSignature)
+                .header("Origin", "https://app.example.com")
+                .contentType("text/plain")
+                .body("tampered")
+            .when()
+                .put(path)
+            .then()
+                .statusCode(403)
+                .body(containsString("SignatureDoesNotMatch"));
+
+            presignedRequest(signature)
+                .header("Origin", "https://app.example.com")
+                .contentType("text/plain")
+                .body("uploaded")
+            .when()
+                .put(path)
+            .then()
+                .statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo("https://app.example.com"));
+        } finally {
+            given().filter(LOCAL_SIGNER).when().delete(path);
+            given().filter(LOCAL_SIGNER).when().delete("/" + bucket);
+        }
+    }
+
+    private static RequestSpecification presignedRequest(String signature) {
+        return given()
+                .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+                .queryParam("X-Amz-Credential", credential("test"))
+                .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+                .queryParam("X-Amz-Expires", "3600")
+                .queryParam("X-Amz-SignedHeaders", "host")
+                .queryParam("X-Amz-Signature", signature);
     }
 
     private static HttpResponse<String> putWithoutContentType(String pathAndQuery, byte[] body,

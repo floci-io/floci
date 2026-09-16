@@ -181,6 +181,7 @@ nav:
     - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
+    - SageMaker: services/sagemaker.md
     - CodeDeploy: services/codedeploy.md
     - CodeGuru Reviewer: services/codegurureviewer.md
     - CodePipeline: services/codepipeline.md
@@ -220,5 +221,6 @@ nav:
     - Java: testcontainers/java.md
     - Node.js / TypeScript: testcontainers/nodejs.md
     - Python: testcontainers/python.md
+    - .NET: testcontainers/dotnet.md
     - Go: testcontainers/go.md
   - Contributing: contributing.md

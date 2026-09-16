@@ -35,6 +35,7 @@ import io.github.hectorvent.floci.services.cloudfront.CloudFrontServingControlle
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesContactController;
 import io.github.hectorvent.floci.services.ses.SesController;
+import io.github.hectorvent.floci.services.ses.SesDedicatedIpController;
 import io.github.hectorvent.floci.services.ses.SesTemplateController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
@@ -59,6 +60,7 @@ import io.github.hectorvent.floci.services.marketplace.MarketplaceCatalogControl
 import io.github.hectorvent.floci.services.marketplace.MarketplaceDeploymentController;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceDiscoveryController;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceReportingController;
+import io.github.hectorvent.floci.services.sagemaker.SageMakerRuntimeController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -288,7 +290,7 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON, ServiceProtocol.QUERY),
                         Set.of(), Set.of("email", "ses", "sesv2"), Set.of(),
                         Set.of(SesController.class, SesContactController.class,
-                                SesTemplateController.class)),
+                                SesDedicatedIpController.class, SesTemplateController.class)),
                 descriptor("es", "opensearch", config.services().opensearch().enabled(), true,
                         "opensearch", storageMode(config.storage().services().opensearch().mode(), config.storage().mode()),
                         config.storage().services().opensearch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
@@ -401,6 +403,12 @@ public class ResolvedServiceCatalog {
                         config.storage().services().batch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("batch"), Set.of(), Set.of(BatchController.class)),
+                descriptor("sagemaker", "sagemaker", config.services().sagemaker().enabled(), true,
+                        "sagemaker", storageMode(config.storage().services().sagemaker().mode(), config.storage().mode()),
+                        config.storage().services().sagemaker().flushIntervalMs(), null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON, ServiceProtocol.REST_JSON),
+                        Set.of("SageMaker."), Set.of("sagemaker", "runtime.sagemaker"), Set.of(),
+                        Set.of(SageMakerRuntimeController.class)),
                 descriptor("codedeploy", "codedeploy", config.services().codedeploy().enabled(), true,
                         "codedeploy", storageMode(config.storage().services().codedeploy().mode(), config.storage().mode()),
                         config.storage().services().codedeploy().flushIntervalMs(), null, ServiceProtocol.JSON,

@@ -12,17 +12,11 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynami
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
-import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
-import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
-import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
@@ -55,7 +49,6 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
@@ -109,9 +102,6 @@ public class CloudFormationResourceProvisioner {
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
     private static final int GENERATED_NAME_SUFFIX_LENGTH = 12;
-    private static final String DDB_REPLICA_TABLE_NAME_ATTR = "TableName";
-    private static final String DDB_REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
-    private static final String DDB_REPLICA_SKIP_DELETION_ATTR = "__FlociDynamoDbReplicaSkipDeletion";
     private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
     private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
@@ -146,8 +136,7 @@ public class CloudFormationResourceProvisioner {
             "AWS::CloudFormation::CustomResource",
             "AWS::EKS::Nodegroup",
             "AWS::IAM::ManagedPolicy",
-            "AWS::IAM::Policy",
-            "Custom::DynamoDBReplica");
+            "AWS::IAM::Policy");
 
     static final Set<String> LEGACY_SWITCH_TYPES = Set.of(
             "AWS::ApiGateway::Authorizer",
@@ -163,8 +152,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::ApiGatewayV2::Route",
             "AWS::ApiGatewayV2::Stage",
             "AWS::CloudFormation::CustomResource",
-            "AWS::DynamoDB::GlobalTable",
-            "AWS::DynamoDB::Table",
             "AWS::EC2::Instance",
             "AWS::EC2::SecurityGroup",
             "AWS::EKS::Cluster",
@@ -175,8 +162,7 @@ public class CloudFormationResourceProvisioner {
             "AWS::IAM::Policy",
             "AWS::Lambda::Function",
             "AWS::Lambda::LayerVersion",
-            "AWS::Route53::RecordSet",
-            "Custom::DynamoDBReplica");
+            "AWS::Route53::RecordSet");
 
     /** Reserved attribute keys used to carry custom-resource state to the later Delete invocation. */
     private static final String CR_SERVICE_TOKEN_ATTR = "__FlociServiceToken";
@@ -189,7 +175,6 @@ public class CloudFormationResourceProvisioner {
     private static final Duration CR_RESPONSE_TIMEOUT = Duration.ofSeconds(10);
 
     private final S3Service s3Service;
-    private final DynamoDbService dynamoDbService;
     private final LambdaService lambdaService;
     private final IamService iamService;
     private final ApiGatewayService apiGatewayService;
@@ -209,7 +194,6 @@ public class CloudFormationResourceProvisioner {
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service,
-                                             SnsService snsService, DynamoDbService dynamoDbService,
                                              LambdaService lambdaService, IamService iamService,
                                              SsmService ssmService, KmsService kmsService,
                                              ApiGatewayService apiGatewayService,
@@ -231,7 +215,6 @@ public class CloudFormationResourceProvisioner {
                                              EmulatorConfig config) {
         this.config = config;
         this.s3Service = s3Service;
-        this.dynamoDbService = dynamoDbService;
         this.lambdaService = lambdaService;
         this.iamService = iamService;
         this.apiGatewayService = apiGatewayService;
@@ -287,8 +270,6 @@ public class CloudFormationResourceProvisioner {
                 return resource;
             }
             switch (resourceType) {
-                case "AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable" ->
-                        provisionDynamoTable(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::Function" -> provisionLambda(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::LayerVersion" ->
                         provisionLambdaLayerVersion(resource, properties, engine, region, stackName);
@@ -312,7 +293,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ApiGatewayV2::Deployment" -> provisionApiGatewayV2Deployment(resource, properties, engine, region);
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
-                case "Custom::DynamoDBReplica" -> provisionDynamoDbReplica(resource, properties, engine, region);
                 // EC2 networking. These delegate to Ec2Service so the resources actually exist
                 // (describe-subnets, ELBv2, etc. can find them) instead of being stubbed with a
                 // fake physical id. Topological ordering guarantees parents are provisioned first.
@@ -432,7 +412,7 @@ public class CloudFormationResourceProvisioner {
         // Registry first. An extracted provisioner owns its type outright, and gets the whole
         // resource so an attribute-aware delete can read its create-time attributes. Consulting it
         // ahead of the branches below means an exact match always beats the Custom:: prefix branch
-        // (so Custom::DynamoDBReplica can move to a provisioner), and that migrating one of the
+        // (which is how Custom::DynamoDBReplica moved to DynamoDbCfnProvisioner), and that migrating one of the
         // DELETE_NEEDS_STACK_RESOURCE types cannot silently keep using the stale branch here.
         CfnResourceProvisioner extractedForDelete = resourceRegistry.forType(resourceType).orElse(null);
         if (extractedForDelete != null) {
@@ -458,12 +438,6 @@ public class CloudFormationResourceProvisioner {
      */
     private void deleteUsingCreateTimeAttributes(StackResource resource, String region) {
         String resourceType = resource.getResourceType();
-        // Custom::DynamoDBReplica is applied natively against the DynamoDB service (not via its
-        // provider Lambda), so remove the replica the same way rather than invoking the handler.
-        if ("Custom::DynamoDBReplica".equals(resourceType)) {
-            deleteDynamoDbReplicaSafe(resource, region);
-            return;
-        }
         if ("AWS::CloudFormation::CustomResource".equals(resourceType)) {
             deleteCustomResource(resource, region);
             return;
@@ -528,7 +502,6 @@ public class CloudFormationResourceProvisioner {
             return;
         }
         switch (resourceType) {
-            case "AWS::DynamoDB::Table" -> deleteDynamoTableSafe(physicalId, region);
             case "AWS::Lambda::Function" -> deleteLambdaFunctionSafe(physicalId, region);
             // AWS::IAM::Policy is inline: it is removed together with its owning principal (see
             // IamRoleCfnProvisioner#delete), or precisely via the StackResource-aware delete path.
@@ -943,139 +916,6 @@ public class CloudFormationResourceProvisioner {
     // ── Kinesis Data Firehose ───────────────────────────────────────────────────
 
     // ── SNS ───────────────────────────────────────────────────────────────────
-
-    // ── DynamoDB ──────────────────────────────────────────────────────────────
-
-    private void provisionDynamoTable(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                      String region, String accountId, String stackName) {
-        String tableName = resolveOptional(props, "TableName", engine);
-        if (tableName == null || tableName.isBlank()) {
-            tableName = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
-
-        List<KeySchemaElement> keySchema = new ArrayList<>();
-        List<AttributeDefinition> attrDefs = new ArrayList<>();
-        List<GlobalSecondaryIndex> gsis = new ArrayList<>();
-        List<LocalSecondaryIndex> lsis = new ArrayList<>();
-
-        if (props != null && props.has("KeySchema")) {
-            for (JsonNode ks : props.get("KeySchema")) {
-                String attrName = engine.resolve(ks.get("AttributeName"));
-                String keyType = engine.resolve(ks.get("KeyType"));
-                keySchema.add(new KeySchemaElement(attrName, keyType));
-            }
-        }
-        if (props != null && props.has("AttributeDefinitions")) {
-            for (JsonNode ad : props.get("AttributeDefinitions")) {
-                String attrName = engine.resolve(ad.get("AttributeName"));
-                String attrType = engine.resolve(ad.get("AttributeType"));
-                attrDefs.add(new AttributeDefinition(attrName, attrType));
-            }
-        }
-
-        if (props != null && props.has("GlobalSecondaryIndexes")) {
-            for (JsonNode gsiNode : props.get("GlobalSecondaryIndexes")) {
-                String indexName = engine.resolve(gsiNode.get("IndexName"));
-                List<KeySchemaElement> gsiKeySchema = new ArrayList<>();
-                if (gsiNode.has("KeySchema")) {
-                    for (JsonNode ks : gsiNode.get("KeySchema")) {
-                        String attrName = engine.resolve(ks.get("AttributeName"));
-                        String keyType = engine.resolve(ks.get("KeyType"));
-                        gsiKeySchema.add(new KeySchemaElement(attrName, keyType));
-                    }
-                }
-                String projectionType = "ALL";
-                JsonNode projection = gsiNode.get("Projection");
-                List<String> nonKeyAttributes = new ArrayList<>();
-                if (projection != null && projection.has("ProjectionType")) {
-                    projectionType = engine.resolve(projection.get("ProjectionType"));
-                    JsonNode nonKeyAttrArray = projection.path("NonKeyAttributes");
-                    if (!nonKeyAttrArray.isMissingNode() && nonKeyAttrArray.isArray()){
-                        for (JsonNode nonKeyAttr : nonKeyAttrArray){
-                            nonKeyAttributes.add(nonKeyAttr.asText());
-                        }
-                    }
-                }
-                gsis.add(new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes));
-            }
-        }
-
-        if (props != null && props.has("LocalSecondaryIndexes")) {
-            for (JsonNode lsiNode : props.get("LocalSecondaryIndexes")) {
-                String indexName = engine.resolve(lsiNode.get("IndexName"));
-                List<KeySchemaElement> lsiKeySchema = new ArrayList<>();
-                if (lsiNode.has("KeySchema")) {
-                    for (JsonNode ks : lsiNode.get("KeySchema")) {
-                        String attrName = engine.resolve(ks.get("AttributeName"));
-                        String keyType = engine.resolve(ks.get("KeyType"));
-                        lsiKeySchema.add(new KeySchemaElement(attrName, keyType));
-                    }
-                }
-                String projectionType = "ALL";
-                JsonNode projection = lsiNode.get("Projection");
-                if (projection != null && projection.has("ProjectionType")) {
-                    projectionType = engine.resolve(projection.get("ProjectionType"));
-                }
-                lsis.add(new LocalSecondaryIndex(indexName, lsiKeySchema, null, projectionType));
-            }
-        }
-
-        if (keySchema.isEmpty()) {
-            keySchema.add(new KeySchemaElement("id", "HASH"));
-            attrDefs.add(new AttributeDefinition("id", "S"));
-        }
-
-        TableDefinition table;
-        try {
-            table = dynamoDbService.createTable(tableName, keySchema, attrDefs, null, null, gsis, lsis, region);
-        } catch (AwsException e) {
-            if (!"ResourceInUseException".equals(e.getErrorCode())) {
-                throw e;
-            }
-            table = dynamoDbService.describeTable(tableName, region);
-        }
-
-        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
-        List<String> staleTags = ProvisionContext.staleTagKeys(
-                dynamoDbService.listTagsOfResource(table.getTableArn(), region), tags);
-        if (!staleTags.isEmpty()) {
-            dynamoDbService.untagResource(table.getTableArn(), staleTags, region);
-        }
-        if (!tags.isEmpty()) {
-            dynamoDbService.tagResource(table.getTableArn(), tags, region);
-        }
-
-        // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
-        // the CloudFormation property carries no StreamEnabled flag — declaring the block IS the
-        // request — so its presence alone turns the stream on. Without this the table is created
-        // streamless and an event source mapping polls its ARN forever.
-        //
-        // Removing the block on an update is the inverse request: the stream is reconciled off,
-        // or a table updated out of streaming would keep emitting records to whatever still holds
-        // its ARN.
-        JsonNode streamSpec = props != null ? props.path("StreamSpecification") : null;
-        if (streamSpec != null && streamSpec.isObject()) {
-            String viewType = streamSpec.has("StreamViewType")
-                    ? engine.resolve(streamSpec.get("StreamViewType"))
-                    : null;
-            table = dynamoDbService.enableStream(tableName, viewType, region);
-        } else if (table.isStreamEnabled()) {
-            table = dynamoDbService.disableStream(tableName, region);
-        }
-
-        r.setPhysicalId(tableName);
-        r.getAttributes().put("Arn", table.getTableArn());
-        // Only a live stream has an ARN worth handing to Fn::GetAtt. Publishing one unconditionally
-        // resolved to nothing on a streamless table; publishing the retained ARN of a stream that
-        // has since been switched off would resolve to something no longer running. An update
-        // starts from the previous attributes, so the stale entry has to be removed rather than
-        // merely left unwritten.
-        if (table.isStreamEnabled() && table.getStreamArn() != null) {
-            r.getAttributes().put("StreamArn", table.getStreamArn());
-        } else {
-            r.getAttributes().remove("StreamArn");
-        }
-    }
 
     // ── Lambda ────────────────────────────────────────────────────────────────
 
@@ -3427,79 +3267,6 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    /**
-     * Provisions a {@code Custom::DynamoDBReplica} — the custom resource the CDK legacy global-table
-     * (dynamodb.Table.replicationRegions) emits per replica region. Its provider Lambda simply calls
-     * DynamoDB UpdateTable with a ReplicaUpdates Create, so apply that directly rather than running
-     * the async CDK Provider framework. {@code Ref} (PhysicalResourceId) follows CDK's
-     * {@code <tableName>-<region>} format.
-     */
-    private void provisionDynamoDbReplica(StackResource r, JsonNode props,
-                                          CloudFormationTemplateEngine engine, String region) {
-        String tableName = resolveOptional(props, "TableName", engine);
-        String replicaRegion = resolveOptional(props, "Region", engine);
-        if (tableName == null || tableName.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing TableName", 400);
-        }
-        if (replicaRegion == null || replicaRegion.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "Custom::DynamoDBReplica " + r.getLogicalId() + " is missing Region", 400);
-        }
-        String priorTableName = r.getAttributes().get(DDB_REPLICA_TABLE_NAME_ATTR);
-        String priorRegion = r.getAttributes().get(DDB_REPLICA_REGION_ATTR);
-        if (priorRegion == null || priorRegion.isBlank()) {
-            priorRegion = replicaRegionFromPhysicalId(
-                    r.getPhysicalId(), priorTableName != null ? priorTableName : tableName);
-        }
-        List<String> removeRegions = priorRegion != null
-                && !priorRegion.isBlank()
-                && !priorRegion.equals(replicaRegion)
-                ? List.of(priorRegion)
-                : List.of();
-        // Validate and persist replacement as one operation so an old-replica removal failure
-        // cannot leave the new replica applied while the resource still points at the old region.
-        dynamoDbService.applyReplicaUpdates(
-                tableName, List.of(replicaRegion), removeRegions, region);
-        r.setPhysicalId(tableName + "-" + replicaRegion);
-        r.getAttributes().put(DDB_REPLICA_TABLE_NAME_ATTR, tableName);
-        r.getAttributes().put(DDB_REPLICA_REGION_ATTR, replicaRegion);
-        r.getAttributes().put(DDB_REPLICA_SKIP_DELETION_ATTR,
-                Boolean.toString(Boolean.TRUE.equals(
-                        parseBooleanOrNull(resolveOptional(props, "SkipReplicaDeletion", engine)))));
-    }
-
-    private void deleteDynamoDbReplicaSafe(StackResource r, String region) {
-        if (Boolean.parseBoolean(r.getAttributes().get(DDB_REPLICA_SKIP_DELETION_ATTR))) {
-            LOG.debugv("Keeping replica for retained Custom::DynamoDBReplica {0}", r.getLogicalId());
-            return;
-        }
-        String tableName = r.getAttributes().get(DDB_REPLICA_TABLE_NAME_ATTR);
-        String replicaRegion = r.getAttributes().get(DDB_REPLICA_REGION_ATTR);
-        if (replicaRegion == null || replicaRegion.isBlank()) {
-            replicaRegion = replicaRegionFromPhysicalId(r.getPhysicalId(), tableName);
-        }
-        if (tableName == null || tableName.isBlank() || replicaRegion == null || replicaRegion.isBlank()) {
-            return;
-        }
-        try {
-            dynamoDbService.applyReplicaUpdates(tableName, List.of(), List.of(replicaRegion), region);
-        } catch (Exception e) {
-            LOG.debugv("Could not remove replica {0} from table {1}: {2}",
-                    replicaRegion, tableName, e.getMessage());
-        }
-    }
-
-    private static String replicaRegionFromPhysicalId(String physicalId, String tableName) {
-        if (physicalId == null || physicalId.isBlank()) {
-            return null;
-        }
-        String prefix = tableName + "-";
-        return tableName != null && !tableName.isBlank() && physicalId.startsWith(prefix)
-                ? physicalId.substring(prefix.length())
-                : physicalId;
-    }
-
     // Reads the ResourceProperties stashed at the last create/update (CR_PROPERTIES_ATTR).
     // Returns null when nothing is stashed or it cannot be parsed.
     private ObjectNode readStashedProperties(StackResource r) {
@@ -3618,10 +3385,6 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    private static Boolean parseBooleanOrNull(String value) {
-        return (value == null || value.isBlank()) ? null : Boolean.valueOf(value);
-    }
-
     private static String textOrNull(JsonNode node, String field) {
         return node != null && node.hasNonNull(field) ? node.path(field).asText() : null;
     }
@@ -3685,17 +3448,6 @@ public class CloudFormationResourceProvisioner {
                 throw e;
             }
             LOG.debugv("IAM policy already gone, treating as deleted: {0}", policyArn);
-        }
-    }
-
-    private void deleteDynamoTableSafe(String tableName, String region) {
-        try {
-            dynamoDbService.deleteTable(tableName, region);
-        } catch (AwsException e) {
-            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw e;
-            }
-            LOG.debugv("DynamoDB table already gone, treating as deleted: {0}", tableName);
         }
     }
 

@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -181,6 +183,106 @@ class ProjectionEvaluatorTest {
     void allowableIndexBeyondTheListJustDropsTheAttribute() {
         var result = ProjectionEvaluator.project(listItem(), "l[4294967294]", null);
         assertNull(result.get("l"), "an in-range index past the list end matches nothing");
+    }
+
+    private static ObjectNode bracketKeyedItem() {
+        return readValue("""
+                {
+                  "pk": {"S": "p"},
+                  "data": {"M": {
+                    "settings": {"M": {
+                      "[alpha]": {"L": [{"S": "one"}, {"S": "two"}]},
+                      "[beta]": {"L": [{"S": "three"}]}
+                    }},
+                    "[0]": {"S": "literal-zero-key"},
+                    "a.b": {"S": "dotted-key"},
+                    "a[0]": {"S": "indexed-looking-key"},
+                    "a": {"M": {"b": {"S": "real-nested"}}}
+                  }},
+                  "list": {"L": [{"S": "first"}, {"S": "second"}]}
+                }
+                """);
+    }
+
+    @Test
+    void aliasResolvingToBracketedNameIsALiteralMapKey() {
+        ObjectNode result = ProjectionEvaluator.project(bracketKeyedItem(), "#data.settings.#key",
+                readValue("""
+                        {"#data": "data", "#key": "[alpha]"}
+                        """));
+
+        ObjectNode settings = (ObjectNode) result.get("data").get("M").get("settings").get("M");
+        assertEquals(2, settings.get("[alpha]").get("L").size());
+        assertEquals("one", settings.get("[alpha]").get("L").get(0).get("S").asText());
+        assertNull(settings.get("[beta]"), "unprojected sibling bracketed key must be dropped");
+    }
+
+    @Test
+    void aliasResolvingToBracketZeroIsNotAListIndex() {
+        ObjectNode result = ProjectionEvaluator.project(bracketKeyedItem(), "#data.#zero",
+                readValue("""
+                        {"#data": "data", "#zero": "[0]"}
+                        """));
+
+        assertEquals("literal-zero-key", result.get("data").get("M").get("[0]").get("S").asText());
+        assertNull(result.get("data").get("L"), "a literal [0] alias must not index a list");
+    }
+
+    @Test
+    void aliasResolvingToDottedNameIsOneSegment() {
+        ObjectNode result = ProjectionEvaluator.project(bracketKeyedItem(), "#data.#dotted",
+                readValue("""
+                        {"#data": "data", "#dotted": "a.b"}
+                        """));
+
+        ObjectNode data = (ObjectNode) result.get("data").get("M");
+        assertEquals("dotted-key", data.get("a.b").get("S").asText());
+        assertNull(data.get("a"), "a dotted alias must not traverse into the real nested map");
+    }
+
+    @Test
+    void aliasResolvingToIndexedLookingNameIsOneSegment() {
+        ObjectNode result = ProjectionEvaluator.project(bracketKeyedItem(), "#data.#indexed",
+                readValue("""
+                        {"#data": "data", "#indexed": "a[0]"}
+                        """));
+
+        ObjectNode data = (ObjectNode) result.get("data").get("M");
+        assertEquals("indexed-looking-key", data.get("a[0]").get("S").asText());
+        assertNull(data.get("a"), "an indexed-looking alias must not index the real attribute");
+    }
+
+    @Test
+    void bracketedAliasFollowedByListIndexIndexesItsValue() {
+        ObjectNode result = ProjectionEvaluator.project(bracketKeyedItem(), "#data.settings.#key[1]",
+                readValue("""
+                        {"#data": "data", "#key": "[alpha]"}
+                        """));
+
+        ObjectNode settings = (ObjectNode) result.get("data").get("M").get("settings").get("M");
+        assertEquals(1, settings.get("[alpha]").get("L").size());
+        assertEquals("two", settings.get("[alpha]").get("L").get(0).get("S").asText());
+    }
+
+    @Test
+    void realIndexSuffixOnAliasedListStillIndexes() {
+        ObjectNode result = ProjectionEvaluator.project(bracketKeyedItem(), "#list[0]",
+                readValue("""
+                        {"#list": "list"}
+                        """));
+
+        assertEquals(1, result.get("list").get("L").size());
+        assertEquals("first", result.get("list").get("L").get(0).get("S").asText());
+    }
+
+    @Test
+    void topLevelAttributesKeepsBracketedAliasLiteral() {
+        Set<String> attributes = ProjectionEvaluator.topLevelAttributes("#key.x, #list[0]",
+                readValue("""
+                        {"#key": "[alpha]", "#list": "list"}
+                        """));
+
+        assertEquals(Set.of("[alpha]", "list"), attributes);
     }
 
     private static ObjectNode readValue(String json) {

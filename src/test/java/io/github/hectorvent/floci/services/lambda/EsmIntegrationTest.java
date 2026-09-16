@@ -224,6 +224,7 @@ class EsmIntegrationTest {
                         {
                           "BisectBatchOnFunctionError": true,
                           "MaximumRetryAttempts": 3,
+                          "MaximumRecordAgeInSeconds": 120,
                           "DestinationConfig": {
                             "OnFailure": {
                               "Destination": "%s"
@@ -237,6 +238,7 @@ class EsmIntegrationTest {
                 .statusCode(202)
                 .body("BisectBatchOnFunctionError", equalTo(true))
                 .body("MaximumRetryAttempts", equalTo(3))
+                .body("MaximumRecordAgeInSeconds", equalTo(120))
                 .body("DestinationConfig.OnFailure.Destination", equalTo(destinationArn));
 
         given()
@@ -246,12 +248,30 @@ class EsmIntegrationTest {
                 .statusCode(200)
                 .body("BisectBatchOnFunctionError", equalTo(true))
                 .body("MaximumRetryAttempts", equalTo(3))
+                .body("MaximumRecordAgeInSeconds", equalTo(120))
                 .body("DestinationConfig.OnFailure.Destination", equalTo(destinationArn));
 
         given()
                 .delete(LAMBDA_BASE + "/event-source-mappings/" + uuid)
                 .then()
                 .statusCode(202);
+    }
+
+    @Test
+    void createEventSourceMappingRejectsMaximumRecordAgeBelowMinimum() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "FunctionName": "%s",
+                          "EventSourceArn": "%s",
+                          "MaximumRecordAgeInSeconds": 59
+                        }
+                        """.formatted(FUNCTION_NAME, QUEUE_ARN))
+                .when()
+                .post(LAMBDA_BASE + "/event-source-mappings")
+                .then()
+                .statusCode(400);
     }
 
     @Test
@@ -270,6 +290,7 @@ class EsmIntegrationTest {
                 .statusCode(202)
                 .body("$", not(hasKey("BisectBatchOnFunctionError")))
                 .body("$", not(hasKey("MaximumRetryAttempts")))
+                .body("$", not(hasKey("MaximumRecordAgeInSeconds")))
                 .body("$", not(hasKey("DestinationConfig")))
                 .extract()
                 .path("UUID");

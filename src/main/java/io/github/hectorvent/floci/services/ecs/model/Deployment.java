@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecs.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.Map;
 
 /**
  * A deployment of an ECS service, as reported in {@code DescribeServices}'
@@ -25,6 +26,12 @@ public class Deployment {
     private LaunchType launchType;
     private Instant createdAt;
     private Instant updatedAt;
+    /**
+     * Raw passthrough of the service's Service Connect configuration. AWS's own {@code Service}
+     * shape carries no {@code serviceConnectConfiguration} member, only {@code Deployment} does,
+     * so this is the single place a generated client can read it back from.
+     */
+    private Map<String, Object> serviceConnectConfiguration;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -50,4 +57,8 @@ public class Deployment {
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
+    public Map<String, Object> getServiceConnectConfiguration() { return serviceConnectConfiguration; }
+    public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
+        this.serviceConnectConfiguration = serviceConnectConfiguration;
+    }
 }
