@@ -114,12 +114,23 @@ public class SsmCommandService implements Resettable {
         info.setComputerName(request.path("Hostname").asText(instanceId));
         info.setRegion(region);
 
-        if (info.getRegistrationDate() == null) {
+        boolean firstRegistration = info.getRegistrationDate() == null;
+        if (firstRegistration) {
             info.setRegistrationDate(Instant.now());
         }
 
         instanceStore.put(instanceKey(region, instanceId), info);
         LOG.infov("SSM agent registered: instanceId={0} platform={1}/{2}", instanceId, info.getPlatformType(), info.getPlatformName());
+
+        // Registering with SSM does not create an EC2 instance record. Make it obvious when the
+        // agent lives in a container Floci did not launch through RunInstances: SendCommand falls
+        // back to agent polling and IMDS (169.254.169.254) has nothing to serve for that container.
+        if (firstRegistration && !directCommandExecutor.isContainerBacked(instanceId)) {
+            LOG.warnv("SSM managed instance {0} is not backed by a running Floci EC2 container. "
+                    + "SendCommand will use the agent polling flow and IMDS will not answer for it. "
+                    + "To get both, launch the container with EC2 RunInstances before registering its SSM agent.",
+                    instanceId);
+        }
     }
 
     public List<InstanceInformation> describeInstanceInformation(String region) {

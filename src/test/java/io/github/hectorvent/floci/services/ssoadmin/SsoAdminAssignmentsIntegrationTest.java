@@ -29,7 +29,7 @@ class SsoAdminAssignmentsIntegrationTest {
                 .then().statusCode(200).body("PermissionSet.PermissionSetArn", notNullValue())
                 .extract().path("PermissionSet.PermissionSetArn");
         json("SWBExternalService.ListPermissionSets", "{\"InstanceArn\":\"" + instanceArn + "\"}")
-                .then().statusCode(200).body("PermissionSets", hasSize(1));
+                .then().statusCode(200).body("PermissionSets", org.hamcrest.Matchers.hasItem(permissionSetArn));
 
         String assignment = "{\"InstanceArn\":\"" + instanceArn
                 + "\",\"TargetId\":\"123456789012\",\"TargetType\":\"AWS_ACCOUNT\",\"PermissionSetArn\":\""
@@ -38,11 +38,74 @@ class SsoAdminAssignmentsIntegrationTest {
                 .then().statusCode(200).extract().path("AccountAssignmentCreationStatus.RequestId");
         json("SWBExternalService.DescribeAccountAssignmentCreationStatus",
                 "{\"InstanceArn\":\"" + instanceArn + "\",\"AccountAssignmentCreationRequestId\":\"" + requestId + "\"}")
-                .then().statusCode(200).body("AccountAssignmentCreationStatus.Status", equalTo("SUCCEEDED"));
+                .then().statusCode(200)
+                .body("AccountAssignmentCreationStatus.Status", equalTo("SUCCEEDED"))
+                .body("AccountAssignmentCreationStatus.CreatedDate", notNullValue());
+        json("SWBExternalService.ListAccountAssignmentCreationStatus",
+                "{\"InstanceArn\":\"" + instanceArn + "\",\"Filter\":{\"Status\":\"SUCCEEDED\"}}")
+                .then().statusCode(200)
+                .body("AccountAssignmentsCreationStatus.RequestId", org.hamcrest.Matchers.hasItem(requestId));
         json("SWBExternalService.ListAccountAssignments",
                 "{\"InstanceArn\":\"" + instanceArn + "\",\"AccountId\":\"123456789012\",\"PermissionSetArn\":\""
                         + permissionSetArn + "\"}")
                 .then().statusCode(200).body("AccountAssignments[0].PrincipalType", equalTo("GROUP"));
+    }
+
+    @Test
+    void deletePermissionSetReturnsEmptyResponseAndRemovesIt() {
+        String instanceArn = json("SWBExternalService.ListInstances", "{}")
+                .then().statusCode(200).extract().path("Instances[0].InstanceArn");
+        String permissionSetArn = json("SWBExternalService.CreatePermissionSet",
+                "{\"InstanceArn\":\"" + instanceArn + "\",\"Name\":\"DeletePermissionSetIntegration\"}")
+                .then().statusCode(200).extract().path("PermissionSet.PermissionSetArn");
+
+        json("SWBExternalService.DeletePermissionSet",
+                "{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn + "\"}")
+                .then().statusCode(200).body(equalTo(""));
+        json("SWBExternalService.DescribePermissionSet",
+                "{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn + "\"}")
+                .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void detachCustomerManagedPolicyReferenceReturnsEmptyResponse() {
+        String instanceArn = json("SWBExternalService.ListInstances", "{}")
+                .then().statusCode(200).extract().path("Instances[0].InstanceArn");
+        String permissionSetArn = json("SWBExternalService.CreatePermissionSet",
+                "{\"InstanceArn\":\"" + instanceArn + "\",\"Name\":\"DetachCustomerPolicyIntegration\"}")
+                .then().statusCode(200).extract().path("PermissionSet.PermissionSetArn");
+        String body = "{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn
+                + "\",\"CustomerManagedPolicyReference\":{\"Name\":\"PlatformPolicy\",\"Path\":\"/platform/\"}}";
+        json("SWBExternalService.AttachCustomerManagedPolicyReferenceToPermissionSet", body)
+                .then().statusCode(200);
+        json("SWBExternalService.ListCustomerManagedPolicyReferencesInPermissionSet",
+                "{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn + "\"}")
+                .then().statusCode(200)
+                .body("CustomerManagedPolicyReferences[0].Name", equalTo("PlatformPolicy"))
+                .body("CustomerManagedPolicyReferences[0].Path", equalTo("/platform/"));
+        json("SWBExternalService.DetachCustomerManagedPolicyReferenceFromPermissionSet", body)
+                .then().statusCode(200).body(equalTo(""));
+    }
+
+    @Test
+    void putPermissionsBoundaryReturnsEmptyResponse() {
+        String instanceArn = json("SWBExternalService.ListInstances", "{}")
+                .then().statusCode(200).extract().path("Instances[0].InstanceArn");
+        String permissionSetArn = json("SWBExternalService.CreatePermissionSet",
+                "{\"InstanceArn\":\"" + instanceArn + "\",\"Name\":\"BoundaryIntegration\"}")
+                .then().statusCode(200).extract().path("PermissionSet.PermissionSetArn");
+        String body = "{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn
+                + "\",\"PermissionsBoundary\":{\"ManagedPolicyArn\":\"arn:aws:iam::aws:policy/PowerUserAccess\"}}";
+        json("SWBExternalService.PutPermissionsBoundaryToPermissionSet", body)
+                .then().statusCode(200).body(equalTo(""));
+        String getBody = "{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn + "\"}";
+        json("SWBExternalService.GetPermissionsBoundaryForPermissionSet", getBody)
+                .then().statusCode(200)
+                .body("PermissionsBoundary.ManagedPolicyArn", equalTo("arn:aws:iam::aws:policy/PowerUserAccess"));
+        json("SWBExternalService.DeletePermissionsBoundaryFromPermissionSet", getBody)
+                .then().statusCode(200).body(equalTo(""));
+        json("SWBExternalService.GetPermissionsBoundaryForPermissionSet", getBody)
+                .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test

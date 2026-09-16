@@ -26,6 +26,7 @@ public class Backup {
     private Map<String, String> tagList = new LinkedHashMap<>();
     private String mode;
     private String hsmType;
+    private String clusterCertificate;
 
     public String getBackupId() {
         return backupId;
@@ -137,5 +138,13 @@ public class Backup {
 
     public void setHsmType(String hsmType) {
         this.hsmType = hsmType;
+    }
+
+    public String getClusterCertificate() {
+        return clusterCertificate;
+    }
+
+    public void setClusterCertificate(String clusterCertificate) {
+        this.clusterCertificate = clusterCertificate;
     }
 }

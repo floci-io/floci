@@ -222,8 +222,8 @@ Configured modes are the API default `authenticationType` plus `additionalAuthen
 | Mode | Emulator notes |
 |---|---|
 | API_KEY | Lookup by `ApiKey.id`, which is the key value (`da2-…`). Identity is absent (not `{}`). Default key expiry is 7 days when `expires` is omitted; stored `expires` is rounded down to the nearest hour. Create/UpdateApiKey require `expires` between 1 and 365 days from now (`ApiKeyValidityOutOfBoundsException`, 400). `deletes` is `expires` plus 60 days. |
-| AWS_IAM | Parses `Credential=` access key; no HMAC. Known keys evaluate `appsync:GraphQL`. Unknown/`test` keys are emulator ALLOW. |
-| Cognito / OIDC | JWT payload decode only (no JWKS). OIDC as the sole mode skips the `iss` check. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
+| AWS_IAM | Verifies a real header-signed SigV4 request (`appsync` service, fixed `/v1/apis/{apiId}/graphql` canonical path, 5-minute clock skew): the `Credential=` access key must resolve to a secret via `IamService`, and the signature must match. The legacy `test`/`test` pair is still emulator ALLOW, but it must be signed with secret `test` like any other key, and it is not a bypass. A temporary (`ASIA...`) credential must also present the `X-Amz-Security-Token` header matching the one issued for it. An unknown or unsigned key is always 401 and never becomes the account-root identity. Known keys additionally evaluate `appsync:GraphQL`. |
+| Cognito / OIDC | JWT signature is verified, not just decoded. Cognito checks the token against the issuing user pool's own RS256 signing key (`alg`, `kid`, issuer, audience/`clientId`, expiry); OIDC checks it against the configured issuer's published JWKS (via OIDC discovery), the same way the HTTP API JWT authorizer does. Both fail closed: an unreachable issuer, unsupported algorithm (including `none`), unmatched `kid`, or bad signature is 401. OIDC as the sole mode still skips the token's own `iss` claim check, but the signature is always verified against the configured issuer's keys. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
 | Lambda | AppSync `isAuthorized` contract via `LambdaService.invoke` (not an API Gateway policy document). |
 
 SDL field auth: unmarked fields require the API **default** mode. Additional modes unlock fields tagged `@aws_api_key` / `@aws_iam` / `@aws_oidc` / `@aws_cognito_user_pools` / `@aws_lambda`. Multiple directives on a field are OR. Field-level directives override type-level. `@aws_auth` is allowed on `OBJECT \| FIELD_DEFINITION` and is ignored when additional modes exist.
@@ -286,6 +286,18 @@ These AWS AppSync capabilities are not yet implemented and are tracked in future
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_APPSYNC_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_APPSYNC_VTL_MAX_LOOPS` | `10000` | Maximum `#foreach` iterations a VTL resolver template may execute |
+| `FLOCI_SERVICES_APPSYNC_VTL_MAX_OUTPUT_CHARS` | `1048576` | Maximum characters a VTL resolver template may render |
+| `FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS` | `5000` | Maximum wall-clock time a VTL resolver template may spend evaluating |
+
+Request/response mapping templates render inside the same VTL reflection sandbox described for
+API Gateway in [api-gateway.md](api-gateway.md#configuration) (`SecureUberspector`, with `Class`,
+`ClassLoader`, `Runtime`, `ProcessBuilder`, `System`, `Thread`, `java.io.File` and related
+classes/packages blocked), and are subject to the same three limits above. The loop cap truncates
+a `#foreach` at the configured iteration count and lets the template finish rendering with
+whatever output it produced up to that point; it does not fail the resolver. Exceeding the
+output-size or execution-time limit does fail the resolver, the same way any other VTL evaluation
+error does.
 
 ## Examples
 

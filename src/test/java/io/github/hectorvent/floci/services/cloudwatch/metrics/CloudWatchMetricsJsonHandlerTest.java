@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -10,6 +11,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
+import io.github.hectorvent.floci.services.cloudwatch.metricstreams.CloudWatchMetricStreamsService;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -46,7 +48,9 @@ class CloudWatchMetricsJsonHandlerTest {
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, "000000000000")
         );
-        handler = new CloudWatchMetricsJsonHandler(service, dashboardsService, MAPPER);
+        CloudWatchMetricStreamsService metricStreamsService = new CloudWatchMetricStreamsService(
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+        handler = new CloudWatchMetricsJsonHandler(service, dashboardsService, metricStreamsService, MAPPER);
     }
 
     /**
@@ -154,6 +158,56 @@ class CloudWatchMetricsJsonHandlerTest {
         JsonNode dimensionCount = alarmData.path("Dimensions").get(1);
         assertEquals("count", dimensionCount.get("Name").asText());
         assertEquals("2", dimensionCount.get("Value").asText());
+    }
+
+    private JsonNode describeFirstAlarm(ObjectNode putAlarmReq) {
+        assertEquals(200, handler.handle("PutMetricAlarm", putAlarmReq, REGION).getStatus());
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.putArray("AlarmNames").add(putAlarmReq.get("AlarmName").asText());
+        Response describeResp = handler.handle("DescribeAlarms", describeReq, REGION);
+        assertEquals(200, describeResp.getStatus());
+        return ((ObjectNode) describeResp.getEntity()).get("MetricAlarms").get(0);
+    }
+
+    private static ObjectNode alarmRequest(String name) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("AlarmName", name);
+        req.put("MetricName", "M");
+        req.put("Namespace", "NS");
+        req.put("Period", 300);
+        req.put("EvaluationPeriods", 3);
+        req.put("Threshold", 1.0);
+        req.put("ComparisonOperator", "GreaterThanThreshold");
+        return req;
+    }
+
+    // The Query/XML handler has always returned DatapointsToAlarm, TreatMissingData and Unit.
+    // The JSON/CBOR builder dropped all three, so a botocore client (which speaks CBOR to
+    // CloudWatch by default) saw them missing from every DescribeAlarms response.
+    @Test
+    void describeAlarms_returnsTheFieldsTheQueryProtocolAlreadyReturns() {
+        ObjectNode req = alarmRequest("FullAlarm");
+        req.put("DatapointsToAlarm", 2);
+        req.put("TreatMissingData", "breaching");
+        req.put("Unit", "Count");
+
+        JsonNode alarm = describeFirstAlarm(req);
+
+        assertEquals(2, alarm.get("DatapointsToAlarm").asInt());
+        assertEquals("breaching", alarm.get("TreatMissingData").asText());
+        assertEquals("Count", alarm.get("Unit").asText());
+    }
+
+    // An alarm the caller never gave an M for reports no DatapointsToAlarm at all. AWS omits the
+    // member in that case, and echoing EvaluationPeriods instead reads as a change to any client
+    // that re-plans against its own configuration, which is what floci-io/floci#3660 hit.
+    @Test
+    void describeAlarms_omittedDatapointsToAlarm_reportsNoDatapointsToAlarm() {
+        JsonNode alarm = describeFirstAlarm(alarmRequest("DefaultedAlarm"));
+
+        assertEquals(3, alarm.get("EvaluationPeriods").asInt());
+        assertFalse(alarm.has("DatapointsToAlarm"),
+                "an alarm with no M out of N must not report one");
     }
 
     @Test

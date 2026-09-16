@@ -300,6 +300,8 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public StorageConfig storage() { return null; }
             @Override
+            public NetworkConfig network() { return null; }
+            @Override
             public DnsConfig dns() {
                 return new DnsConfig() {
                     @Override

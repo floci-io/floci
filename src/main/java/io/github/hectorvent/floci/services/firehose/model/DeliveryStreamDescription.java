@@ -7,6 +7,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ArrayList;
@@ -196,6 +197,11 @@ public class DeliveryStreamDescription {
     @JsonIgnoreProperties(ignoreUnknown = true)
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static class S3Destination {
+
+        /** The order AWS echoes a Lambda processor's parameters in, whatever order it received them (probed). */
+        private static final List<String> LAMBDA_PARAMETER_ORDER = List.of("LambdaArn",
+                "NumberOfRetries", "RoleArn", "BufferSizeInMBs", "BufferIntervalInSeconds");
+
         @JsonProperty("RoleARN")
         private String roleArn;
         @JsonProperty("BucketARN")
@@ -218,6 +224,8 @@ public class DeliveryStreamDescription {
         private String s3BackupMode;
         @JsonProperty("DataFormatConversionConfiguration")
         private DataFormatConversionConfiguration dataFormatConversionConfiguration;
+        @JsonProperty("ProcessingConfiguration")
+        private ProcessingConfiguration processingConfiguration;
 
         public S3Destination() {}
         public String getRoleArn() { return roleArn; }
@@ -245,6 +253,28 @@ public class DeliveryStreamDescription {
         }
         public void setDataFormatConversionConfiguration(DataFormatConversionConfiguration configuration) {
             this.dataFormatConversionConfiguration = configuration;
+        }
+
+        public ProcessingConfiguration getProcessingConfiguration() {
+            return processingConfiguration;
+        }
+        public void setProcessingConfiguration(ProcessingConfiguration processingConfiguration) {
+            this.processingConfiguration = processingConfiguration;
+        }
+
+        /**
+         * True when a transformation applies to deliveries: the configuration is present
+         * and Enabled is explicitly true. An omitted Enabled leaves it disabled, the
+         * opposite of the conversion block below. Probed rather than carried over from
+         * there (2026-09-11): DescribeDeliveryStream echoes an omitted Enabled as false
+         * here and as true on the conversion block.
+         *
+         * Ignored for serialization for the same reason as the accessor below.
+         */
+        @JsonIgnore
+        public boolean isProcessingEnabled() {
+            return processingConfiguration != null
+                    && Boolean.TRUE.equals(processingConfiguration.getEnabled());
         }
 
         /**
@@ -297,7 +327,78 @@ public class DeliveryStreamDescription {
                     bufferingHints.setIntervalInSeconds(BufferingHints.DEFAULT_INTERVAL_SECONDS);
                 }
             }
+            // Legacy persisted state again: a processing block stored before Enabled was
+            // defaulted never passes canonicalizeProcessors a second time, and would be
+            // described without the member AWS always returns. Only Enabled is healed
+            // here, since the parameters AWS defaults include RoleArn, which a read must
+            // not inject from whatever role is current by then.
+            if (processingConfiguration != null && processingConfiguration.getEnabled() == null) {
+                processingConfiguration.setEnabled(false);
+            }
         }
+
+        /**
+         * Real AWS answers with more than the caller sent: a Lambda processor comes back
+         * with NumberOfRetries defaulted to 3, RoleArn filled from the delivery stream's
+         * role, and BufferSizeInMBs and BufferIntervalInSeconds defaulted to 1 and 60,
+         * and the parameters are echoed in a fixed order whatever order they arrived in
+         * (probed 2026-09-10 and 2026-09-11). The two buffer defaults are the Lambda
+         * processor's own, not the destination's BufferingHints: a destination buffering
+         * 5 MiB over 300s still echoes 1 and 60 here. An omitted Enabled is stored as
+         * false, which is what leaves the transformation disabled.
+         *
+         * Called as a destination is written, not as it is read. Doing it on the way out
+         * would mutate what storage handed back, so whether a Describe had happened would
+         * decide what a later update sees, and RoleArn would be injected from whichever
+         * role was current at the time of the read.
+         */
+        public void canonicalizeProcessors() {
+            if (processingConfiguration == null) {
+                return;
+            }
+            if (processingConfiguration.getEnabled() == null) {
+                processingConfiguration.setEnabled(false);
+            }
+            if (processingConfiguration.getProcessors() == null) {
+                return;
+            }
+            for (Processor processor : processingConfiguration.getProcessors()) {
+                if (processor == null || !"Lambda".equals(processor.getType())
+                        || processor.getParameters() == null) {
+                    continue;
+                }
+                // A repeated name never reaches here, the validator rejects it as AWS
+                // does, so this only has to be stable for the names it does see.
+                Map<String, String> byName = new LinkedHashMap<>();
+                for (ProcessorParameter parameter : processor.getParameters()) {
+                    if (parameter != null && parameter.getParameterName() != null) {
+                        byName.putIfAbsent(parameter.getParameterName(), parameter.getParameterValue());
+                    }
+                }
+                byName.putIfAbsent("NumberOfRetries", "3");
+                if (roleArn != null) {
+                    byName.putIfAbsent("RoleArn", roleArn);
+                }
+                byName.putIfAbsent("BufferSizeInMBs", "1");
+                byName.putIfAbsent("BufferIntervalInSeconds", "60");
+                List<ProcessorParameter> ordered = new ArrayList<>(byName.size());
+                for (String name : LAMBDA_PARAMETER_ORDER) {
+                    if (byName.containsKey(name)) {
+                        ordered.add(parameter(name, byName.remove(name)));
+                    }
+                }
+                byName.forEach((name, value) -> ordered.add(parameter(name, value)));
+                processor.setParameters(ordered);
+            }
+        }
+
+        private static ProcessorParameter parameter(String name, String value) {
+            ProcessorParameter parameter = new ProcessorParameter();
+            parameter.setParameterName(name);
+            parameter.setParameterValue(value);
+            return parameter;
+        }
+
 
         /**
          * A view of this config with only the fields AWS's plain S3DestinationDescription
@@ -323,6 +424,62 @@ public class DeliveryStreamDescription {
             int last = bucketArn.lastIndexOf(':');
             return last >= 0 ? bucketArn.substring(last + 1) : bucketArn;
         }
+    }
+
+    /**
+     * Unlike the conversion configuration below, UpdateDestination replaces this block
+     * outright rather than merging it member-wise (probed), so a stored member never has
+     * to survive an update that omits it.
+     */
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class ProcessingConfiguration {
+        @JsonProperty("Enabled")
+        private Boolean enabled;
+        @JsonProperty("Processors")
+        private List<Processor> processors;
+
+        public ProcessingConfiguration() {}
+
+        public Boolean getEnabled() { return enabled; }
+        public void setEnabled(Boolean enabled) { this.enabled = enabled; }
+        public List<Processor> getProcessors() { return processors; }
+        public void setProcessors(List<Processor> processors) { this.processors = processors; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class Processor {
+        @JsonProperty("Type")
+        private String type;
+        @JsonProperty("Parameters")
+        private List<ProcessorParameter> parameters;
+
+        public Processor() {}
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+        public List<ProcessorParameter> getParameters() { return parameters; }
+        public void setParameters(List<ProcessorParameter> parameters) { this.parameters = parameters; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class ProcessorParameter {
+        @JsonProperty("ParameterName")
+        private String parameterName;
+        @JsonProperty("ParameterValue")
+        private String parameterValue;
+
+        public ProcessorParameter() {}
+
+        public String getParameterName() { return parameterName; }
+        public void setParameterName(String parameterName) { this.parameterName = parameterName; }
+        public String getParameterValue() { return parameterValue; }
+        public void setParameterValue(String parameterValue) { this.parameterValue = parameterValue; }
     }
 
     /**

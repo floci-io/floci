@@ -51,6 +51,57 @@ class VerificationCodeServiceTest {
     }
 
     @Test
+    void consume_consumedAttributeVerificationCode_throwsExpired() {
+        String code = service.issue("pool", "alice",
+            VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, Duration.ofHours(24));
+        service.consume("pool", "alice",
+            VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, code);
+
+        VerificationCodeException ex = assertThrows(VerificationCodeException.class,
+            () -> service.consume("pool", "alice",
+                VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, code));
+
+        assertEquals(VerificationCodeException.Kind.EXPIRED, ex.getKind());
+    }
+
+    @Test
+    void consume_consumedSignupOrResetCode_throwsNotFound() {
+        // Unlike the attribute-verification purposes, SIGNUP_CONFIRMATION and
+        // PASSWORD_RESET delete on consume rather than retaining a tombstone: that
+        // reuse behavior was never validated against real Cognito for ConfirmSignUp
+        // or ConfirmForgotPassword, so it stays exactly as it was before this change.
+        String signupCode = service.issue("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+        service.consume("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, signupCode);
+        VerificationCodeException signupEx = assertThrows(VerificationCodeException.class,
+            () -> service.consume("pool", "alice",
+                VerificationCode.Purpose.SIGNUP_CONFIRMATION, signupCode));
+        assertEquals(VerificationCodeException.Kind.NOT_FOUND, signupEx.getKind());
+
+        String resetCode = service.issue("pool", "bob",
+            VerificationCode.Purpose.PASSWORD_RESET, Duration.ofHours(1));
+        service.consume("pool", "bob",
+            VerificationCode.Purpose.PASSWORD_RESET, resetCode);
+        VerificationCodeException resetEx = assertThrows(VerificationCodeException.class,
+            () -> service.consume("pool", "bob",
+                VerificationCode.Purpose.PASSWORD_RESET, resetCode));
+        assertEquals(VerificationCodeException.Kind.NOT_FOUND, resetEx.getKind());
+    }
+
+    @Test
+    void issue_afterConsumedCode_succeedsImmediately() {
+        String code = service.issue("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+        service.consume("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, code);
+
+        assertDoesNotThrow(() ->
+            service.issue("pool", "alice",
+                VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24)));
+    }
+
+    @Test
     void consume_wrongCode_throwsMismatch() {
         service.issue("pool", "alice",
             VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
@@ -130,6 +181,37 @@ class VerificationCodeServiceTest {
             VerificationCode.Purpose.SIGNUP_CONFIRMATION, signupCode));
         assertDoesNotThrow(() -> service.consume("pool", "alice",
             VerificationCode.Purpose.PASSWORD_RESET, resetCode));
+    }
+
+    @Test
+    void invalidateForPool_removesOnlyThatPoolsCodes() {
+        service.issue("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+        String otherCode = service.issue("other", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+
+        service.invalidateForPool("pool");
+
+        assertThrows(VerificationCodeException.class, () -> service.consume("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "000000"));
+        assertDoesNotThrow(() -> service.consume("other", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, otherCode));
+    }
+
+    @Test
+    void invalidateForPool_sparesPoolWhoseIdExtendsThisOne() {
+        // floci:override-id lets a caller pin an id containing a colon, so "pool:child" is a
+        // distinct live pool whose storage keys share the "pool:" prefix of the pool being deleted.
+        service.issue("pool", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+        String childCode = service.issue("pool:child", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+
+        service.invalidateForPool("pool");
+
+        assertDoesNotThrow(() -> service.consume("pool:child", "alice",
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, childCode),
+            "deleting pool must not invalidate a code issued by pool:child");
     }
 
     static final class MutableClock extends Clock {

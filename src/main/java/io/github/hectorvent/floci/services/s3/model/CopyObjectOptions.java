@@ -13,6 +13,7 @@ public class CopyObjectOptions {
     private String contentDisposition;
     private String cacheControl;
     private String serverSideEncryption;
+    private String sseKmsKeyId;
     private String sseCustomerAlgorithm;
     private String sseCustomerKey;
     private String sseCustomerKeyMd5;
@@ -26,6 +27,8 @@ public class CopyObjectOptions {
     private String grantReadAcp;
     private String grantWriteAcp;
     private String checksumAlgorithm;
+    // Whether annotations travel with the copy: COPY (the default) or EXCLUDE.
+    private String annotationDirective;
 
     public String getMetadataDirective() { return metadataDirective; }
     public CopyObjectOptions withMetadataDirective(String metadataDirective) { this.metadataDirective = metadataDirective; return this; }
@@ -56,6 +59,9 @@ public class CopyObjectOptions {
 
     public String getServerSideEncryption() { return serverSideEncryption; }
     public CopyObjectOptions withServerSideEncryption(String serverSideEncryption) { this.serverSideEncryption = serverSideEncryption; return this; }
+
+    public String getSseKmsKeyId() { return sseKmsKeyId; }
+    public CopyObjectOptions withSseKmsKeyId(String sseKmsKeyId) { this.sseKmsKeyId = sseKmsKeyId; return this; }
 
     public String getSseCustomerAlgorithm() { return sseCustomerAlgorithm; }
     public CopyObjectOptions withSseCustomerAlgorithm(String sseCustomerAlgorithm) { this.sseCustomerAlgorithm = sseCustomerAlgorithm; return this; }
@@ -95,4 +101,7 @@ public class CopyObjectOptions {
 
     public String getChecksumAlgorithm() { return checksumAlgorithm; }
     public CopyObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }
+
+    public String getAnnotationDirective() { return annotationDirective; }
+    public CopyObjectOptions withAnnotationDirective(String annotationDirective) { this.annotationDirective = annotationDirective; return this; }
 }

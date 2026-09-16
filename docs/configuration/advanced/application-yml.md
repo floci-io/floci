@@ -66,7 +66,7 @@ floci:
       lambda:
         flush-interval-ms: 5000
       cloudwatchlogs:
-        flush-interval-ms: 5000
+        flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
       secretsmanager:
@@ -122,7 +122,7 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30         # Seconds
-      max-message-size: 1048576              # Bytes (1 MB)
+      max-message-size: 1048576              # Bytes (1 MiB, the AWS maximum)
       clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue clears SQS FIFO dedup and SNS FIFO topic dedup for topics subscribed to that queue
 
     s3:
@@ -207,6 +207,7 @@ floci:
     cloudwatchlogs:
       enabled: true
       max-events-per-query: 10000
+      max-stored-events: 20000   # per account; oldest events are evicted once the store exceeds this
 
     cloudwatchmetrics:
       enabled: true
@@ -277,7 +278,7 @@ floci:
       enabled: true
       registry-image: "registry:2"
       registry-container-name: floci-ecr-registry
-      registry-base-port: 5100
+      registry-base-port: 5100              # private loopback backing port range
       registry-max-port: 5199
       data-path: ./data/ecr
       tls-enabled: false
@@ -314,6 +315,8 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK`                | *(unset)*        | Docker network for ECS task containers                        |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB`             | `512`            | Default memory (MB) when task definition omits it             |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS`             | `256`            | Default CPU units when task definition omits it               |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
+| `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES`     | `false`          | Allow any host path, bypassing the host-volume-roots allowlist (traversal, bare root, and the Docker socket or an ancestor directory of it are still always rejected) |
 | `FLOCI_SERVICES_CODEBUILD_MAX_CONCURRENT_BUILDS`   | `4`    | Max builds staging a workspace on disk at once; caps a parallel stage's fan-out on a constrained host |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK`                   | `false`          | Skip Docker; domains appear active immediately (useful for CI)   |

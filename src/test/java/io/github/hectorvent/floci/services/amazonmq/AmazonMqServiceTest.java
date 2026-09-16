@@ -76,6 +76,20 @@ class AmazonMqServiceTest {
     }
 
     @Test
+    void createBrokerAcceptsDeploymentModeCasing() {
+        // DeploymentMode is matched case-insensitively for the same reason EngineType is: the
+        // wire enum is upper case but callers spell it however their tooling does, and
+        // "single_instance" names the one mode this emulator supports rather than one to
+        // reject. The canonical wire casing is stored so DescribeBroker reads back the enum
+        // value the SDKs expect, whatever casing the request used.
+        CreateBrokerParams mixedCase = new CreateBrokerParams("orders", "RABBITMQ", null,
+                "single_instance", "mq.t3.micro", false, false,
+                List.of(new MqUser("admin", "AdminPass123", true, null)), null);
+        Broker broker = service.createBroker(mixedCase);
+        assertEquals("SINGLE_INSTANCE", broker.getDeploymentMode());
+    }
+
+    @Test
     void createBrokerRejectsNonSingleInstanceDeployment() {
         CreateBrokerParams cluster = new CreateBrokerParams("ha", "RABBITMQ", null,
                 "CLUSTER_MULTI_AZ", "mq.t3.micro", false, false, null, null);

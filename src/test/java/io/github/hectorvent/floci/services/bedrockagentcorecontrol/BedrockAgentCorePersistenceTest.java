@@ -115,4 +115,32 @@ class BedrockAgentCorePersistenceTest {
         assertNotNull(loaded.getCreatedAt());
         assertNotNull(loaded.getUpdatedAt());
     }
+
+    @Test
+    void toolDeleteIdempotencySurvivesPersistentStorageRestart(@TempDir Path dir) {
+        Path file = dir.resolve("bedrock-agentcore-tools.json");
+        TypeReference<Map<String, ObjectNode>> ref = new TypeReference<>() {};
+        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+
+        PersistentStorage<String, ObjectNode> writer = new PersistentStorage<>(file, ref);
+        BedrockAgentCoreToolsService beforeRestart = new BedrockAgentCoreToolsService(writer, regionResolver);
+
+        ObjectNode request = mapper.createObjectNode();
+        request.put("name", "persistBrowser");
+        request.putObject("networkConfiguration").put("networkMode", "PUBLIC");
+        String browserId = beforeRestart.createBrowser(request, REGION).path("browserId").asText();
+        String clientToken = "persist-delete-browser-token-00000001";
+
+        ObjectNode firstDelete = beforeRestart.deleteBrowser(browserId, clientToken, REGION);
+        assertEquals("DELETING", firstDelete.path("status").asText());
+        writer.flush();
+
+        PersistentStorage<String, ObjectNode> reader = new PersistentStorage<>(file, ref);
+        reader.load();
+        BedrockAgentCoreToolsService afterRestart = new BedrockAgentCoreToolsService(reader, regionResolver);
+
+        ObjectNode replayedDelete = afterRestart.deleteBrowser(browserId, clientToken, REGION);
+        assertEquals("DELETING", replayedDelete.path("status").asText());
+        assertEquals(browserId, replayedDelete.path("browserId").asText());
+    }
 }

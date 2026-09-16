@@ -152,6 +152,45 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void allowsAssumedRoleCallerAgainstRolePrincipalArnInGovCloud() {
+        // The silent-denial case. Resolving the session back to its role used to rebuild the role
+        // ARN with a hardcoded "aws" partition, so a GovCloud caller was compared against
+        // arn:aws:iam::... and never matched the arn:aws-us-gov:iam::... principal its own trust
+        // policy names. AssumeRole was refused with nothing in the response explaining why.
+        String assumedRoleArn = "arn:aws-us-gov:sts::111111111111:assumed-role/AppRole/session-abc";
+        assertTrue(evaluator.allows(
+                trust("{\"AWS\":\"arn:aws-us-gov:iam::111111111111:role/AppRole\"}"),
+                assumedRoleArn, CALLER_ACCOUNT));
+    }
+
+    @Test
+    void allowsAssumedRoleCallerAgainstRolePrincipalArnInChina() {
+        String assumedRoleArn = "arn:aws-cn:sts::111111111111:assumed-role/AppRole/session-abc";
+        assertTrue(evaluator.allows(
+                trust("{\"AWS\":\"arn:aws-cn:iam::111111111111:role/AppRole\"}"),
+                assumedRoleArn, CALLER_ACCOUNT));
+    }
+
+    /**
+     * The guard against over-widening. Partitions are isolated, so a session in one must not
+     * satisfy a trust policy written for another even when account, role and session all match.
+     */
+    @Test
+    void deniesAssumedRoleCallerFromAnotherPartition() {
+        String assumedRoleArn = "arn:aws-us-gov:sts::111111111111:assumed-role/AppRole/session-abc";
+        assertFalse(evaluator.allows(
+                trust("{\"AWS\":\"arn:aws:iam::111111111111:role/AppRole\"}"),
+                assumedRoleArn, CALLER_ACCOUNT));
+    }
+
+    @Test
+    void allowsAccountRootPrincipalInGovCloud() {
+        assertTrue(evaluator.allows(
+                trust("{\"AWS\":\"arn:aws-us-gov:iam::111111111111:root\"}"),
+                "arn:aws-us-gov:iam::111111111111:user/alice", CALLER_ACCOUNT));
+    }
+
+    @Test
     void deniesServiceOnlyPrincipal() {
         assertFalse(evaluator.allows(
                 trust("{\"Service\":\"lambda.amazonaws.com\"}"), CALLER_ARN, CALLER_ACCOUNT));

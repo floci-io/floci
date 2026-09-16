@@ -350,6 +350,73 @@ class DynamoDbAccessPathValidatorTest {
                 table, tablePath, "COUNT", "pk", null, null));
     }
 
+    @Test
+    void acceptsAKeyConditionWithTheValueOnTheLeft() {
+        assertDoesNotThrow(() -> validateExpression(tablePath, "pk = :pk AND :lo <= sk"));
+        assertDoesNotThrow(() -> validateExpression(tablePath, "pk = :pk AND :hi > sk"));
+    }
+
+    @Test
+    void rejectsANestedPathOnAKeyAttribute() {
+        var names = mapper.createObjectNode();
+        names.put("#sk", "sk");
+        var values = expressionValues(":pk", ":v");
+
+        var error = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        table, tablePath, null, "pk = :pk AND #sk.foo = :v",
+                        null, null, names, values));
+
+        assertEquals("KeyConditionExpressions cannot have conditions on nested attributes",
+                error.getMessage());
+    }
+
+    @Test
+    void reportsTheMissingKeySchemaElementForANonKeyAttribute() {
+        var error = assertThrows(AwsException.class,
+                () -> validateExpression(tablePath, "attr1 = :v"));
+
+        assertEquals("Query condition missed key schema element: pk", error.getMessage());
+    }
+
+    @Test
+    void stillRejectsANonKeyAttributeAlongsideTheFullKey() {
+        var error = assertThrows(AwsException.class,
+                () -> validateExpression(tablePath, "pk = :pk AND attr1 = :v"));
+
+        assertEquals("Query key condition not supported", error.getMessage());
+    }
+
+    @Test
+    void namesTheSelectValueWhenRejectingAProjectionExpression() {
+        AwsException allAttributes = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, tablePath, "ALL_ATTRIBUTES", "sk", null, null));
+        assertEquals("Cannot specify the ProjectionExpression when choosing to get ALL_ATTRIBUTES",
+                allAttributes.getMessage());
+
+        AwsException count = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, tablePath, "COUNT", "sk", null, null));
+        assertEquals("Cannot specify the ProjectionExpression when choosing to get only the Count",
+                count.getMessage());
+    }
+
+    @Test
+    void reportsTheProjectionExpressionConflictBeforeTheMissingIndex() {
+        AwsException both = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, tablePath, "ALL_PROJECTED_ATTRIBUTES", "sk", null, null));
+        assertEquals("Cannot specify the ProjectionExpression when choosing to get ALL_PROJECTED_ATTRIBUTES",
+                both.getMessage());
+
+        AwsException indexOnly = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateSelection(
+                        table, tablePath, "ALL_PROJECTED_ATTRIBUTES", null, null, null));
+        assertEquals("ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName",
+                indexOnly.getMessage());
+    }
+
     private void validateExpression(DynamoDbAccessPath accessPath, String expression) {
         DynamoDbAccessPathValidator.validateQuery(
                 table, accessPath, null, expression, null, null, null,

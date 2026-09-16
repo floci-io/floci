@@ -504,7 +504,45 @@ class ApiGatewayV2IntegrationTest {
     }
 
     @Test @Order(105)
-    void tagApi_withOverrideKey_isRejectedAfterCreation() {
+    void tagApi_withOverrideKey_isIdempotent() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"floci:override-id":"MYV2OVERRIDE","repeat":"accepted"}}
+                        """)
+                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2OVERRIDE")
+                .then()
+                .statusCode(201);
+
+        given()
+                .when().get("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2OVERRIDE")
+                .then()
+                .statusCode(200)
+                .body("tags.'floci:override-id'", nullValue())
+                .body("tags.repeat", equalTo("accepted"));
+    }
+
+    @Test @Order(106)
+    void tagApi_withDeprecatedCustomIdKey_isIdempotent() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"_custom_id_":"MYV2CUSTOM","repeat":"accepted"}}
+                        """)
+                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2CUSTOM")
+                .then()
+                .statusCode(201);
+
+        given()
+                .when().get("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2CUSTOM")
+                .then()
+                .statusCode(200)
+                .body("tags._custom_id_", nullValue())
+                .body("tags.repeat", equalTo("accepted"));
+    }
+
+    @Test @Order(107)
+    void tagApi_withChangedOverrideId_isRejected() {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
@@ -513,21 +551,18 @@ class ApiGatewayV2IntegrationTest {
                 .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2OVERRIDE")
                 .then()
                 .statusCode(400);
-    }
 
-    @Test @Order(106)
-    void tagApi_withDeprecatedCustomIdKey_isRejectedAfterCreation() {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
                         {"tags":{"_custom_id_":"TOOLATE"}}
                         """)
-                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2OVERRIDE")
+                .when().post("/v2/tags/arn:aws:apigateway:us-east-1::/apis/MYV2CUSTOM")
                 .then()
                 .statusCode(400);
     }
 
-    @Test @Order(107)
+    @Test @Order(108)
     void deleteApis_customAndOverrideId() {
         given().when().delete("/v2/apis/MYV2CUSTOM").then().statusCode(204);
         given().when().delete("/v2/apis/MYV2OVERRIDE").then().statusCode(204);

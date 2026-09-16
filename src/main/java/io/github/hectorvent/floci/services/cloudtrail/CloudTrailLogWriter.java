@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -23,9 +24,11 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -46,6 +49,7 @@ import java.util.zip.GZIPOutputStream;
 public class CloudTrailLogWriter {
 
     private static final Logger LOG = Logger.getLogger(CloudTrailLogWriter.class);
+    static final int MAX_RECORDS_PER_LOG_FILE = 1_000;
 
     private static final DateTimeFormatter PATH_DATE = DateTimeFormatter.ofPattern("yyyy/MM/dd");
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmm'Z'");
@@ -58,6 +62,7 @@ public class CloudTrailLogWriter {
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final SecureRandom rng = new SecureRandom();
+    private final ConcurrentHashMap<CloudTrailService.TrailKey, FlushLock> flushLocks = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService executor;
 
@@ -92,7 +97,7 @@ public class CloudTrailLogWriter {
     void stop(@Observes ShutdownEvent event) {
         if (executor != null) {
             // Best-effort final flush so shutdown doesn't lose buffered events.
-            try { flushAll(); } catch (Exception e) { LOG.warnv(e, "CloudTrail final flush on shutdown failed — some records may be lost"); }
+            try { flushAll(); } catch (Exception e) { LOG.warnv(e, "CloudTrail final flush on shutdown failed: some records may be lost"); }
             executor.shutdownNow();
             executor = null;
         }
@@ -110,7 +115,7 @@ public class CloudTrailLogWriter {
         try {
             for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
                 try {
-                    flushTrail(key);
+                    flushTrailBatches(key);
                 } catch (RuntimeException e) {
                     LOG.warnv(e, "CloudTrail log flush failed for trail {0} in {1}",
                             key.trailName(), key.region());
@@ -121,25 +126,60 @@ public class CloudTrailLogWriter {
         }
     }
 
-    private void flushTrail(CloudTrailService.TrailKey key) {
+    private void flushTrailBatches(CloudTrailService.TrailKey key) {
+        FlushLock lock = flushLocks.compute(key, (ignored, existing) -> {
+            FlushLock result = existing != null ? existing : new FlushLock();
+            result.users++;
+            return result;
+        });
+        lock.mutex.lock();
+        try {
+            int remaining = cloudTrailService.pendingRecordCount(key);
+            while (remaining > 0) {
+                int flushed = flushTrail(key);
+                if (flushed == 0) {
+                    return;
+                }
+                remaining -= flushed;
+            }
+        } finally {
+            lock.mutex.unlock();
+            flushLocks.computeIfPresent(key, (ignored, current) -> {
+                if (current != lock) {
+                    return current;
+                }
+                current.users--;
+                return current.users == 0 ? null : current;
+            });
+        }
+    }
+
+    private static final class FlushLock {
+        private final ReentrantLock mutex = new ReentrantLock();
+        private int users;
+    }
+
+    private int flushTrail(CloudTrailService.TrailKey key) {
         Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
         if (trail == null) {
-            // Trail was deleted while records were pending — drop them.
-            cloudTrailService.drainPendingRecords(key);
-            return;
+            // Trail was deleted while records were pending: drop them.
+            cloudTrailService.discardPendingRecords(key);
+            return 0;
         }
 
-        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key);
+        List<ObjectNode> records = cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE);
         if (records.isEmpty()) {
-            return;
+            return 0;
         }
 
+        byte[] payload;
+        String objectKey;
         try {
-            byte[] payload = serializeAndGzip(records);
+            payload = serializeAndGzip(records);
             String accountId = regionResolver.getAccountId();
             // Use the event region for the S3 delivery path so multi-region trail
             // events from us-west-2 land under CloudTrail/us-west-2, not the trail's home region.
-            String objectKey = buildObjectKey(trail, accountId, key.eventRegion());
+            objectKey = buildObjectKey(trail, accountId, key.eventRegion());
             s3Service.putObject(trail.s3BucketName(), objectKey, payload,
                     "application/x-gzip", Map.of());
             LOG.debugv("CloudTrail wrote {0} records to s3://{1}/{2}",
@@ -147,10 +187,58 @@ public class CloudTrailLogWriter {
         } catch (RuntimeException e) {
             // Re-queue so records survive the failed flush and are retried next cycle.
             cloudTrailService.requeueRecords(key, records);
+            try {
+                cloudTrailService.recordDeliveryFailure(key, deliveryError(e));
+            } catch (RuntimeException statusError) {
+                LOG.warnv(statusError, "CloudTrail delivery failure status update failed for trail {0}", key.trailName());
+            }
             LOG.warnv(e, "CloudTrail flush failed for trail {0} ({1} records re-queued)",
                     key.trailName(), records.size());
             throw e;
         }
+        try {
+            cloudTrailService.recordDeliverySuccess(key, System.currentTimeMillis());
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "CloudTrail delivery success status update failed for trail {0}", key.trailName());
+        }
+        cloudTrailService.completeDelivery(key);
+
+        // The write above already succeeded and durably delivered the records:
+        // from here on, records must never be re-queued. Doing so on a failure
+        // in this block would deliver the same batch to S3 again next flush.
+        try {
+            // This write goes straight to S3Service, bypassing the HTTP-facing
+            // S3Controller that normally emits data events for API-driven puts.
+            // Any trail whose selector matches its own destination bucket must
+            // still see its own deliveries: that is the real circular-logging
+            // behavior (issue #1192 / PR #1194) this emulator exists to prove.
+            cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
+                    .region(key.eventRegion())
+                    .eventName("PutObject")
+                    .bucketName(trail.s3BucketName())
+                    .key(objectKey)
+                    .accessKeyId(null)
+                    .sourceIp(null)
+                    .userAgent("cloudtrail.amazonaws.com")
+                    .bytesIn(payload.length)
+                    .bytesOut(0)
+                    .errorCode(null)
+                    .errorMessage(null)
+                    .eventTimeMillis(System.currentTimeMillis())
+                    .build());
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "CloudTrail self-delivery event emission failed for trail {0} "
+                    + "(write already succeeded, records not re-queued)", key.trailName());
+        }
+        return records.size();
+    }
+
+    private String deliveryError(RuntimeException e) {
+        String message = e.getMessage() == null ? "" : ": " + e.getMessage();
+        if (e instanceof AwsException awsException) {
+            return awsException.getErrorCode() + message;
+        }
+        return e.getClass().getSimpleName() + message;
     }
 
     private byte[] serializeAndGzip(List<ObjectNode> records) {

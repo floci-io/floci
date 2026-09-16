@@ -140,6 +140,77 @@ class S3MultipartServiceTest {
     }
 
     @Test
+    void completeMultipartUploadRejectsWrongETagAndAllowsRetry() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "etag.bin", null);
+        String eTag = s3Service.uploadPart("test-bucket", "etag.bin", upload.getUploadId(), 1,
+                "part1".getBytes(StandardCharsets.UTF_8));
+
+        AwsException mismatch = assertThrows(AwsException.class, () -> s3Service.completeMultipartUpload(
+                "test-bucket", "etag.bin", upload.getUploadId(), List.of(1), Map.of(1, "\"wrong\""),
+                Map.of(), null, null));
+        assertEquals("InvalidPart", mismatch.getErrorCode());
+        assertEquals(eTag, s3Service.completeMultipartUpload("test-bucket", "etag.bin", upload.getUploadId(),
+                List.of(1), Map.of(1, eTag), Map.of(), null, null).getParts().get(0).getETag());
+    }
+
+    @Test
+    void completeMultipartUploadAcceptsAnUnquotedCliETag() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "cli-etag.bin", null);
+        String eTag = s3Service.uploadPart("test-bucket", "cli-etag.bin", upload.getUploadId(), 1,
+                "part1".getBytes(StandardCharsets.UTF_8));
+
+        s3Service.completeMultipartUpload("test-bucket", "cli-etag.bin", upload.getUploadId(),
+                List.of(1), Map.of(1, eTag.substring(1, eTag.length() - 1)), Map.of(), null, null);
+
+        assertEquals("part1", new String(s3Service.getObject("test-bucket", "cli-etag.bin").getData(),
+                StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void completeMultipartUploadRejectsDuplicateAndDecreasingPartOrder() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "order.bin", null);
+        String first = s3Service.uploadPart("test-bucket", "order.bin", upload.getUploadId(), 1,
+                "part1".getBytes(StandardCharsets.UTF_8));
+        String second = s3Service.uploadPart("test-bucket", "order.bin", upload.getUploadId(), 2,
+                "part2".getBytes(StandardCharsets.UTF_8));
+        Map<Integer, String> eTags = Map.of(1, first, 2, second);
+
+        AwsException duplicate = assertThrows(AwsException.class, () -> s3Service.completeMultipartUpload(
+                "test-bucket", "order.bin", upload.getUploadId(), List.of(1, 1), eTags, Map.of(), null, null));
+        assertEquals("InvalidPartOrder", duplicate.getErrorCode());
+        AwsException decreasing = assertThrows(AwsException.class, () -> s3Service.completeMultipartUpload(
+                "test-bucket", "order.bin", upload.getUploadId(), List.of(2, 1), eTags, Map.of(), null, null));
+        assertEquals("InvalidPartOrder", decreasing.getErrorCode());
+    }
+
+    @Test
+    void completeMultipartUploadRejectsUnknownPartBeforeCleanup() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "missing.bin", null);
+        String eTag = s3Service.uploadPart("test-bucket", "missing.bin", upload.getUploadId(), 1,
+                "part1".getBytes(StandardCharsets.UTF_8));
+
+        AwsException missing = assertThrows(AwsException.class, () -> s3Service.completeMultipartUpload(
+                "test-bucket", "missing.bin", upload.getUploadId(), List.of(1, 3),
+                Map.of(1, eTag), Map.of(), null, null));
+        assertEquals("InvalidPart", missing.getErrorCode());
+        assertEquals(1, s3Service.listParts("test-bucket", "missing.bin", upload.getUploadId()).getParts().size());
+    }
+
+    @Test
+    void completeMultipartUploadAcceptsNonConsecutivePartNumbers() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "gapped.bin", null);
+        String first = s3Service.uploadPart("test-bucket", "gapped.bin", upload.getUploadId(), 1,
+                "part1".getBytes(StandardCharsets.UTF_8));
+        String third = s3Service.uploadPart("test-bucket", "gapped.bin", upload.getUploadId(), 3,
+                "part3".getBytes(StandardCharsets.UTF_8));
+
+        S3Object result = s3Service.completeMultipartUpload("test-bucket", "gapped.bin", upload.getUploadId(),
+                List.of(1, 3), Map.of(1, first, 3, third), Map.of(), null, null);
+        assertEquals("part1part3", new String(s3Service.getObject("test-bucket", "gapped.bin").getData(),
+                StandardCharsets.UTF_8));
+    }
+
+    @Test
     void abortMultipartUpload() {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "file.bin", null);
         s3Service.uploadPart("test-bucket", "file.bin", upload.getUploadId(), 1, "data".getBytes());
@@ -176,6 +247,33 @@ class S3MultipartServiceTest {
                 upload.getUploadId(), List.of(1), null, null);
 
         assertNotNull(result.getVersionId(), "Versioned bucket should produce a versionId");
+    }
+
+    @Test
+    void completeMultipartUploadStoresTheCompositeETagOnTheFirstWrite() {
+        // WAL storage logs a record when it is put, so an ETag changed after the put never reaches the log.
+        Map<String, String> firstStoredETags = new HashMap<>();
+        InMemoryStorage<String, S3Object> objectStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, S3Object value) {
+                firstStoredETags.putIfAbsent(key, value.getETag());
+                super.put(key, value);
+            }
+        };
+        S3Service service = new S3Service(new InMemoryStorage<>(), objectStore, tempDir, true);
+        service.createBucket("versioned-bucket", "us-east-1");
+        service.putBucketVersioning("versioned-bucket", "Enabled");
+        MultipartUpload upload = service.initiateMultipartUpload("versioned-bucket", "file.bin", null);
+        service.uploadPart("versioned-bucket", "file.bin", upload.getUploadId(), 1,
+                "part1".getBytes(StandardCharsets.UTF_8));
+        service.uploadPart("versioned-bucket", "file.bin", upload.getUploadId(), 2,
+                "part2".getBytes(StandardCharsets.UTF_8));
+
+        S3Object result = service.completeMultipartUpload("versioned-bucket", "file.bin",
+                upload.getUploadId(), List.of(1, 2), null, null);
+
+        assertTrue(result.getETag().endsWith("-2\""), result.getETag());
+        assertEquals(Set.of(result.getETag()), Set.copyOf(firstStoredETags.values()));
     }
 
     @Test

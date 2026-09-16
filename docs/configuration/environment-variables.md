@@ -85,8 +85,12 @@ See [Storage Modes](./storage.md) for a full explanation of each mode.
 
 ## Docker Daemon
 
+This foundation release provides opt-in security-group filtering for EC2 Docker instances and ECS `awsvpc` tasks. A rootful Linux Docker daemon with nftables support is required. Before enabling it, terminate existing EC2 instances and ECS tasks, then launch replacements so their namespaces are prepared before application code starts. Restart Floci after changing this setting. Mock mode remains a control-plane simulation and does not filter packets.
+
 | Variable | Default | Description |
 |---|---|---|
+| `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` | `false` | Opt in to filtering Docker-backed EC2 and ECS `awsvpc` traffic by attached security groups |
+| `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_HELPER_IMAGE` | `floci/network-helper:local` | Linux helper image containing nftables; Floci builds the default image locally when missing |
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket path or TCP address |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(none)_ | Path to a directory containing Docker's `config.json` for registry auth |
 | `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04` |
@@ -170,7 +174,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_SQS_ENABLED` | `true` | Enable the SQS service |
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT` | `30` | Default message visibility timeout in seconds |
-| `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MB) |
+| `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MiB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | Reset the deduplication cache when a FIFO queue is purged |
 
 ### SNS
@@ -256,6 +260,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_FIREHOSE_ENABLED` | `true` | Enable the Kinesis Data Firehose service |
 | `FLOCI_SERVICES_FIREHOSE_TICK_INTERVAL_SECONDS` | `10` | How often (seconds) the buffer flusher checks for streams whose `BufferingHints.IntervalInSeconds` has elapsed |
 | `FLOCI_SERVICES_FIREHOSE_FLUSH_RECORD_COUNT` | `0` | Emulator-only: flush after this many buffered records (`0` = disabled, AWS-faithful; `1` = LocalStack-style record-at-a-time delivery) |
+| `FLOCI_SERVICES_FIREHOSE_STAGING_BUCKET` | `floci-firehose-staging` | S3 bucket used to stage NDJSON batches before DuckDB writes the Parquet object for format-converting streams |
 
 ### EventBridge
 
@@ -277,6 +282,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_ENABLED` | `true` | Enable the CloudWatch Logs service |
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_EVENTS_PER_QUERY` | `10000` | Maximum log events returned by a single `FilterLogEvents` or `GetLogEvents` call, and the upper bound for a Logs Insights `limit` |
+| `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_STORED_EVENTS` | `20000` | Maximum log events retained per account across all groups; oldest events are evicted first |
 | `FLOCI_SERVICES_CLOUDWATCHLOGS_QUERY_COMPLETION_DELAY_MS` | `0` | Artificial Logs Insights query delay. With `0` a query completes immediately; a positive value emulates the asynchronous `Running` → `Complete` lifecycle |
 
 ### CloudWatch Metrics
@@ -401,6 +407,18 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_MSK_MOCK` | `false` | When `true`, clusters are created instantly without a real Redpanda container |
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` | Docker image for Kafka/Redpanda brokers |
 
+### Amazon MQ
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_AMAZONMQ_ENABLED` | `true` | Enable the Amazon MQ service |
+| `FLOCI_SERVICES_AMAZONMQ_MOCK` | `false` | When `true`, brokers are created instantly without a real RabbitMQ container |
+| `FLOCI_SERVICES_AMAZONMQ_DEFAULT_IMAGE` | `rabbitmq:3-management` | Docker image for RabbitMQ broker containers |
+| `FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_BASE` | `5672` | First host port in the range the AMQP listener is published on |
+| `FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_MAX` | `5699` | Last host port in the AMQP range |
+| `FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_BASE` | `15672` | First host port in the range the management console is published on |
+| `FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_MAX` | `15699` | Last host port in the console range |
+
 ### Managed Service for Apache Flink (Kinesis Analytics V2)
 
 | Variable | Default | Description |
@@ -416,8 +434,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECR_ENABLED` | `true` | Enable the ECR service |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` | Docker image for the ECR registry sidecar |
 | `FLOCI_SERVICES_ECR_REGISTRY_CONTAINER_NAME` | `floci-ecr-registry` | Name of the ECR registry sidecar container |
-| `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First port in the ECR registry range |
-| `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last port in the ECR registry range |
+| `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First private loopback port for the backing registry |
+| `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last private loopback port for the backing registry |
 | `FLOCI_SERVICES_ECR_TLS_ENABLED` | `false` | Enable TLS for the ECR registry |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Keep the ECR registry container running when Floci stops |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | Repository URI style: `hostname` (`<account>.dkr.ecr.<region>.localhost`) or `path` |
@@ -446,6 +464,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default task memory when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default task CPU units when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | _(none)_ | Comma-separated allowlist of parent directories host volume `sourcePath`s must resolve under. By default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
+| `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing `HOST_VOLUME_ROOTS`; traversal, the bare root, and the Docker socket (or an ancestor directory of it, e.g. `/var/run`) are still always rejected |
 
 ### EC2
 
@@ -467,6 +487,35 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ATHENA_DUCK_URL` | _(none)_ | URL of an existing DuckDB service. When set, Floci skips managing the container |
 
 ---
+
+### Web Console (UI)
+
+Floci starts the web console as a sidecar container the first time `/_floci/ui` is opened.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_UI_ENABLED` | `true` | Enable the web console sidecar |
+| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
+| `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
+| `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
+| `FLOCI_SERVICES_UI_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave the sidecar running when Floci stops |
+| `FLOCI_SERVICES_UI_DOCKER_NETWORK` | _(none)_ | Docker network for the sidecar (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_UI_ENDPOINT` | _(derived)_ | Floci endpoint handed to the console, instead of deriving it from the Docker host and TLS settings |
+| `FLOCI_SERVICES_UI_EXTRA_ENV` | _(none)_ | Extra `KEY=VALUE` entries for the console, comma-separated (escape a literal comma as `\,`). Applied last, so an entry may override an injected default |
+| `FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY` | `false` | Have the console skip TLS verification on its connection to Floci |
+| `FLOCI_SERVICES_UI_INTERNAL_PORT` | _(discovered, else `4500`)_ | Port the console listens on inside its container |
+| `FLOCI_SERVICES_UI_ENDPOINT_ENV` | _(none)_ | An extra variable to repeat the Floci endpoint in, for a console reading neither `AWS_ENDPOINT_URL` nor `FLOCI_ENDPOINT` |
+| `FLOCI_SERVICES_UI_STATUS_PATH` | _(discovered, else `/api/health`)_ | Path the readiness probe requests on the console |
+| `FLOCI_SERVICES_UI_STATUS_READY_FIELD` | _(discovered, else `status`)_ | JSON field in that response reporting readiness. Set to `none` to make any `200` count as ready |
+| `FLOCI_SERVICES_UI_STATUS_READY_VALUE` | _(discovered, else `ok`)_ | Value of that field meaning the console reached Floci |
+| `FLOCI_SERVICES_UI_STATUS_UNAVAILABLE_VALUE` | _(discovered, else `unavailable`)_ | Value meaning the console is up but cannot reach Floci |
+
+The last six exist only for a console that neither follows the
+[console contract](../ui/console-contract.md) nor describes itself in its image labels. Leave them
+unset otherwise: setting one overrides both discovery paths.
+
+See [Web Console](../ui/index.md) for running the console and swapping in a third-party one, and
+[Console Contract v1](../ui/console-contract.md) for writing one.
 
 ## Services — Additional
 

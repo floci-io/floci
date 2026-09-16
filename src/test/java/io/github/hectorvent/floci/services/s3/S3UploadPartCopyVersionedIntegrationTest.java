@@ -24,6 +24,7 @@ class S3UploadPartCopyVersionedIntegrationTest {
     private static final String DEST_KEY = "versioned-mp-dest.bin";
     private static String sourceV1VersionId;
     private static String uploadId;
+    private static String copiedPartETag;
 
     @Test
     @Order(1)
@@ -86,14 +87,15 @@ class S3UploadPartCopyVersionedIntegrationTest {
     @Test
     @Order(5)
     void uploadPartCopyUsesOlderVersion() {
-        given()
+        copiedPartETag = given()
                 .header("x-amz-copy-source", "/" + BUCKET + "/" + SRC_KEY + "?versionId=" + sourceV1VersionId)
                 .when()
                 .put("/" + BUCKET + "/" + DEST_KEY + "?uploadId=" + uploadId + "&partNumber=1")
                 .then()
                 .statusCode(200)
                 .body(containsString("<CopyPartResult"))
-                .body(containsString("<ETag>"));
+                .body(containsString("<ETag>"))
+                .extract().xmlPath().getString("CopyPartResult.ETag");
     }
 
     @Test
@@ -101,8 +103,8 @@ class S3UploadPartCopyVersionedIntegrationTest {
     void completeAndVerifyBodyFromVersion1() {
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>placeholder</ETag></Part>
-                </CompleteMultipartUpload>""";
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(copiedPartETag);
 
         given()
                 .contentType("application/xml")

@@ -778,6 +778,121 @@ class KinesisJsonHandlerTest {
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
     }
 
+    @Test
+    void getRecordsSerializesApproximateArrivalTimestampAsPlainDecimal() throws Exception {
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        // A fixed, realistic (2020s-era) arrival timestamp - Instant.now() would also trigger
+        // the bug, but a fixed value makes the expected serialized decimal assertable exactly.
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(Instant.ofEpochMilli(1_786_959_659_083L));
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        JsonNode timestampNode = responseEntity(handler.handle("GetRecords", recReq, REGION))
+                .get("Records").get(0).get("ApproximateArrivalTimestamp");
+
+        assertTrue(timestampNode.isNumber());
+        assertEquals(new BigDecimal("1786959659.083"), timestampNode.decimalValue());
+
+        String serialized = MAPPER.writeValueAsString(timestampNode);
+        assertEquals("1786959659.083", serialized);
+        assertFalse(serialized.contains("E"));
+        assertFalse(serialized.contains("e"));
+    }
+
+    @Test
+    void getRecordsWholeSecondArrivalTimestampRemainsNumeric() throws Exception {
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(Instant.ofEpochMilli(1_786_959_659_000L));
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        JsonNode timestampNode = responseEntity(handler.handle("GetRecords", recReq, REGION))
+                .get("Records").get(0).get("ApproximateArrivalTimestamp");
+
+        assertEquals(new BigDecimal("1786959659.000"), timestampNode.decimalValue());
+        assertEquals("1786959659.000", MAPPER.writeValueAsString(timestampNode));
+    }
+
+    @Test
+    void getRecordsOmitsArrivalTimestampRatherThanThrowingWhenNull() throws Exception {
+        // A record loaded back from hybrid/persistent JSON-backed storage (KinesisRecord is
+        // @RegisterForReflection with a no-arg constructor) can have a null
+        // approximateArrivalTimestamp if it was persisted by an older Floci version, or the
+        // field was otherwise dropped - GetRecords must not NPE serializing the whole response
+        // just because one record's timestamp is missing.
+        createStream("test-stream");
+
+        ObjectNode putReq = MAPPER.createObjectNode();
+        putReq.put("StreamName", "test-stream");
+        putReq.put("Data", "dGVzdA==");
+        putReq.put("PartitionKey", "pk1");
+        handler.handle("PutRecord", putReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+
+        service.describeStream("test-stream", REGION).getShards().get(0).getRecords().get(0)
+                .setApproximateArrivalTimestamp(null);
+
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", shardId);
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode recReq = MAPPER.createObjectNode();
+        recReq.put("ShardIterator", iterator);
+        Response resp = handler.handle("GetRecords", recReq, REGION);
+        assertThat(resp.getStatus(), is(200));
+
+        ObjectNode record = (ObjectNode) responseEntity(resp).get("Records").get(0);
+        assertFalse(record.has("ApproximateArrivalTimestamp"));
+        assertTrue(record.has("SequenceNumber"));
+    }
+
     private ArrayNode readAllRecords(String streamName) {
         ObjectNode descReq = MAPPER.createObjectNode();
         descReq.put("StreamName", streamName);
@@ -1175,6 +1290,127 @@ class KinesisJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("UpdateMaxRecordSize", update, REGION));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    private ObjectNode updateShardCount(String streamName, int targetShardCount, String scalingType) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", streamName);
+        req.put("TargetShardCount", targetShardCount);
+        req.put("ScalingType", scalingType);
+        return responseEntity(handler.handle("UpdateShardCount", req, REGION));
+    }
+
+    @Test
+    void updateShardCountScalesUpAndReturnsExpectedShape() {
+        createStream("test-stream", 2);
+
+        ObjectNode response = updateShardCount("test-stream", 4, "UNIFORM_SCALING");
+        assertEquals("test-stream", response.get("StreamName").asText());
+        assertEquals(streamArn("test-stream"), response.get("StreamARN").asText());
+        assertEquals(2, response.get("CurrentShardCount").asInt());
+        assertEquals(4, response.get("TargetShardCount").asInt());
+
+        ObjectNode summaryReq = MAPPER.createObjectNode();
+        summaryReq.put("StreamName", "test-stream");
+        ObjectNode summary = (ObjectNode) responseEntity(
+                handler.handle("DescribeStreamSummary", summaryReq, REGION)).get("StreamDescriptionSummary");
+        assertEquals(4, summary.get("OpenShardCount").asInt());
+    }
+
+    @Test
+    void updateShardCountScalesDown() {
+        createStream("test-stream", 4);
+
+        ObjectNode response = updateShardCount("test-stream", 2, "UNIFORM_SCALING");
+        assertEquals(4, response.get("CurrentShardCount").asInt());
+        assertEquals(2, response.get("TargetShardCount").asInt());
+
+        ObjectNode summaryReq = MAPPER.createObjectNode();
+        summaryReq.put("StreamName", "test-stream");
+        ObjectNode summary = (ObjectNode) responseEntity(
+                handler.handle("DescribeStreamSummary", summaryReq, REGION)).get("StreamDescriptionSummary");
+        assertEquals(2, summary.get("OpenShardCount").asInt());
+    }
+
+    @Test
+    void updateShardCountRejectsTargetAboveDouble() {
+        createStream("test-stream", 2);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> updateShardCount("test-stream", 5, "UNIFORM_SCALING"));
+        assertEquals("LimitExceededException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateShardCountRejectsTargetBelowHalf() {
+        createStream("test-stream", 4);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> updateShardCount("test-stream", 1, "UNIFORM_SCALING"));
+        assertEquals("LimitExceededException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateShardCountRejectsNonUniformScalingType() {
+        createStream("test-stream", 2);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> updateShardCount("test-stream", 4, "BOGUS"));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateShardCountRejectsOnDemandStream() {
+        ObjectNode create = MAPPER.createObjectNode();
+        create.put("StreamName", "on-demand-stream");
+        create.put("ShardCount", 2);
+        create.putObject("StreamModeDetails").put("StreamMode", "ON_DEMAND");
+        assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> updateShardCount("on-demand-stream", 4, "UNIFORM_SCALING"));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateShardCountRejectsAStreamThatIsNotActive() {
+        createStream("test-stream", 2);
+        service.describeStream("test-stream", REGION).setStreamStatus("UPDATING");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> updateShardCount("test-stream", 4, "UNIFORM_SCALING"));
+        assertEquals("ResourceInUseException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateShardCountRejectsUnknownStream() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> updateShardCount("missing-stream", 2, "UNIFORM_SCALING"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateShardCountLineageAfterSplitCoversWholeParentRange() {
+        createStream("test-stream", 1);
+
+        updateShardCount("test-stream", 2, "UNIFORM_SCALING");
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        ArrayNode shards = (ArrayNode) responseEntity(
+                handler.handle("DescribeStream", descReq, REGION)).get("StreamDescription").get("Shards");
+        assertEquals(3, shards.size());
+
+        ObjectNode parent = (ObjectNode) shards.get(0);
+        List<ObjectNode> children = new java.util.ArrayList<>();
+        for (JsonNode s : shards) {
+            if (s.has("ParentShardId") && s.get("ParentShardId").asText().equals(parent.get("ShardId").asText())) {
+                children.add((ObjectNode) s);
+            }
+        }
+        assertEquals(2, children.size());
+        assertFalse(children.get(0).has("AdjacentParentShardId"));
+        assertFalse(children.get(1).has("AdjacentParentShardId"));
     }
 
     @Test

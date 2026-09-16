@@ -7,13 +7,16 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class CloudFormationTemplateEngineTest {
 
@@ -369,5 +372,114 @@ class CloudFormationTemplateEngineTest {
 
         assertEquals(java.util.List.of("subnet-default"),
                 eFalse.resolveStringList(json("{\"Fn::If\":[\"UseCustom\",[\"subnet-prefix\",{\"Fn::Split\":[\",\",{\"Fn::ImportValue\":\"Subnets\"}]}],[\"subnet-default\"]]}")));
+    }
+
+    /**
+     * Reproduces #2213: a Lambda {@code Environment.Variables} entry (or any other plain string
+     * template value) carrying {@code {{resolve:...}}} syntax reached the deployed resource as the
+     * literal text because {@code resolveNode}, the general-purpose path every non-RDS property goes
+     * through, had no dynamic-reference stage.
+     */
+    /**
+     * CDK emits an RDS master credential as an {@code Fn::Join} whose fragments split one dynamic
+     * reference: {@code ["{{resolve:secretsmanager:", {"Ref": "Secret"}, ":SecretString:password::}}"]}.
+     * Resolving each fragment on its own rejects the opening fragment as an unclosed reference, so
+     * the reference must be resolved once, on the concatenated string.
+     */
+    @Test
+    void resolveNodeResolvesDynamicReferenceSplicedAcrossJoinFragments() {
+        List<String> resolverInputs = new ArrayList<>();
+        UnaryOperator<String> resolver = value -> {
+            resolverInputs.add(value);
+            return "resolved-password";
+        };
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(),
+                Map.of("Secret", "arn:aws:secretsmanager:us-east-1:000000000000:secret:creds-AbC123"),
+                Map.of(), Map.of(), Map.of(), mapper, (Function<String, String>) name -> null, resolver);
+
+        String resolved = e.resolveNode(json("{\"Fn::Join\":[\"\",[\"{{resolve:secretsmanager:\","
+                + "{\"Ref\":\"Secret\"},\":SecretString:password::}}\"]]}")).asText();
+
+        assertEquals("resolved-password", resolved);
+        assertEquals(List.of("{{resolve:secretsmanager:arn:aws:secretsmanager:us-east-1:000000000000:"
+                + "secret:creds-AbC123:SecretString:password::}}"), resolverInputs);
+    }
+
+    /**
+     * The RDS credential path opts out of the general dynamic-reference stage and resolves the
+     * reference itself, so the joined string must survive intact with the reference untouched.
+     */
+    @Test
+    void resolveWithoutDynamicReferencesKeepsJoinSplicedReferenceIntact() {
+        UnaryOperator<String> resolver = value -> fail("dynamic reference must not be resolved here: " + value);
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(),
+                Map.of("Secret", "arn:aws:secretsmanager:us-east-1:000000000000:secret:creds-AbC123"),
+                Map.of(), Map.of(), Map.of(), mapper, (Function<String, String>) name -> null, resolver);
+
+        assertEquals("{{resolve:secretsmanager:arn:aws:secretsmanager:us-east-1:000000000000:"
+                        + "secret:creds-AbC123:SecretString:password::}}",
+                e.resolveWithoutDynamicReferences(json("{\"Fn::Join\":[\"\",[\"{{resolve:secretsmanager:\","
+                        + "{\"Ref\":\"Secret\"},\":SecretString:password::}}\"]]}")));
+    }
+
+    @Test
+    void resolveNodeResolvesDynamicReferenceInPlainStringValue() {
+        UnaryOperator<String> resolver = value -> {
+            assertEquals("{{resolve:ssm:/demo/url}}", value);
+            return "https://real.example.com";
+        };
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), mapper, (Function<String, String>) name -> null, resolver);
+
+        assertEquals("https://real.example.com",
+                e.resolveNode(json("\"{{resolve:ssm:/demo/url}}\"")).asText());
+    }
+
+    /**
+     * The same dynamic-reference stage applies to the text an intrinsic function produces, since a
+     * literal {@code {{resolve:...}}} embedded in an {@code Fn::Sub} template survives substitution
+     * untouched and reaches resolveNode's final string.
+     */
+    @Test
+    void resolveNodeResolvesDynamicReferenceProducedByIntrinsic() {
+        UnaryOperator<String> resolver = value -> {
+            assertEquals("prefix-{{resolve:ssm:/demo/url}}", value);
+            return "prefix-https://real.example.com";
+        };
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), mapper, (Function<String, String>) name -> null, resolver);
+
+        assertEquals("prefix-https://real.example.com", e.resolveNode(
+                json("{\"Fn::Sub\": \"prefix-{{resolve:ssm:/demo/url}}\"}")).asText());
+    }
+
+    /**
+     * A plain literal with no dynamic reference syntax must never reach the resolver: it is left
+     * exactly as written, and a resolver that throws proves it was not invoked.
+     */
+    @Test
+    void resolveNodeLeavesPlainLiteralStringUntouched() {
+        UnaryOperator<String> resolver = value -> fail("dynamic reference resolver must not be "
+                + "invoked for a value with no {{resolve:...}} syntax: " + value);
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), mapper, (Function<String, String>) name -> null, resolver);
+
+        assertEquals("just-a-normal-value", e.resolveNode(json("\"just-a-normal-value\"")).asText());
+    }
+
+    /**
+     * With no dynamic-reference resolver configured (the 11-argument constructor every other test
+     * in this class uses), resolveNode leaves {@code {{resolve:...}}} syntax exactly as written
+     * instead of failing: callers that never need dynamic references stay decoupled from them.
+     */
+    @Test
+    void resolveNodeWithNoResolverLeavesDynamicReferenceSyntaxVerbatim() {
+        assertEquals("{{resolve:ssm:/demo/url}}",
+                engine().resolveNode(json("\"{{resolve:ssm:/demo/url}}\"")).asText());
     }
 }

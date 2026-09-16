@@ -54,6 +54,9 @@ public class SesInspectionController {
                 node.putNull("Region");
             }
             node.put("Source", email.getSource());
+            if (email.getReturnPath() != null) {
+                node.put("ReturnPath", email.getReturnPath());
+            }
 
             if (email.isRaw()) {
                 // LocalStack returns RawData for raw emails, without

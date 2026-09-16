@@ -147,6 +147,66 @@ class CertificateGeneratorSanTypeTest {
                 "Should have 3 iPAddress SANs (127.0.0.1, 0.0.0.0, 10.0.0.5). Found SANs: " + sans);
     }
 
+    // ==================== hex-shaped names are not addresses ====================
+
+    /**
+     * A hex-only label used to match the old IP pattern and be handed to
+     * {@code InetAddress.getByName}, which decodes {@code 1234} as {@code 0.0.4.210}. The
+     * certificate then carried an address nobody asked for, and the name it was given was not
+     * covered at all.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"1234", "0", "beef", "cafe", "abcd"})
+    void hexShapedLabelsAreDnsNamesNotAddresses(String name) throws Exception {
+        var cert = generator.generateSelfSignedCertificate(
+                "localhost", List.of("localhost", name), KeyAlgorithm.RSA_2048);
+
+        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        Collection<List<?>> sans = x509.getSubjectAlternativeNames();
+
+        assertTrue(sans.stream().anyMatch(san -> (Integer) san.get(0) == GeneralName.dNSName
+                        && san.get(1).toString().equals(name)),
+                name + " must be covered as a dNSName. Found: " + sans);
+        assertFalse(sans.stream().anyMatch(san -> (Integer) san.get(0) == GeneralName.iPAddress
+                        && !san.get(1).toString().equals("127.0.0.1")),
+                name + " must not become an iPAddress SAN. Found: " + sans);
+    }
+
+    /** An octet above 255 is not an address; the old dotted-quad pattern accepted it. */
+    @ParameterizedTest
+    @ValueSource(strings = {"256.1.1.1", "999.999.999.999", "1.2.3.4.5", "01.02.03.256"})
+    void outOfRangeDottedQuadsAreDnsNames(String name) {
+        assertFalse(CertificateGenerator.isIpAddress(name),
+                name + " is not a valid IPv4 address");
+    }
+
+    /** A malformed IPv6 literal still reaches the DNS-name fallback rather than being dropped. */
+    @Test
+    void aMalformedIpv6LiteralIsStillCoveredAsADnsName() throws Exception {
+        var cert = generator.generateSelfSignedCertificate(
+                "localhost", List.of("localhost", "fffff::1"), KeyAlgorithm.RSA_2048);
+
+        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        Collection<List<?>> sans = x509.getSubjectAlternativeNames();
+
+        assertTrue(sans.stream().anyMatch(san -> (Integer) san.get(0) == GeneralName.dNSName
+                        && san.get(1).toString().equals("fffff::1")),
+                "a name we cannot parse must still be covered, not silently dropped. Found: " + sans);
+    }
+
+    /**
+     * The property that keeps certificate generation off the network: only values already known
+     * to be literals are handed to the resolver. A colon-free label must never be treated as an
+     * address, however hex-shaped, because resolving it would be a blocking DNS call whose result
+     * would replace the name the caller asked to cover.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"1234", "beef", "deadbeef", "localhost", "floci"})
+    void colonFreeLabelsAreNeverTreatedAsAddresses(String name) {
+        assertFalse(CertificateGenerator.isIpAddress(name),
+                name + " has no colon and is not a dotted quad, so it must not be resolved");
+    }
+
     // ==================== isIpAddress utility tests ====================
 
     @ParameterizedTest
@@ -172,5 +232,44 @@ class CertificateGeneratorSanTypeTest {
         assertFalse(CertificateGenerator.isIpAddress(null));
         assertFalse(CertificateGenerator.isIpAddress(""));
         assertFalse(CertificateGenerator.isIpAddress("   "));
+    }
+
+    /**
+     * A colon somewhere is not enough to make a value a literal, and treating it as one puts the
+     * resolver back in the certificate path.
+     *
+     * <p>{@code InetAddress.getAllByName} only attempts a literal parse when the first character
+     * is an ASCII hex digit or a colon; everything else it resolves. Measured on JDK 25,
+     * {@code getByName("z:1")} takes tens of milliseconds and fails with the resolver's
+     * "nodename nor servname provided", while {@code getByName("fffff::1")} fails in under a
+     * millisecond with "invalid IPv6 address literal". Only the second never left the JVM.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"z:1", "host:8080", "xyz::1", "-:1", "_:1", "g::1"})
+    void isIpAddress_colonButNotLiteralShaped_staysADnsName(String value) {
+        assertFalse(CertificateGenerator.isIpAddress(value),
+                value + " starts with a character the JDK will not read as a literal, so calling it "
+                        + "an IP address would send it to the name service");
+    }
+
+    /**
+     * The shape a {@code Character.digit(c, 16)} implementation would let through.
+     *
+     * <p>{@code IPAddressUtil.digit} is ASCII-only by default and its own comment gives the set as
+     * [0-9,A-F,a-f], but {@code Character.digit} answers 1 for the Arabic-Indic digit one. Writing
+     * the leading-character test the convenient way would classify this as a literal, hand it to
+     * the resolver, and have the JDK decline to parse it and look it up instead.
+     */
+    @Test
+    void isIpAddress_nonAsciiDigitLeadingColonValue_staysADnsName() {
+        assertFalse(CertificateGenerator.isIpAddress("\u0661:1"),
+                "a non-ASCII digit is not one of [0-9,A-F,a-f], so the JDK would resolve this");
+    }
+
+    /** Literal-shaped leading characters still count, including uppercase hex and a bare colon. */
+    @ParameterizedTest
+    @ValueSource(strings = {"::1", "FE80::1", "fe80::1", "0::1", "9:1", "A::1", "f::1"})
+    void isIpAddress_literalShapedLeadingCharacter_isStillAnIpAddress(String value) {
+        assertTrue(CertificateGenerator.isIpAddress(value), value + " should be detected as IP");
     }
 }

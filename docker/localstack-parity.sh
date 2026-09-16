@@ -75,4 +75,4 @@ if [ -n "${CUSTOM_SSL_CERT_PATH:-}" ]; then
     export FLOCI_TLS_KEY_PATH="${FLOCI_TLS_KEY_PATH:-${CUSTOM_SSL_CERT_PATH}}"
 fi
 
-# SERVICES — intentionally ignored; Floci starts all 41 services in ~24ms.
+# SERVICES: intentionally ignored; Floci starts every service in ~24ms.

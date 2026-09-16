@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -20,21 +21,38 @@ import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -48,6 +66,7 @@ class FirehoseServiceTest {
     private FirehoseService firehoseService;
     private KinesisService kinesisService;
     private StorageFactory storageFactory;
+    private Map<String, AccountAwareStorageBackend<?>> backends;
     private S3Service s3Service;
     private MutableClock clock;
 
@@ -59,7 +78,7 @@ class FirehoseServiceTest {
         // the map FirehoseService.scan() reads as delivery streams; a fresh instance per
         // create() call would make a second service over "the same storage" impossible
         // to build, which is what the restart test needs.
-        Map<String, AccountAwareStorageBackend<?>> backends = new HashMap<>();
+        backends = new HashMap<>();
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(invocation -> backends.computeIfAbsent(
                         invocation.getArgument(0) + "/" + invocation.getArgument(1),
@@ -70,6 +89,14 @@ class FirehoseServiceTest {
     }
 
     private FirehoseService newService(int flushRecordCount) {
+        return newService(flushRecordCount, UnaryOperator.identity());
+    }
+
+    /**
+     * @param kinesisDecorator applied to the source service before the poller sees it,
+     *                         e.g. {@code Mockito::spy} to park a poll mid-way.
+     */
+    private FirehoseService newService(int flushRecordCount, UnaryOperator<KinesisService> kinesisDecorator) {
         EmulatorConfig.FirehoseServiceConfig firehoseCfg = mock(EmulatorConfig.FirehoseServiceConfig.class);
         when(firehoseCfg.enabled()).thenReturn(true);
         when(firehoseCfg.tickIntervalSeconds()).thenReturn(10L);
@@ -82,9 +109,35 @@ class FirehoseServiceTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         // A real KinesisService, not a mock: the point of the source poller is that it
         // sees what a GetRecords consumer sees, and a stubbed one could not show that.
-        kinesisService = new KinesisService(storageFactory, regionResolver);
+        kinesisService = kinesisDecorator.apply(new KinesisService(storageFactory, regionResolver));
         return new FirehoseService(storageFactory, s3Service, kinesisService,
-                regionResolver, clock, config);
+                regionResolver, clock, config, mock(FirehoseParquetConverter.class),
+                mock(FirehoseLambdaTransformer.class));
+    }
+
+    /** The committed source checkpoint, as a restarted service would read it back. */
+    @SuppressWarnings("unchecked")
+    private Optional<Map<String, String>> durableCheckpoint(String deliveryStream) {
+        AccountAwareStorageBackend<Map<String, String>> store =
+                (AccountAwareStorageBackend<Map<String, String>>) backends.get("firehose/source-iterators.json");
+        return store.getForAccount("000000000000", "us-east-1/" + deliveryStream);
+    }
+
+    /**
+     * Spin until {@code thread} is parked entering a monitor or {@code task} has finished,
+     * whichever comes first, so the assertions that follow see a settled state rather than
+     * a thread that was merely never scheduled.
+     */
+    private static void awaitParkedOrDone(AtomicReference<Thread> thread, Future<?> task)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline && !task.isDone()) {
+            Thread th = thread.get();
+            if (th != null && th.getState() == Thread.State.BLOCKED) {
+                return;
+            }
+            Thread.sleep(5);
+        }
     }
 
     private static S3Destination destination(String bucketArn, String compressionFormat) {
@@ -117,13 +170,18 @@ class FirehoseServiceTest {
     }
 
     private Delivered delivered(String expectedBucket) {
+        return delivered(expectedBucket, 1);
+    }
+
+    /** The most recent of exactly {@code attempts} S3 writes. */
+    private Delivered delivered(String expectedBucket, int attempts) {
         ArgumentCaptor<String> bucket = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
         ArgumentCaptor<String> contentType = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<PutObjectOptions> options = ArgumentCaptor.forClass(PutObjectOptions.class);
-        verify(s3Service).putObject(bucket.capture(), key.capture(), body.capture(), contentType.capture(),
-                anyMap(), options.capture());
+        verify(s3Service, times(attempts)).putObject(bucket.capture(), key.capture(), body.capture(),
+                contentType.capture(), anyMap(), options.capture());
         assertEquals(expectedBucket, bucket.getValue());
         return new Delivered(key.getValue(), body.getValue(), contentType.getValue(),
                 options.getValue().getContentEncoding());
@@ -136,6 +194,85 @@ class FirehoseServiceTest {
     private void verifyNothingDelivered() {
         verify(s3Service, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(),
                 anyMap(), any(PutObjectOptions.class));
+    }
+
+    @Test
+    void migratesLegacyAccountAndNameKeysOnlyForMatchingOwner() {
+        DeliveryStreamDescription legacy = new DeliveryStreamDescription(
+                "legacy", "arn:aws:firehose:us-east-1:111111111111:deliverystream/legacy", null, null);
+        legacy.setAccountId("111111111111");
+        AccountAwareStorageBackend<DeliveryStreamDescription> streams =
+                (AccountAwareStorageBackend<DeliveryStreamDescription>) backends.get("firehose/streams.json");
+        streams.putForAccount("111111111111", "legacy", legacy);
+
+        assertEquals("legacy", firehoseService.describeDeliveryStream("111111111111", "us-east-1", "legacy")
+                .getDeliveryStreamName());
+        assertFalse(streams.getForAccount("111111111111", "legacy").isPresent());
+        assertTrue(streams.getForAccount("111111111111", "us-east-1/legacy").isPresent());
+
+        DeliveryStreamDescription wrongRegion = new DeliveryStreamDescription(
+                "wrong-region", "arn:aws:firehose:eu-west-1:111111111111:deliverystream/wrong-region", null, null);
+        wrongRegion.setAccountId("111111111111");
+        streams.putForAccount("111111111111", "wrong-region", wrongRegion);
+        assertThrows(AwsException.class,
+                () -> firehoseService.describeDeliveryStream("111111111111", "us-east-1", "wrong-region"),
+                "legacy entries from another region must not be adopted");
+    }
+
+    @Test
+    void isolatesSameStreamNameAcrossAccountsAndRegionsIncludingFlushAndDelete() {
+        String firstArn = firehoseService.createDeliveryStream("us-east-1", "111111111111", "shared", null,
+                List.of(), null, null);
+        String secondArn = firehoseService.createDeliveryStream("eu-west-1", "222222222222", "shared", null,
+                List.of(), null, null);
+
+        assertTrue(firstArn.contains(":us-east-1:111111111111:deliverystream/shared"));
+        assertTrue(secondArn.contains(":eu-west-1:222222222222:deliverystream/shared"));
+
+        firehoseService.putRecord("111111111111", "us-east-1", "shared",
+                new Record("first".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.putRecord("222222222222", "eu-west-1", "shared",
+                new Record("second".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.flush("111111111111", "us-east-1", "shared");
+
+        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(),
+                argThat(body -> new String(body, StandardCharsets.UTF_8).equals("first\n")),
+                eq(OCTET_STREAM), anyMap(), any(PutObjectOptions.class));
+        verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+        assertEquals("shared", firehoseService.describeDeliveryStream("222222222222", "eu-west-1", "shared")
+                .getDeliveryStreamName());
+
+        firehoseService.deleteDeliveryStream("111111111111", "us-east-1", "shared");
+        assertEquals("shared", firehoseService.describeDeliveryStream("222222222222", "eu-west-1", "shared")
+                .getDeliveryStreamName());
+    }
+
+    @Test
+    void sameNameIsIndependentForEachAccountRegionDimension() {
+        List<String[]> owners = List.of(
+                new String[] {"111111111111", "us-east-1"},
+                new String[] {"111111111111", "eu-west-1"},
+                new String[] {"222222222222", "us-east-1"},
+                new String[] {"222222222222", "eu-west-1"});
+        for (int i = 0; i < owners.size(); i++) {
+            firehoseService.createDeliveryStream(owners.get(i)[1], owners.get(i)[0], "matrix", null,
+                    List.of(), null, null);
+            firehoseService.putRecord(owners.get(i)[0], owners.get(i)[1], "matrix",
+                    new Record(("owner-" + i).getBytes(StandardCharsets.UTF_8)));
+        }
+
+        firehoseService.flush("111111111111", "us-east-1", "matrix");
+
+        verify(s3Service).putObject(eq("floci-firehose-results"), anyString(),
+                argThat(body -> new String(body, StandardCharsets.UTF_8).equals("owner-0\n")),
+                eq(OCTET_STREAM), anyMap(), any(PutObjectOptions.class));
+        verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+        for (String[] owner : owners) {
+            assertEquals("matrix", firehoseService.describeDeliveryStream(owner[0], owner[1], "matrix")
+                    .getDeliveryStreamName());
+        }
     }
 
     @Test
@@ -584,6 +721,154 @@ class FirehoseServiceTest {
         firehoseService.flush("sourced-stream");
 
         assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void aFailedDeliveryRestoresTheBatchAheadOfRecordsAddedDuringDelivery() {
+        firehoseService.createDeliveryStream("retry-stream", destination("arn:aws:s3:::sink", null));
+        firehoseService.putRecord("retry-stream", new Record("first".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.putRecord("retry-stream", new Record("second".getBytes(StandardCharsets.UTF_8)));
+        AtomicBoolean s3Down = new AtomicBoolean(true);
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenAnswer(invocation -> {
+            if (s3Down.getAndSet(false)) {
+                firehoseService.putRecord("retry-stream", new Record("third".getBytes(StandardCharsets.UTF_8)));
+                throw new RuntimeException("s3 unavailable");
+            }
+            return null;
+        });
+
+        firehoseService.flush("retry-stream");
+        firehoseService.flush("retry-stream");
+
+        assertEquals("first\nsecond\nthird\n", delivered("sink", 2).text());
+    }
+
+    @Test
+    void aRestoredBatchIsRetriedOnTheNextScheduledFlush() {
+        firehoseService.createDeliveryStream("retry-stream", destination("arn:aws:s3:::sink", null));
+        firehoseService.putRecord("retry-stream", new Record("first".getBytes(StandardCharsets.UTF_8)));
+        AtomicBoolean s3Down = new AtomicBoolean(true);
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenAnswer(invocation -> {
+            if (s3Down.getAndSet(false)) {
+                // A record arrives while the write is in flight; it must not push the
+                // restored batch's buffering start forward.
+                clock.advance(Duration.ofSeconds(1));
+                firehoseService.putRecord("retry-stream", new Record("second".getBytes(StandardCharsets.UTF_8)));
+                throw new RuntimeException("s3 unavailable");
+            }
+            return null;
+        });
+        clock.advance(Duration.ofSeconds(300));
+        firehoseService.flushDueBuffers(clock.instant());
+        verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+
+        clock.advance(Duration.ofSeconds(10));
+        firehoseService.flushDueBuffers(clock.instant());
+
+        assertEquals("first\nsecond\n", delivered("sink", 2).text());
+    }
+
+    @Test
+    void aSuccessfulDeliveryClearsOnlyTheRecordsItWrote() {
+        firehoseService.createDeliveryStream("keep-stream", destination("arn:aws:s3:::sink", null));
+        firehoseService.putRecord("keep-stream", new Record("first".getBytes(StandardCharsets.UTF_8)));
+        AtomicBoolean firstWrite = new AtomicBoolean(true);
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenAnswer(invocation -> {
+            if (firstWrite.getAndSet(false)) {
+                firehoseService.putRecord("keep-stream", new Record("second".getBytes(StandardCharsets.UTF_8)));
+            }
+            return null;
+        });
+
+        firehoseService.flush("keep-stream");
+        assertEquals("first\n", delivered("sink").text());
+
+        firehoseService.flush("keep-stream");
+        assertEquals("second\n", delivered("sink", 2).text());
+    }
+
+    @Test
+    void aLaterFlushCannotCommitItsCheckpointWhileAnEarlierBatchIsUnresolved() throws Exception {
+        // A spy, so one poll can be parked between reading its page and buffering it.
+        firehoseService = newService(0, Mockito::spy);
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "first".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        firehoseService.pollKinesisSources();
+
+        // The first S3 write parks until released and then fails, like a slow S3 that
+        // eventually answers with an error. Later writes succeed.
+        CountDownLatch firstWriteStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstWrite = new CountDownLatch(1);
+        AtomicBoolean firstWrite = new AtomicBoolean(true);
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenAnswer(invocation -> {
+            if (firstWrite.getAndSet(false)) {
+                firstWriteStarted.countDown();
+                releaseFirstWrite.await();
+                throw new RuntimeException("s3 unavailable");
+            }
+            return null;
+        });
+        // The next poll parks once it has read its page, before it buffers the records
+        // and advances the pending checkpoint past them.
+        kinesisService.putRecord("src-stream", "second".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        CountDownLatch pollRead = new CountDownLatch(1);
+        CountDownLatch resumePoll = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            Object page = invocation.callRealMethod();
+            pollRead.countDown();
+            resumePoll.await();
+            return page;
+        }).when(kinesisService).getRecordsForAccount(anyString(), anyString(), any(), anyString());
+
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            // P reads "second" from the position "first" was polled to, then parks.
+            Future<?> poll = pool.submit(firehoseService::pollKinesisSources);
+            assertTrue(pollRead.await(2, TimeUnit.SECONDS), "the poll must read its page");
+            // A takes "first" with its checkpoint and parks inside the S3 write.
+            Future<?> flushA = pool.submit(() -> firehoseService.flush("sourced-stream"));
+            assertTrue(firstWriteStarted.await(2, TimeUnit.SECONDS), "flush A must reach its S3 write");
+            // P buffers "second" and leaves a checkpoint past both records pending.
+            resumePoll.countDown();
+            poll.get(2, TimeUnit.SECONDS);
+            // B finds "second" buffered while A still owes "first" to S3.
+            AtomicReference<Thread> bThread = new AtomicReference<>();
+            Future<?> flushB = pool.submit(() -> {
+                bThread.set(Thread.currentThread());
+                firehoseService.flush("sourced-stream");
+            });
+            awaitParkedOrDone(bThread, flushB);
+
+            // Committing B's checkpoint now would persist a position past "first" while
+            // "first" is not durable: a restart before A's retry would skip it forever.
+            assertTrue(durableCheckpoint("sourced-stream").isEmpty(),
+                    "no checkpoint may be committed while an earlier batch is unresolved");
+            verify(s3Service, times(1)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                    anyMap(), any(PutObjectOptions.class));
+            assertThrows(TimeoutException.class, () -> flushB.get(500, TimeUnit.MILLISECONDS),
+                    "a later flush must wait for the earlier batch to resolve");
+
+            releaseFirstWrite.countDown();
+            flushA.get(2, TimeUnit.SECONDS);
+            flushB.get(2, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        // A's failure hands "first" back ahead of "second"; B then delivers both.
+        assertEquals("first\nsecond\n", delivered("sink", 2).text());
+
+        // Restart: the committed checkpoint covers exactly what reached S3, so nothing
+        // is re-read and nothing is skipped.
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        verify(s3Service, times(2)).putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class));
     }
 
     @Test

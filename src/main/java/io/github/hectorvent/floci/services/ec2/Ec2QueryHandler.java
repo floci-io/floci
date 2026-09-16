@@ -41,15 +41,19 @@ public class Ec2QueryHandler {
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
     private final Ec2EbsEncryptionService ebsEncryptionService;
+    private final Ec2SnapshotBlockPublicAccessService snapshotBlockPublicAccessService;
     private final Ec2IpamService ipamService;
 
     @Inject
     public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
-                           Ec2EbsEncryptionService ebsEncryptionService, Ec2IpamService ipamService) {
+                           Ec2EbsEncryptionService ebsEncryptionService,
+                           Ec2SnapshotBlockPublicAccessService snapshotBlockPublicAccessService,
+                           Ec2IpamService ipamService) {
         this.service = service;
         this.config = config;
         this.flowLogService = flowLogService;
         this.ebsEncryptionService = ebsEncryptionService;
+        this.snapshotBlockPublicAccessService = snapshotBlockPublicAccessService;
         this.ipamService = ipamService;
     }
 
@@ -67,7 +71,10 @@ public class Ec2QueryHandler {
                 case "StartInstances" -> handleStartInstances(params, region);
                 case "StopInstances" -> handleStopInstances(params, region);
                 case "RebootInstances" -> handleRebootInstances(params, region);
+                case "MonitorInstances" -> handleMonitoring(params, region, "MonitorInstances", true);
+                case "UnmonitorInstances" -> handleMonitoring(params, region, "UnmonitorInstances", false);
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
+                case "DescribeInstanceCreditSpecifications" -> handleDescribeInstanceCreditSpecifications(params, region);
                 case "DescribeInstanceAttribute" -> handleDescribeInstanceAttribute(params, region);
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
                 case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
@@ -78,6 +85,10 @@ public class Ec2QueryHandler {
                 case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
                 case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
                 case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
+                // Snapshot block public access
+                case "EnableSnapshotBlockPublicAccess" -> handleEnableSnapshotBlockPublicAccess(params, region);
+                case "DisableSnapshotBlockPublicAccess" -> handleDisableSnapshotBlockPublicAccess(params, region);
+                case "GetSnapshotBlockPublicAccessState" -> handleGetSnapshotBlockPublicAccessState(params, region);
                 // VPCs
                 case "CreateVpc" -> handleCreateVpc(params, region);
                 case "DescribeVpcs" -> handleDescribeVpcs(params, region);
@@ -110,6 +121,7 @@ public class Ec2QueryHandler {
                         handleDescribeTransitGatewayVpcAttachments(params, region);
                 case "DescribeTransitGatewayAttachments" ->
                         handleDescribeTransitGatewayAttachments(params, region);
+                case "DescribeTransitGatewayConnects" -> handleDescribeTransitGatewayConnects(params, region);
                 case "ModifyTransitGatewayVpcAttachment" ->
                         handleModifyTransitGatewayVpcAttachment(params, region);
                 case "DeleteTransitGatewayVpcAttachment" ->
@@ -168,6 +180,8 @@ public class Ec2QueryHandler {
                 case "DescribeImages" -> handleDescribeImages(params, region);
                 case "CreateImage" -> handleCreateImage(params, region);
                 case "RegisterImage" -> handleRegisterImage(params, region);
+                case "DeregisterImage" -> handleDeregisterImage(params, region);
+                case "CopyImage" -> handleCopyImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
                 // Tags
                 case "CreateTags" -> handleCreateTags(params, region);
@@ -253,6 +267,7 @@ public class Ec2QueryHandler {
                 case "RequestSpotInstances" -> handleRequestSpotInstances(params, region);
                 case "DescribeSpotInstanceRequests" -> handleDescribeSpotInstanceRequests(params, region);
                 case "CancelSpotInstanceRequests" -> handleCancelSpotInstanceRequests(params, region);
+                case "DescribeSpotPriceHistory" -> handleDescribeSpotPriceHistory(params, region);
                 // IPAM
                 case "EnableIpamOrganizationAdminAccount" -> handleEnableIpamOrgAdmin(params);
                 case "DisableIpamOrganizationAdminAccount" -> handleDisableIpamOrgAdmin(params);
@@ -511,6 +526,27 @@ public class Ec2QueryHandler {
         return tags;
     }
 
+    /**
+     * Reads the {@code SubnetConfiguration.N} list shared by CreateVpcEndpoint and
+     * ModifyVpcEndpoint. The EC2 query protocol flattens the list under the member's
+     * locationName, so the wire form is {@code SubnetConfiguration.1.SubnetId} alongside
+     * {@code .Ipv4} and {@code .Ipv6}, numbered from 1. An entry carrying only addresses and no
+     * subnet ends the list, since the subnet is what an address is assigned within.
+     */
+    private List<VpcEndpointSubnetConfiguration> parseSubnetConfigurations(MultivaluedMap<String, String> p) {
+        List<VpcEndpointSubnetConfiguration> configurations = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "SubnetConfiguration." + i;
+            String subnetId = p.getFirst(prefix + ".SubnetId");
+            if (subnetId == null) {
+                break;
+            }
+            configurations.add(new VpcEndpointSubnetConfiguration(
+                    subnetId, p.getFirst(prefix + ".Ipv4"), p.getFirst(prefix + ".Ipv6")));
+        }
+        return configurations;
+    }
+
     // Apply tags supplied inline on a create call (TagSpecification) to the resource, so
     // they round-trip on the next Describe* — otherwise the provider sees phantom tag drift.
     private void applyResourceTags(MultivaluedMap<String, String> p, String region, String resourceType, String resourceId) {
@@ -575,6 +611,41 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleEnableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        // Validate State before honoring DryRun. AWS returns DryRunOperation only once the
+        // request would otherwise have succeeded, so a bad State still fails on its own error.
+        String state = p.getFirst("State");
+        snapshotBlockPublicAccessService.validateEnableState(state);
+        checkDryRun(p);
+        return snapshotBlockPublicAccessResponse("EnableSnapshotBlockPublicAccessResponse",
+                snapshotBlockPublicAccessService.enableSnapshotBlockPublicAccess(region, state),
+                null);
+    }
+
+    private Response handleDisableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        return snapshotBlockPublicAccessResponse("DisableSnapshotBlockPublicAccessResponse",
+                snapshotBlockPublicAccessService.disableSnapshotBlockPublicAccess(region), null);
+    }
+
+    private Response handleGetSnapshotBlockPublicAccessState(MultivaluedMap<String, String> p, String region) {
+        // Only GetSnapshotBlockPublicAccessState carries managedBy, and Floci has no
+        // declarative-policy layer, so the account always owns the state.
+        checkDryRun(p);
+        return snapshotBlockPublicAccessResponse("GetSnapshotBlockPublicAccessStateResponse",
+                snapshotBlockPublicAccessService.getSnapshotBlockPublicAccessState(region), "account");
+    }
+
+    private Response snapshotBlockPublicAccessResponse(String rootElement, String state, String managedBy) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(rootElement, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("state", state)
+                .elem("managedBy", managedBy)
+                .end(rootElement);
+        return xmlResponse(xml.build());
+    }
+
     private Response ebsKmsKeyResponse(String rootElement, String kmsKeyId) {
         XmlBuilder xml = new XmlBuilder()
                 .start(rootElement, AwsNamespaces.EC2)
@@ -603,8 +674,11 @@ public class Ec2QueryHandler {
     private Response handleRunInstances(MultivaluedMap<String, String> p, String region) {
         String imageId = p.getFirst("ImageId");
         String instanceType = p.getFirst("InstanceType");
-        int minCount = Integer.parseInt(p.getOrDefault("MinCount", List.of("1")).get(0));
-        int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
+        int minCount = parseRunInstancesCount(p, "MinCount");
+        int maxCount = parseRunInstancesCount(p, "MaxCount");
+        if (maxCount < minCount) {
+            throw new AwsException("InvalidParameterValue", "MaxCount must be greater than or equal to MinCount", 400);
+        }
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
         // The launch-time public-IP override arrives either on the primary
@@ -661,6 +735,7 @@ public class Ec2QueryHandler {
 
         // Absent fields stay null so the launch default, or the launch template's value, applies.
         LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
+        String creditSpecificationCpuCredits = p.getFirst("CreditSpecification.CpuCredits");
 
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(p, region);
         if (launchTemplateData != null) {
@@ -668,10 +743,17 @@ public class Ec2QueryHandler {
                 metadataOptions = LaunchTemplateData.MetadataOptions.merge(
                         launchTemplateData.getMetadataOptions(), metadataOptions);
             }
+            if (launchTemplateData.getCreditSpecification() != null) {
+                creditSpecificationCpuCredits = firstNonBlank(creditSpecificationCpuCredits,
+                        launchTemplateData.getCreditSpecification().getCpuCredits());
+            }
             imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
             instanceType = firstNonBlank(instanceType, launchTemplateData.getInstanceType());
             keyName = firstNonBlank(keyName, launchTemplateData.getKeyName());
-            userData = firstNonBlank(userData, launchTemplateData.getUserData());
+            if (userDataEncoded == null || userDataEncoded.isBlank()) {
+                userData = launchTemplateData.getUserData();
+                userDataEncoded = launchTemplateData.getEncodedUserData();
+            }
             iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn,
                     service.iamInstanceProfileArn(launchTemplateData));
             if (sgIds.isEmpty()) {
@@ -687,7 +769,8 @@ public class Ec2QueryHandler {
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions);
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
+                creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")));
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -712,6 +795,22 @@ public class Ec2QueryHandler {
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
         return xmlResponse(xml.build());
+    }
+
+    private int parseRunInstancesCount(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return 1;
+        }
+        try {
+            int count = Integer.parseInt(value);
+            if (count > 0) {
+                return count;
+            }
+        } catch (NumberFormatException ignored) {
+            // Malformed and non-positive counts share the same EC2 validation error.
+        }
+        throw new AwsException("InvalidParameterValue", name + " must be a positive integer", 400);
     }
 
     private LaunchTemplateData resolveRunInstancesLaunchTemplateData(MultivaluedMap<String, String> p, String region) {
@@ -794,7 +893,7 @@ public class Ec2QueryHandler {
                         null,
                         null,
                         0,
-                        launch.availabilityZone());
+                        launch.availabilityZone(), null, null, launch.encodedUserData());
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
                 results.add(new FleetLaunchResult(instance, launch));
@@ -949,6 +1048,7 @@ public class Ec2QueryHandler {
                 availabilityZone,
                 template.getKeyName(),
                 template.getUserData(),
+                template.getEncodedUserData(),
                 service.iamInstanceProfileArn(template),
                 template.effectiveSecurityGroupIds(),
                 new ArrayList<>(tags.values()));
@@ -995,7 +1095,7 @@ public class Ec2QueryHandler {
 
     private record FleetLaunch(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                String instanceType, String imageId, String subnetId, String availabilityZone,
-                               String keyName, String userData, String iamInstanceProfileArn,
+                               String keyName, String userData, String encodedUserData, String iamInstanceProfileArn,
                                List<String> securityGroupIds, List<Tag> instanceTags) {}
 
     private record FleetLaunchKey(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
@@ -1105,8 +1205,17 @@ public class Ec2QueryHandler {
     private Response handleTerminateInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.terminateInstances(region, ids);
+        return xmlResponse(buildInstanceStateChangeXml("TerminateInstancesResponse", changes));
+    }
+
+    /**
+     * The shared {@code instancesSet}/{@code item}/{@code currentState}/{@code previousState}
+     * shape that {@code TerminateInstances}, {@code StartInstances}, and {@code StopInstances}
+     * each return, keyed only by the top-level response element name.
+     */
+    private String buildInstanceStateChangeXml(String responseElementName, List<Map<String, String>> changes) {
         XmlBuilder xml = new XmlBuilder()
-                .start("TerminateInstancesResponse", AwsNamespaces.EC2)
+                .start(responseElementName, AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("instancesSet");
         for (Map<String, String> c : changes) {
@@ -1122,56 +1231,47 @@ public class Ec2QueryHandler {
                     .end("previousState")
                     .end("item");
         }
-        xml.end("instancesSet").end("TerminateInstancesResponse");
+        xml.end("instancesSet").end(responseElementName);
+        return xml.build();
+    }
+
+    /**
+     * Detailed monitoring is a CloudWatch billing switch with no emulated behaviour behind
+     * it, so this acknowledges the requested state without storing it. Answering matters
+     * because a single unsupported call fails an entire {@code terraform apply}: an
+     * {@code aws_instance} with {@code monitoring = true} calls MonitorInstances right
+     * after RunInstances, and rejecting it discards everything else the module built.
+     */
+    private Response handleMonitoring(MultivaluedMap<String, String> p, String region, String action,
+                                      boolean enabled) {
+        List<String> changed = service.setInstanceMonitoring(region, getList(p, "InstanceId"), enabled);
+        String state = enabled ? "enabled" : "disabled";
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("instancesSet");
+        for (String id : changed) {
+            xml.start("item")
+                    .elem("instanceId", id)
+                    .start("monitoring")
+                    .elem("state", state)
+                    .end("monitoring")
+                    .end("item");
+        }
+        xml.end("instancesSet").end(action + "Response");
         return xmlResponse(xml.build());
     }
 
     private Response handleStartInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.startInstances(region, ids);
-        XmlBuilder xml = new XmlBuilder()
-                .start("StartInstancesResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("instancesSet");
-        for (Map<String, String> c : changes) {
-            xml.start("item")
-                    .elem("instanceId", c.get("instanceId"))
-                    .start("currentState")
-                    .elem("code", c.get("currentCode"))
-                    .elem("name", c.get("currentState"))
-                    .end("currentState")
-                    .start("previousState")
-                    .elem("code", c.get("previousCode"))
-                    .elem("name", c.get("previousState"))
-                    .end("previousState")
-                    .end("item");
-        }
-        xml.end("instancesSet").end("StartInstancesResponse");
-        return xmlResponse(xml.build());
+        return xmlResponse(buildInstanceStateChangeXml("StartInstancesResponse", changes));
     }
 
     private Response handleStopInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.stopInstances(region, ids);
-        XmlBuilder xml = new XmlBuilder()
-                .start("StopInstancesResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("instancesSet");
-        for (Map<String, String> c : changes) {
-            xml.start("item")
-                    .elem("instanceId", c.get("instanceId"))
-                    .start("currentState")
-                    .elem("code", c.get("currentCode"))
-                    .elem("name", c.get("currentState"))
-                    .end("currentState")
-                    .start("previousState")
-                    .elem("code", c.get("previousCode"))
-                    .elem("name", c.get("previousState"))
-                    .end("previousState")
-                    .end("item");
-        }
-        xml.end("instancesSet").end("StopInstancesResponse");
-        return xmlResponse(xml.build());
+        return xmlResponse(buildInstanceStateChangeXml("StopInstancesResponse", changes));
     }
 
     private Response handleRebootInstances(MultivaluedMap<String, String> p, String region) {
@@ -1213,6 +1313,44 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    /**
+     * CreditSpecification is not a member of the Instance shape DescribeInstances returns, per the
+     * EC2 model, so this dedicated action is the only place an instance's credit option reaches
+     * the wire. Terraform's aws_instance resource reads credit_specification from here.
+     */
+    private Response handleDescribeInstanceCreditSpecifications(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "InstanceId");
+        Map<String, List<String>> filters = getFilters(p);
+        int maxResults = parseIntParam(p, "MaxResults", 0);
+        String nextToken = p.getFirst("NextToken");
+
+        // Validate the pagination parameters before honoring DryRun. AWS returns DryRunOperation
+        // only once the request would otherwise have succeeded, so a MaxResults outside its
+        // modeled range still fails on its own error.
+        service.validateInstanceCreditSpecificationsPagination(ids, maxResults);
+        checkDryRun(p);
+
+        InstanceCreditSpecificationListResult result =
+                service.describeInstanceCreditSpecifications(region, ids, filters, maxResults, nextToken);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeInstanceCreditSpecificationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("instanceCreditSpecificationSet");
+        for (InstanceCreditSpecification spec : result.instanceCreditSpecifications()) {
+            xml.start("item")
+                    .elem("instanceId", spec.instanceId())
+                    .elem("cpuCredits", spec.cpuCredits())
+                    .end("item");
+        }
+        xml.end("instanceCreditSpecificationSet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.end("DescribeInstanceCreditSpecificationsResponse");
+        return xmlResponse(xml.build());
+    }
+
     private Response handleDescribeInstanceAttribute(MultivaluedMap<String, String> p, String region) {
         String instanceId = p.getFirst("InstanceId");
         String attribute = p.getFirst("Attribute");
@@ -1221,7 +1359,9 @@ public class Ec2QueryHandler {
                 .start("DescribeInstanceAttributeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("instanceId", instanceId);
-        if ("instanceType".equals(attribute)) {
+        if ("userData".equals(attribute)) {
+            xml.start("userData").elem("value", inst.getEncodedUserData()).end("userData");
+        } else if ("instanceType".equals(attribute)) {
             xml.start("instanceType").elem("value", inst.getInstanceType()).end("instanceType");
         } else if ("sourceDestCheck".equals(attribute)) {
             xml.start("sourceDestCheck").elem("value", String.valueOf(inst.isSourceDestCheck())).end("sourceDestCheck");
@@ -1897,7 +2037,8 @@ public class Ec2QueryHandler {
                 getList(p, "SecurityGroupId"),
                 p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
                 p.getFirst("PolicyDocument"),
-                parseTagsForResource(p, "vpc-endpoint"));
+                parseTagsForResource(p, "vpc-endpoint"),
+                parseSubnetConfigurations(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1918,7 +2059,8 @@ public class Ec2QueryHandler {
                 getList(p, "RemoveSecurityGroupId"),
                 p.getFirst("PolicyDocument"),
                 p.getFirst("ResetPolicy") != null ? Boolean.valueOf(p.getFirst("ResetPolicy")) : null,
-                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null);
+                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
+                parseSubnetConfigurations(p));
         // ModifyVpcEndpoint returns only a boolean; the caller re-reads the endpoint
         // through DescribeVpcEndpoints to see the result.
         XmlBuilder xml = new XmlBuilder()
@@ -2178,6 +2320,18 @@ public class Ec2QueryHandler {
             xml.start("item").raw(item.build()).end("item");
         }
         xml.end("transitGatewayAttachments").end("DescribeTransitGatewayAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /** floci does not yet support creating Connect attachments, so this is always an empty list. */
+    private Response handleDescribeTransitGatewayConnects(MultivaluedMap<String, String> p, String region) {
+        service.describeTransitGatewayConnects(region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayConnectsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayConnectSet")
+                .end("transitGatewayConnectSet")
+                .end("DescribeTransitGatewayConnectsResponse");
         return xmlResponse(xml.build());
     }
 
@@ -2632,7 +2786,7 @@ public class Ec2QueryHandler {
                 .start("cidrBlockAssociation")
                 .elem("associationId", assoc.getAssociationId())
                 .elem("cidrBlock", assoc.getCidrBlock())
-                .elem("cidrBlockState", assoc.getCidrBlockState())
+                .start("cidrBlockState").elem("state", assoc.getCidrBlockState()).end("cidrBlockState")
                 .end("cidrBlockAssociation")
                 .end("AssociateVpcCidrBlockResponse");
         return xmlResponse(xml.build());
@@ -2661,7 +2815,8 @@ public class Ec2QueryHandler {
         String cidrBlock = p.getFirst("CidrBlock");
         String az = p.getFirst("AvailabilityZone");
         String azId = p.getFirst("AvailabilityZoneId");
-        Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId);
+        String ipv6CidrBlock = p.getFirst("Ipv6CidrBlock");
+        Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId, ipv6CidrBlock);
         applyResourceTags(p, region, "subnet", subnet.getSubnetId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
@@ -3104,6 +3259,57 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("imageId", image.getImageId())
                 .end("RegisterImageResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * DeregisterImage. The documented response is requestId plus {@code return} ("Returns true if
+     * the request succeeds; otherwise, it returns an error"), with deleteSnapshotResultSet present
+     * only when DeleteAssociatedSnapshots was requested.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DeregisterImage.html">DeregisterImage</a>
+     */
+    private Response handleDeregisterImage(MultivaluedMap<String, String> p, String region) {
+        List<Ec2Service.SnapshotDeletion> deletions = service.deregisterImage(
+                region,
+                p.getFirst("ImageId"),
+                Boolean.parseBoolean(p.getFirst("DeleteAssociatedSnapshots")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeregisterImageResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("return", "true");
+        if (!deletions.isEmpty()) {
+            xml.start("deleteSnapshotResultSet");
+            for (Ec2Service.SnapshotDeletion deletion : deletions) {
+                xml.start("item")
+                        .elem("snapshotId", deletion.snapshotId())
+                        .elem("returnCode", deletion.returnCode())
+                        .end("item");
+            }
+            xml.end("deleteSnapshotResultSet");
+        }
+        xml.end("DeregisterImageResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * CopyImage. "The copy operation must be initiated in the destination Region", so the
+     * request's own region is the destination and SourceRegion names where the source AMI lives.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopyImage.html">CopyImage</a>
+     */
+    private Response handleCopyImage(MultivaluedMap<String, String> p, String region) {
+        Image image = service.copyImage(
+                region,
+                p.getFirst("SourceRegion"),
+                p.getFirst("SourceImageId"),
+                p.getFirst("Name"),
+                p.getFirst("Description"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CopyImageResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("imageId", image.getImageId())
+                .end("CopyImageResponse");
         return xmlResponse(xml.build());
     }
 
@@ -3796,7 +4002,8 @@ public class Ec2QueryHandler {
                     .start("memoryInfo")
                     .elem("sizeInMiB", String.valueOf(t.get("memoryMib")))
                     .end("memoryInfo")
-                    .elem("instanceStorageSupported", String.valueOf(t.get("instanceStorageSupported")));
+                    .elem("instanceStorageSupported", String.valueOf(t.get("instanceStorageSupported")))
+                    .elem("burstablePerformanceSupported", String.valueOf(t.get("burstablePerformanceSupported")));
             if (Boolean.TRUE.equals(t.get("instanceStorageSupported"))) {
                 xml.start("instanceStorageInfo")
                         .elem("totalSizeInGB", String.valueOf(t.get("localStorageGiB")))
@@ -3807,7 +4014,12 @@ public class Ec2QueryHandler {
             for (String arch : (List<String>) t.get("supportedArchitectures")) {
                 xml.elem("item", arch);
             }
-            xml.end("supportedArchitectures").end("processorInfo");
+            xml.end("supportedArchitectures").end("processorInfo")
+                    .start("supportedUsageClasses");
+            for (String usageClass : (List<String>) t.get("supportedUsageClasses")) {
+                xml.elem("item", usageClass);
+            }
+            xml.end("supportedUsageClasses");
             Map<String, Object> networkInfo = (Map<String, Object>) t.get("networkInfo");
             xml.start("networkInfo")
                     .elem("encryptionInTransitSupported",
@@ -4278,10 +4490,24 @@ public class Ec2QueryHandler {
                 .elem("assignIpv6AddressOnCreation", String.valueOf(s.isAssignIpv6AddressOnCreation()))
                 .elem("enableDns64", String.valueOf(s.isEnableDns64()))
                 .elem("mapCustomerOwnedIpOnLaunch", String.valueOf(s.isMapCustomerOwnedIpOnLaunch()))
-                .start("ipv6CidrBlockAssociationSet").end("ipv6CidrBlockAssociationSet")
+                .start("ipv6CidrBlockAssociationSet");
+        for (VpcIpv6CidrBlockAssociation assoc : s.getIpv6CidrBlockAssociationSet()) {
+            xml.start("item").raw(subnetIpv6AssociationXml(assoc)).end("item");
+        }
+        xml.end("ipv6CidrBlockAssociationSet")
                 .elem("ownerId", s.getOwnerId())
                 .raw(tagSetXml(s.getTags()));
         return xml.build();
+    }
+
+    // Subnet's ipv6CidrBlockAssociationSet item carries only ipv6CidrBlock/associationId/state on
+    // the wire, unlike the VPC's own association, which also carries ipv6Pool/networkBorderGroup.
+    private String subnetIpv6AssociationXml(VpcIpv6CidrBlockAssociation assoc) {
+        return new XmlBuilder()
+                .elem("ipv6CidrBlock", assoc.getIpv6CidrBlock())
+                .elem("associationId", assoc.getAssociationId())
+                .start("ipv6CidrBlockState").elem("state", assoc.getIpv6CidrBlockState()).end("ipv6CidrBlockState")
+                .build();
     }
 
     private String sgXml(SecurityGroup sg) {
@@ -4556,6 +4782,15 @@ public class Ec2QueryHandler {
                     }
                     xml.end("groupSet");
                 }
+                LaunchTemplateData.ConnectionTrackingSpecification tracking =
+                        networkInterface.getConnectionTrackingSpecification();
+                if (tracking != null) {
+                    xml.start("connectionTrackingSpecification")
+                            .elem("tcpEstablishedTimeout", str(tracking.getTcpEstablishedTimeout()))
+                            .elem("udpTimeout", str(tracking.getUdpTimeout()))
+                            .elem("udpStreamTimeout", str(tracking.getUdpStreamTimeout()))
+                            .end("connectionTrackingSpecification");
+                }
                 xml.end("item");
             }
             xml.end("networkInterfaceSet");
@@ -4601,6 +4836,23 @@ public class Ec2QueryHandler {
                     .elem("threadsPerCore", str(cpuOptions.getThreadsPerCore()))
                     .elem("amdSevSnp", cpuOptions.getAmdSevSnp())
                     .end("cpuOptions");
+        }
+
+        LaunchTemplateData.InstanceMarketOptions marketOptions = data.getInstanceMarketOptions();
+        if (marketOptions != null) {
+            xml.start("instanceMarketOptions")
+                    .elem("marketType", marketOptions.getMarketType());
+            LaunchTemplateData.SpotOptions spotOptions = marketOptions.getSpotOptions();
+            if (spotOptions != null) {
+                xml.start("spotOptions")
+                        .elem("maxPrice", spotOptions.getMaxPrice())
+                        .elem("spotInstanceType", spotOptions.getSpotInstanceType())
+                        .elem("blockDurationMinutes", str(spotOptions.getBlockDurationMinutes()))
+                        .elem("validUntil", spotOptions.getValidUntil())
+                        .elem("instanceInterruptionBehavior", spotOptions.getInstanceInterruptionBehavior())
+                        .end("spotOptions");
+            }
+            xml.end("instanceMarketOptions");
         }
 
         LaunchTemplateData.CreditSpecification creditSpecification = data.getCreditSpecification();
@@ -4653,6 +4905,10 @@ public class Ec2QueryHandler {
             xml.end("capacityReservationSpecification");
         }
 
+        if (data.getInstanceRequirements() != null) {
+            appendInstanceRequirements(xml, data.getInstanceRequirements());
+        }
+
         if (!data.getSecurityGroupIds().isEmpty()) {
             xml.start("securityGroupIdSet");
             for (String securityGroupId : data.getSecurityGroupIds()) {
@@ -4672,6 +4928,79 @@ public class Ec2QueryHandler {
             xml.end("tagSpecificationSet");
         }
         return xml.build();
+    }
+
+    /** Renders {@code InstanceRequirements}, whose element names differ from the request's. */
+    private void appendInstanceRequirements(XmlBuilder xml, LaunchTemplateData.InstanceRequirements requirements) {
+        xml.start("instanceRequirements");
+        appendIntRange(xml, "vCpuCount", requirements.getVCpuCount());
+        appendIntRange(xml, "memoryMiB", requirements.getMemoryMiB());
+        appendStringSet(xml, "cpuManufacturerSet", requirements.getCpuManufacturers());
+        appendDoubleRange(xml, "memoryGiBPerVCpu", requirements.getMemoryGiBPerVCpu());
+        appendStringSet(xml, "excludedInstanceTypeSet", requirements.getExcludedInstanceTypes());
+        appendStringSet(xml, "instanceGenerationSet", requirements.getInstanceGenerations());
+        xml.elem("spotMaxPricePercentageOverLowestPrice",
+                        str(requirements.getSpotMaxPricePercentageOverLowestPrice()))
+                .elem("onDemandMaxPricePercentageOverLowestPrice",
+                        str(requirements.getOnDemandMaxPricePercentageOverLowestPrice()))
+                .elem("bareMetal", requirements.getBareMetal())
+                .elem("burstablePerformance", requirements.getBurstablePerformance())
+                .elem("requireHibernateSupport", str(requirements.getRequireHibernateSupport()));
+        appendIntRange(xml, "networkInterfaceCount", requirements.getNetworkInterfaceCount());
+        xml.elem("localStorage", requirements.getLocalStorage());
+        appendStringSet(xml, "localStorageTypeSet", requirements.getLocalStorageTypes());
+        appendDoubleRange(xml, "totalLocalStorageGB", requirements.getTotalLocalStorageGB());
+        appendIntRange(xml, "baselineEbsBandwidthMbps", requirements.getBaselineEbsBandwidthMbps());
+        appendStringSet(xml, "acceleratorTypeSet", requirements.getAcceleratorTypes());
+        appendIntRange(xml, "acceleratorCount", requirements.getAcceleratorCount());
+        appendStringSet(xml, "acceleratorManufacturerSet", requirements.getAcceleratorManufacturers());
+        appendStringSet(xml, "acceleratorNameSet", requirements.getAcceleratorNames());
+        appendIntRange(xml, "acceleratorTotalMemoryMiB", requirements.getAcceleratorTotalMemoryMiB());
+        appendDoubleRange(xml, "networkBandwidthGbps", requirements.getNetworkBandwidthGbps());
+        appendStringSet(xml, "allowedInstanceTypeSet", requirements.getAllowedInstanceTypes());
+        xml.elem("maxSpotPriceAsPercentageOfOptimalOnDemandPrice",
+                str(requirements.getMaxSpotPriceAsPercentageOfOptimalOnDemandPrice()));
+        LaunchTemplateData.BaselinePerformanceFactors factors = requirements.getBaselinePerformanceFactors();
+        if (factors != null && factors.getCpu() != null) {
+            xml.start("baselinePerformanceFactors").start("cpu").start("referenceSet");
+            for (LaunchTemplateData.PerformanceFactorReference reference : factors.getCpu().getReferences()) {
+                xml.start("item").elem("instanceFamily", reference.getInstanceFamily()).end("item");
+            }
+            xml.end("referenceSet").end("cpu").end("baselinePerformanceFactors");
+        }
+        xml.elem("requireEncryptionInTransit", str(requirements.getRequireEncryptionInTransit()))
+                .end("instanceRequirements");
+    }
+
+    private void appendIntRange(XmlBuilder xml, String element, LaunchTemplateData.IntRange range) {
+        if (range == null) {
+            return;
+        }
+        xml.start(element)
+                .elem("min", str(range.getMin()))
+                .elem("max", str(range.getMax()))
+                .end(element);
+    }
+
+    private void appendDoubleRange(XmlBuilder xml, String element, LaunchTemplateData.DoubleRange range) {
+        if (range == null) {
+            return;
+        }
+        xml.start(element)
+                .elem("min", str(range.getMin()))
+                .elem("max", str(range.getMax()))
+                .end(element);
+    }
+
+    private void appendStringSet(XmlBuilder xml, String element, List<String> values) {
+        if (values.isEmpty()) {
+            return;
+        }
+        xml.start(element);
+        for (String value : values) {
+            xml.elem("item", value);
+        }
+        xml.end(element);
     }
 
     /**
@@ -4802,7 +5131,109 @@ public class Ec2QueryHandler {
             }
             data.setCapacityReservationSpecification(spec);
         }
+
+        if (anyParamStartsWith(p, prefix + ".InstanceMarketOptions.")) {
+            data.setInstanceMarketOptions(parseLaunchTemplateInstanceMarketOptions(
+                    p, prefix + ".InstanceMarketOptions."));
+        }
+
+        if (anyParamStartsWith(p, prefix + ".InstanceRequirements.")) {
+            data.setInstanceRequirements(parseLaunchTemplateInstanceRequirements(
+                    p, prefix + ".InstanceRequirements."));
+        }
         return data;
+    }
+
+    private LaunchTemplateData.InstanceMarketOptions parseLaunchTemplateInstanceMarketOptions(
+            MultivaluedMap<String, String> p, String prefix) {
+        LaunchTemplateData.InstanceMarketOptions options = new LaunchTemplateData.InstanceMarketOptions();
+        options.setMarketType(p.getFirst(prefix + "MarketType"));
+        String spotPrefix = prefix + "SpotOptions.";
+        if (anyParamStartsWith(p, spotPrefix)) {
+            LaunchTemplateData.SpotOptions spotOptions = new LaunchTemplateData.SpotOptions();
+            spotOptions.setMaxPrice(p.getFirst(spotPrefix + "MaxPrice"));
+            spotOptions.setSpotInstanceType(p.getFirst(spotPrefix + "SpotInstanceType"));
+            spotOptions.setBlockDurationMinutes(intParam(p, spotPrefix + "BlockDurationMinutes"));
+            spotOptions.setValidUntil(p.getFirst(spotPrefix + "ValidUntil"));
+            spotOptions.setInstanceInterruptionBehavior(p.getFirst(spotPrefix + "InstanceInterruptionBehavior"));
+            options.setSpotOptions(spotOptions);
+        }
+        return options;
+    }
+
+    /**
+     * Parses {@code InstanceRequirementsRequest}. Its scalar-list members carry a singular
+     * {@code locationName}, so the wire names are {@code CpuManufacturer.N} rather than
+     * {@code CpuManufacturers.N}, and the nested performance-factor references arrive as
+     * {@code BaselinePerformanceFactors.Cpu.Reference.N.InstanceFamily}.
+     */
+    private LaunchTemplateData.InstanceRequirements parseLaunchTemplateInstanceRequirements(
+            MultivaluedMap<String, String> p, String prefix) {
+        LaunchTemplateData.InstanceRequirements requirements = new LaunchTemplateData.InstanceRequirements();
+        requirements.setVCpuCount(parseIntRange(p, prefix + "VCpuCount."));
+        requirements.setMemoryMiB(parseIntRange(p, prefix + "MemoryMiB."));
+        requirements.setCpuManufacturers(getList(p, prefix + "CpuManufacturer"));
+        requirements.setMemoryGiBPerVCpu(parseDoubleRange(p, prefix + "MemoryGiBPerVCpu."));
+        requirements.setExcludedInstanceTypes(getList(p, prefix + "ExcludedInstanceType"));
+        requirements.setInstanceGenerations(getList(p, prefix + "InstanceGeneration"));
+        requirements.setSpotMaxPricePercentageOverLowestPrice(
+                intParam(p, prefix + "SpotMaxPricePercentageOverLowestPrice"));
+        requirements.setOnDemandMaxPricePercentageOverLowestPrice(
+                intParam(p, prefix + "OnDemandMaxPricePercentageOverLowestPrice"));
+        requirements.setBareMetal(p.getFirst(prefix + "BareMetal"));
+        requirements.setBurstablePerformance(p.getFirst(prefix + "BurstablePerformance"));
+        requirements.setRequireHibernateSupport(boolParam(p, prefix + "RequireHibernateSupport"));
+        requirements.setNetworkInterfaceCount(parseIntRange(p, prefix + "NetworkInterfaceCount."));
+        requirements.setLocalStorage(p.getFirst(prefix + "LocalStorage"));
+        requirements.setLocalStorageTypes(getList(p, prefix + "LocalStorageType"));
+        requirements.setTotalLocalStorageGB(parseDoubleRange(p, prefix + "TotalLocalStorageGB."));
+        requirements.setBaselineEbsBandwidthMbps(parseIntRange(p, prefix + "BaselineEbsBandwidthMbps."));
+        requirements.setAcceleratorTypes(getList(p, prefix + "AcceleratorType"));
+        requirements.setAcceleratorCount(parseIntRange(p, prefix + "AcceleratorCount."));
+        requirements.setAcceleratorManufacturers(getList(p, prefix + "AcceleratorManufacturer"));
+        requirements.setAcceleratorNames(getList(p, prefix + "AcceleratorName"));
+        requirements.setAcceleratorTotalMemoryMiB(parseIntRange(p, prefix + "AcceleratorTotalMemoryMiB."));
+        requirements.setNetworkBandwidthGbps(parseDoubleRange(p, prefix + "NetworkBandwidthGbps."));
+        requirements.setAllowedInstanceTypes(getList(p, prefix + "AllowedInstanceType"));
+        requirements.setMaxSpotPriceAsPercentageOfOptimalOnDemandPrice(
+                intParam(p, prefix + "MaxSpotPriceAsPercentageOfOptimalOnDemandPrice"));
+        requirements.setRequireEncryptionInTransit(boolParam(p, prefix + "RequireEncryptionInTransit"));
+        String cpuPrefix = prefix + "BaselinePerformanceFactors.Cpu.";
+        if (anyParamStartsWith(p, cpuPrefix)) {
+            LaunchTemplateData.CpuPerformanceFactor cpu = new LaunchTemplateData.CpuPerformanceFactor();
+            List<LaunchTemplateData.PerformanceFactorReference> references = new ArrayList<>();
+            for (int i = 1; ; i++) {
+                String instanceFamily = p.getFirst(cpuPrefix + "Reference." + i + ".InstanceFamily");
+                if (instanceFamily == null) {
+                    break;
+                }
+                references.add(new LaunchTemplateData.PerformanceFactorReference(instanceFamily));
+            }
+            cpu.setReferences(references);
+            LaunchTemplateData.BaselinePerformanceFactors factors =
+                    new LaunchTemplateData.BaselinePerformanceFactors();
+            factors.setCpu(cpu);
+            requirements.setBaselinePerformanceFactors(factors);
+        }
+        return requirements;
+    }
+
+    private LaunchTemplateData.IntRange parseIntRange(MultivaluedMap<String, String> p, String prefix) {
+        Integer min = intParam(p, prefix + "Min");
+        Integer max = intParam(p, prefix + "Max");
+        if (min == null && max == null) {
+            return null;
+        }
+        return new LaunchTemplateData.IntRange(min, max);
+    }
+
+    private LaunchTemplateData.DoubleRange parseDoubleRange(MultivaluedMap<String, String> p, String prefix) {
+        Double min = doubleParam(p, prefix + "Min");
+        Double max = doubleParam(p, prefix + "Max");
+        if (min == null && max == null) {
+            return null;
+        }
+        return new LaunchTemplateData.DoubleRange(min, max);
     }
 
     private List<LaunchTemplateData.BlockDeviceMapping> parseLaunchTemplateBlockDeviceMappings(
@@ -4855,6 +5286,15 @@ public class Ec2QueryHandler {
             networkInterface.setSecondaryPrivateIpAddressCount(intParam(p, base + ".SecondaryPrivateIpAddressCount"));
             networkInterface.setSubnetId(p.getFirst(base + ".SubnetId"));
             networkInterface.setNetworkCardIndex(intParam(p, base + ".NetworkCardIndex"));
+            String trackingPrefix = base + ".ConnectionTrackingSpecification.";
+            if (anyParamStartsWith(p, trackingPrefix)) {
+                LaunchTemplateData.ConnectionTrackingSpecification tracking =
+                        new LaunchTemplateData.ConnectionTrackingSpecification();
+                tracking.setTcpEstablishedTimeout(intParam(p, trackingPrefix + "TcpEstablishedTimeout"));
+                tracking.setUdpTimeout(intParam(p, trackingPrefix + "UdpTimeout"));
+                tracking.setUdpStreamTimeout(intParam(p, trackingPrefix + "UdpStreamTimeout"));
+                networkInterface.setConnectionTrackingSpecification(tracking);
+            }
             networkInterface.setGroups(getList(p, base + ".SecurityGroupId", base + ".Groups", base + ".GroupId"));
             interfaces.add(networkInterface);
         }
@@ -4910,6 +5350,18 @@ public class Ec2QueryHandler {
             return Integer.valueOf(value);
         } catch (NumberFormatException e) {
             throw new AwsException("InvalidParameterValue", name + " is not a valid integer.", 400);
+        }
+    }
+
+    private Double doubleParam(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (!isSet(value)) {
+            return null;
+        }
+        try {
+            return Double.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " is not a valid number.", 400);
         }
     }
 
@@ -5326,6 +5778,25 @@ public class Ec2QueryHandler {
         }
         xml.end("spotInstanceRequestSet")
                 .end("CancelSpotInstanceRequestsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * Return the EC2 Query response shape for spot price history.
+     *
+     * <p>Floci does not currently maintain a spot-price snapshot. AWS returns an empty
+     * {@code spotPriceHistorySet} when no matching records exist, which is sufficient for
+     * clients such as Karpenter to distinguish an empty result from an unsupported action.</p>
+     */
+    private Response handleDescribeSpotPriceHistory(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeSpotPriceHistoryResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("nextToken", "")
+                .start("spotPriceHistorySet")
+                .end("spotPriceHistorySet")
+                .end("DescribeSpotPriceHistoryResponse");
         return xmlResponse(xml.build());
     }
 

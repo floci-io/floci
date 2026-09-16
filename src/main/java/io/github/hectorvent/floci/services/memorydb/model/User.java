@@ -17,6 +17,8 @@ import java.util.List;
 public class User {
 
     private String name;
+    private String accountId;
+    private String region;
     private String status;
     private AuthMode authMode;
     private List<String> passwords = new ArrayList<>();
@@ -29,6 +31,12 @@ public class User {
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
+
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public String getRegion() { return region; }
+    public void setRegion(String region) { this.region = region; }
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }

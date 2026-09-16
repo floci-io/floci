@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -111,6 +112,32 @@ class Ec2InstanceTypeCatalogTest {
         IllegalStateException error = assertThrows(IllegalStateException.class,
                 () -> new Ec2InstanceTypeCatalog(catalog));
         assertTrue(error.getMessage().contains("maximumNetworkInterfaces"));
+    }
+
+    @Test
+    void burstableFamiliesCarryTheirDocumentedDefaultCreditOption() {
+        assertEquals(Optional.of("standard"), Ec2InstanceTypeCatalog.defaultCpuCredits("t2.micro"));
+        assertEquals(Optional.of("unlimited"), Ec2InstanceTypeCatalog.defaultCpuCredits("t3.small"));
+        assertEquals(Optional.of("unlimited"), Ec2InstanceTypeCatalog.defaultCpuCredits("t3a.large"));
+        assertEquals(Optional.of("unlimited"), Ec2InstanceTypeCatalog.defaultCpuCredits("t4g.medium"));
+    }
+
+    @Test
+    void nonBurstableFamiliesHaveNoCreditOption() {
+        assertEquals(Optional.empty(), Ec2InstanceTypeCatalog.defaultCpuCredits("m5.large"));
+        // t1 is the one T family that predates the credit model.
+        assertEquals(Optional.empty(), Ec2InstanceTypeCatalog.defaultCpuCredits("t1.micro"));
+        assertEquals(Optional.empty(), Ec2InstanceTypeCatalog.defaultCpuCredits(null));
+        assertFalse(Ec2InstanceTypeCatalog.isBurstablePerformanceType("m5.large"));
+        assertTrue(Ec2InstanceTypeCatalog.isBurstablePerformanceType("t3.micro"));
+    }
+
+    @Test
+    void responseMapReportsBurstablePerformanceSupport() {
+        assertEquals(true, instanceTypeCatalog.find("t4g.medium").orElseThrow()
+                .toResponseMap().get("burstablePerformanceSupported"));
+        assertEquals(false, instanceTypeCatalog.find("m5.large").orElseThrow()
+                .toResponseMap().get("burstablePerformanceSupported"));
     }
 
     private void assertLargeGravitonType(String name) {

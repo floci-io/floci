@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -305,41 +306,13 @@ final class EksTokenMinter {
     record AwsCredentials(String accessKeyId, String secretAccessKey, String sessionToken) {
     }
 
-    /** Maps a region to its STS hostname, honoring the region's actual partition. */
-    private static String stsHost(String region) {
-        return "sts." + region + "." + partitionDnsSuffix(region);
-    }
-
     /**
-     * Sourced from the AWS SDKs' own public partition metadata (e.g. botocore's
-     * {@code partitions.json}, MIT-licensed and openly published at
-     * https://github.com/boto/botocore/blob/develop/botocore/data/partitions.json), rather than
-     * assumed. Covers every partition that metadata currently defines: the commercial
-     * {@code aws} partition and {@code aws-us-gov} share {@code amazonaws.com} so neither needs
-     * a case of its own, {@code aws-cn} is the one commonly-hit split, and the classified
-     * ISO/ISOB/ISOE/ISOF partitions (regions matching {@code us-iso-*}, {@code us-isob-*},
-     * {@code eu-isoe-*}, {@code us-isof-*}) each resolve under their own distinct domain.
+     * Maps a region to its STS hostname, honoring the region's actual partition. The partition
+     * table lives in {@link AwsRegions}, shared with ARN construction, so a region added in one
+     * place cannot be missing from the other.
      */
-    private static String partitionDnsSuffix(String region) {
-        if (region.matches("cn-\\w+-\\d+")) {
-            return "amazonaws.com.cn";
-        }
-        if (region.matches("us-iso-\\w+-\\d+")) {
-            return "c2s.ic.gov";
-        }
-        if (region.matches("us-isob-\\w+-\\d+")) {
-            return "sc2s.sgov.gov";
-        }
-        if (region.matches("eu-isoe-\\w+-\\d+")) {
-            return "cloud.adc-e.uk";
-        }
-        if (region.matches("us-isof-\\w+-\\d+")) {
-            return "csp.hci.ic.gov";
-        }
-        if (region.matches("eusc-de-\\w+-\\d+")) {
-            return "amazonaws.eu";
-        }
-        return "amazonaws.com";
+    private static String stsHost(String region) {
+        return "sts." + region + "." + AwsRegions.dnsSuffixFor(region);
     }
 
     /**

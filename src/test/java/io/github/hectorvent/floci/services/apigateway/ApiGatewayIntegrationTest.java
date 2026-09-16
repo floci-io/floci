@@ -395,6 +395,36 @@ class ApiGatewayIntegrationTest {
     }
 
     @Test @Order(51)
+    void tagRestApi_customIdTag_isIdempotent() {
+        String arn = "arn:aws:apigateway:us-east-1::/restapis/MYCUSTOMNAME";
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"_custom_id_":"MYCUSTOMNAME","repeat":"accepted"}}
+                        """)
+                .when().put("/tags/" + arn)
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/restapis/MYCUSTOMNAME")
+                .then()
+                .statusCode(200)
+                .body("tags._custom_id_", nullValue())
+                .body("tags.repeat", equalTo("accepted"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"tags":{"_custom_id_":"DIFFERENT"}}
+                        """)
+                .when().put("/tags/" + arn)
+                .then()
+                .statusCode(400)
+                .body("message", containsString("can only be supplied during resource creation"));
+    }
+
+    @Test @Order(52)
     void getRestApi_customId_resolvesById() {
         given()
                 .when().get("/restapis/MYCUSTOMNAME")
@@ -406,7 +436,7 @@ class ApiGatewayIntegrationTest {
 
     // ──────────────────────────── floci:override-id tag ────────────────────────────
 
-    @Test @Order(52)
+    @Test @Order(53)
     void createRestApi_flociOverrideIdTag_usesTagValueAsApiId() {
         String body = """
                 {"name":"override-id-api","tags":{"floci:override-id":"MYOVERRIDEID"}}
@@ -422,7 +452,7 @@ class ApiGatewayIntegrationTest {
                 .body("tags.'floci:override-id'", nullValue());
     }
 
-    @Test @Order(53)
+    @Test @Order(54)
     void createRestApi_bothOverrideKeys_prefersFlociOverrideId() {
         String body = """
                 {"name":"both-keys-api","tags":{"floci:override-id":"WINNER","_custom_id_":"LOSER"}}
@@ -436,7 +466,7 @@ class ApiGatewayIntegrationTest {
                 .body("id", equalTo("WINNER"));
     }
 
-    @Test @Order(54)
+    @Test @Order(55)
     void createRestApi_blankOverrideId_isRejected() {
         String body = """
                 {"name":"blank-override-api","tags":{"floci:override-id":"   "}}
@@ -450,7 +480,7 @@ class ApiGatewayIntegrationTest {
                 .body("message", containsString("must not be blank"));
     }
 
-    @Test @Order(55)
+    @Test @Order(56)
     void createRestApi_overrideIdWithPathSeparator_isRejected() {
         String body = """
                 {"name":"bad-override-api","tags":{"floci:override-id":"has/slash"}}

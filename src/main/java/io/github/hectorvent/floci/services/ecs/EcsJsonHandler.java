@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
 import io.github.hectorvent.floci.services.ecs.model.Failure;
+import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
@@ -52,11 +54,13 @@ public class EcsJsonHandler {
 
     private final EcsService service;
     private final ObjectMapper objectMapper;
+    private final HostVolumePolicy hostVolumePolicy;
 
     @Inject
-    public EcsJsonHandler(EcsService service, ObjectMapper objectMapper) {
+    public EcsJsonHandler(EcsService service, ObjectMapper objectMapper, HostVolumePolicy hostVolumePolicy) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.hostVolumePolicy = hostVolumePolicy;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -409,10 +413,13 @@ public class EcsJsonHandler {
         String deploymentControllerType = parseChoice(req.path("deploymentController"), "type",
                 "deploymentController.type", DEPLOYMENT_CONTROLLER_TYPES);
         String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
+        Map<String, Object> serviceConnectConfiguration =
+                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration"));
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
                 desiredCount, launchType, loadBalancers, networkConfiguration, tags,
-                schedulingStrategy, deploymentControllerType, availabilityZoneRebalancing, region);
+                schedulingStrategy, deploymentControllerType, availabilityZoneRebalancing,
+                serviceConnectConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -489,9 +496,12 @@ public class EcsJsonHandler {
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
         String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
         boolean forceNewDeployment = req.path("forceNewDeployment").asBoolean(false);
+        Map<String, Object> serviceConnectConfiguration =
+                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration"));
 
         EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount,
-                networkConfiguration, availabilityZoneRebalancing, forceNewDeployment, region);
+                networkConfiguration, availabilityZoneRebalancing, forceNewDeployment,
+                serviceConnectConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -1114,6 +1124,29 @@ public class EcsJsonHandler {
             n.set("logConfiguration", logNode);
         }
 
+        if (def.getHealthCheck() != null) {
+            HealthCheck hc = def.getHealthCheck();
+            ObjectNode hcNode = objectMapper.createObjectNode();
+            if (hc.command() != null) {
+                ArrayNode cmd = objectMapper.createArrayNode();
+                hc.command().forEach(cmd::add);
+                hcNode.set("command", cmd);
+            }
+            if (hc.interval() != null) {
+                hcNode.put("interval", hc.interval());
+            }
+            if (hc.timeout() != null) {
+                hcNode.put("timeout", hc.timeout());
+            }
+            if (hc.retries() != null) {
+                hcNode.put("retries", hc.retries());
+            }
+            if (hc.startPeriod() != null) {
+                hcNode.put("startPeriod", hc.startPeriod());
+            }
+            n.set("healthCheck", hcNode);
+        }
+
         return n;
     }
 
@@ -1136,6 +1169,23 @@ public class EcsJsonHandler {
         if (t.getStartedAt() != null) { n.put("startedAt", t.getStartedAt().toEpochMilli() / 1000.0); }
         if (t.getStoppedAt() != null) { n.put("stoppedAt", t.getStoppedAt().toEpochMilli() / 1000.0); }
         if (t.getStoppedReason() != null) { n.put("stoppedReason", t.getStoppedReason()); }
+        if (t.getNetworkInterfaceId() != null) {
+            ObjectNode attachment = objectMapper.createObjectNode();
+            attachment.put("id", "eni-attach-" + t.getNetworkInterfaceId());
+            attachment.put("type", "ElasticNetworkInterface");
+            attachment.put("status", "ATTACHED");
+            ArrayNode details = objectMapper.createArrayNode();
+            if (t.getNetworkConfiguration() != null
+                    && t.getNetworkConfiguration().getAwsvpcConfiguration() != null
+                    && !t.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().isEmpty()) {
+                details.addObject().put("name", "subnetId").put("value",
+                        t.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst());
+            }
+            details.addObject().put("name", "networkInterfaceId").put("value", t.getNetworkInterfaceId());
+            details.addObject().put("name", "privateIPv4Address").put("value", t.getPrivateIpAddress());
+            attachment.set("details", details);
+            n.putArray("attachments").add(attachment);
+        }
 
         ArrayNode containers = objectMapper.createArrayNode();
         if (t.getContainers() != null) {
@@ -1273,7 +1323,23 @@ public class EcsJsonHandler {
         if (d.getLaunchType() != null) { n.put("launchType", d.getLaunchType().name()); }
         if (d.getCreatedAt() != null) { n.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
         if (d.getUpdatedAt() != null) { n.put("updatedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
+        if (d.getServiceConnectConfiguration() != null) {
+            n.set("serviceConnectConfiguration", objectMapper.valueToTree(d.getServiceConnectConfiguration()));
+        }
         return n;
+    }
+
+    /**
+     * Keeps the caller's Service Connect configuration as given. AWS's {@code Service} shape has
+     * no member for it, so DescribeServices reports it on each deployment rather than on the
+     * service, and a generated client drops anything written anywhere else.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseServiceConnectConfiguration(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        return objectMapper.convertValue(node, Map.class);
     }
 
     private ObjectNode containerInstanceNode(ContainerInstance ci) {
@@ -1416,6 +1482,9 @@ public class EcsJsonHandler {
             }
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
             def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
+            if (item.has("healthCheck")) {
+                def.setHealthCheck(parseHealthCheck(item.path("healthCheck")));
+            }
 
             if (item.has("command") && item.path("command").isArray()) {
                 List<String> cmd = new ArrayList<>();
@@ -1500,6 +1569,21 @@ public class EcsJsonHandler {
         return new LogConfiguration(logDriver, options, secretOptions);
     }
 
+    private HealthCheck parseHealthCheck(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        if (!node.hasNonNull("command") || !node.path("command").isArray() || node.path("command").isEmpty()) {
+            throw new AwsException("ClientException", "HealthCheck command is required.", 400);
+        }
+        List<String> command = jsonArrayToList(node.path("command"));
+        Integer interval = node.has("interval") ? node.path("interval").asInt() : null;
+        Integer timeout = node.has("timeout") ? node.path("timeout").asInt() : null;
+        Integer retries = node.has("retries") ? node.path("retries").asInt() : null;
+        Integer startPeriod = node.has("startPeriod") ? node.path("startPeriod").asInt() : null;
+        return new HealthCheck(command, interval, timeout, retries, startPeriod);
+    }
+
     private List<Volume> parseVolumes(JsonNode node) {
         List<Volume> result = new ArrayList<>();
         if (!node.isArray()) {
@@ -1507,6 +1591,9 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             String hostSourcePath = item.path("host").path("sourcePath").asText(null);
+            if (hostSourcePath != null && !hostSourcePath.isBlank()) {
+                hostVolumePolicy.validate(hostSourcePath);
+            }
             EfsVolumeConfiguration efs = parseEfsVolumeConfiguration(item.path("efsVolumeConfiguration"));
             result.add(new Volume(item.path("name").asText(), hostSourcePath, efs));
         }
@@ -1524,12 +1611,20 @@ public class EcsJsonHandler {
         Integer transitEncryptionPort = node.path("transitEncryptionPort").isNumber()
                 ? node.path("transitEncryptionPort").asInt() : null;
         JsonNode auth = node.path("authorizationConfig");
+        String rootDirectory = node.path("rootDirectory").asText(null);
+        String accessPointId = auth.path("accessPointId").asText(null);
+        if (accessPointId != null && !accessPointId.isBlank()
+                && rootDirectory != null && !rootDirectory.isBlank() && !"/".equals(rootDirectory)) {
+            throw new AwsException("InvalidParameterException",
+                    "Root directory must either be omitted or set to '/' when an EFS access point "
+                            + "is specified in authorizationConfig.accessPointId.", 400);
+        }
         return new EfsVolumeConfiguration(
                 fileSystemId,
-                node.path("rootDirectory").asText(null),
+                rootDirectory,
                 node.path("transitEncryption").asText(null),
                 transitEncryptionPort,
-                auth.path("accessPointId").asText(null),
+                accessPointId,
                 auth.path("iam").asText(null));
     }
 

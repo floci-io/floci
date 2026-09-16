@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
 import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
 import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
@@ -322,13 +323,13 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         if ("import".equals(mode)) {
             RestApi api = service.importRestApi(region, body);
-            return Response.status(201).entity(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+            return Response.status(201).entity(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
         }
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
             RestApi api = service.createRestApi(region, request);
-            return Response.status(201).entity(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+            return Response.status(201).entity(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
         } catch (IOException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
@@ -343,7 +344,7 @@ public class ApiGatewayController {
                                String body) {
         String region = regionResolver.resolveRegion(headers);
         RestApi api = service.putRestApi(region, apiId, mode, body);
-        return Response.ok(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @GET
@@ -353,7 +354,7 @@ public class ApiGatewayController {
         List<RestApi> apis = service.getRestApis(region);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        apis.forEach(a -> items.add(toApiNode(a)));
+        apis.forEach(a -> items.add(toApiNode(region, a)));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -361,7 +362,7 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}")
     public Response getRestApi(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(toApiNode(service.getRestApi(region, apiId)).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toApiNode(region, service.getRestApi(region, apiId)).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @PATCH
@@ -370,7 +371,7 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         List<Map<String, String>> patchOperations = parsePatchOperations(body);
         RestApi api = service.updateRestApi(region, apiId, patchOperations);
-        return Response.ok(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -869,6 +870,71 @@ public class ApiGatewayController {
     public Response deleteUsagePlanKey(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId, @PathParam("keyId") String keyId) {
         String region = regionResolver.resolveRegion(headers);
         service.deleteUsagePlanKey(region, usagePlanId, keyId);
+        return Response.accepted().build();
+    }
+
+    // ──────────────────────────── Gateway Responses (v1) ────────────────────────────
+
+    @PUT
+    @Path("/restapis/{apiId}/gatewayresponses/{responseType}")
+    public Response putGatewayResponse(@Context HttpHeaders headers,
+                                       @PathParam("apiId") String apiId,
+                                       @PathParam("responseType") String responseType,
+                                       String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = body == null || body.isBlank()
+                    ? new HashMap<>()
+                    : objectMapper.readValue(body, Map.class);
+            GatewayResponse response = service.putGatewayResponse(region, apiId, responseType, request);
+            return Response.status(201).entity(toGatewayResponseNode(response).toString())
+                    .type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/gatewayresponses")
+    public Response getGatewayResponses(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+        String region = regionResolver.resolveRegion(headers);
+        List<GatewayResponse> responses = service.getGatewayResponses(region, apiId);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("item");
+        responses.forEach(response -> items.add(toGatewayResponseNode(response)));
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/gatewayresponses/{responseType}")
+    public Response getGatewayResponse(@Context HttpHeaders headers,
+                                       @PathParam("apiId") String apiId,
+                                       @PathParam("responseType") String responseType) {
+        String region = regionResolver.resolveRegion(headers);
+        GatewayResponse response = service.getGatewayResponse(region, apiId, responseType);
+        return Response.ok(toGatewayResponseNode(response).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @PATCH
+    @Path("/restapis/{apiId}/gatewayresponses/{responseType}")
+    public Response updateGatewayResponse(@Context HttpHeaders headers,
+                                          @PathParam("apiId") String apiId,
+                                          @PathParam("responseType") String responseType,
+                                          String body) {
+        String region = regionResolver.resolveRegion(headers);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        GatewayResponse response = service.updateGatewayResponse(region, apiId, responseType, patchOperations);
+        return Response.ok(toGatewayResponseNode(response).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/restapis/{apiId}/gatewayresponses/{responseType}")
+    public Response deleteGatewayResponse(@Context HttpHeaders headers,
+                                          @PathParam("apiId") String apiId,
+                                          @PathParam("responseType") String responseType) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteGatewayResponse(region, apiId, responseType);
         return Response.accepted().build();
     }
 
@@ -1902,7 +1968,7 @@ public class ApiGatewayController {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private ObjectNode toApiNode(RestApi api) {
+    private ObjectNode toApiNode(String region, RestApi api) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("id", api.getId());
         node.put("name", api.getName());
@@ -1928,6 +1994,25 @@ public class ApiGatewayController {
         epConfig.getVpcEndpointIds().forEach(vpcIds::add);
         node.set("endpointConfiguration", epNode);
 
+        // The root resource is created with the API and is already reachable through
+        // GetResources, but AWS also reports its id on the API itself. Terraform reads it
+        // as aws_api_gateway_rest_api.root_resource_id, which is how the first resource
+        // under "/" gets its parent, so leaving it out breaks the conventional way of
+        // building a REST API.
+        if (api.getRootResourceId() != null) {
+            node.put("rootResourceId", api.getRootResourceId());
+        } else {
+            service.findRootResourceId(region, api.getId()).ifPresent(id -> node.put("rootResourceId", id));
+        }
+
+        // Neither member is settable on a REST API here: createRestApi ignores both and
+        // updateRestApi patches only /name and /description, so the emulated value is always
+        // the AWS default. Report the defaults rather than omitting them, because a client
+        // that reads an absent member back as "" or null sees it as a difference from the
+        // configuration it just sent and never converges.
+        node.put("apiKeySource", "HEADER");
+        node.put("disableExecuteApiEndpoint", false);
+
         return node;
     }
 
@@ -1944,6 +2029,7 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("httpMethod", m.getHttpMethod());
         node.put("authorizationType", m.getAuthorizationType());
+        node.put("apiKeyRequired", m.isApiKeyRequired());
         if (m.getAuthorizerId() != null) node.put("authorizerId", m.getAuthorizerId());
         if (m.getRequestValidatorId() != null) node.put("requestValidatorId", m.getRequestValidatorId());
         if (m.getRequestModels() != null && !m.getRequestModels().isEmpty()) {
@@ -1969,6 +2055,19 @@ public class ApiGatewayController {
         node.put("httpMethod", i.getHttpMethod());
         node.put("uri", i.getUri());
         node.put("passthroughBehavior", i.getPassthroughBehavior());
+        if (!i.getRequestParameters().isEmpty()) {
+            ObjectNode params = node.putObject("requestParameters");
+            i.getRequestParameters().forEach(params::put);
+        }
+        if (!i.getRequestTemplates().isEmpty()) {
+            ObjectNode templates = node.putObject("requestTemplates");
+            i.getRequestTemplates().forEach(templates::put);
+        }
+        if (!i.getIntegrationResponses().isEmpty()) {
+            ObjectNode responses = node.putObject("integrationResponses");
+            i.getIntegrationResponses().forEach((status, ir) ->
+                    responses.set(status, toIntegrationResponseNode(ir)));
+        }
         return node;
     }
 
@@ -1976,6 +2075,14 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("statusCode", r.statusCode());
         node.put("selectionPattern", r.selectionPattern());
+        if (r.responseParameters() != null && !r.responseParameters().isEmpty()) {
+            ObjectNode params = node.putObject("responseParameters");
+            r.responseParameters().forEach(params::put);
+        }
+        if (r.responseTemplates() != null && !r.responseTemplates().isEmpty()) {
+            ObjectNode templates = node.putObject("responseTemplates");
+            r.responseTemplates().forEach(templates::put);
+        }
         return node;
     }
 
@@ -2266,6 +2373,20 @@ public class ApiGatewayController {
         if (m.getDescription() != null) node.put("description", m.getDescription());
         node.put("contentType", m.getContentType());
         if (m.getSchema() != null) node.put("schema", m.getSchema());
+        return node;
+    }
+
+    private ObjectNode toGatewayResponseNode(GatewayResponse response) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("responseType", response.getResponseType());
+        if (response.getStatusCode() != null) {
+            node.put("statusCode", response.getStatusCode());
+        }
+        ObjectNode parameters = node.putObject("responseParameters");
+        response.getResponseParameters().forEach(parameters::put);
+        ObjectNode templates = node.putObject("responseTemplates");
+        response.getResponseTemplates().forEach(templates::put);
+        node.put("defaultResponse", response.isDefaultResponse());
         return node;
     }
 

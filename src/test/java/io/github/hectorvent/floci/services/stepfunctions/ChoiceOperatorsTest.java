@@ -418,10 +418,18 @@ class ChoiceOperatorsTest {
                 "Assign must be an object");
         assertTrue(validate(j("{'Variable':'$.a[0].b','NumericEquals':1,'Next':'X'}")).isEmpty(),
                 "valid indexed reference path accepted");
+        assertTrue(validate(j("{'Variable':'$$.Execution.Input.token',"
+                + "'StringEqualsPath':'$$.Execution.Input.expected','Next':'X'}")).isEmpty(),
+                "context reference paths are valid for variables and path operands");
         assertTrue(ChoiceOperators.isReferencePath("$"));
         assertTrue(ChoiceOperators.isReferencePath("$.a.b"));
         assertTrue(ChoiceOperators.isReferencePath("$[0]"));
+        assertTrue(ChoiceOperators.isReferencePath("$$"));
+        assertTrue(ChoiceOperators.isReferencePath("$$.Execution.Input.token"));
+        assertTrue(ChoiceOperators.isReferencePath("$$[0]"));
         assertFalse(ChoiceOperators.isReferencePath("$."));
+        assertFalse(ChoiceOperators.isReferencePath("$$."));
+        assertFalse(ChoiceOperators.isReferencePath("$$foo"));
         assertFalse(ChoiceOperators.isReferencePath("$["));
         assertFalse(ChoiceOperators.isReferencePath("nope"));
     }

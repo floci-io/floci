@@ -170,6 +170,83 @@ class DynamoDbProjectionIntegrationTest {
             .body("Items[0].data.M.sources", nullValue());
     }
 
+    @Test
+    @Order(6)
+    void putItemWithBracketedMapKey() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {
+                        "pk": {"S": "item2"},
+                        "data": {"M": {
+                            "settings": {"M": {
+                                "[alpha]": {"L": [{"S": "one"}]},
+                                "[beta]": {"L": [{"S": "three"}]}
+                            }}
+                        }}
+                    }
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    /**
+     * An alias that resolves to a bracketed map key such as "[alpha]" is a literal
+     * attribute name, not a list index. Before the fix this failed with a 500 because
+     * the bracket was parsed as an index.
+     */
+    @Test
+    @Order(7)
+    void getItemWithAliasResolvingToBracketedKeyProjectsThatKey() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "item2"}},
+                    "ExpressionAttributeNames": {"#data": "data", "#key": "[alpha]"},
+                    "ProjectionExpression": "#data.settings.#key"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.data.M.settings.M.'[alpha]'.L[0].S", equalTo("one"))
+            .body("Item.data.M.settings.M.'[beta]'", nullValue());
+    }
+
+    @Test
+    @Order(8)
+    void queryWithAliasResolvingToBracketedKeyProjectsThatKey() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {":pk": {"S": "item2"}},
+                    "ExpressionAttributeNames": {"#data": "data", "#key": "[alpha]"},
+                    "ProjectionExpression": "#data.settings.#key"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Count", equalTo(1))
+            .body("Items[0].data.M.settings.M.'[alpha]'.L[0].S", equalTo("one"))
+            .body("Items[0].data.M.settings.M.'[beta]'", nullValue());
+    }
+
     @AfterAll
     static void cleanup() {
         given()

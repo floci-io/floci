@@ -46,7 +46,7 @@ public class FirehoseJsonHandler {
                 S3Destination s3 = null;
                 if (request.has("S3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("S3DestinationConfiguration"), S3Destination.class);
-                    dropConversionFromLegacyShape(s3);
+                    dropExtendedOnlyMembersFromLegacyShape(s3);
                     S3DestinationValidator.validateWireShape(s3, "s3DestinationConfiguration");
                 } else if (request.has("ExtendedS3DestinationConfiguration")) {
                     s3 = mapper.treeToValue(request.get("ExtendedS3DestinationConfiguration"), S3Destination.class);
@@ -82,7 +82,7 @@ public class FirehoseJsonHandler {
                     S3DestinationValidator.validateWireShape(update, "extendedS3DestinationUpdate");
                 } else if (request.has("S3DestinationUpdate")) {
                     update = mapper.treeToValue(request.get("S3DestinationUpdate"), S3Destination.class);
-                    dropConversionFromLegacyShape(update);
+                    dropExtendedOnlyMembersFromLegacyShape(update);
                     S3DestinationValidator.validateWireShape(update, "s3DestinationUpdate");
                 }
                 firehoseService.updateDestination(name, currentVersionId, destinationId, update);
@@ -198,24 +198,28 @@ public class FirehoseJsonHandler {
     }
 
     /**
-     * Clears {@code DataFormatConversionConfiguration} from a legacy
-     * {@code S3DestinationConfiguration} or {@code S3DestinationUpdate}, which AWS
-     * models only on the extended shapes. The two share one class here, which would
-     * otherwise let a legacy request store a member its contract does not define.
+     * Clears {@code DataFormatConversionConfiguration} and
+     * {@code ProcessingConfiguration} from a legacy {@code S3DestinationConfiguration}
+     * or {@code S3DestinationUpdate}, which AWS models only on the extended shapes. The
+     * two share one class here, which would otherwise let a legacy request store members
+     * its contract does not define.
      *
      * Dropped rather than rejected: AWS's JSON protocol ignores a member the shape does
      * not model, so a request carrying one succeeds with the member disregarded. The
-     * SDKs cannot even send it, since it is absent from the legacy shape's model.
+     * SDKs cannot even send them, since both are absent from the legacy shape's model.
+     * That was probed for the conversion member; the processing member is the same
+     * mechanism on the same shape.
      *
-     * Only this member is cleared. {@code FileExtension}, {@code CustomTimeZone} and
+     * Only these two are cleared. {@code FileExtension}, {@code CustomTimeZone} and
      * {@code S3BackupMode} are extended-only too and reach the legacy shapes the same
      * way, a deviation that predates this change and is recorded in
      * docs/services/firehose.md; widening the clearing would change behavior those
      * members already have.
      */
-    private static void dropConversionFromLegacyShape(S3Destination s3) {
+    private static void dropExtendedOnlyMembersFromLegacyShape(S3Destination s3) {
         if (s3 != null) {
             s3.setDataFormatConversionConfiguration(null);
+            s3.setProcessingConfiguration(null);
         }
     }
 

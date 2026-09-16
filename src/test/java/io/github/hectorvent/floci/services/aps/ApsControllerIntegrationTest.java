@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.aps;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyString;
@@ -222,6 +225,156 @@ class ApsControllerIntegrationTest {
             .statusCode(200)
             .body("tags.env", equalTo("test"))
             .body("tags", not(org.hamcrest.Matchers.hasKey("team")));
+    }
+
+    private static final String RULES = Base64.getEncoder().encodeToString(
+            "groups:\n- name: alerts\n  rules: []\n".getBytes(StandardCharsets.UTF_8));
+
+    @Test
+    void ruleGroupsNamespaceLifecycleRoundTrip() {
+        String workspaceId = createWorkspace("rules-lifecycle");
+
+        String arn = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "alerts", "data": "%s", "tags": {"team": "devops"}, "clientToken": "token-123"}
+                """.formatted(RULES))
+        .when()
+            .post("/workspaces/{workspaceId}/rulegroupsnamespaces", workspaceId)
+        .then()
+            .statusCode(202)
+            .body("name", equalTo("alerts"))
+            .body("arn", containsString(":rulegroupsnamespace/" + workspaceId + "/alerts"))
+            .body("status.statusCode", equalTo("ACTIVE"))
+            .body("tags.team", equalTo("devops"))
+            .extract().path("arn");
+
+        given()
+        .when()
+            .get("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}", workspaceId, "alerts")
+        .then()
+            .statusCode(200)
+            .body("ruleGroupsNamespace.name", equalTo("alerts"))
+            .body("ruleGroupsNamespace.arn", equalTo(arn))
+            .body("ruleGroupsNamespace.status.statusCode", equalTo("ACTIVE"))
+            .body("ruleGroupsNamespace.data", equalTo(RULES))
+            .body("ruleGroupsNamespace.createdAt", notNullValue())
+            .body("ruleGroupsNamespace.modifiedAt", notNullValue());
+
+        given()
+        .when()
+            .get("/workspaces/{workspaceId}/rulegroupsnamespaces", workspaceId)
+        .then()
+            .statusCode(200)
+            .body("ruleGroupsNamespaces.name", hasItem("alerts"))
+            .body("ruleGroupsNamespaces.find { it.name == 'alerts' }.data", equalTo(null));
+
+        String updated = Base64.getEncoder().encodeToString(
+                "groups:\n- name: updated\n  rules: []\n".getBytes(StandardCharsets.UTF_8));
+        given()
+            .contentType("application/json")
+            .body("{\"data\": \"%s\"}".formatted(updated))
+        .when()
+            .put("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}", workspaceId, "alerts")
+        .then()
+            .statusCode(202)
+            .body("status.statusCode", equalTo("ACTIVE"));
+
+        given()
+        .when()
+            .get("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}", workspaceId, "alerts")
+        .then()
+            .statusCode(200)
+            .body("ruleGroupsNamespace.data", equalTo(updated));
+
+        given()
+        .when()
+            .delete("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}", workspaceId, "alerts")
+        .then()
+            .statusCode(202)
+            .body(is(emptyString()));
+
+        given()
+        .when()
+            .get("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}", workspaceId, "alerts")
+        .then()
+            .statusCode(404)
+            .header("X-Amzn-Errortype", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void createRuleGroupsNamespaceRejectsDuplicateNameWithConflict() {
+        String workspaceId = createWorkspace("rules-duplicate");
+        String body = """
+            {"name": "alerts", "data": "%s"}
+            """.formatted(RULES);
+
+        given().contentType("application/json").body(body)
+            .when().post("/workspaces/{workspaceId}/rulegroupsnamespaces", workspaceId)
+            .then().statusCode(202);
+
+        given().contentType("application/json").body(body)
+        .when()
+            .post("/workspaces/{workspaceId}/rulegroupsnamespaces", workspaceId)
+        .then()
+            .statusCode(409)
+            .header("X-Amzn-Errortype", equalTo("ConflictException"));
+    }
+
+    @Test
+    void ruleGroupsNamespaceRoutesRejectAnUnknownWorkspace() {
+        given()
+        .when()
+            .get("/workspaces/{workspaceId}/rulegroupsnamespaces", "ws-missing")
+        .then()
+            .statusCode(404)
+            .header("X-Amzn-Errortype", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void deletingAWorkspaceDeletesItsRuleGroupsNamespaces() {
+        String workspaceId = createWorkspace("rules-cascade");
+        given()
+            .contentType("application/json")
+            .body("{\"name\": \"alerts\", \"data\": \"%s\"}".formatted(RULES))
+            .when().post("/workspaces/{workspaceId}/rulegroupsnamespaces", workspaceId)
+            .then().statusCode(202);
+
+        given().when().delete("/workspaces/{workspaceId}", workspaceId).then().statusCode(202);
+
+        given()
+        .when()
+            .get("/workspaces/{workspaceId}/rulegroupsnamespaces/{name}", workspaceId, "alerts")
+        .then()
+            .statusCode(404)
+            .header("X-Amzn-Errortype", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void ruleGroupsNamespaceTagsRoundTripThroughSharedTagsDispatcher() {
+        String workspaceId = createWorkspace("rules-tags");
+        String arn = given()
+            .contentType("application/json")
+            .body("{\"name\": \"alerts\", \"data\": \"%s\", \"tags\": {\"team\": \"devops\"}}".formatted(RULES))
+            .when().post("/workspaces/{workspaceId}/rulegroupsnamespaces", workspaceId)
+            .then().statusCode(202)
+            .extract().path("arn");
+
+        given()
+            .contentType("application/json")
+            .body("{\"tags\": {\"env\": \"test\"}}")
+        .when()
+            .post("/tags/{arn}", arn)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/tags/{arn}", arn)
+        .then()
+            .statusCode(200)
+            .body("tags.team", equalTo("devops"))
+            .body("tags.env", equalTo("test"));
     }
 
     @Test

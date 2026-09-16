@@ -83,6 +83,94 @@ class RedshiftDataOperationsTest {
         assertThat(result.records().get(0).get(1).stringValue()).isEqualTo("a");
     }
 
+    /**
+     * Redshift stores INTERVAL YEAR TO MONTH and INTERVAL DAY TO SECOND columns and the
+     * Data API returns them as strings, checked against a real cluster on 2026-09-13. pgjdbc
+     * builds the value through reflection, so this also checks that the native image keeps
+     * that metadata.
+     */
+    @Test
+    @DisplayName("interval columns read back as strings")
+    void intervalColumnsReadBackAsStrings() throws Exception {
+        run("CREATE TABLE compat_intervals (y2m interval year to month, d2s interval day to second)");
+        run("INSERT INTO compat_intervals VALUES (interval '1-2' year to month, interval '2 1:0:0' day to second)");
+
+        String selectId = run("SELECT y2m, d2s FROM compat_intervals");
+        GetStatementResultResponse result = data.getStatementResult(GetStatementResultRequest.builder()
+                .id(selectId)
+                .build());
+
+        assertThat(result.totalNumRows()).isEqualTo(1L);
+        assertThat(result.records().get(0).get(0).stringValue()).isEqualTo("1 years 2 mons");
+        // Redshift prints "2 days 1 hours 0 mins 0.0 secs", Floci drops the zero fields.
+        assertThat(result.records().get(0).get(1).stringValue()).isNotEmpty();
+    }
+
+    /**
+     * Redshift rejects these as column types but evaluates them in a select, and the Data
+     * API returns them as strings. Values checked against a real ra3.large cluster on
+     * 2026-09-13. pgjdbc builds them through reflection, so this also checks that the
+     * native image keeps that metadata.
+     */
+    @Test
+    @DisplayName("geometric expressions read back as strings")
+    void geometricExpressionsReadBackAsStrings() throws Exception {
+        String selectId = run("SELECT point(1, 2), box '((0,0),(1,1))', circle '<(0,0),1>', lseg '[(0,0),(1,1)]', "
+                + "path '[(0,0),(1,1)]', polygon '((0,0),(1,1),(1,0))', '12.34'::money");
+        GetStatementResultResponse result = data.getStatementResult(GetStatementResultRequest.builder()
+                .id(selectId)
+                .build());
+
+        assertThat(result.totalNumRows()).isEqualTo(1L);
+        assertThat(result.columnMetadata()).extracting("typeName")
+                .containsExactly("point", "box", "circle", "lseg", "path", "polygon", "money");
+        assertThat(result.records().get(0).get(0).stringValue()).isEqualTo("(1.0,2.0)");
+        assertThat(result.records().get(0).get(1).stringValue()).isEqualTo("(1.0,1.0),(0.0,0.0)");
+        assertThat(result.records().get(0).get(2).stringValue()).isEqualTo("<(0.0,0.0),1.0>");
+        assertThat(result.records().get(0).get(3).stringValue()).isEqualTo("[(0.0,0.0),(1.0,1.0)]");
+        // Redshift prints path as the server text [(0,0),(1,1)], Floci still prints the driver form.
+        assertThat(result.records().get(0).get(4).stringValue()).isNotEmpty();
+        assertThat(result.records().get(0).get(5).stringValue()).isEqualTo("((0.0,0.0),(1.0,1.0),(1.0,0.0))");
+        assertThat(result.records().get(0).get(6).doubleValue()).isEqualTo(12.34);
+    }
+
+    /**
+     * Error text checked against a real cluster on 2026-09-13.
+     */
+    @Test
+    @DisplayName("PostgreSQL types Redshift lacks fail the statement with the Redshift error")
+    void typesRedshiftLacksFailTheStatement() throws Exception {
+        assertThat(failure("SELECT line '{1,2,3}'")).isEqualTo("ERROR: type \"line\" not yet implemented");
+        assertThat(failure("SELECT '{\"a\":1}'::json")).isEqualTo("ERROR: type \"json\" does not exist");
+        assertThat(failure("SELECT '{\"a\":1}'::jsonb")).isEqualTo("ERROR: type \"jsonb\" does not exist");
+    }
+
+    private String failure(String sql) throws Exception {
+        String id = submit(sql);
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(30));
+        while (Instant.now().isBefore(deadline)) {
+            DescribeStatementResponse describe = describe(id);
+            if (describe.status() == StatusString.FAILED) {
+                return describe.error();
+            }
+            if (describe.status() == StatusString.FINISHED) {
+                throw new IllegalStateException("Statement " + id + " finished but was expected to fail");
+            }
+            Thread.sleep(250);
+        }
+        throw new IllegalStateException("Statement " + id + " did not finish in time");
+    }
+
+    private String submit(String sql) {
+        return data.executeStatement(ExecuteStatementRequest.builder()
+                .clusterIdentifier(clusterId)
+                .dbUser(USERNAME)
+                .database(DATABASE)
+                .sql(sql)
+                .build())
+                .id();
+    }
+
     private String run(String sql) throws Exception {
         String id = data.executeStatement(ExecuteStatementRequest.builder()
                 .clusterIdentifier(clusterId)

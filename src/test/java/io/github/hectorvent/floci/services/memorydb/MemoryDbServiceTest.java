@@ -465,6 +465,57 @@ class MemoryDbServiceTest {
     }
 
     @Test
+    void sameNamesAreScopedToRegion() {
+        User firstUser = passwordUser("shared-user", "one");
+        User secondUser = passwordUser("shared-user", "two");
+        service.createUser(firstUser, "us-east-1");
+        service.createUser(secondUser, "eu-west-1");
+
+        Acl firstAcl = acl("shared-acl", "shared-user");
+        Acl secondAcl = acl("shared-acl", "shared-user");
+        service.createAcl(firstAcl, "us-east-1");
+        service.createAcl(secondAcl, "eu-west-1");
+
+        Cluster first = cluster("shared-cluster", "shared-acl");
+        Cluster second = cluster("shared-cluster", "shared-acl");
+        service.createCluster(first, "us-east-1");
+        service.createCluster(second, "eu-west-1");
+
+        assertEquals("one", service.describeUsers("shared-user", "us-east-1").iterator().next()
+                .getPasswords().get(0));
+        assertEquals("two", service.describeUsers("shared-user", "eu-west-1").iterator().next()
+                .getPasswords().get(0));
+        assertEquals("arn:aws:memorydb:us-east-1:000000000000:cluster/shared-cluster",
+                service.getCluster("shared-cluster", "us-east-1").getArn());
+        assertEquals("arn:aws:memorydb:eu-west-1:000000000000:cluster/shared-cluster",
+                service.getCluster("shared-cluster", "eu-west-1").getArn());
+        assertThrows(AwsException.class, () -> service.getCluster("shared-cluster", "ap-southeast-1"));
+    }
+
+    private User passwordUser(String name, String password) {
+        User user = new User();
+        user.setName(name);
+        user.setAuthMode(AuthMode.PASSWORD);
+        user.setPasswords(List.of(password));
+        user.setAccessString("on ~* +@all");
+        return user;
+    }
+
+    private Acl acl(String name, String userName) {
+        Acl acl = new Acl();
+        acl.setName(name);
+        acl.setUserNames(List.of("default", userName));
+        return acl;
+    }
+
+    private Cluster cluster(String name, String aclName) {
+        Cluster cluster = new Cluster();
+        cluster.setName(name);
+        cluster.setAclName(aclName);
+        return cluster;
+    }
+
+    @Test
     void createWithoutDockerDaemonStillReachesAvailable() {
         // tryStart() returns null when no Docker daemon is reachable. The cluster record is
         // metadata, so the create still succeeds, the cluster reaches 'available' on the first

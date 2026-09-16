@@ -31,6 +31,15 @@ public class Image {
      * not in the catalog and would otherwise fall back to the default guest.
      */
     private String sourceImageId;
+
+    /**
+     * For images produced by CreateImage: the Docker image the source container was committed
+     * to, which is what actually captures the instance's file system. Not an EC2 field. Null
+     * when no capture could be made (mock mode, or an instance with no container), in which
+     * case launching falls back to {@link #sourceImageId} and the AMI is only a metadata
+     * record of its ancestor.
+     */
+    private String dockerImage;
     private List<BlockDeviceMapping> blockDeviceMappings = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
 
@@ -83,6 +92,9 @@ public class Image {
 
     public String getSourceImageId() { return sourceImageId; }
     public void setSourceImageId(String sourceImageId) { this.sourceImageId = sourceImageId; }
+
+    public String getDockerImage() { return dockerImage; }
+    public void setDockerImage(String dockerImage) { this.dockerImage = dockerImage; }
 
     public List<BlockDeviceMapping> getBlockDeviceMappings() { return blockDeviceMappings; }
     public void setBlockDeviceMappings(List<BlockDeviceMapping> blockDeviceMappings) { this.blockDeviceMappings = blockDeviceMappings; }

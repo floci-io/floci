@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -9,24 +10,29 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
+import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedFieldSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 @ApplicationScoped
@@ -36,14 +42,16 @@ public class CloudTrailService {
 
     private static final String EVENT_VERSION = "1.11";
     private static final String S3_EVENT_SOURCE = "s3.amazonaws.com";
+    static final int MAX_PENDING_RECORDS_PER_TRAIL = 1024;
+    static final long MAX_PENDING_BYTES_PER_TRAIL = 4L * 1024L * 1024L;
 
     private final StorageBackend<String, CloudTrailEntry> store;
     private final RegionResolver regionResolver;
     private final IamService iamService;
     private final ObjectMapper mapper;
 
-    /** Per-trail pending record buffers — ephemeral, never persisted. */
-    private final ConcurrentHashMap<TrailKey, ConcurrentLinkedQueue<ObjectNode>> pendingRecordsByTrail =
+    /** Per-trail pending record buffers: ephemeral, never persisted. */
+    private final ConcurrentHashMap<PendingTrailKey, PendingRecordBuffer> pendingRecordsByTrail =
             new ConcurrentHashMap<>();
 
     /**
@@ -107,7 +115,8 @@ public class CloudTrailService {
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
                 enableLogFileValidation, false, false, isOrganizationTrail);
-        store.put(key, new CloudTrailEntry(trail, List.of(), false, null, null, initialTags));
+        store.put(key, new CloudTrailEntry(trail, List.of(), List.of(), false, null, null,
+                initialTags, null, null));
         return trail;
     }
 
@@ -183,6 +192,44 @@ public class CloudTrailService {
                 .orElse(List.of());
     }
 
+    public List<AdvancedEventSelector> putAdvancedEventSelectors(
+            String region, String trailNameOrArn, List<AdvancedEventSelector> selectors) {
+        Trail trail = findTrailOrThrow(region, trailNameOrArn);
+        List<AdvancedEventSelector> normalized = selectors == null ? List.of() : List.copyOf(selectors);
+        String key = regionKey(trail.homeRegion(), trail.name());
+        withTrailLock(key, () -> store.get(key).ifPresent(entry -> store.put(key, entry.withAdvancedSelectors(normalized, true))));
+        return normalized;
+    }
+
+    public List<AdvancedEventSelector> getAdvancedEventSelectors(String region, String trailNameOrArn) {
+        Trail trail = findTrailOrThrow(region, trailNameOrArn);
+        return store.get(regionKey(trail.homeRegion(), trail.name()))
+                .map(e -> e.advancedSelectors() != null ? e.advancedSelectors() : List.<AdvancedEventSelector>of())
+                .orElse(List.of());
+    }
+
+    public List<TrailInfo> listTrails(String region) {
+        List<TrailInfo> result = new ArrayList<>();
+        for (String k : store.keys()) {
+            CloudTrailEntry entry = store.get(k).orElse(null);
+            if (entry == null) {
+                continue;
+            }
+            Trail t = entry.trail();
+            if (regionFromKey(k).equals(region) || t.isMultiRegionTrail()) {
+                result.add(new TrailInfo(t.name(), t.trailArn(), t.homeRegion()));
+            }
+        }
+        return result;
+    }
+
+    @RegisterForReflection
+    public record TrailInfo(
+            @JsonProperty("Name") String name,
+            @JsonProperty("TrailARN") String trailArn,
+            @JsonProperty("HomeRegion") String homeRegion) {
+    }
+
     public void startLogging(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         String key = regionKey(trail.homeRegion(), trail.name());
@@ -198,15 +245,16 @@ public class CloudTrailService {
     public TrailStatus getTrailStatus(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         return store.get(regionKey(trail.homeRegion(), trail.name()))
-                .map(e -> new TrailStatus(e.logging(), e.startLoggingTime(), e.stopLoggingTime()))
-                .orElse(new TrailStatus(false, null, null));
+                .map(e -> new TrailStatus(e.logging(), e.startLoggingTime(), e.stopLoggingTime(),
+                        e.latestDeliveryTime(), e.latestDeliveryError()))
+                .orElse(new TrailStatus(false, null, null, null, null));
     }
 
     // --- Tagging ---
     //
     // AddTags/RemoveTags/ListTags identify the trail solely by ARN (ResourceId /
     // ResourceIdList), unlike every other CloudTrail action here which also accepts a
-    // bare trail name — so these don't take a `region` parameter.
+    // bare trail name, so these do not take a `region` parameter.
 
     private static final int MAX_TAGS_PER_RESOURCE = 50;
 
@@ -311,8 +359,13 @@ public class CloudTrailService {
             for (MatchedTrail mt : matched) {
                 ObjectNode copy = record.deepCopy();
                 copy.put("recipientAccountId", regionResolver.getAccountId());
-                queueFor(new TrailKey(mt.region(), mt.trail().name(), region)).add(copy);
-                LOG.tracev("Emitted CloudTrail event {0} for trail {1}", in.eventName(), mt.trail().name());
+                boolean accepted = append(new TrailKey(mt.region(), mt.trail().name(), region), copy);
+                if (accepted) {
+                    LOG.tracev("Emitted CloudTrail event {0} for trail {1}", in.eventName(), mt.trail().name());
+                } else {
+                    LOG.tracev("Dropped CloudTrail event {0} for trail {1}: retry buffer is full",
+                            in.eventName(), mt.trail().name());
+                }
             }
         } catch (Exception e) {
             // Never let emission take down an S3 op.
@@ -323,29 +376,63 @@ public class CloudTrailService {
 
     public void requeueRecords(TrailKey key, List<ObjectNode> records) {
         if (!records.isEmpty()) {
-            queueFor(key).addAll(records);
+            List<PendingRecord> pending = records.stream()
+                    .map(record -> new PendingRecord(record, estimatedRecordBytes(record)))
+                    .toList();
+            pendingRecordsByTrail.compute(pendingTrailKey(key), (ignored, buffer) -> {
+                PendingRecordBuffer updated = buffer == null ? new PendingRecordBuffer() : buffer;
+                updated.requeueFront(key.eventRegion(), pending);
+                return updated.isEmpty() ? null : updated;
+            });
         }
     }
 
+    public void completeDelivery(TrailKey key) {
+        pendingRecordsByTrail.computeIfPresent(pendingTrailKey(key), (ignored, buffer) -> {
+            buffer.completeDelivery(key.eventRegion());
+            return buffer.isEmpty() ? null : buffer;
+        });
+    }
+
+    public void discardPendingRecords(TrailKey key) {
+        pendingRecordsByTrail.computeIfPresent(pendingTrailKey(key), (ignored, buffer) -> {
+            buffer.discard(key.eventRegion());
+            return buffer.isEmpty() ? null : buffer;
+        });
+    }
+
     public List<ObjectNode> drainPendingRecords(TrailKey key) {
-        ConcurrentLinkedQueue<ObjectNode> q = pendingRecordsByTrail.get(key);
-        if (q == null) return List.of();
-        List<ObjectNode> drained = new ArrayList<>();
-        ObjectNode r;
-        while ((r = q.poll()) != null) {
-            drained.add(r);
+        return drainPendingRecords(key, Integer.MAX_VALUE);
+    }
+
+    public List<ObjectNode> drainPendingRecords(TrailKey key, int maxRecords) {
+        if (maxRecords <= 0) {
+            return List.of();
         }
-        return drained;
+        List<ObjectNode> drained = new ArrayList<>();
+        pendingRecordsByTrail.compute(pendingTrailKey(key), (ignored, buffer) -> {
+            if (buffer == null) {
+                return null;
+            }
+            drained.addAll(buffer.drain(key.eventRegion(), maxRecords));
+            return buffer.isEmpty() ? null : buffer;
+        });
+        return drained.isEmpty() ? List.of() : drained;
     }
 
     public List<TrailKey> trailsWithPendingRecords() {
         List<TrailKey> result = new ArrayList<>();
-        for (Map.Entry<TrailKey, ConcurrentLinkedQueue<ObjectNode>> e : pendingRecordsByTrail.entrySet()) {
-            if (!e.getValue().isEmpty()) {
-                result.add(e.getKey());
+        for (Map.Entry<PendingTrailKey, PendingRecordBuffer> e : pendingRecordsByTrail.entrySet()) {
+            for (String eventRegion : e.getValue().eventRegions()) {
+                result.add(new TrailKey(e.getKey().region(), e.getKey().trailName(), eventRegion));
             }
         }
         return result;
+    }
+
+    public int pendingRecordCount(TrailKey key) {
+        PendingRecordBuffer buffer = pendingRecordsByTrail.get(pendingTrailKey(key));
+        return buffer == null ? 0 : buffer.pendingCount(key.eventRegion());
     }
 
     public Trail getTrail(String region, String trailName) {
@@ -354,8 +441,36 @@ public class CloudTrailService {
                 .orElse(null);
     }
 
-    private ConcurrentLinkedQueue<ObjectNode> queueFor(TrailKey key) {
-        return pendingRecordsByTrail.computeIfAbsent(key, k -> new ConcurrentLinkedQueue<>());
+    public void recordDeliveryFailure(TrailKey key, String error) {
+        updateDeliveryStatus(key, entry -> entry.withDeliveryFailure(error));
+    }
+
+    public void recordDeliverySuccess(TrailKey key, long time) {
+        updateDeliveryStatus(key, entry -> entry.withDeliverySuccess(time));
+    }
+
+    private void updateDeliveryStatus(TrailKey key, Function<CloudTrailEntry, CloudTrailEntry> update) {
+        String storeKey = regionKey(key.region(), key.trailName());
+        withTrailLock(storeKey, () -> store.get(storeKey).ifPresent(entry -> store.put(storeKey, update.apply(entry))));
+    }
+
+    private boolean append(TrailKey key, ObjectNode record) {
+        long recordBytes = estimatedRecordBytes(record);
+        boolean[] accepted = {false};
+        pendingRecordsByTrail.compute(pendingTrailKey(key), (ignored, buffer) -> {
+            PendingRecordBuffer updated = buffer == null ? new PendingRecordBuffer() : buffer;
+            accepted[0] = updated.append(key.eventRegion(), record, recordBytes);
+            return updated.isEmpty() ? null : updated;
+        });
+        return accepted[0];
+    }
+
+    private long estimatedRecordBytes(ObjectNode record) {
+        try {
+            return mapper.writeValueAsBytes(record).length;
+        } catch (Exception e) {
+            return record.toString().getBytes(StandardCharsets.UTF_8).length;
+        }
     }
 
     /**
@@ -366,6 +481,137 @@ public class CloudTrailService {
      */
     public record TrailKey(String region, String trailName, String eventRegion) {}
 
+    private record PendingTrailKey(String region, String trailName) {}
+
+    private record PendingRecord(ObjectNode record, long byteCount) {}
+
+    private final class PendingRecordBuffer {
+        private final Map<String, ArrayDeque<PendingRecord>> recordsByRegion = new ConcurrentHashMap<>();
+        private final Map<String, List<PendingRecord>> inFlightByRegion = new ConcurrentHashMap<>();
+        private int recordCount;
+        private long byteCount;
+
+        synchronized boolean append(String eventRegion, ObjectNode record, long recordBytes) {
+            if (!inFlightByRegion.isEmpty()
+                    && (recordCount >= MAX_PENDING_RECORDS_PER_TRAIL
+                    || byteCount + recordBytes > MAX_PENDING_BYTES_PER_TRAIL)) {
+                return false;
+            }
+            recordsByRegion.computeIfAbsent(eventRegion, ignored -> new ArrayDeque<>())
+                    .addLast(new PendingRecord(record, recordBytes));
+            recordCount++;
+            byteCount += recordBytes;
+            return true;
+        }
+
+        synchronized void requeueFront(String eventRegion, List<PendingRecord> drained) {
+            ArrayDeque<PendingRecord> records = recordsByRegion.computeIfAbsent(
+                    eventRegion, ignored -> new ArrayDeque<>());
+            boolean wasInFlight = inFlightByRegion.remove(eventRegion) != null;
+            for (int i = drained.size() - 1; i >= 0; i--) {
+                PendingRecord pending = drained.get(i);
+                records.addFirst(pending);
+                if (!wasInFlight) {
+                    recordCount++;
+                    byteCount += pending.byteCount();
+                }
+            }
+            trimTailToLimit(eventRegion);
+        }
+
+        synchronized List<ObjectNode> drain(String eventRegion) {
+            return drain(eventRegion, Integer.MAX_VALUE);
+        }
+
+        synchronized List<ObjectNode> drain(String eventRegion, int maxRecords) {
+            ArrayDeque<PendingRecord> records = recordsByRegion.remove(eventRegion);
+            if (records == null || records.isEmpty()) {
+                return List.of();
+            }
+            List<PendingRecord> selected = new ArrayList<>(Math.min(records.size(), maxRecords));
+            while (selected.size() < maxRecords && !records.isEmpty()) {
+                selected.add(records.removeFirst());
+            }
+            if (!records.isEmpty()) {
+                recordsByRegion.put(eventRegion, records);
+            }
+            inFlightByRegion.put(eventRegion, selected);
+            List<ObjectNode> drained = new ArrayList<>(selected.size());
+            for (PendingRecord pending : selected) {
+                drained.add(pending.record());
+            }
+            return drained;
+        }
+
+        synchronized void completeDelivery(String eventRegion) {
+            List<PendingRecord> inFlight = inFlightByRegion.remove(eventRegion);
+            if (inFlight == null) {
+                return;
+            }
+            for (PendingRecord pending : inFlight) {
+                recordCount--;
+                byteCount -= pending.byteCount();
+            }
+        }
+
+        synchronized void discard(String eventRegion) {
+            ArrayDeque<PendingRecord> queued = recordsByRegion.remove(eventRegion);
+            if (queued != null) {
+                for (PendingRecord pending : queued) {
+                    recordCount--;
+                    byteCount -= pending.byteCount();
+                }
+            }
+            List<PendingRecord> inFlight = inFlightByRegion.remove(eventRegion);
+            if (inFlight != null) {
+                for (PendingRecord pending : inFlight) {
+                    recordCount--;
+                    byteCount -= pending.byteCount();
+                }
+            }
+        }
+
+        synchronized boolean isEmpty() {
+            return recordCount == 0 && inFlightByRegion.isEmpty();
+        }
+
+        synchronized int pendingCount(String eventRegion) {
+            ArrayDeque<PendingRecord> records = recordsByRegion.get(eventRegion);
+            List<PendingRecord> inFlight = inFlightByRegion.get(eventRegion);
+            return (records == null ? 0 : records.size()) + (inFlight == null ? 0 : inFlight.size());
+        }
+
+        synchronized List<String> eventRegions() {
+            return java.util.stream.Stream.concat(recordsByRegion.keySet().stream(), inFlightByRegion.keySet().stream())
+                    .distinct()
+                    .filter(eventRegion -> {
+                        ArrayDeque<PendingRecord> records = recordsByRegion.get(eventRegion);
+                        return (records != null && !records.isEmpty()) || inFlightByRegion.containsKey(eventRegion);
+                    })
+                    .toList();
+        }
+
+        private void trimTailToLimit(String preferredRegion) {
+            while (recordCount > MAX_PENDING_RECORDS_PER_TRAIL
+                    || byteCount > MAX_PENDING_BYTES_PER_TRAIL) {
+                ArrayDeque<PendingRecord> records = recordsByRegion.get(preferredRegion);
+                if (records == null || records.isEmpty()) {
+                    records = recordsByRegion.values().stream()
+                            .filter(queue -> !queue.isEmpty())
+                            .findFirst()
+                            .orElseThrow();
+                }
+                PendingRecord dropped = records.removeLast();
+                recordCount--;
+                byteCount -= dropped.byteCount();
+            }
+        }
+    }
+
+    private static PendingTrailKey pendingTrailKey(TrailKey key) {
+        return new PendingTrailKey(key.region(), key.trailName());
+    }
+
     // --- Helpers ---
 
     private List<MatchedTrail> trailsMatching(String region, S3EventInput in) {
@@ -374,12 +620,26 @@ public class CloudTrailService {
             String trailRegion = regionFromKey(k);
             boolean sameRegion = trailRegion.equals(region);
             CloudTrailEntry entry = store.get(k).orElse(null);
-            if (entry == null) continue;
+            if (entry == null) {
+                continue;
+            }
             Trail trail = entry.trail();
-            if (!sameRegion && !trail.isMultiRegionTrail()) continue;
-            if (!entry.logging()) continue;
-            List<EventSelector> selectors = entry.selectors() != null ? entry.selectors() : List.of();
-            if (matchesAnySelector(selectors, in)) {
+            if (!sameRegion && !trail.isMultiRegionTrail()) {
+                continue;
+            }
+            if (!entry.logging()) {
+                continue;
+            }
+            List<AdvancedEventSelector> advancedSelectors =
+                    entry.advancedSelectors() != null ? entry.advancedSelectors() : List.of();
+            boolean matched;
+            if (!advancedSelectors.isEmpty()) {
+                matched = matchesAnyAdvancedSelector(advancedSelectors, in);
+            } else {
+                List<EventSelector> selectors = entry.selectors() != null ? entry.selectors() : List.of();
+                matched = matchesAnySelector(selectors, in);
+            }
+            if (matched) {
                 result.add(new MatchedTrail(trail, trailRegion));
             }
         }
@@ -411,6 +671,70 @@ public class CloudTrailService {
             }
         }
         return false;
+    }
+
+    private boolean matchesAnyAdvancedSelector(List<AdvancedEventSelector> selectors, S3EventInput in) {
+        String arn = "arn:aws:s3:::" + in.bucketName() + (in.key() != null ? "/" + in.key() : "");
+        // Bucket-level operations (e.g. ListObjects) have no object key and are reported
+        // by CloudTrail as AWS::S3::Bucket resources, not AWS::S3::Object: matching real
+        // AWS behavior, an AWS::S3::Object DataResource selector must never match them.
+        String resourceType = in.key() != null ? "AWS::S3::Object" : "AWS::S3::Bucket";
+        for (AdvancedEventSelector sel : selectors) {
+            if (matchesAdvancedSelector(sel, arn, resourceType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesAdvancedSelector(AdvancedEventSelector selector, String s3ObjectArn, String resourceType) {
+        List<AdvancedFieldSelector> fieldSelectors = selector.fieldSelectors();
+        if (fieldSelectors == null || fieldSelectors.isEmpty()) {
+            return false;
+        }
+        for (AdvancedFieldSelector fs : fieldSelectors) {
+            if (!matchesAdvancedFieldSelector(fs, s3ObjectArn, resourceType)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Package-private for unit testing. Only the fields CloudTrail evaluates for S3 data events
+    // are supported: eventCategory, resources.type, resources.ARN.
+    static boolean matchesAdvancedFieldSelector(AdvancedFieldSelector fs, String s3ObjectArn, String resourceType) {
+        String value = switch (fs.field()) {
+            case "eventCategory" -> "Data";
+            case "resources.type" -> resourceType;
+            case "resources.ARN" -> s3ObjectArn;
+            default -> null;
+        };
+        if (value == null) {
+            return false;
+        }
+        if (!isEmpty(fs.equalsValues()) && fs.equalsValues().stream().noneMatch(value::equals)) {
+            return false;
+        }
+        if (!isEmpty(fs.notEquals()) && fs.notEquals().stream().anyMatch(value::equals)) {
+            return false;
+        }
+        if (!isEmpty(fs.startsWith()) && fs.startsWith().stream().noneMatch(value::startsWith)) {
+            return false;
+        }
+        if (!isEmpty(fs.notStartsWith()) && fs.notStartsWith().stream().anyMatch(value::startsWith)) {
+            return false;
+        }
+        if (!isEmpty(fs.endsWith()) && fs.endsWith().stream().noneMatch(value::endsWith)) {
+            return false;
+        }
+        if (!isEmpty(fs.notEndsWith()) && fs.notEndsWith().stream().anyMatch(value::endsWith)) {
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean isEmpty(List<String> values) {
+        return values == null || values.isEmpty();
     }
 
     // Package-private for unit testing.
@@ -452,7 +776,8 @@ public class CloudTrailService {
         if (eventName == null) return true;
         return switch (eventName) {
             case "GetObject", "HeadObject", "ListObjects", "ListObjectsV2",
-                 "GetObjectAcl", "GetObjectTagging", "ListMultipartUploads" -> true;
+                 "GetObjectAcl", "GetObjectTagging", "ListMultipartUploads",
+                 "GetObjectAnnotation", "ListObjectAnnotations" -> true;
             default -> false;
         };
     }
@@ -637,7 +962,12 @@ public class CloudTrailService {
         return colon < 0 ? key : key.substring(0, colon);
     }
 
-    public record TrailStatus(boolean logging, Long startLoggingTime, Long stopLoggingTime) {}
+    public record TrailStatus(boolean logging, Long startLoggingTime, Long stopLoggingTime,
+                              Long latestDeliveryTime, String latestDeliveryError) {
+        public TrailStatus(boolean logging, Long startLoggingTime, Long stopLoggingTime) {
+            this(logging, startLoggingTime, stopLoggingTime, null, null);
+        }
+    }
 
     private record MatchedTrail(Trail trail, String region) {}
 

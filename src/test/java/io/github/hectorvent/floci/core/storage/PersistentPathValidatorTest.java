@@ -16,8 +16,12 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -110,5 +114,65 @@ class PersistentPathValidatorTest {
         when(catalog.all()).thenReturn(List.of(descriptor("s3", false, "s3", "hybrid")));
 
         validator().validateAtBoot();
+    }
+
+    @Test
+    void memoryModeLogsThatStateIsNotPersisted() {
+        when(catalog.all()).thenReturn(List.of(
+                descriptor("s3", true, "s3", "memory"),
+                descriptor("sqs", true, "sqs", "memory")));
+
+        List<LogRecord> records = captureLogs(() -> validator().validateAtBoot());
+
+        assertTrue(records.stream().anyMatch(r -> r.getMessage() != null
+                        && r.getMessage().contains("memory")
+                        && r.getMessage().contains("NOT persisted")),
+                "expected a boot log announcing memory mode, got: " + records);
+    }
+
+    @Test
+    void hybridModeLogsThatStateIsPersisted() {
+        Path root = tempDir.resolve("data");
+        when(catalog.all()).thenReturn(List.of(descriptor("sqs", true, "sqs", "hybrid")));
+        when(storageConfig.persistentPath()).thenReturn(root.toString());
+
+        List<LogRecord> records = captureLogs(() -> validator().validateAtBoot());
+
+        assertTrue(records.stream().anyMatch(r -> r.getMessage() != null
+                        && r.getMessage().contains("persistent")
+                        && r.getParameters() != null
+                        && r.getParameters().length == 2
+                        && String.valueOf(r.getParameters()[0]).contains("sqs=hybrid")
+                        && String.valueOf(r.getParameters()[1]).contains(root.toString())),
+                "expected a boot log announcing persistent mode with the effective path, got: " + records);
+    }
+
+    private static List<LogRecord> captureLogs(Runnable action) {
+        java.util.logging.Logger julLogger =
+                java.util.logging.Logger.getLogger(PersistentPathValidator.class.getName());
+        julLogger.setLevel(Level.ALL);
+        List<LogRecord> records = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(Level.ALL);
+        julLogger.addHandler(handler);
+        try {
+            action.run();
+        } finally {
+            julLogger.removeHandler(handler);
+        }
+        return records;
     }
 }

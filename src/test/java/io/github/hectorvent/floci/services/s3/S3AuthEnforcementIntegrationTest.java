@@ -1,14 +1,22 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testutil.S3RequestSigner;
+import io.restassured.specification.RequestSpecification;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URI;
 import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -23,12 +31,16 @@ import javax.crypto.spec.SecretKeySpec;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
 @TestProfile(S3AuthEnforcementIntegrationTest.S3AuthProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class S3AuthEnforcementIntegrationTest {
+
+    @Inject
+    IamService iamService;
 
     private static final String PUBLIC_BUCKET = "auth-public-bucket";
     private static final String PRIVATE_BUCKET = "auth-private-bucket";
@@ -47,6 +59,7 @@ class S3AuthEnforcementIntegrationTest {
     private static final String BYPASS_BUCKET = "auth-bypass-governance-bucket";
     private static final String BYPASS_KEY = "bypass-target.txt";
     private static final String CONDITIONAL_DENY_ACL_BUCKET = "auth-conditional-deny-acl-bucket";
+    private static final String BUCKET_CONFIG_BUCKET = "auth-bucket-config-bucket";
     private static final String PUBLIC_KEY = "public.txt";
     private static final String PRIVATE_KEY = "private.txt";
     private static final String ERROR_KEY = "error.html";
@@ -59,18 +72,18 @@ class S3AuthEnforcementIntegrationTest {
             .withZone(ZoneOffset.UTC)
             .format(Instant.now());
     private static final String SIGNING_DATE = SIGNING_TIMESTAMP.substring(0, 8);
-    private static final String LOCAL_AUTH_HEADER = authorizationHeader("test");
-    private static final String BAD_AUTH_HEADER = authorizationHeader("bad-key");
-    private static final String ACCOUNT_SHAPED_AUTH_HEADER = authorizationHeader("123456789012");
+    private static final S3RequestSigner LOCAL_SIGNER = S3RequestSigner.signedAs("test", "test");
+    private static final S3RequestSigner BAD_KEY_SIGNER = S3RequestSigner.signedAs("bad-key", "bad-secret");
+    private static final S3RequestSigner ACCOUNT_SHAPED_SIGNER = S3RequestSigner.signedAs("123456789012", "test");
 
     @Test
     @Order(1)
     void createBucketsAndObjects() {
-        given().when().put("/" + PUBLIC_BUCKET).then().statusCode(200);
-        given().when().put("/" + PRIVATE_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + PUBLIC_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + PRIVATE_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("public body")
         .when()
             .put("/" + PUBLIC_BUCKET + "/" + PUBLIC_KEY)
@@ -78,7 +91,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("private body")
         .when()
             .put("/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY)
@@ -86,6 +99,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicReadPolicy(PUBLIC_BUCKET))
         .when()
@@ -154,7 +168,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(6)
     void signedRequestWithBadAccessKeyCannotUsePublicAccess() {
         given()
-            .header("Authorization", BAD_AUTH_HEADER)
+            .filter(BAD_KEY_SIGNER)
         .when()
             .get("/" + PUBLIC_BUCKET + "/" + PUBLIC_KEY)
         .then()
@@ -166,7 +180,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(7)
     void signedRequestWithAccountShapedAccessKeyCannotReadPrivateObject() {
         given()
-            .header("Authorization", ACCOUNT_SHAPED_AUTH_HEADER)
+            .filter(ACCOUNT_SHAPED_SIGNER)
         .when()
             .get("/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY)
         .then()
@@ -210,7 +224,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(10)
     void signedRequestWithLocalAccessKeyCanReadPrivateObject() {
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY)
         .then()
@@ -240,10 +254,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(12)
     void websiteRootAuthorizesIndexObjectReadNotBucketList() {
-        given().when().put("/" + WEBSITE_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + WEBSITE_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .contentType("text/html")
             .body("<html>index</html>")
         .when()
@@ -252,6 +266,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/xml")
             .body(websiteConfiguration())
         .when()
@@ -260,6 +275,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicGetObjectPolicy(WEBSITE_BUCKET))
         .when()
@@ -287,10 +303,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(13)
     void websiteRootUsesErrorDocumentForDeniedIndexObject() {
-        given().when().put("/" + WEBSITE_ERROR_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + WEBSITE_ERROR_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .contentType("text/html")
             .body("<html>private index</html>")
         .when()
@@ -299,7 +315,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .contentType("text/html")
             .body("<html>denied</html>")
         .when()
@@ -308,6 +324,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/xml")
             .body(websiteConfiguration(ERROR_KEY))
         .when()
@@ -316,6 +333,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicGetObjectPolicy(WEBSITE_ERROR_BUCKET, ERROR_KEY))
         .when()
@@ -337,10 +355,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(14)
     void bucketAclPublicReadAllowsUnsignedList() {
-        given().when().put("/" + BUCKET_ACL_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + BUCKET_ACL_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("listed")
         .when()
             .put("/" + BUCKET_ACL_BUCKET + "/" + ACL_KEY)
@@ -348,6 +366,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/xml")
             .body(publicReadAcl())
         .when()
@@ -366,10 +385,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(15)
     void explicitBucketPolicyDenyOverridesPublicObjectAcl() {
-        given().when().put("/" + DENY_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + DENY_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .header("x-amz-acl", "public-read")
             .body("denied")
         .when()
@@ -378,6 +397,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(denyGetObjectPolicy(DENY_BUCKET))
         .when()
@@ -439,14 +459,14 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(403);
 
         given()
-            .header("Authorization", BAD_AUTH_HEADER)
+            .filter(BAD_KEY_SIGNER)
         .when()
             .head("/" + PUBLIC_BUCKET)
         .then()
             .statusCode(403);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .head("/" + PRIVATE_BUCKET)
         .then()
@@ -466,7 +486,7 @@ class S3AuthEnforcementIntegrationTest {
             .body("Error.Code", equalTo("AccessDenied"));
 
         given()
-            .header("Authorization", BAD_AUTH_HEADER)
+            .filter(BAD_KEY_SIGNER)
             .contentType("application/xml")
             .body(selectRequest())
         .when()
@@ -479,9 +499,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(20)
     void missingObjectRequiresListBucketToReturnNoSuchKey() {
-        given().when().put("/" + GET_ONLY_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + GET_ONLY_BUCKET).then().statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicGetObjectPolicy(GET_ONLY_BUCKET))
         .when()
@@ -507,9 +528,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(21)
     void versionedObjectReadRequiresGetObjectVersion() {
-        given().when().put("/" + VERSION_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + VERSION_BUCKET).then().statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/xml")
             .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
         .when()
@@ -518,7 +540,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         String versionId = given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("versioned body")
         .when()
             .put("/" + VERSION_BUCKET + "/" + VERSION_KEY)
@@ -527,6 +549,7 @@ class S3AuthEnforcementIntegrationTest {
             .extract().header("x-amz-version-id");
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicObjectActionPolicy(VERSION_BUCKET, "s3:GetObject"))
         .when()
@@ -542,6 +565,7 @@ class S3AuthEnforcementIntegrationTest {
             .body("Error.Code", equalTo("AccessDenied"));
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicObjectActionPolicy(VERSION_BUCKET, "s3:GetObjectVersion"))
         .when()
@@ -698,10 +722,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(29)
     void unsignedRequestCannotPutObject() {
-        given().when().put("/" + WRITE_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + WRITE_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("signed body")
         .when()
             .put("/" + WRITE_BUCKET + "/" + WRITE_KEY)
@@ -717,7 +741,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("AccessDenied"));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + WRITE_BUCKET + "/" + ANON_WRITE_KEY)
         .then()
@@ -735,7 +759,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("AccessDenied"));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + WRITE_BUCKET + "/" + WRITE_KEY)
         .then()
@@ -743,7 +767,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(equalTo("signed body"));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .delete("/" + WRITE_BUCKET + "/" + WRITE_KEY)
         .then()
@@ -754,7 +778,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(31)
     void signedRequestWithBadAccessKeyCannotWriteObject() {
         given()
-            .header("Authorization", BAD_AUTH_HEADER)
+            .filter(BAD_KEY_SIGNER)
             .body("bad key body")
         .when()
             .put("/" + WRITE_BUCKET + "/" + ANON_WRITE_KEY)
@@ -763,7 +787,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("InvalidAccessKeyId"));
 
         given()
-            .header("Authorization", BAD_AUTH_HEADER)
+            .filter(BAD_KEY_SIGNER)
         .when()
             .delete("/" + WRITE_BUCKET + "/" + ANON_WRITE_KEY)
         .then()
@@ -774,9 +798,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(32)
     void bucketPolicyCanExplicitlyAllowAnonymousWrite() {
-        given().when().put("/" + PUBLIC_WRITE_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + PUBLIC_WRITE_BUCKET).then().statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicObjectActionPolicy(PUBLIC_WRITE_BUCKET, "s3:PutObject"))
         .when()
@@ -792,6 +817,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicObjectActionPolicy(PUBLIC_WRITE_BUCKET, "s3:DeleteObject"))
         .when()
@@ -810,7 +836,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(33)
     void unsignedRequestCannotWriteObjectSubresources() {
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("subresource body")
         .when()
             .put("/" + WRITE_BUCKET + "/subresource.txt")
@@ -872,7 +898,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("AccessDenied"));
 
         String uploadId = given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .post("/" + WRITE_BUCKET + "/multipart.txt?uploads")
         .then()
@@ -888,7 +914,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("AccessDenied"));
 
         String eTag = given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("part data")
         .when()
             .put("/" + WRITE_BUCKET + "/multipart.txt?uploadId=" + uploadId + "&partNumber=1")
@@ -913,7 +939,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("AccessDenied"));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .contentType("application/xml")
             .body(completeMultipartBody(eTag))
         .when()
@@ -935,7 +961,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(35)
     void unsignedRequestCannotCopyObject() {
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("copy source body")
         .when()
             .put("/" + WRITE_BUCKET + "/copy-source.txt")
@@ -951,7 +977,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("AccessDenied"));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .header("x-amz-copy-source", "/" + WRITE_BUCKET + "/copy-source.txt")
         .when()
             .put("/" + WRITE_BUCKET + "/copy-dest.txt")
@@ -963,7 +989,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(36)
     void batchDeleteObjectsDeniesUnauthorizedKeysButAllowsAuthorized() {
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("batch a")
         .when()
             .put("/" + WRITE_BUCKET + "/batch-a.txt")
@@ -971,7 +997,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("batch b")
         .when()
             .put("/" + WRITE_BUCKET + "/batch-b.txt")
@@ -998,7 +1024,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(not(containsString("<Deleted>")));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + WRITE_BUCKET + "/batch-a.txt")
         .then()
@@ -1006,7 +1032,7 @@ class S3AuthEnforcementIntegrationTest {
             .body(equalTo("batch a"));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .contentType("application/xml")
             .body(deleteXml)
         .when()
@@ -1021,7 +1047,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(37)
     void batchDeleteObjectsWithUnknownAccessKeyFailsWholeRequest() {
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("bad-key batch a")
         .when()
             .put("/" + WRITE_BUCKET + "/bad-key-batch-a.txt")
@@ -1035,7 +1061,7 @@ class S3AuthEnforcementIntegrationTest {
                 """;
 
         given()
-            .header("Authorization", BAD_AUTH_HEADER)
+            .filter(BAD_KEY_SIGNER)
             .contentType("application/xml")
             .body(deleteXml)
         .when()
@@ -1045,7 +1071,7 @@ class S3AuthEnforcementIntegrationTest {
             .body("Error.Code", equalTo("InvalidAccessKeyId"));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + WRITE_BUCKET + "/bad-key-batch-a.txt")
         .then()
@@ -1059,10 +1085,10 @@ class S3AuthEnforcementIntegrationTest {
         // Per AWS's ACL docs, a bucket-ACL WRITE grant to a non-owner (like AllUsers) "denies
         // non-owners the ability to overwrite or delete existing objects" -- it only lets them
         // create new ones.
-        given().when().put("/" + PUBLIC_WRITE_ACL_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + PUBLIC_WRITE_ACL_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .header("x-amz-acl", "public-read-write")
         .when()
             .put("/" + PUBLIC_WRITE_ACL_BUCKET + "?acl")
@@ -1077,7 +1103,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + PUBLIC_WRITE_ACL_BUCKET + "/" + ANON_WRITE_KEY)
         .then()
@@ -1103,10 +1129,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(39)
     void explicitPolicyDenyOverridesPublicWriteAcl() {
-        given().when().put("/" + DENY_WRITE_ACL_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + DENY_WRITE_ACL_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .header("x-amz-acl", "public-read-write")
         .when()
             .put("/" + DENY_WRITE_ACL_BUCKET + "?acl")
@@ -1114,6 +1140,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(denyObjectActionPolicy(DENY_WRITE_ACL_BUCKET, "s3:PutObject"))
         .when()
@@ -1148,7 +1175,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(40)
     void publicWriteAclDoesNotAuthorizeObjectSubresources() {
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("subresource body")
         .when()
             .put("/" + PUBLIC_WRITE_ACL_BUCKET + "/acl-subresource.txt")
@@ -1177,9 +1204,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(41)
     void deleteObjectPolicyGrantDoesNotAuthorizeVersionedDelete() {
-        given().when().put("/" + DELETE_VERSION_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + DELETE_VERSION_BUCKET).then().statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/xml")
             .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
         .when()
@@ -1188,7 +1216,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         String versionId = given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("versioned delete target")
         .when()
             .put("/" + DELETE_VERSION_BUCKET + "/" + VERSION_KEY)
@@ -1197,6 +1225,7 @@ class S3AuthEnforcementIntegrationTest {
             .extract().header("x-amz-version-id");
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicObjectActionPolicy(DELETE_VERSION_BUCKET, "s3:DeleteObject"))
         .when()
@@ -1221,10 +1250,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(42)
     void deleteObjectDoesNotBypassGovernanceRetentionWithoutDistinctPermission() {
-        given().when().put("/" + BYPASS_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + BYPASS_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("locked candidate")
         .when()
             .put("/" + BYPASS_BUCKET + "/" + BYPASS_KEY)
@@ -1232,6 +1261,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicObjectActionPolicy(BYPASS_BUCKET, "s3:DeleteObject"))
         .when()
@@ -1248,6 +1278,7 @@ class S3AuthEnforcementIntegrationTest {
             .body("Error.Code", equalTo("AccessDenied"));
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(deleteAndBypassGovernancePolicy(BYPASS_BUCKET))
         .when()
@@ -1283,10 +1314,10 @@ class S3AuthEnforcementIntegrationTest {
         // Floci has no request context to evaluate a Condition against, so a conditional Deny
         // is treated as applying (fail closed) -- consistent with S3PublicAccessEvaluatorTest's
         // conditionalDenyFailsClosedAndOverridesAllow, this must also override the ACL fallback.
-        given().when().put("/" + CONDITIONAL_DENY_ACL_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + CONDITIONAL_DENY_ACL_BUCKET).then().statusCode(200);
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .header("x-amz-acl", "public-read-write")
         .when()
             .put("/" + CONDITIONAL_DENY_ACL_BUCKET + "?acl")
@@ -1294,6 +1325,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(conditionalDenyObjectActionPolicy(CONDITIONAL_DENY_ACL_BUCKET, "s3:PutObject"))
         .when()
@@ -1313,9 +1345,10 @@ class S3AuthEnforcementIntegrationTest {
     @Test
     @Order(44)
     void batchDeleteObjectsPolicyGrantDoesNotAuthorizeVersionedDelete() {
-        given().when().put("/" + BATCH_DELETE_VERSION_BUCKET).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).when().put("/" + BATCH_DELETE_VERSION_BUCKET).then().statusCode(200);
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/xml")
             .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
         .when()
@@ -1324,7 +1357,7 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(200);
 
         String versionId = given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
             .body("versioned batch delete target")
         .when()
             .put("/" + BATCH_DELETE_VERSION_BUCKET + "/" + VERSION_KEY)
@@ -1333,6 +1366,7 @@ class S3AuthEnforcementIntegrationTest {
             .extract().header("x-amz-version-id");
 
         given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicObjectActionPolicy(BATCH_DELETE_VERSION_BUCKET, "s3:DeleteObject"))
         .when()
@@ -1357,12 +1391,82 @@ class S3AuthEnforcementIntegrationTest {
             .body(not(containsString("<Deleted>")));
 
         given()
-            .header("Authorization", LOCAL_AUTH_HEADER)
+            .filter(LOCAL_SIGNER)
         .when()
             .get("/" + BATCH_DELETE_VERSION_BUCKET + "?versions&prefix=" + VERSION_KEY)
         .then()
             .statusCode(200)
             .body(containsString("<VersionId>" + versionId + "</VersionId>"));
+    }
+
+    @Test
+    @Order(45)
+    void batchDeleteBypassPermissionOnlyAppliesToGovernanceLockedEntries() {
+        String bucket = "auth-batch-bypass-scope-bucket";
+        String unlockedKey = "unlocked.txt";
+        String lockedKey = "locked.txt";
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+            .body("unlocked")
+        .when()
+            .put("/" + bucket + "/" + unlockedKey)
+        .then()
+            .statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2030-01-01T00:00:00Z")
+            .body("locked")
+        .when()
+            .put("/" + bucket + "/" + lockedKey)
+        .then()
+            .statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+            .contentType("application/json")
+            .body(publicObjectActionPolicy(bucket, "s3:DeleteObject"))
+        .when()
+            .put("/" + bucket + "?policy")
+        .then()
+            .statusCode(200);
+
+        String deleteXml = """
+                <Delete>
+                  <Object><Key>%s</Key></Object>
+                  <Object><Key>%s</Key></Object>
+                </Delete>
+                """.formatted(unlockedKey, lockedKey);
+
+        given()
+            .header("x-amz-bypass-governance-retention", "true")
+            .contentType("application/xml")
+            .body(deleteXml)
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Deleted><Key>" + unlockedKey + "</Key>"))
+            .body(containsString("<Error><Key>" + lockedKey + "</Key>"))
+            .body(containsString("<Code>AccessDenied</Code>"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + bucket + "/" + unlockedKey)
+        .then()
+            .statusCode(404);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + bucket + "/" + lockedKey)
+        .then()
+            .statusCode(200)
+            .body(equalTo("locked"));
     }
 
     private static String conditionalDenyObjectActionPolicy(String bucket, String action) {
@@ -1417,13 +1521,555 @@ class S3AuthEnforcementIntegrationTest {
                 """.formatted(bucket, bucket);
     }
 
-    private static String authorizationHeader(String accessKeyId) {
-        return "AWS4-HMAC-SHA256 Credential=" + credential(accessKeyId)
-                + ", SignedHeaders=host;x-amz-date, Signature=test";
-    }
-
     private static String credential(String accessKeyId) {
         return accessKeyId + "/" + SIGNING_DATE + "/us-east-1/s3/aws4_request";
+    }
+
+    @Test
+    @Order(45)
+    void signedRequestWithTemporaryCredentialRequiresIssuedSessionToken() {
+        String accessKeyId = "ASIAS3NORMALREQUEST";
+        String sessionToken = "issued-session-token";
+        iamService.registerSession(
+                accessKeyId,
+                "temp-key-material",
+                sessionToken,
+                null,
+                Instant.now().plusSeconds(3600),
+                null);
+        String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
+
+        given().filter(S3RequestSigner.signedAs(accessKeyId, "temp-key-material", sessionToken))
+                .when().get(path).then().statusCode(200).body(equalTo("private body"));
+
+        given().filter(S3RequestSigner.signedAs(accessKeyId, "temp-key-material"))
+                .when().get(path).then().statusCode(403).body(containsString("InvalidAccessKeyId"));
+
+        given().filter(S3RequestSigner.signedAs(accessKeyId, "temp-key-material", "other-session-token"))
+                .when().get(path).then().statusCode(403).body(containsString("InvalidAccessKeyId"));
+    }
+
+    @Test
+    @Order(46)
+    void unsignedRequestCannotCreateOrDeleteBucket() {
+        given()
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .filter(BAD_KEY_SIGNER)
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET)
+        .then()
+            .statusCode(403)
+            .body(containsString("InvalidAccessKeyId"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .head("/" + BUCKET_CONFIG_BUCKET)
+        .then()
+            .statusCode(404);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .delete("/" + BUCKET_CONFIG_BUCKET)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .filter(BAD_KEY_SIGNER)
+        .when()
+            .delete("/" + BUCKET_CONFIG_BUCKET)
+        .then()
+            .statusCode(403)
+            .body(containsString("InvalidAccessKeyId"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .head("/" + BUCKET_CONFIG_BUCKET)
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(47)
+    void unsignedRequestCannotRewriteBucketPolicyToExposePrivateObject() {
+        given()
+            .filter(LOCAL_SIGNER)
+            .body("secret data")
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "/" + PRIVATE_KEY)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET_CONFIG_BUCKET + "/" + PRIVATE_KEY)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .contentType("application/json")
+            .body(publicGetObjectPolicy(BUCKET_CONFIG_BUCKET))
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+        .when()
+            .get("/" + BUCKET_CONFIG_BUCKET + "/" + PRIVATE_KEY)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchBucketPolicy"));
+
+        given()
+        .when()
+            .delete("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+    }
+
+    @Test
+    @Order(48)
+    void unsignedRequestCannotWriteBucketSubresources() {
+        for (String subresource : new String[] {
+                "acl", "cors", "lifecycle", "versioning", "website", "notification", "logging",
+                "encryption", "publicAccessBlock", "ownershipControls", "requestPayment", "tagging",
+                "accelerate", "replication", "object-lock", "metrics&id=anon"}) {
+            given()
+            .when()
+                .put("/" + BUCKET_CONFIG_BUCKET + "?" + subresource)
+            .then()
+                .statusCode(403)
+                .body(containsString("AccessDenied"));
+        }
+        for (String subresource : new String[] {
+                "cors", "lifecycle", "website", "encryption", "publicAccessBlock",
+                "ownershipControls", "tagging", "replication", "metrics&id=anon"}) {
+            given()
+            .when()
+                .delete("/" + BUCKET_CONFIG_BUCKET + "?" + subresource)
+            .then()
+                .statusCode(403)
+                .body(containsString("AccessDenied"));
+        }
+
+        given()
+            .filter(BAD_KEY_SIGNER)
+            .contentType("application/xml")
+            .body("<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag></TagSet></Tagging>")
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?tagging")
+        .then()
+            .statusCode(403)
+            .body(containsString("InvalidAccessKeyId"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + BUCKET_CONFIG_BUCKET + "?tagging")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Key>k</Key>")));
+    }
+
+    @Test
+    @Order(49)
+    void bucketPolicyCanExplicitlyAllowAnonymousBucketConfigWrite() {
+        given()
+            .filter(LOCAL_SIGNER)
+            .contentType("application/json")
+            .body(publicBucketActionPolicy(BUCKET_CONFIG_BUCKET, "s3:PutBucketTagging"))
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/xml")
+            .body("<Tagging><TagSet><Tag><Key>anon</Key><Value>granted</Value></Tag></TagSet></Tagging>")
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?tagging")
+        .then()
+            .statusCode(204);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + BUCKET_CONFIG_BUCKET + "?tagging")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>anon</Key>"));
+
+        given()
+            .contentType("application/xml")
+            .body("<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin>"
+                    + "<AllowedMethod>GET</AllowedMethod></CORSRule></CORSConfiguration>")
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?cors")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .delete("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(50)
+    void bucketPolicyCannotGrantAnonymousBucketPolicyWrites() {
+        String selfGrantingPolicy = """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy"],
+                    "Resource": "arn:aws:s3:::%s"
+                  }
+                }
+                """.formatted(BUCKET_CONFIG_BUCKET);
+        given()
+            .filter(LOCAL_SIGNER)
+            .contentType("application/json")
+            .body(selfGrantingPolicy)
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body(publicGetObjectPolicy(BUCKET_CONFIG_BUCKET))
+        .when()
+            .put("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+        .when()
+            .delete("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(200)
+            .body(containsString("s3:DeleteBucketPolicy"))
+            .body(not(containsString("s3:GetObject")));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .delete("/" + BUCKET_CONFIG_BUCKET + "?policy")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(51)
+    void forgedHeaderSignatureIsRejected() throws Exception {
+        String key = "forged-signature.txt";
+
+        given()
+            .filter(LOCAL_SIGNER.withSignature("deadbeef"))
+            .body("forged")
+        .when()
+            .put("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(403)
+            .body(containsString("SignatureDoesNotMatch"));
+
+        given()
+            .filter(S3RequestSigner.signedAs("test", "not-the-secret"))
+            .body("wrong secret")
+        .when()
+            .put("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(403)
+            .body(containsString("SignatureDoesNotMatch"));
+
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
+                    + "/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef")
+            .header("x-amz-date", SIGNING_TIMESTAMP)
+            .header("x-amz-content-sha256", sha256Hex("forged"))
+            .body("forged")
+        .when()
+            .put("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(403)
+            .body(containsString("SignatureDoesNotMatch"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(52)
+    void headerSignatureMustBindHostAndPayload() throws Exception {
+        String key = "bound-signature.txt";
+
+        given()
+            .filter(LOCAL_SIGNER.withoutSignedHost())
+            .body("unbound host")
+        .when()
+            .put("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(403)
+            .body(containsString("SignatureDoesNotMatch"));
+
+        given()
+            .filter(LOCAL_SIGNER.withContentSha256(sha256Hex("the body that was signed")))
+            .body("a different body")
+        .when()
+            .put("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(400)
+            .body(containsString("XAmzContentSHA256Mismatch"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(404);
+
+        given()
+            .filter(LOCAL_SIGNER.withContentSha256("UNSIGNED-PAYLOAD"))
+            .body("unsigned payload is allowed")
+        .when()
+            .put("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(200);
+
+        // The AWS CLI sends bucket configuration bodies and put-object --body without a
+        // Content-Type (RestAssured always adds one, hence the raw client); the declared hash
+        // must still be checked against the bytes that arrived.
+        byte[] suspend = "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>"
+                .getBytes(StandardCharsets.UTF_8);
+        assertThat(putWithoutContentType(WRITE_BUCKET + "?versioning", suspend, LOCAL_SIGNER).statusCode(),
+                equalTo(200));
+        HttpResponse<String> mismatch = putWithoutContentType(WRITE_BUCKET + "?versioning", suspend,
+                LOCAL_SIGNER.withContentSha256(sha256Hex("something else")));
+        assertThat(mismatch.statusCode(), equalTo(400));
+        assertThat(mismatch.body(), containsString("XAmzContentSHA256Mismatch"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + WRITE_BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .body(equalTo("unsigned payload is allowed"));
+    }
+
+    @Test
+    @Order(53)
+    void headerSignatureRequiresFreshDateAndContentHash() throws Exception {
+        String path = "/" + PRIVATE_BUCKET + "/" + PRIVATE_KEY;
+
+        given()
+            .filter(LOCAL_SIGNER.signedAt(Instant.now().minusSeconds(20 * 60)))
+        .when()
+            .get(path)
+        .then()
+            .statusCode(403)
+            .body(containsString("RequestTimeTooSkewed"));
+
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
+                    + "/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
+            .header("x-amz-date", SIGNING_TIMESTAMP)
+        .when()
+            .get(path)
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"))
+            .body(containsString("x-amz-content-sha256"));
+
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
+                    + "/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
+            .header("x-amz-content-sha256", sha256Hex(""))
+        .when()
+            .get(path)
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"))
+            .body(containsString("valid Date or x-amz-date"));
+
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
+                    + "/us-east-1/s3/aws4_request")
+            .header("x-amz-date", SIGNING_TIMESTAMP)
+            .header("x-amz-content-sha256", sha256Hex(""))
+        .when()
+            .get(path)
+        .then()
+            .statusCode(400)
+            .body(containsString("AuthorizationHeaderMalformed"));
+
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/" + SIGNING_DATE
+                    + "/us-east-1/sqs/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc")
+            .header("x-amz-date", SIGNING_TIMESTAMP)
+            .header("x-amz-content-sha256", sha256Hex(""))
+        .when()
+            .get(path)
+        .then()
+            .statusCode(400)
+            .body(containsString("AuthorizationHeaderMalformed"));
+    }
+
+    @Test
+    @Order(54)
+    void presignedPutCorsPreflightSkipsOnlyPreflightSignatureValidation() {
+        String bucket = "auth-presigned-cors-" + Long.toUnsignedString(System.nanoTime(), 36);
+        String key = "upload.txt";
+        String path = "/" + bucket + "/" + key;
+        String signature = presignedSignature("PUT", path, "test", "test", "3600");
+        String tamperedSignature = signature.substring(0, signature.length() - 1)
+                + (signature.endsWith("0") ? "1" : "0");
+        String corsConfiguration = """
+                <CORSConfiguration>
+                  <CORSRule>
+                    <AllowedOrigin>https://app.example.com</AllowedOrigin>
+                    <AllowedMethod>PUT</AllowedMethod>
+                    <AllowedHeader>content-type</AllowedHeader>
+                    <MaxAgeSeconds>600</MaxAgeSeconds>
+                  </CORSRule>
+                </CORSConfiguration>
+                """;
+
+        try {
+            given()
+                .filter(LOCAL_SIGNER)
+            .when()
+                .put("/" + bucket)
+            .then()
+                .statusCode(200);
+
+            given()
+                .filter(LOCAL_SIGNER)
+                .contentType("application/xml")
+                .body(corsConfiguration)
+            .when()
+                .put("/" + bucket + "?cors")
+            .then()
+                .statusCode(200);
+
+            presignedRequest(signature)
+                .header("Origin", "https://app.example.com")
+                .header("Access-Control-Request-Method", "PUT")
+                .header("Access-Control-Request-Headers", "content-type")
+            .when()
+                .options(path)
+            .then()
+                .statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo("https://app.example.com"))
+                .header("Access-Control-Allow-Methods", containsString("PUT"))
+                .header("Access-Control-Allow-Headers", equalTo("content-type"))
+                .header("Access-Control-Max-Age", equalTo("600"));
+
+            // OPTIONS alone is not a CORS preflight and must not turn a PUT signature into a
+            // general authentication bypass.
+            presignedRequest(signature)
+            .when()
+                .options(path)
+            .then()
+                .statusCode(403)
+                .body(containsString("SignatureDoesNotMatch"));
+
+            // Origin without Access-Control-Request-Method is not a preflight either.
+            presignedRequest(signature)
+                .header("Origin", "https://app.example.com")
+            .when()
+                .options(path)
+            .then()
+                .statusCode(403)
+                .body(containsString("SignatureDoesNotMatch"));
+
+            presignedRequest(tamperedSignature)
+                .header("Origin", "https://app.example.com")
+                .contentType("text/plain")
+                .body("tampered")
+            .when()
+                .put(path)
+            .then()
+                .statusCode(403)
+                .body(containsString("SignatureDoesNotMatch"));
+
+            presignedRequest(signature)
+                .header("Origin", "https://app.example.com")
+                .contentType("text/plain")
+                .body("uploaded")
+            .when()
+                .put(path)
+            .then()
+                .statusCode(200)
+                .header("Access-Control-Allow-Origin", equalTo("https://app.example.com"));
+        } finally {
+            given().filter(LOCAL_SIGNER).when().delete(path);
+            given().filter(LOCAL_SIGNER).when().delete("/" + bucket);
+        }
+    }
+
+    private static RequestSpecification presignedRequest(String signature) {
+        return given()
+                .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+                .queryParam("X-Amz-Credential", credential("test"))
+                .queryParam("X-Amz-Date", SIGNING_TIMESTAMP)
+                .queryParam("X-Amz-Expires", "3600")
+                .queryParam("X-Amz-SignedHeaders", "host")
+                .queryParam("X-Amz-Signature", signature);
+    }
+
+    private static HttpResponse<String> putWithoutContentType(String pathAndQuery, byte[] body,
+                                                              S3RequestSigner signer) throws Exception {
+        URI uri = URI.create("http://localhost:" + io.restassured.RestAssured.port + "/" + pathAndQuery);
+        HttpRequest.Builder request = HttpRequest.newBuilder(uri)
+                .PUT(HttpRequest.BodyPublishers.ofByteArray(body));
+        signer.headersFor("PUT", uri, body).forEach(request::header);
+        return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private static String presignedSignature(String method, String path,
@@ -1553,6 +2199,20 @@ class S3AuthEnforcementIntegrationTest {
                   }
                 }
                 """.formatted(action, bucket, key);
+    }
+
+    private static String publicBucketActionPolicy(String bucket, String action) {
+        return """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": "%s",
+                    "Resource": "arn:aws:s3:::%s"
+                  }
+                }
+                """.formatted(action, bucket);
     }
 
     private static String denyGetObjectPolicy(String bucket) {

@@ -87,7 +87,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
     private static final Map<String, String> SERVICE_LINKED_ROLE_NAMES = Map.of(
             "autoscaling.amazonaws.com", "AutoScaling",
-            "cloud9.amazonaws.com", "AWSCloud9"
+            "cloud9.amazonaws.com", "AWSCloud9",
+            "ram.amazonaws.com", "ResourceAccessManager"
     );
     private static final String AMAZONAWS_DOMAIN = ".amazonaws.com";
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
@@ -275,8 +276,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Map<String, IamPolicy> catalog = new LinkedHashMap<>();
         for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
             String arn = def.arn();
+            // The bundled document is the policy's current default version, served under the
+            // version id AWS actually reports for it (v3 for AmazonS3ReadOnlyAccess, v1 for
+            // AdministratorAccess) so GetPolicy/ListPolicyVersions match a real account.
+            // Superseded versions are not bundled, so they resolve to NoSuchEntity.
+            Instant now = Instant.now();
+            Instant updateDate = def.updateDate() != null ? def.updateDate() : now;
+            Instant createDate = def.createDate() != null ? def.createDate() : updateDate;
+            PolicyVersion defaultVersion = new PolicyVersion(
+                    def.defaultVersionId(), def.document(), true, updateDate);
             catalog.put(arn, new IamPolicy("ANPA" + randomId(16), def.name(), def.path(), arn,
-                    def.description(), def.document()));
+                    def.description(), defaultVersion, createDate, updateDate));
         }
         return catalog;
     }
@@ -1921,8 +1931,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
-     * Stores an assumed-role session including the temporary secret access key so that
-     * {@link #findSecretKey(String)} can resolve it for RDS/ElastiCache IAM token validation.
+     * Stores an assumed-role session including the temporary secret access key. Token-aware
+     * authentication paths use the overload that also records the session token.
      */
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
                                 java.time.Instant expiration, String sessionPolicyDocument) {
@@ -2175,6 +2185,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return Optional.empty();
             }
             String roleArn = session.getRoleArn();
+            if (roleArn == null) {
+                return Optional.empty();
+            }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
             return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString());

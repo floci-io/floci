@@ -42,6 +42,12 @@ on:
       jvm-digest-ref:
         description: Immutable JVM image reference
         value: ${{ jobs.publish.outputs.jvm-digest-ref }}
+      cedar-ref:
+        description: Commit-tagged Cedar sidecar image reference
+        value: ${{ jobs.publish.outputs.cedar-ref }}
+      cedar-digest-ref:
+        description: Immutable Cedar sidecar image reference
+        value: ${{ jobs.publish.outputs.cedar-digest-ref }}
       native-ref:
         description: Commit-tagged native image reference when publish-native is true
         value: ${{ jobs.publish.outputs.native-ref }}
@@ -259,6 +265,8 @@ jobs:
       compat-digest-ref: ${{ steps.provenance.outputs.compat-digest-ref }}
       jvm-ref: ${{ steps.provenance.outputs.jvm-ref }}
       jvm-digest-ref: ${{ steps.provenance.outputs.jvm-digest-ref }}
+      cedar-ref: ${{ steps.provenance.outputs.cedar-ref }}
+      cedar-digest-ref: ${{ steps.provenance.outputs.cedar-digest-ref }}
       native-ref: ${{ steps.provenance.outputs.native-ref }}
       native-digest-ref: ${{ steps.provenance.outputs.native-digest-ref }}
 
@@ -334,6 +342,29 @@ jobs:
           cache-from: type=gha,scope=floci-jvm
           cache-to: type=gha,scope=floci-jvm,mode=max
 
+      - name: Build and publish Cedar sidecar image
+        id: cedar
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source-date-epoch }}
+        with:
+          context: .
+          file: sidecars/cedar/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.image-tag }}-cedar
+          labels: |
+            org.opencontainers.image.version=${{ needs.prepare.outputs.product-version }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.source-sha }}
+            org.opencontainers.image.vcs-ref=${{ needs.prepare.outputs.source-sha }}
+            org.opencontainers.image.created=${{ steps.metadata.outputs.created }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            version=${{ needs.prepare.outputs.product-version }}
+            build-date=${{ steps.metadata.outputs.created }}
+            vcs-ref=${{ needs.prepare.outputs.source-sha }}
+          cache-from: type=gha,scope=floci-cedar
+          cache-to: type=gha,scope=floci-cedar,mode=max
+
       - name: Build and publish native image
         id: native
         if: inputs.publish-native
@@ -390,6 +421,7 @@ jobs:
       - name: Record image provenance
         id: provenance
         env:
+          CEDAR_DIGEST: ${{ steps.cedar.outputs.digest }}
           COMPAT_DIGEST: ${{ steps.compat.outputs.digest }}
           CREATED: ${{ steps.metadata.outputs.created }}
           IMAGE: ${{ needs.prepare.outputs.image }}
@@ -408,6 +440,8 @@ jobs:
         run: |
           jvm_ref="$IMAGE:$IMAGE_TAG"
           jvm_digest_ref="$IMAGE@$JVM_DIGEST"
+          cedar_ref="$IMAGE:$IMAGE_TAG-cedar"
+          cedar_digest_ref="$IMAGE@$CEDAR_DIGEST"
           native_ref="$IMAGE:$IMAGE_TAG-native"
           compat_ref="$IMAGE:$IMAGE_TAG-native-compat"
           native_digest_ref="$IMAGE@$NATIVE_DIGEST"
@@ -427,7 +461,10 @@ jobs:
             --arg jvmRef "$jvm_ref" \
             --arg jvmDigest "$JVM_DIGEST" \
             --arg jvmDigestRef "$jvm_digest_ref" \
-            '{source: {sha: $sourceSha, requestedRef: $requestedSourceRef, repository: $repository}, workflow: {runId: $runId, attempt: $runAttempt, url: $runUrl}, created: $created, imageTag: $imageTag, productVersion: $productVersion, images: {jvm: {ref: $jvmRef, digest: $jvmDigest, digestRef: $jvmDigestRef, dockerfile: "docker/Dockerfile"}}, platforms: ["linux/amd64", "linux/arm64"]}' \
+            --arg cedarRef "$cedar_ref" \
+            --arg cedarDigest "$CEDAR_DIGEST" \
+            --arg cedarDigestRef "$cedar_digest_ref" \
+            '{source: {sha: $sourceSha, requestedRef: $requestedSourceRef, repository: $repository}, workflow: {runId: $runId, attempt: $runAttempt, url: $runUrl}, created: $created, imageTag: $imageTag, productVersion: $productVersion, images: {jvm: {ref: $jvmRef, digest: $jvmDigest, digestRef: $jvmDigestRef, dockerfile: "docker/Dockerfile"}, cedar: {ref: $cedarRef, digest: $cedarDigest, digestRef: $cedarDigestRef, dockerfile: "sidecars/cedar/Dockerfile"}}, platforms: ["linux/amd64", "linux/arm64"]}' \
             > floci-image-provenance.json
 
           if [[ "$PUBLISH_NATIVE" == "true" ]]; then
@@ -447,6 +484,8 @@ jobs:
           {
             echo "jvm-ref=$jvm_ref"
             echo "jvm-digest-ref=$jvm_digest_ref"
+            echo "cedar-ref=$cedar_ref"
+            echo "cedar-digest-ref=$cedar_digest_ref"
             if [[ "$PUBLISH_NATIVE" == "true" ]]; then
               echo "native-ref=$native_ref"
               echo "native-digest-ref=$native_digest_ref"
@@ -464,6 +503,7 @@ jobs:
             echo "| Image tag | Immutable digest reference |"
             echo "| --- | --- |"
             echo "| \`$jvm_ref\` | \`$jvm_digest_ref\` |"
+            echo "| \`$cedar_ref\` | \`$cedar_digest_ref\` |"
             if [[ "$PUBLISH_NATIVE" == "true" ]]; then
               echo "| \`$native_ref\` | \`$native_digest_ref\` |"
               echo "| \`$compat_ref\` | \`$compat_digest_ref\` |"

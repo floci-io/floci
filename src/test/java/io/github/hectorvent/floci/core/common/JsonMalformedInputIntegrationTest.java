@@ -97,6 +97,92 @@ class JsonMalformedInputIntegrationTest {
             .statusCode(200);
     }
 
+    // ── Dispatcher: the body must be a JSON object; no body at all is the wire form of "no input" ──
+
+    @Test
+    void emptyBodyOnJson11IsReadAsEmptyInput() {
+        req(JSON_1_1, "TrentService.ListKeys", "")
+        .when().post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void whitespaceOnlyBodyOnJson11IsReadAsEmptyInput() {
+        req(JSON_1_1, "TrentService.ListKeys", " \n ")
+        .when().post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void emptyBodyOnJson11NoInputOperationBehavesLikeEmptyObject() {
+        // The awsJson1_1 protocol requires services to accept no payload for operations that
+        // define no input, so an empty body must be answered exactly like {}.
+        int statusWithEmptyObject = req(JSON_1_1, "AWSOrganizationsV20161128.DescribeOrganization", "{}")
+                .when().post("/")
+                .then().extract().statusCode();
+
+        req(JSON_1_1, "AWSOrganizationsV20161128.DescribeOrganization", "")
+        .when().post("/")
+        .then()
+            .statusCode(statusWithEmptyObject)
+            .body("__type", not(equalTo("SerializationException")));
+    }
+
+    @Test
+    void emptyBodyOnJson10IsReadAsEmptyInput() {
+        req(JSON_1_0, "DynamoDB_20120810.ListTables", "")
+        .when().post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void jsonNullBodyOnJson11IsSerializationException() {
+        req(JSON_1_1, "TrentService.ListKeys", "null")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    void arrayBodyOnJson11IsSerializationException() {
+        req(JSON_1_1, "TrentService.ListKeys", "[]")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    void scalarBodyOnJson11IsSerializationException() {
+        req(JSON_1_1, "TrentService.ListKeys", "\"ListKeys\"")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    void jsonNullBodyOnJson10IsSerializationException() {
+        req(JSON_1_0, "DynamoDB_20120810.ListTables", "null")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    void arrayBodyOnJson10IsSerializationException() {
+        req(JSON_1_0, "DynamoDB_20120810.ListTables", "[]")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
     // ── KMS: base64 blob fields ──
 
     @Test

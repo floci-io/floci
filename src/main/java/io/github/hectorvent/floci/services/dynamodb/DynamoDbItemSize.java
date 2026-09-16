@@ -38,7 +38,7 @@ final class DynamoDbItemSize {
         return total;
     }
 
-    private static int attributeValueSize(JsonNode attr) {
+    static int attributeValueSize(JsonNode attr) {
         if (attr == null) return 0;
         if (attr.has("S")) return utf8Length(attr.get("S").asText());
         if (attr.has("N")) return attr.get("N").asText().length();

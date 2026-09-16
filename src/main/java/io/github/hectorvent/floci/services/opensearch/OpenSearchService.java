@@ -347,7 +347,11 @@ public class OpenSearchService implements ResourceProvider {
     }
 
     private void startReadinessPoller() {
-        poller.scheduleWithFixedDelay(() -> {
+        poller.scheduleWithFixedDelay(this::pollReadiness, 3, 3, TimeUnit.SECONDS);
+    }
+
+    void pollReadiness() {
+        try {
             for (Domain domain : allDomains()) {
                 if (domain.isProcessing() && domainManager.isReady(domain)) {
                     domain.setProcessing(false);
@@ -356,7 +360,9 @@ public class OpenSearchService implements ResourceProvider {
                             domain.getDomainName(), domain.getEndpoint());
                 }
             }
-        }, 3, 3, TimeUnit.SECONDS);
+        } catch (RuntimeException e) {
+            LOG.warn("OpenSearch readiness poll failed; will retry", e);
+        }
     }
 
     private List<Domain> allDomains() {

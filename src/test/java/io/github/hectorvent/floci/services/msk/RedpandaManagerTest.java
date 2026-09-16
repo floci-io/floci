@@ -38,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -102,6 +103,7 @@ class RedpandaManagerTest {
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
         lenient().when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
         lenient().when(regionResolver.getAccountId()).thenReturn("000000000000");
+        lenient().when(regionResolver.getDefaultAccountId()).thenReturn("000000000000");
     }
 
     @AfterEach
@@ -228,6 +230,69 @@ class RedpandaManagerTest {
                         "io.floci.account", "000000000000",
                         "io.floci.region", "us-east-1"),
                 specCaptor.getValue().labels());
+    }
+
+    @Test
+    void startContainerUsesAccountAwareLogsAndScopedHostPath() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(54321);
+
+        ContainerInfo info = new ContainerInfo("container-789",
+                Map.of(KAFKA_PORT, new EndpointInfo("localhost", 54321)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        manager.startContainer(newCluster());
+
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("container-789"),
+                eq("/aws/msk/cluster/test-cluster"), eq("log-stream"), eq("us-east-1"),
+                eq("msk:test-cluster"));
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        String hostPath = specCaptor.getValue().binds().get(0).getPath().toString();
+        assertTrue(hostPath.contains("000000000000"));
+        assertTrue(hostPath.contains("us-east-1"));
+    }
+
+    @Test
+    void startContainerReusesLegacyHostPathWhenScopedPathIsMissing() throws Exception {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(54321);
+        Files.createDirectories(tempDir.resolve("msk").resolve("test-cluster"));
+
+        MskCluster cluster = newCluster();
+        cluster.setResourceRegion(null);
+        ContainerInfo info = new ContainerInfo("container-legacy",
+                Map.of(KAFKA_PORT, new EndpointInfo("localhost", 54321)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        assertEquals(tempDir.resolve("msk").resolve("test-cluster").toAbsolutePath(),
+                Path.of(specCaptor.getValue().binds().get(0).getPath()).toAbsolutePath());
+    }
+
+    @Test
+    void startContainerDoesNotReuseLegacyPathForScopedCluster() throws Exception {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(54321);
+        Files.createDirectories(tempDir.resolve("msk").resolve("test-cluster"));
+
+        MskCluster cluster = newCluster();
+        cluster.setResourceRegion("us-east-1");
+        ContainerInfo info = new ContainerInfo("container-scoped",
+                Map.of(KAFKA_PORT, new EndpointInfo("localhost", 54321)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        assertTrue(Path.of(specCaptor.getValue().binds().get(0).getPath()).toAbsolutePath()
+                .toString().contains("000000000000"));
+        assertTrue(Path.of(specCaptor.getValue().binds().get(0).getPath()).toAbsolutePath()
+                .toString().contains("us-east-1"));
     }
 
     @Test

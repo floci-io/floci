@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -12,6 +13,13 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.SecurityGroupFirewallManager;
+import io.github.hectorvent.floci.services.ec2.SecurityGroupNftCompiler;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
@@ -34,14 +42,19 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Manages Docker container lifecycle for ECS tasks.
@@ -62,6 +75,9 @@ public class EcsContainerManager {
     private final SsmService ssmService;
     private final SecretsManagerService secretsManagerService;
     private final EcrRegistryManager ecrRegistryManager;
+    private final HostVolumePolicy hostVolumePolicy;
+    private Ec2Service ec2Service;
+    private SecurityGroupFirewallManager firewallManager;
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -73,7 +89,27 @@ public class EcsContainerManager {
                                LaunchedContainerAwsEnv awsEnv,
                                SsmService ssmService,
                                SecretsManagerService secretsManagerService,
-                               EcrRegistryManager ecrRegistryManager) {
+                               EcrRegistryManager ecrRegistryManager,
+                               HostVolumePolicy hostVolumePolicy,
+                               Ec2Service ec2Service,
+                               SecurityGroupFirewallManager firewallManager) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver,
+                awsEnv, ssmService, secretsManagerService, ecrRegistryManager, hostVolumePolicy);
+        this.ec2Service = ec2Service;
+        this.firewallManager = firewallManager;
+    }
+
+    public EcsContainerManager(ContainerBuilder containerBuilder,
+                               ContainerLifecycleManager lifecycleManager,
+                               ContainerLogStreamer logStreamer,
+                               ContainerDetector containerDetector,
+                               EmulatorConfig config,
+                               RegionResolver regionResolver,
+                               LaunchedContainerAwsEnv awsEnv,
+                               SsmService ssmService,
+                               SecretsManagerService secretsManagerService,
+                               EcrRegistryManager ecrRegistryManager,
+                               HostVolumePolicy hostVolumePolicy) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -83,6 +119,7 @@ public class EcsContainerManager {
         this.awsEnv = awsEnv;
         this.ssmService = ssmService;
         this.secretsManagerService = secretsManagerService;
+        this.hostVolumePolicy = hostVolumePolicy;
         this.ecrRegistryManager = ecrRegistryManager;
     }
 
@@ -125,6 +162,9 @@ public class EcsContainerManager {
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
 
+        PreparedNetwork protectedNetwork = prepareNetwork(task, taskDef, region, taskId);
+
+        try {
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
             String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
 
@@ -146,6 +186,10 @@ public class EcsContainerManager {
                     .withLogRotation()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                             "ecs", taskId, regionResolver.getAccountId(), region));
+            if (protectedNetwork != null) {
+                specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
+                specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+            }
 
             // Add memory limit if specified
             if (def.getMemory() != null) {
@@ -160,7 +204,7 @@ public class EcsContainerManager {
             // local Docker host (#1778) — awsvpc mappings always get a dynamic
             // host port in native mode, or expose-only in Docker mode where ECS
             // consumers reach containers via the docker network IP.
-            if (def.getPortMappings() != null) {
+            if (protectedNetwork == null && def.getPortMappings() != null) {
                 boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
                 boolean publishToHost = !containerDetector.isRunningInContainer();
                 for (PortMapping pm : def.getPortMappings()) {
@@ -198,37 +242,20 @@ public class EcsContainerManager {
                     String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
                     EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
                     if (sourcePath != null) {
-                        // Host volume: bind-mount an absolute path on the Docker host.
+                        // Host volume: bind-mount an absolute path on the Docker host. Re-validate
+                        // here (not just at RegisterTaskDefinition time): this narrows the window
+                        // between validation and mount for a symlink swapped in afterward, and
+                        // also covers task definitions persisted before this policy existed. A
+                        // rejection is not swallowed, it propagates out of startTask and is
+                        // surfaced by EcsService as the task's stoppedReason.
+                        hostVolumePolicy.validate(sourcePath);
                         if (mp.readOnly()) {
                             specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
                         } else {
                             specBuilder.withBind(sourcePath, mp.containerPath());
                         }
                     } else if (efs != null) {
-                        // EFS volume: a shared local Docker named volume, so every task
-                        // container that mounts the same EFS file system shares persistent
-                        // storage — the local stand-in for an EFS mount (Docker cannot mount
-                        // a real EFS file system). Initialise the volume root's POSIX ownership
-                        // to emulate the EFS access point's RootDirectory.CreationInfo, so a
-                        // non-root task image USER can write to it (no-op unless configured).
-                        var efsCfg = config.storage().efs();
-                        lifecycleManager.ensureSharedVolume(efsVolumeName(efs.fileSystemId()),
-                                efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
-                                efsCfg.initImage());
-                        specBuilder.withNamedVolume(efsVolumeName(efs.fileSystemId()),
-                                mp.containerPath(), mp.readOnly());
-                        // Emulate the access point's PosixUser: run the container under the
-                        // configured uid[:gid] and/or add the supplementary group, so a non-root
-                        // image can read/write the shared volume owned by ownerUid/ownerGid.
-                        efsCfg.mountUser().ifPresent(u -> {
-                            // Validate the access point PosixUser format before applying it.
-                            if (!u.matches("^\\d+(:\\d+)?$")) {
-                                throw new IllegalArgumentException(
-                                        "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + u);
-                            }
-                            specBuilder.withUser(u);
-                        });
-                        efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
+                        mountEfsVolume(specBuilder, efs, mp);
                     } else {
                         LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
                                 mp.sourceVolume(), def.getName());
@@ -245,7 +272,8 @@ public class EcsContainerManager {
             LOG.infov("Created ECS container {0} for task {1} container {2}", dockerId, taskId, def.getName());
 
             // Resolve network bindings for ECS-specific model
-            List<NetworkBinding> networkBindings = resolveNetworkBindings(dockerId, def);
+            List<NetworkBinding> networkBindings = resolveNetworkBindings(
+                    protectedNetwork == null ? dockerId : protectedNetwork.namespace().helperId(), def);
 
             // Build ECS container model
             Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
@@ -263,14 +291,82 @@ public class EcsContainerManager {
                 logStreamsByContainerId.put(dockerId, logHandle);
             }
         }
+        } catch (Exception e) {
+            for (String dockerId : containerIds.values()) {
+                lifecycleManager.stopAndRemove(dockerId, null);
+            }
+            if (protectedNetwork != null) {
+                firewallManager.unregister(protectedNetwork.eni().getNetworkInterfaceId());
+                ec2Service.deleteNetworkInterface(region, protectedNetwork.eni().getNetworkInterfaceId());
+            }
+            throw e;
+        }
 
         task.setContainers(runtimeContainers);
         task.setLastStatus(TaskStatus.RUNNING.name());
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
-        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId);
+        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
+                protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region);
     }
+
+    private PreparedNetwork prepareNetwork(EcsTask task, TaskDefinition definition, String region, String taskId) {
+        if (definition.getNetworkMode() != NetworkMode.awsvpc
+                || firewallManager == null || !firewallManager.enabled()) {
+            return null;
+        }
+        AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
+                : task.getNetworkConfiguration().getAwsvpcConfiguration();
+        if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
+            throw new AwsException("ClientException", "awsvpc tasks require a subnet", 400);
+        }
+        NetworkInterface eni = ec2Service.createNetworkInterface(region, awsvpc.getSubnets().getFirst(),
+                "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
+        String eniId = eni.getNetworkInterfaceId();
+        SecurityGroupFirewallManager.Namespace namespace = null;
+        try {
+            Map<Integer, Integer> bindings = new LinkedHashMap<>();
+            if (!containerDetector.isRunningInContainer()) {
+                for (ContainerDefinition container : definition.getContainerDefinitions()) {
+                    if (container.getPortMappings() != null) {
+                        container.getPortMappings().forEach(port -> bindings.put(port.containerPort(), 0));
+                    }
+                }
+            }
+            namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
+                    region, config.services().ecs().dockerNetwork(), bindings);
+            List<String> groupIds = eni.getGroups().stream().map(g -> g.getGroupId()).toList();
+            List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
+            if (groups.size() != groupIds.size()) {
+                throw new IllegalStateException("An ECS task security group could not be resolved");
+            }
+            Map<String, List<String>> prefixLists = new LinkedHashMap<>();
+            for (SecurityGroup group : groups) {
+                Stream.concat(group.getIpPermissions().stream(),
+                                group.getIpPermissionsEgress().stream())
+                        .flatMap(permission -> permission.getPrefixListIds().stream())
+                        .map(reference -> reference.getPrefixListId())
+                        .distinct()
+                        .forEach(id -> prefixLists.put(id, ec2Service.getManagedPrefixListEntries(region, id, null)
+                                .stream().map(PrefixListEntry::getCidr).toList()));
+            }
+            firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
+                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(),
+                    namespace.transportAddress(), Set.copyOf(groupIds), groups), namespace.helperId(), prefixLists);
+            task.setNetworkInterfaceId(eniId);
+            task.setPrivateIpAddress(eni.getPrivateIpAddress());
+            return new PreparedNetwork(eni, namespace);
+        } catch (Exception e) {
+            if (namespace != null) {
+                lifecycleManager.removeIfExists(namespace.helperId());
+            }
+            ec2Service.deleteNetworkInterface(region, eniId);
+            throw e;
+        }
+    }
+
+    private record PreparedNetwork(NetworkInterface eni, SecurityGroupFirewallManager.Namespace namespace) {}
 
     /**
      * Stops and removes all Docker containers for a task.
@@ -290,6 +386,7 @@ public class EcsContainerManager {
         for (String dockerId : handle.getContainerIds().values()) {
             lifecycleManager.stopAndRemove(dockerId, null);
         }
+        cleanupProtectedNetwork(handle);
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
     }
@@ -335,7 +432,15 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        cleanupProtectedNetwork(handle);
         return exitCodes;
+    }
+
+    private void cleanupProtectedNetwork(EcsTaskHandle handle) {
+        if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
+            firewallManager.unregister(handle.getNetworkInterfaceId());
+            ec2Service.deleteNetworkInterface(handle.getRegion(), handle.getNetworkInterfaceId());
+        }
     }
 
     private void finalizeLogStream(EcsTaskHandle handle, String dockerId) {
@@ -421,7 +526,7 @@ public class EcsContainerManager {
         String value;
         String jsonKey = null;
         try {
-            if (valueFrom != null && valueFrom.startsWith("arn:aws:secretsmanager:")) {
+            if (AwsArnUtils.isArnFor(valueFrom, "secretsmanager")) {
                 // The valueFrom may carry the ECS selector suffix
                 // (:json-key:version-stage:version-id); the parser strips it so the base ARN
                 // reaches SecretsManagerService intact, keeping its partial-ARN fallback working.
@@ -479,7 +584,7 @@ public class EcsContainerManager {
     }
 
     private String ssmParameterName(String valueFrom) {
-        if (valueFrom != null && valueFrom.startsWith("arn:aws:ssm:")) {
+        if (AwsArnUtils.isArnFor(valueFrom, "ssm")) {
             int parameterMarker = valueFrom.indexOf(":parameter");
             if (parameterMarker >= 0) {
                 return valueFrom.substring(parameterMarker + ":parameter".length());
@@ -593,9 +698,75 @@ public class EcsContainerManager {
         return slash >= 0 ? taskArn.substring(slash + 1) : taskArn;
     }
 
-    /** Name of the local Docker named volume backing an EFS file system. */
-    private static String efsVolumeName(String fileSystemId) {
-        return "floci-efs-" + fileSystemId;
+    /**
+     * Materialises an EFS-configured task volume as a shared local Docker named volume scoped to
+     * both the file system and the mount's effective root (see {@link #efsVolumeName}), then
+     * initialises the volume root's POSIX ownership to emulate the EFS access point's
+     * RootDirectory.CreationInfo (no-op unless {@code floci.storage.efs} configures owner/permissions)
+     * and applies the configured PosixUser emulation (uid[:gid] and/or supplementary group) so a
+     * non-root task image can read/write the shared volume.
+     */
+    private void mountEfsVolume(ContainerBuilder.Builder specBuilder, EfsVolumeConfiguration efs, MountPoint mp) {
+        String efsVolumeName = efsVolumeName(efs.fileSystemId(), efs.accessPointId(), efs.rootDirectory());
+        var efsCfg = config.storage().efs();
+        lifecycleManager.ensureSharedVolume(efsVolumeName,
+                efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
+                efsCfg.initImage());
+        specBuilder.withNamedVolume(efsVolumeName, mp.containerPath(), mp.readOnly());
+        efsCfg.mountUser().ifPresent(u -> {
+            if (!u.matches("^\\d+(:\\d+)?$")) {
+                throw new IllegalArgumentException(
+                        "floci.storage.efs.mount-user must be \"uid\" or \"uid:gid\": " + u);
+            }
+            specBuilder.withUser(u);
+        });
+        efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
+    }
+
+    /**
+     * Name of the local Docker named volume backing an EFS-configured task volume, scoped to
+     * both the file system and the mount's effective root so two mounts of the same file system
+     * with a different {@code rootDirectory}/{@code accessPointId} land on isolated volumes
+     * while identical configurations keep sharing one, matching how AWS scopes an EFS mount to
+     * a subpath. When {@code accessPointId} is set, it determines the effective root: on real
+     * AWS an access point's own root directory takes precedence over any {@code rootDirectory}
+     * on the volume.
+     */
+    static String efsVolumeName(String fileSystemId, String accessPointId, String rootDirectory) {
+        if (accessPointId != null && !accessPointId.isBlank()) {
+            return "floci-efs-" + fileSystemId + "-" + sha256Hex("accessPoint:" + accessPointId);
+        }
+        String normalizedRoot = normalizeRootDirectory(rootDirectory);
+        if ("/".equals(normalizedRoot)) {
+            return "floci-efs-" + fileSystemId;
+        }
+        return "floci-efs-" + fileSystemId + "-" + sha256Hex(normalizedRoot);
+    }
+
+    /**
+     * Canonicalises a {@code rootDirectory} path so syntactically different but equivalent
+     * paths (missing/blank, a missing leading slash, repeated slashes, a trailing slash) resolve
+     * to the same effective root instead of silently splitting shared storage across local
+     * volumes that AWS would treat as identical.
+     */
+    private static String normalizeRootDirectory(String rootDirectory) {
+        if (rootDirectory == null || rootDirectory.isBlank()) {
+            return "/";
+        }
+        String collapsed = rootDirectory.trim().replaceAll("/+", "/");
+        if (collapsed.length() > 1 && collapsed.endsWith("/")) {
+            collapsed = collapsed.substring(0, collapsed.length() - 1);
+        }
+        return collapsed.startsWith("/") ? collapsed : "/" + collapsed;
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required but not available", e);
+        }
     }
 
     // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability

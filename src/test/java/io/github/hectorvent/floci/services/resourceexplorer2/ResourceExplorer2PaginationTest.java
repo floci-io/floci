@@ -7,6 +7,7 @@ import java.util.Base64;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Unit tests for the pure pagination math behind ListResources/Search:
@@ -63,9 +64,15 @@ class ResourceExplorer2PaginationTest {
     }
 
     @Test
-    void garbageTokenDecodesToZeroOffset() {
-        var b = ResourceExplorer2Service.pageBounds(50, 10, "!!!not-base64!!!", CAP);
-        assertEquals(0, b.start());
+    void garbageTokenIsRejected() {
+        assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> ResourceExplorer2Service.pageBounds(50, 10, "!!!not-base64!!!", CAP));
+    }
+
+    @Test
+    void negativeTokenOffsetIsRejected() {
+        assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                () -> ResourceExplorer2Service.pageBounds(50, 10, token(-1), CAP));
     }
 
     @Test

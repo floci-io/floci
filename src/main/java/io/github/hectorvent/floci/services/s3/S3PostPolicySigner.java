@@ -25,12 +25,12 @@ final class S3PostPolicySigner {
     private S3PostPolicySigner() {
     }
 
-    static Optional<String> resolveSecretKey(IamService iamService, String accessKeyId) {
+    static Optional<String> resolveSecretKey(IamService iamService, String accessKeyId, String sessionToken) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return Optional.of(LEGACY_SECRET_KEY);
         }
         if (iamService != null) {
-            return iamService.findSecretKey(accessKeyId);
+            return iamService.findSecretKey(accessKeyId, sessionToken);
         }
         return Optional.empty();
     }

@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import javax.crypto.Cipher;
 import javax.crypto.Mac;
+import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
@@ -32,11 +33,18 @@ import java.security.spec.PSSParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -67,6 +75,22 @@ class KmsServiceTest {
         );
     }
 
+    /**
+     * Round-trip in a non-commercial partition. The key ARN a GovCloud or China deployment mints
+     * carries that partition, and resolving a key by ARN used to test
+     * {@code startsWith("arn:aws:kms:")}, so the emulator refused to find a key it had just
+     * created and reported NotFound for a key that exists.
+     */
+    @Test
+    void resolvesAKeyByItsOwnArnInAnyPartition() {
+        for (String region : List.of("us-gov-west-1", "cn-north-1", "us-east-1")) {
+            KmsKey created = kmsService.createKey("partition key", region);
+
+            assertEquals(created.getKeyId(), kmsService.describeKey(created.getArn(), region).getKeyId(),
+                    "key in " + region + " was not resolvable by its own ARN " + created.getArn());
+        }
+    }
+
     @Test
     void createKeyAndDescribe() {
         KmsKey key = kmsService.createKey("my test key", REGION);
@@ -76,6 +100,31 @@ class KmsServiceTest {
         assertTrue(key.getArn().contains("key/"));
         assertEquals("my test key", key.getDescription());
         assertEquals("Enabled", key.getKeyState());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "cn-fake-1"})
+    void createSm2KeyReportsRegionUnsupportedOperation(String region) {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                kmsService.createKey(null, "SIGN_VERIFY", "SM2", null, Map.of(), region));
+
+        assertEquals("UnsupportedOperationException", exception.getErrorCode());
+        assertEquals("KeySpec SM2 is not supported in this Region", exception.getMessage());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cn-north-1", "cn-northwest-1"})
+    void createSm2KeySucceedsInChinaRegions(String region) {
+        KmsKey key = kmsService.createKey(null, "SIGN_VERIFY", "SM2", null, Map.of(), region);
+        byte[] message = "SM2 regional signing".getBytes(StandardCharsets.UTF_8);
+        byte[] signature = kmsService.sign(key.getKeyId(), message, "SM2DSA", region);
+
+        assertEquals(KmsKeySpec.SM2, key.getKeySpec());
+        assertEquals(KmsKeyUsage.SIGN_VERIFY, key.getKeyUsage());
+        assertNotNull(key.getPrivateKeyEncoded());
+        assertNotNull(key.getPublicKeyEncoded());
+        assertTrue(kmsService.verify(key.getKeyId(), message, signature, "SM2DSA", region));
     }
 
     @Test
@@ -2580,6 +2629,306 @@ class KmsServiceTest {
             AwsException ex = assertThrows(AwsException.class, () ->
                     kmsService.getParametersForImport(keyId, "RSA_AES_KEY_WRAP_SHA_256", "RSA_2048", REGION));
             assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        }
+
+        @Test
+        void aSymmetricKeyEncryptsWithTheMaterialThatWasImported() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            byte[] rawMaterial = material(32, (byte) 42);
+            byte[] plaintext = "bring-your-own-key".getBytes(StandardCharsets.UTF_8);
+            importInto(key, rawMaterial, OAEP_SHA_256);
+
+            byte[] envelope = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+            // Open the documented KMS3 envelope with nothing but the imported material: the header
+            // up to and including the 12-byte IV is the AAD (an empty EncryptionContext adds none)
+            // and the 16-byte GCM tag trails the ciphertext.
+            int ivEnd = envelope.length - plaintext.length - 16;
+            byte[] headerAndIv = Arrays.copyOfRange(envelope, 0, ivEnd);
+            byte[] iv = Arrays.copyOfRange(envelope, ivEnd - 12, ivEnd);
+            Cipher aesGcm = Cipher.getInstance("AES/GCM/NoPadding");
+            aesGcm.init(Cipher.DECRYPT_MODE, new SecretKeySpec(rawMaterial, "AES"), new GCMParameterSpec(128, iv));
+            aesGcm.updateAAD(headerAndIv);
+            assertArrayEquals(plaintext, aesGcm.doFinal(Arrays.copyOfRange(envelope, ivEnd, envelope.length)));
+        }
+
+        @Test
+        void legacyImportedSymmetricMaterialIsMigratedToTheEnvelopeBackingKey() {
+            KmsKey key = externalSymmetricKey();
+            byte[] material = material(32, (byte) 11);
+            key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
+            key.setKeyState("Enabled");
+            key.setEnabled(true);
+            key.setBackingKeys(new HashMap<>());
+            key.setCurrentBackingKeyId(null);
+            keyStore.put(REGION + "::" + key.getKeyId(), key);
+
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "legacy-import".getBytes(StandardCharsets.UTF_8), REGION);
+
+            assertArrayEquals("legacy-import".getBytes(StandardCharsets.UTF_8), kmsService.decrypt(ciphertext, REGION));
+            KmsKey migrated = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            assertEquals(1, migrated.getBackingKeys().size());
+            assertNotNull(migrated.getCurrentBackingKeyId());
+        }
+
+        @Test
+        void deletingImportedMaterialLeavesNothingThatCanOpenItsCiphertext() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 42), OAEP_SHA_256);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "bring-your-own-key".getBytes(StandardCharsets.UTF_8), REGION);
+
+            kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.decrypt(ciphertext, REGION));
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptingUnderAKeyWhoseMaterialWasDeletedReportsPendingImport() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            importInto(key, material(32, (byte) 42), OAEP_SHA_256);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "bring-your-own-key".getBytes(StandardCharsets.UTF_8), REGION);
+
+            kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+
+            AwsException ex = assertThrows(AwsException.class, () ->
+                    kmsService.decryptAndResolveKey(ciphertext, Map.of(), REGION, null));
+            assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        }
+
+        @Test
+        void reimportingTheSameMaterialOpensCiphertextMadeBeforeTheDeletion() throws Exception {
+            KmsKey key = externalSymmetricKey();
+            byte[] rawMaterial = material(32, (byte) 42);
+            byte[] plaintext = "bring-your-own-key".getBytes(StandardCharsets.UTF_8);
+            importInto(key, rawMaterial, OAEP_SHA_256);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+            kmsService.deleteImportedKeyMaterial(key.getKeyId(), REGION);
+
+            importInto(key, rawMaterial, OAEP_SHA_256);
+
+            assertArrayEquals(plaintext, kmsService.decrypt(ciphertext, REGION));
+        }
+    }
+
+    /**
+     * The v2 blob ("kms:v2:&lt;keyId&gt;:&lt;nonce&gt;:&lt;contextFingerprint&gt;:&lt;base64(plaintext)&gt;")
+     * carried no real encryption: the payload was plain base64 with no key material involved, so
+     * anyone holding a CiphertextBlob could read the plaintext and a tampered blob still "decrypted".
+     * These tests pin the AES-GCM envelope that replaces it: real per-CMK key material, AEAD binding
+     * of key id / backing key id / EncryptionContext, and rejection of any tampering.
+     */
+    @Nested
+    class EnvelopeEncryptionTests {
+
+        @Test
+        void encryptDoesNotProduceLegacyBase64Blob() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] plaintext = "super-secret-value".getBytes(StandardCharsets.UTF_8);
+
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+            String asText = new String(ciphertext, StandardCharsets.UTF_8);
+            assertFalse(asText.startsWith("kms:"),
+                    "encrypt must not produce the legacy plaintext-revealing blob format");
+            byte[] plaintextBase64 = Base64.getEncoder().encodeToString(plaintext).getBytes(StandardCharsets.UTF_8);
+            assertEquals(-1, indexOf(ciphertext, plaintextBase64),
+                    "ciphertext must not contain the base64 plaintext as a substring");
+        }
+
+        @Test
+        void decryptRoundTripsTheNewEnvelope() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] plaintext = "hello envelope".getBytes(StandardCharsets.UTF_8);
+
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, Map.of("tenant", "1"), REGION);
+
+            assertArrayEquals(plaintext, kmsService.decrypt(ciphertext, Map.of("tenant", "1"), REGION));
+        }
+
+        @Test
+        void decryptWithFlippedTagByteThrowsInvalidCiphertext() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "hello world".getBytes(StandardCharsets.UTF_8), REGION);
+
+            byte[] tampered = ciphertext.clone();
+            tampered[tampered.length - 1] ^= 0x01;
+
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.decrypt(tampered, REGION));
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithFlippedIvByteThrowsInvalidCiphertext() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] plaintext = "hello world".getBytes(StandardCharsets.UTF_8);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+            int gcmTagBytes = 16;
+            int gcmIvBytes = 12;
+            int ivStart = ciphertext.length - gcmIvBytes - (plaintext.length + gcmTagBytes);
+            byte[] tampered = ciphertext.clone();
+            tampered[ivStart] ^= 0x01;
+
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.decrypt(tampered, REGION));
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithCorruptedKeyIdInHeaderThrowsInvalidCiphertextNeverAPlaintext() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] plaintext = "hello world".getBytes(StandardCharsets.UTF_8);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+            // magic(4) + version(1) + keyId length prefix(2) = keyId bytes start at index 7.
+            int keyIdStart = 7;
+            byte[] tampered = ciphertext.clone();
+            tampered[keyIdStart] ^= 0x01;
+
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.decrypt(tampered, REGION));
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptWithCorruptedBackingKeyIdInHeaderThrowsInvalidCiphertext() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "hello world".getBytes(StandardCharsets.UTF_8), REGION);
+
+            int backingKeyIdStart = 4 + 1 + 2 + key.getKeyId().getBytes(StandardCharsets.UTF_8).length + 2;
+            byte[] tampered = ciphertext.clone();
+            tampered[backingKeyIdStart] ^= 0x01;
+
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.decrypt(tampered, REGION));
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void decryptOfTruncatedEnvelopeThrowsInvalidCiphertext() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), "hello world".getBytes(StandardCharsets.UTF_8), REGION);
+
+            byte[] truncated = Arrays.copyOf(ciphertext, ciphertext.length - 20);
+
+            AwsException ex = assertThrows(AwsException.class, () -> kmsService.decrypt(truncated, REGION));
+            assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        }
+
+        @Test
+        void rotateKeyOnDemandKeepsOldCiphertextDecryptableAndMintsANewBackingKey() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            byte[] plaintext = "before-rotation".getBytes(StandardCharsets.UTF_8);
+            byte[] beforeRotation = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+            kmsService.rotateKeyOnDemand(key.getKeyId(), REGION);
+            byte[] afterRotation = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+            assertArrayEquals(plaintext, kmsService.decrypt(beforeRotation, REGION));
+            assertArrayEquals(plaintext, kmsService.decrypt(afterRotation, REGION));
+            assertFalse(Arrays.equals(beforeRotation, afterRotation));
+
+            KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            assertEquals(2, stored.getBackingKeys().size());
+        }
+
+        @Test
+        void concurrentOnDemandRotationsKeepEveryRotation() throws Exception {
+            KmsKey key = kmsService.createKey(null, REGION);
+            int rotationCount = 20;
+            CountDownLatch startGate = new CountDownLatch(1);
+            List<Future<String>> futures = new ArrayList<>();
+
+            try (ExecutorService executor = Executors.newFixedThreadPool(rotationCount)) {
+                for (int i = 0; i < rotationCount; i++) {
+                    futures.add(executor.submit(() -> {
+                        startGate.await();
+                        return kmsService.rotateKeyOnDemand(key.getKeyId(), REGION);
+                    }));
+                }
+                startGate.countDown();
+                for (Future<String> future : futures) {
+                    assertEquals(key.getKeyId(), future.get(10, TimeUnit.SECONDS));
+                }
+            }
+
+            KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            assertEquals(rotationCount, stored.getOnDemandRotationCount());
+            assertEquals(rotationCount + 1, stored.getBackingKeys().size());
+        }
+
+        @Test
+        void legacyKeyWithoutBackingMaterialLazilyGeneratesItOnUse() {
+            KmsKey key = kmsService.createKey(null, REGION);
+            KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            // Simulate a key persisted before this fix: no backing key material on disk.
+            stored.setBackingKeys(new HashMap<>());
+            stored.setCurrentBackingKeyId(null);
+            keyStore.put(REGION + "::" + key.getKeyId(), stored);
+
+            byte[] plaintext = "legacy-key-plaintext".getBytes(StandardCharsets.UTF_8);
+            byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+            assertArrayEquals(plaintext, kmsService.decrypt(ciphertext, REGION));
+
+            KmsKey healed = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            assertNotNull(healed.getCurrentBackingKeyId());
+            assertFalse(healed.getBackingKeys().isEmpty());
+        }
+
+        @Test
+        void concurrentFirstUsesOfALegacyKeyMintExactlyOneBackingKey() throws Exception {
+            KmsKey key = kmsService.createKey(null, REGION);
+            KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+            // Simulate a key persisted before this fix: no backing key material on disk.
+            stored.setBackingKeys(new HashMap<>());
+            stored.setCurrentBackingKeyId(null);
+            keyStore.put(REGION + "::" + key.getKeyId(), stored);
+
+            int threadCount = 12;
+            byte[] plaintext = "concurrent-legacy-plaintext".getBytes(StandardCharsets.UTF_8);
+            CountDownLatch startGate = new CountDownLatch(1);
+            List<Future<byte[]>> futures = new ArrayList<>();
+
+            try (ExecutorService executor = Executors.newFixedThreadPool(threadCount)) {
+                for (int i = 0; i < threadCount; i++) {
+                    futures.add(executor.submit(() -> {
+                        startGate.await();
+                        return kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+                    }));
+                }
+                startGate.countDown();
+
+                List<byte[]> ciphertexts = new ArrayList<>();
+                for (Future<byte[]> future : futures) {
+                    ciphertexts.add(future.get(10, TimeUnit.SECONDS));
+                }
+
+                // Every thread must have healed onto the same backing key: exactly one backing key
+                // was minted for the whole race, never one per racing thread.
+                KmsKey healed = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+                assertNotNull(healed.getCurrentBackingKeyId());
+                assertEquals(1, healed.getBackingKeys().size(),
+                        "concurrent first uses of a legacy key must mint exactly one backing key");
+                assertTrue(healed.getBackingKeys().containsKey(healed.getCurrentBackingKeyId()));
+
+                // Every ciphertext produced under the race, regardless of which thread produced it,
+                // must still decrypt: none of them can have been encrypted under a backing key that
+                // a losing keyStore.put then discarded.
+                for (byte[] ciphertext : ciphertexts) {
+                    assertArrayEquals(plaintext, kmsService.decrypt(ciphertext, REGION));
+                }
+            }
+        }
+
+        private static int indexOf(byte[] haystack, byte[] needle) {
+            outer:
+            for (int i = 0; i <= haystack.length - needle.length; i++) {
+                for (int j = 0; j < needle.length; j++) {
+                    if (haystack[i + j] != needle[j]) {
+                        continue outer;
+                    }
+                }
+                return i;
+            }
+            return -1;
         }
     }
 }

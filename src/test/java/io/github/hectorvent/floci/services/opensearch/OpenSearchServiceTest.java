@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -78,5 +79,23 @@ class OpenSearchServiceTest {
 
         assertFalse(domain.isProcessing());
         verify(domainManager, Mockito.never()).tryStartDomain(any());
+    }
+
+    @Test
+    void readinessPollerContinuesAfterOneReadinessFailure() {
+        when(domainManager.tryStartDomain(any())).thenReturn(true);
+        when(domainManager.isReady(any()))
+                .thenThrow(new RuntimeException("temporary readiness failure"))
+                .thenReturn(true);
+
+        service.createDomain("ready-recovery", "OpenSearch_2.11",
+                null, null, null, "us-east-1");
+
+        service.pollReadiness();
+        assertTrue(service.describeDomain("ready-recovery").isProcessing());
+
+        service.pollReadiness();
+        assertFalse(service.describeDomain("ready-recovery").isProcessing());
+        verify(domainManager, atLeast(2)).isReady(any());
     }
 }

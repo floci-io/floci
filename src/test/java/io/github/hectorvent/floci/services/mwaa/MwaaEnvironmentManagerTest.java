@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.mwaa;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -14,6 +13,7 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Mount;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -27,6 +27,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -41,7 +42,6 @@ class MwaaEnvironmentManagerTest {
 
     private ContainerLifecycleManager lifecycleManager;
     private ContainerDetector containerDetector;
-    private RegionResolver regionResolver;
     private MwaaEnvironmentManager manager;
 
     @BeforeEach
@@ -78,13 +78,14 @@ class MwaaEnvironmentManagerTest {
                 "AWS_ACCESS_KEY_ID=test",
                 "AWS_SECRET_ACCESS_KEY=test",
                 "AWS_ENDPOINT_URL=http://localhost:4566"));
-
-        regionResolver = Mockito.mock(RegionResolver.class);
-        when(regionResolver.getAccountId()).thenReturn("000000000000");
-        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+        when(awsEnv.sdkBaselineEnv(eq("eu-west-1"), any())).thenReturn(List.of(
+                "AWS_DEFAULT_REGION=eu-west-1",
+                "AWS_ACCESS_KEY_ID=test",
+                "AWS_SECRET_ACCESS_KEY=test",
+                "AWS_ENDPOINT_URL=http://localhost:4566"));
 
         manager = new MwaaEnvironmentManager(containerBuilder, lifecycleManager, containerDetector, config,
-                awsEnv, regionResolver);
+                awsEnv);
     }
 
     @SuppressWarnings("unchecked")
@@ -131,7 +132,77 @@ class MwaaEnvironmentManagerTest {
     @Test
     void airflowImageTagSubstitutesTheRequestedVersion() {
         ContainerSpec spec = startAirflowAndCaptureSpec(false);
-        assertEquals("apache/airflow:2.10.5-python3.12", spec.image());
+        // Real Amazon MWAA runs 2.10.x on Python 3.11, not 3.12.
+        assertEquals("apache/airflow:2.10.5-python3.11", spec.image());
+    }
+
+    @Test
+    void pythonTagForMatchesRealMwaasAirflowPythonPairing() {
+        // Every version through 2.10.x runs Python 3.11 on real Amazon MWAA.
+        assertEquals("python3.11", MwaaEnvironmentManager.pythonTagFor("2.7.2"));
+        assertEquals("python3.11", MwaaEnvironmentManager.pythonTagFor("2.8.4"));
+        assertEquals("python3.11", MwaaEnvironmentManager.pythonTagFor("2.9.3"));
+        assertEquals("python3.11", MwaaEnvironmentManager.pythonTagFor("2.10.5"));
+        // 2.11.0 onward, and every 3.x release, runs Python 3.12.
+        assertEquals("python3.12", MwaaEnvironmentManager.pythonTagFor("2.11.0"));
+        assertEquals("python3.12", MwaaEnvironmentManager.pythonTagFor("2.11.2"));
+        assertEquals("python3.12", MwaaEnvironmentManager.pythonTagFor("3.0.6"));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvTranslatesSectionDotKeyToAirflowDoubleUnderscoreFormat() {
+        assertEquals(List.of("AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=false"),
+                MwaaEnvironmentManager.airflowConfigurationOptionsEnv(
+                        Map.of("core.dags_are_paused_at_creation", "false")));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvSkipsAKeyMissingTheSectionDotKeySeparator() {
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(
+                Map.of("not_dotted", "value")));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvSkipsAnEmptySectionOrKey() {
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(
+                Map.of(".key", "value", "section.", "value")));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvSkipsAnEntryThatWouldOverrideFlociOwnedWiring() {
+        // core.executor -> AIRFLOW__CORE__EXECUTOR, one of Floci's own mandatory (LocalExecutor)
+        // vars. A configuration option request doesn't get to override that.
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(
+                Map.of("core.executor", "CeleryExecutor")));
+    }
+
+    @Test
+    void airflowConfigurationOptionsEnvHandlesANullOrEmptyMap() {
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(null));
+        assertEquals(List.of(), MwaaEnvironmentManager.airflowConfigurationOptionsEnv(Map.of()));
+    }
+
+    @Test
+    void startAirflowContainerAppliesConfiguredAirflowConfigurationOptions() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+        when(lifecycleManager.startCreated(eq("airflow-container-id"), any())).thenReturn(
+                new ContainerInfo("airflow-container-id", Map.of(8080, new EndpointInfo("172.18.0.5", 8080))));
+
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setAirflowConfigurationOptions(Map.of(
+                "core.dags_are_paused_at_creation", "false",
+                "core.executor", "CeleryExecutor"));
+
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null);
+
+        ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(captor.capture());
+        assertTrue(captor.getValue().env().contains("AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=false"));
+        // The colliding entry must not have replaced Floci's own required executor setting.
+        assertTrue(captor.getValue().env().contains("AIRFLOW__CORE__EXECUTOR=LocalExecutor"));
+        assertFalse(captor.getValue().env().contains("AIRFLOW__CORE__EXECUTOR=CeleryExecutor"));
     }
 
     @Test
@@ -155,6 +226,24 @@ class MwaaEnvironmentManagerTest {
         assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://localhost:4566"),
                 "DAG code's own boto3 calls must target Floci, not real AWS");
         assertTrue(spec.env().contains("AWS_DEFAULT_REGION=us-east-1"));
+    }
+
+    @Test
+    void airflowContainerUsesTheEnvironmentRegionForItsOwnAwsSdkCalls() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+        when(lifecycleManager.startCreated(eq("airflow-container-id"), any())).thenReturn(
+                new ContainerInfo("airflow-container-id", Map.of(8080, new EndpointInfo("172.18.0.5", 8080))));
+
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setArn("arn:aws:airflow:eu-west-1:111111111111:environment/my-env");
+
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null);
+
+        ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(captor.capture());
+        assertTrue(captor.getValue().env().contains("AWS_DEFAULT_REGION=eu-west-1"));
     }
 
     @Test
@@ -216,22 +305,39 @@ class MwaaEnvironmentManagerTest {
     }
 
     @Test
-    void containerNamingMatchesThePlan() {
-        assertEquals("floci-mwaa-my-env-db", MwaaEnvironmentManager.dbContainerName(null, "my-env"));
-        assertEquals("floci-mwaa-my-env-airflow", MwaaEnvironmentManager.airflowContainerName(null, "my-env"));
-    }
-
-    @Test
     void containerNamingAppliesTheConfiguredResourceNamespace() {
         EmulatorConfig.DockerConfig dockerConfig = Mockito.mock(EmulatorConfig.DockerConfig.class);
         when(dockerConfig.resourceNamespace()).thenReturn(Optional.of("ns1"));
         EmulatorConfig namespacedConfig = Mockito.mock(EmulatorConfig.class);
         when(namespacedConfig.docker()).thenReturn(dockerConfig);
 
-        assertEquals("floci-ns1-mwaa-my-env-db",
-                MwaaEnvironmentManager.dbContainerName(namespacedConfig, "my-env"));
-        assertEquals("floci-ns1-mwaa-my-env-airflow",
-                MwaaEnvironmentManager.airflowContainerName(namespacedConfig, "my-env"));
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setAccountId("000000000000");
+        environment.setArn("arn:aws:airflow:us-east-1:000000000000:environment/my-env");
+
+        assertEquals("floci-ns1-mwaa-000000000000.us-east-1.my-env-db",
+                MwaaEnvironmentManager.dbContainerName(namespacedConfig, environment));
+        assertEquals("floci-ns1-mwaa-000000000000.us-east-1.my-env-airflow",
+                MwaaEnvironmentManager.airflowContainerName(namespacedConfig, environment));
+    }
+
+    @Test
+    void scopedContainerNamesDifferForSameNameEnvironments() {
+        Environment eastEnvironment = new Environment();
+        eastEnvironment.setName("shared-name");
+        eastEnvironment.setAccountId("111111111111");
+        eastEnvironment.setArn("arn:aws:airflow:us-east-1:111111111111:environment/shared-name");
+
+        Environment westEnvironment = new Environment();
+        westEnvironment.setName("shared-name");
+        westEnvironment.setAccountId("222222222222");
+        westEnvironment.setArn("arn:aws:airflow:eu-west-1:222222222222:environment/shared-name");
+
+        assertNotEquals(MwaaEnvironmentManager.dbContainerName(null, eastEnvironment),
+                MwaaEnvironmentManager.dbContainerName(null, westEnvironment));
+        assertNotEquals(MwaaEnvironmentManager.airflowContainerName(null, eastEnvironment),
+                MwaaEnvironmentManager.airflowContainerName(null, westEnvironment));
     }
 
     @Test
@@ -312,6 +418,90 @@ class MwaaEnvironmentManagerTest {
 
             verify(lifecycleManager).removeIfExists("airflow-container-id");
             verify(lifecycleManager, never()).startCreated(anyString(), any());
+        }
+    }
+
+    /** Crash detection the readiness poller relies on to stop waiting on dead containers, verified
+     *  against a mocked DockerClient (mirrors BatchDockerRunnerTest's deep-stub style). */
+    @Nested
+    class ContainerExitDetection {
+
+        private DockerClient dockerClient;
+
+        @BeforeEach
+        void setUpDockerClient() {
+            dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        }
+
+        private Environment environmentWithContainers(String dbContainerId, String airflowContainerId) {
+            Environment environment = new Environment();
+            environment.setName("my-env");
+            environment.setDbContainerId(dbContainerId);
+            environment.setAirflowContainerId(airflowContainerId);
+            return environment;
+        }
+
+        @Test
+        void reportsNotExitedWhileBothContainersAreStillRunning() {
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
+
+            assertFalse(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
+        }
+
+        @Test
+        void reportsExitedOnceTheAirflowContainerHasStopped() {
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec().getState().getRunning())
+                    .thenReturn(false);
+
+            assertTrue(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
+        }
+
+        @Test
+        void reportsExitedOnceTheSiblingPostgresContainerHasStopped() {
+            // Airflow itself keeps running when Postgres dies underneath it, it just never reports
+            // metadatabase healthy, so this must be detected independently of the Airflow
+            // container's own running state.
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(false);
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
+
+            assertTrue(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
+        }
+
+        @Test
+        void reportsExitedWhenEitherContainerHasBeenRemoved() {
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec())
+                    .thenThrow(new NotFoundException("no such container"));
+
+            assertTrue(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
+        }
+
+        @Test
+        void reportsNotExitedWhenNeitherContainerHasBeenCreatedYet() {
+            assertFalse(manager.hasAnyContainerExited(new Environment()));
+        }
+
+        @Test
+        void reportsNotExitedWhenTheDockerDaemonInspectFailsForAnUnrelatedReason() {
+            // Anything other than NotFoundException is inconclusive, not "the container is gone" -
+            // must not propagate, since the readiness poller shares one loop across every CREATING
+            // environment and a thrown exception here would starve every other environment's check
+            // for this poll tick, not just this one's.
+            when(dockerClient.inspectContainerCmd("db-container-id").exec().getState().getRunning())
+                    .thenReturn(true);
+            when(dockerClient.inspectContainerCmd("airflow-container-id").exec())
+                    .thenThrow(new RuntimeException("docker daemon connection reset"));
+
+            assertFalse(manager.hasAnyContainerExited(environmentWithContainers("db-container-id", "airflow-container-id")));
         }
     }
 }

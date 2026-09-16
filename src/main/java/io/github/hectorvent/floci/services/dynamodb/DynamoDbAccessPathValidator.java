@@ -55,11 +55,12 @@ final class DynamoDbAccessPathValidator {
     static void validateSelection(TableDefinition table, DynamoDbAccessPath accessPath,
                                   String select, String projectionExpression,
                                   JsonNode attributesToGet, JsonNode expressionAttributeNames) {
-        if ("ALL_PROJECTED_ATTRIBUTES".equals(select) && !accessPath.isIndex()) {
-            throw validationException("Select type ALL_PROJECTED_ATTRIBUTES is not supported for query on a table");
-        }
         if (projectionExpression != null && select != null && !"SPECIFIC_ATTRIBUTES".equals(select)) {
-            throw validationException("Cannot use both Select and ProjectionExpression unless Select is SPECIFIC_ATTRIBUTES");
+            throw validationException("Cannot specify the ProjectionExpression when choosing to get "
+                    + ("COUNT".equals(select) ? "only the Count" : select));
+        }
+        if ("ALL_PROJECTED_ATTRIBUTES".equals(select) && !accessPath.isIndex()) {
+            throw validationException("ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName");
         }
         if (attributesToGet != null && select != null && !"SPECIFIC_ATTRIBUTES".equals(select)) {
             throw validationException("Cannot use both Select and AttributesToGet unless Select is SPECIFIC_ATTRIBUTES");
@@ -106,7 +107,14 @@ final class DynamoDbAccessPathValidator {
         Set<String> conditionedAttributes = new HashSet<>();
         Map<String, Boolean> sortKeyEqualities = new HashMap<>();
 
-        for (Expr condition : conditions) {
+        boolean conditionOnNonKeyAttribute = false;
+
+        for (var rawCondition : conditions) {
+            Expr condition = normalizeOperandOrder(rawCondition);
+            if (conditionOperand(condition) instanceof PathOperand(List<String> segments) && segments.size() > 1) {
+                throw new AwsException("ValidationException",
+                        "KeyConditionExpressions cannot have conditions on nested attributes", 400);
+            }
             String attribute = conditionAttribute(condition, names);
             if (attribute != null && !conditionedAttributes.add(attribute)) {
                 throw new AwsException("ValidationException",
@@ -126,7 +134,8 @@ final class DynamoDbAccessPathValidator {
                 }
                 sortKeyEqualities.put(attribute, isEqualityCondition(condition));
             } else {
-                throw new AwsException("ValidationException", "Query key condition not supported", 400);
+                conditionOnNonKeyAttribute = true;
+                continue;
             }
             validateConditionValueTypes(table, attribute, condition, values);
         }
@@ -137,6 +146,9 @@ final class DynamoDbAccessPathValidator {
                     .findFirst().orElseThrow();
             throw new AwsException("ValidationException",
                     "Query condition missed key schema element: " + missing, 400);
+        }
+        if (conditionOnNonKeyAttribute) {
+            throw new AwsException("ValidationException", "Query key condition not supported", 400);
         }
         validateCompositeSortKeyConditions(sortKeys, sortKeyEqualities);
         return partitionKeyValuePlaceholder;
@@ -187,15 +199,39 @@ final class DynamoDbAccessPathValidator {
         return false;
     }
 
-    private static String conditionAttribute(Expr condition, JsonNode names) {
-        Operand operand = switch (condition) {
+    // AWS accepts the value on the left of a sort-key comparison (":lo <= #sk"), which means
+    // the same as "#sk >= :lo".
+    private static Expr normalizeOperandOrder(Expr condition) {
+        if (condition instanceof CompareExpr(Operand left, TokenType op, Operand right)
+                && left instanceof PlaceholderOperand
+                && right instanceof PathOperand) {
+            return new CompareExpr(right, flipComparator(op), left);
+        }
+        return condition;
+    }
+
+    private static TokenType flipComparator(TokenType op) {
+        return switch (op) {
+            case LT -> TokenType.GT;
+            case LE -> TokenType.GE;
+            case GT -> TokenType.LT;
+            case GE -> TokenType.LE;
+            default -> op;
+        };
+    }
+
+    private static Operand conditionOperand(Expr condition) {
+        return switch (condition) {
             case CompareExpr compare -> compare.left();
             case BetweenExpr between -> between.value();
             case FunctionCallExpr function when "begins_with".equals(function.functionName())
                     && !function.args().isEmpty() -> function.args().getFirst();
             default -> null;
         };
-        if (!(operand instanceof PathOperand path) || path.segments().size() != 1) {
+    }
+
+    private static String conditionAttribute(Expr condition, JsonNode names) {
+        if (!(conditionOperand(condition) instanceof PathOperand path) || path.segments().size() != 1) {
             return null;
         }
         return topLevelAttribute(path, names);

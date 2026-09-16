@@ -78,6 +78,8 @@ public interface EmulatorConfig {
 
     DnsConfig dns();
 
+    NetworkConfig network();
+
     AuthConfig auth();
 
     SecurityConfig security();
@@ -91,6 +93,18 @@ public interface EmulatorConfig {
     TlsConfig tls();
 
     ProtocolsConfig protocols();
+
+    interface NetworkConfig {
+        SecurityGroupEnforcementConfig securityGroupEnforcement();
+    }
+
+    interface SecurityGroupEnforcementConfig {
+        @WithDefault("false")
+        boolean enabled();
+
+        @WithDefault("floci/network-helper:local")
+        String helperImage();
+    }
 
     interface ProtocolsConfig {
         /**
@@ -341,6 +355,7 @@ public interface EmulatorConfig {
 
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
+        SageMakerStorageConfig sagemaker();
     }
 
     interface ApsStorageConfig {
@@ -389,7 +404,8 @@ public interface EmulatorConfig {
     interface CloudWatchLogsStorageConfig {
         Optional<String> mode();
 
-        @WithDefault("5000")
+        // Log events are the largest and most write-heavy store, so they flush less often than the rest.
+        @WithDefault("15000")
         long flushIntervalMs();
     }
 
@@ -615,7 +631,15 @@ public interface EmulatorConfig {
         @WithDefault("5000")
         long flushIntervalMs();
     }
+
     interface EfsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface SageMakerStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -691,6 +715,7 @@ public interface EmulatorConfig {
         AppConfigDataServiceConfig appconfigdata();
         EcrServiceConfig ecr();
         ResourceGroupsTaggingServiceConfig tagging();
+        BedrockServiceConfig bedrock();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
         MwaaServiceConfig mwaa();
@@ -721,6 +746,8 @@ public interface EmulatorConfig {
         CostExplorerServiceConfig ce();
         CurServiceConfig cur();
         BcmDataExportsServiceConfig bcmDataExports();
+        OamServiceConfig oam();
+        BcmPricingCalculatorServiceConfig bcmPricingCalculator();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
@@ -728,6 +755,7 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        SageMakerServiceConfig sagemaker();
         LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
@@ -743,28 +771,40 @@ public interface EmulatorConfig {
         NetworkFirewallServiceConfig networkfirewall();
         ServiceCatalogServiceConfig servicecatalog();
         SsoAdminServiceConfig ssoadmin();
+        SsoOidcServiceConfig ssooidc();
         Macie2ServiceConfig macie2();
         AccountServiceConfig account();
         AccessAnalyzerServiceConfig accessanalyzer();
         IdentityStoreServiceConfig identitystore();
         BudgetsServiceConfig budgets();
         Inspector2ServiceConfig inspector2();
+        SecurityHubServiceConfig securityhub();
         DetectiveServiceConfig detective();
         ServiceQuotasServiceConfig servicequotas();
+        VerifiedPermissionsServiceConfig verifiedpermissions();
         RamServiceConfig ram();
         ControlCatalogServiceConfig controlcatalog();
         ControlTowerServiceConfig controltower();
         ConnectServiceConfig connect();
+        AppIntegrationsServiceConfig appintegrations();
         CognitoIdentityServiceConfig cognitoidentity();
+        GlobalAcceleratorServiceConfig globalaccelerator();
+        DataSyncServiceConfig datasync();
 
         ApsServiceConfig aps();
 
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
         CodeGuruReviewerServiceConfig codegurureviewer();
+        MarketplaceServiceConfig marketplace();
     }
 
     interface ConnectServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface AppIntegrationsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -774,9 +814,26 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface GlobalAcceleratorServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface DataSyncServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface SsoAdminServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface SsoOidcServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        Optional<String> localPrincipalId();
     }
 
     interface Macie2ServiceConfig {
@@ -797,6 +854,9 @@ public interface EmulatorConfig {
     interface IdentityStoreServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("floci-scim-token")
+        String scimBearerToken();
     }
 
     interface BudgetsServiceConfig {
@@ -805,6 +865,11 @@ public interface EmulatorConfig {
     }
 
     interface Inspector2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface SecurityHubServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -820,6 +885,11 @@ public interface EmulatorConfig {
     }
 
     interface CodeGuruReviewerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface MarketplaceServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -920,6 +990,17 @@ public interface EmulatorConfig {
     interface ServiceQuotasServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface VerifiedPermissionsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When set, Floci uses this URL and skips Cedar sidecar container management. */
+        Optional<String> cedarUrl();
+
+        @WithDefault("floci/floci:latest-cedar")
+        String cedarImage();
     }
 
     interface RamServiceConfig {
@@ -1083,6 +1164,13 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
     }
 
+    interface SageMakerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        Optional<String> dockerNetwork();
+    }
+
     interface CodeDeployServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1170,6 +1258,21 @@ public interface EmulatorConfig {
     interface ApiGatewayServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Maximum #foreach loop iterations allowed in a single VTL mapping template render, as a
+         *  hard backstop against runaway loops. Env: FLOCI_SERVICES_APIGATEWAY_VTL_MAX_LOOPS */
+        @WithDefault("10000")
+        int vtlMaxLoops();
+
+        /** Maximum rendered output size, in characters, for a single VTL mapping template render.
+         *  Env: FLOCI_SERVICES_APIGATEWAY_VTL_MAX_OUTPUT_CHARS */
+        @WithDefault("1048576")
+        int vtlMaxOutputChars();
+
+        /** Wall-clock execution budget, in milliseconds, for a single VTL mapping template render.
+         *  Env: FLOCI_SERVICES_APIGATEWAY_VTL_TIMEOUT_MILLIS */
+        @WithDefault("5000")
+        long vtlTimeoutMillis();
     }
 
     interface IamServiceConfig {
@@ -1216,6 +1319,31 @@ public interface EmulatorConfig {
 
         @WithDefault("rabbitmq:3-management")
         String defaultImage();
+
+        /**
+         * Host port range the AMQP listener (container port 5672) is published on, one
+         * port per broker. Published in both topologies: no Floci-internal proxy fronts
+         * the broker, so the Docker host-port binding is the only way a client outside
+         * the Docker network (e.g. on the host, with Floci itself containerized) can
+         * reach it (#3240). Env: FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_BASE
+         */
+        @WithDefault("5672")
+        int amqpHostPortBase();
+
+        /** Env: FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_MAX */
+        @WithDefault("5699")
+        int amqpHostPortMax();
+
+        /**
+         * Host port range the RabbitMQ management console (container port 15672) is
+         * published on. Env: FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_BASE
+         */
+        @WithDefault("15672")
+        int consoleHostPortBase();
+
+        /** Env: FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_MAX */
+        @WithDefault("15699")
+        int consoleHostPortMax();
     }
 
     interface KinesisAnalyticsServiceConfig {
@@ -1302,6 +1430,21 @@ public interface EmulatorConfig {
         // Hostname clients use to reach a cluster endpoint. Empty -> resolved from
         // DockerHostResolver (falls back to "localhost").
         Optional<String> endpointHost();
+
+        // Default lifetime for GetClusterCredentials / GetClusterCredentialsWithIAM when
+        // DurationSeconds is omitted. AWS allows 900 to 3600.
+        @WithDefault("900")
+        int defaultCredentialDurationSeconds();
+
+        // Bounds for the per-cluster auth proxy: how long a client has to complete the
+        // startup/auth handshake, how long a backend connect attempt may take, and how many
+        // concurrent connections the proxy accepts before refusing new ones.
+        @WithDefault("10000")
+        int proxyHandshakeTimeoutMillis();
+        @WithDefault("5000")
+        int proxyBackendConnectTimeoutMillis();
+        @WithDefault("100")
+        int proxyMaxConnections();
     }
 
     interface RdsServiceConfig {
@@ -1338,6 +1481,16 @@ public interface EmulatorConfig {
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        // Bounds for the per-instance auth proxy: how long a client has to complete the
+        // startup/auth handshake, how long a backend connect attempt may take, and how many
+        // concurrent connections the proxy accepts before refusing new ones.
+        @WithDefault("10000")
+        int proxyHandshakeTimeoutMillis();
+        @WithDefault("5000")
+        int proxyBackendConnectTimeoutMillis();
+        @WithDefault("100")
+        int proxyMaxConnections();
     }
 
     interface RdsDataServiceConfig {
@@ -1460,6 +1613,14 @@ public interface EmulatorConfig {
         int maxEventsPerQuery();
 
         /**
+         * Upper bound on log events kept across all groups. The store is one JSON document rewritten
+         * in full on every flush, so an unbounded store turns a chatty or retrying Lambda into a
+         * sustained multi-hundred-MB/s disk writer. Oldest events are evicted first once exceeded.
+         */
+        @WithDefault("20000")
+        int maxStoredEvents();
+
+        /**
          * Artificial Logs Insights query completion delay, in milliseconds. With the default 0,
          * queries complete immediately (fast local dev). A positive value emulates the real
          * asynchronous lifecycle — StartQuery → Running → Complete after this delay — which also
@@ -1511,6 +1672,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("0")
         int flushRecordCount();
+
+        /**
+         * S3 bucket used to stage validated NDJSON batches before DuckDB writes
+         * the Parquet object for data-format-converting delivery streams.
+         * Created on first use if it doesn't exist.
+         */
+        @WithDefault("floci-firehose-staging")
+        String stagingBucket();
     }
 
     interface KmsServiceConfig {
@@ -1709,9 +1878,31 @@ public interface EmulatorConfig {
 
         @WithDefault("256")
         int defaultCpuUnits();
+
+        /**
+         * Approved parent directories for task definition host volume bind mounts
+         * (volumes[].host.sourcePath). A sourcePath must resolve under one of these roots.
+         * Empty (the default) rejects every host volume sourcePath unless
+         * {@link #allowUnsafeHostVolumes()} is set, subject to the always-on traversal,
+         * bare-root, and Docker socket blocks below.
+         */
+        Optional<List<String>> hostVolumeRoots();
+
+        /**
+         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes,
+         * allowing any absolute path. Traversal segments, the bare root "/", and the Docker
+         * socket (or any ancestor directory that contains it) are still always rejected.
+         */
+        @WithDefault("false")
+        boolean allowUnsafeHostVolumes();
     }
 
     interface ResourceGroupsTaggingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BedrockServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1873,6 +2064,31 @@ public interface EmulatorConfig {
         /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
         @WithDefault("30")
         int schemaWorkerShutdownTimeoutSeconds();
+
+        /** Maximum #foreach loop iterations allowed in a single VTL resolver template render, as a
+         *  hard backstop against runaway loops. Env: FLOCI_SERVICES_APPSYNC_VTL_MAX_LOOPS */
+        @WithDefault("10000")
+        int vtlMaxLoops();
+
+        /** Maximum rendered output size, in characters, for a single VTL resolver template render.
+         *  Env: FLOCI_SERVICES_APPSYNC_VTL_MAX_OUTPUT_CHARS */
+        @WithDefault("1048576")
+        int vtlMaxOutputChars();
+
+        /** Wall-clock execution budget, in milliseconds, for a single VTL resolver template render.
+         *  Env: FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS */
+        @WithDefault("5000")
+        long vtlTimeoutMillis();
+    }
+
+    interface OamServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BcmPricingCalculatorServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface BcmDataExportsServiceConfig {
@@ -1887,6 +2103,16 @@ public interface EmulatorConfig {
         String emitMode();
     }
 
+    /**
+     * The web console Floci runs as a sidecar. Any console implementing the Floci console
+     * contract works with no configuration beyond {@link #image()}; these keys exist to run one
+     * that deviates from it. See {@code docs/ui/console-contract.md}.
+     *
+     * <p>Every contract key is optional on purpose. "Unset" is what lets Floci fall back to the
+     * image's own {@code io.floci.console.*} labels, then to a built-in profile, then to the
+     * contract defaults, so a value here is only ever needed for a console that describes itself
+     * neither way.
+     */
     interface UiServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1901,21 +2127,78 @@ public interface EmulatorConfig {
         @WithDefault("4500")
         int port();
 
+        /**
+         * Port the console listens on <em>inside</em> its container, published as {@link #port()}.
+         * Env: {@code FLOCI_SERVICES_UI_INTERNAL_PORT}
+         *
+         * <p>Contract default 4500. The console is told the resolved value through {@code PORT},
+         * so this only needs setting for a console with a fixed port of its own that does not
+         * declare it as an {@code io.floci.console.port} label.
+         */
+        OptionalInt internalPort();
+
+        /**
+         * An <em>additional</em> environment variable the resolved Floci endpoint is repeated in.
+         * Env: {@code FLOCI_SERVICES_UI_ENDPOINT_ENV}
+         *
+         * <p>Every console already receives the endpoint as {@code AWS_ENDPOINT_URL} (the contract's
+         * canonical name) and as {@code FLOCI_ENDPOINT}, so this is only for a console that reads
+         * neither. The endpoint's <em>value</em> cannot be set by hand in the containerized case: it
+         * is Floci's own container IP, discovered at start time.
+         */
+        Optional<String> endpointEnv();
+
+        /**
+         * Extra environment entries for the console, each {@code KEY=VALUE}.
+         * Env: {@code FLOCI_SERVICES_UI_EXTRA_ENV} (comma-separated; escape a literal comma as
+         * {@code \,}).
+         *
+         * <p>Applied last, so an entry may also override one of the injected defaults.
+         */
+        Optional<List<String>> extraEnv();
+
+        /**
+         * Path the readiness probe requests on the console.
+         * Env: {@code FLOCI_SERVICES_UI_STATUS_PATH}
+         *
+         * <p>Contract default {@code /api/health}.
+         */
+        Optional<String> statusPath();
+
+        /**
+         * JSON field in the health response that says whether the console can reach Floci, and the
+         * values that mean it can and that it cannot.
+         * Env: {@code FLOCI_SERVICES_UI_STATUS_READY_FIELD},
+         * {@code FLOCI_SERVICES_UI_STATUS_READY_VALUE},
+         * {@code FLOCI_SERVICES_UI_STATUS_UNAVAILABLE_VALUE}
+         *
+         * <p>Contract defaults {@code status}, {@code ok} and {@code unavailable}. Set the field to
+         * {@code none} for a console whose health endpoint is a plain liveness check, which makes
+         * any {@code 200} count as ready. An empty value cannot express that: an environment
+         * variable set to nothing arrives as an absent property and would silently mean "use the
+         * default field".
+         */
+        Optional<String> statusReadyField();
+
+        Optional<String> statusReadyValue();
+
+        Optional<String> statusUnavailableValue();
+
         @WithDefault("false")
         boolean keepRunningOnShutdown();
 
         Optional<String> dockerNetwork();
 
         /**
-         * Overrides the Floci endpoint handed to the UI sidecar, instead of deriving it from
+         * Overrides the Floci endpoint handed to the console, instead of deriving it from
          * the resolved Docker host and {@link EmulatorConfig#tls()}.
          * Env: {@code FLOCI_SERVICES_UI_ENDPOINT}
          *
          * <p>The derived value is {@code https://<floci-container-ip>:<port>} when TLS is on,
-         * which the sidecar's Node/Bun proxy rejects: Floci's self-signed certificate carries no
+         * which a Node/Bun console's proxy rejects: Floci's self-signed certificate carries no
          * IP SAN for its own container IP, so verification fails with
          * {@code ERR_TLS_CERT_ALTNAME_INVALID} even when the CA is trusted. Floci's port does
-         * HTTP/HTTPS protocol detection, so pointing the sidecar at {@code http://<ip>:<port>}
+         * HTTP/HTTPS protocol detection, so pointing the console at {@code http://<ip>:<port>}
          * reaches the same server over the private container network with TLS left enabled.
          *
          * <p>Must be an absolute {@code http://} or {@code https://} URL. A blank or malformed
@@ -1924,12 +2207,13 @@ public interface EmulatorConfig {
         Optional<String> endpoint();
 
         /**
-         * Disables TLS certificate verification in the UI sidecar's Node/Bun proxy by injecting
-         * {@code NODE_TLS_REJECT_UNAUTHORIZED=0}. Env: {@code FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY}
+         * Disables TLS certificate verification in the console's HTTP client by injecting
+         * {@code FLOCI_TLS_SKIP_VERIFY=1} (and {@code NODE_TLS_REJECT_UNAUTHORIZED=0} for a
+         * Node/Bun console). Env: {@code FLOCI_SERVICES_UI_INSECURE_SKIP_TLS_VERIFY}
          *
          * <p>Trusting Floci's CA alone is not sufficient — it fixes the chain but not the missing
          * IP SAN — so this is the only trust knob that makes an {@code https://<container-ip>}
-         * endpoint work. Scoped to the sidecar's connection to Floci; it does not affect Floci's
+         * endpoint work. Scoped to the console's connection to Floci; it does not affect Floci's
          * own TLS. Prefer {@link #endpoint()} where an {@code http://} endpoint is acceptable.
          */
         @WithDefault("false")
@@ -2087,6 +2371,28 @@ public interface EmulatorConfig {
          * Env var: FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS (comma-separated)
          */
         Optional<List<String>> extraHosts();
+
+        /**
+         * Accept a {@code Layers} ARN naming another account, recording it on the function
+         * without mounting its content. Off by default, because it broadens what CreateFunction
+         * and UpdateFunctionConfiguration accept beyond what AWS does.
+         *
+         * <p>On the live service a foreign-account layer resolves through its resource policy:
+         * an AWS-managed public layer succeeds, and everything else is AccessDeniedException.
+         * Floci implements no layer permissions, so it cannot tell those apart. The default
+         * answers both the way AWS answers the second, which is the faithful choice for a
+         * compatibility layer. Turn this on to attach public layers such as Powertools, the
+         * AppConfig extension or a vendor-published layer, at the cost of also accepting an
+         * ARN AWS would refuse. The content is never fetched either way, so a function whose
+         * behaviour depends on the layer will not run correctly here.
+         *
+         * <p>A layer ARN outside the {@code aws} partition is rejected regardless: partitions
+         * are isolated, so no resource policy can make one readable.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS
+         */
+        @WithDefault("false")
+        boolean acceptExternalLayerArns();
 
         /**
          * Concurrent executions ceiling applied per region. AWS Lambda's
@@ -2282,6 +2588,43 @@ public interface EmulatorConfig {
         /** When true, instances go straight to RUNNING without launching Docker containers. */
         @WithDefault("false")
         boolean mock();
+
+        /** Docker-network backing for VPCs and subnets. */
+        VpcNetworksConfig vpcNetworks();
+    }
+
+    /**
+     * Backs each VPC with a real Docker network so instances get private addresses drawn from
+     * the CIDR the caller declared, and instances in different VPCs cannot route to each other.
+     */
+    interface VpcNetworksConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Private range that substituted CIDRs are allocated from, used when a declared VPC CIDR
+         * is absent, malformed, outside RFC 1918, or already claimed on the Docker daemon. Must
+         * itself be RFC 1918. The default sits high in 10/8, away from both Docker's default
+         * pools (172.17-172.31, 192.168) and the low 10.x ranges corporate VPNs favour.
+         */
+        @WithDefault("10.240.0.0/12")
+        String fallbackPool();
+
+        /** Prefix length of each block handed out of {@link #fallbackPool}. */
+        @WithDefault("16")
+        int fallbackPrefixLength();
+
+        /**
+         * When true, VPC networks left behind by a previous run of this same Floci instance are
+         * removed at startup. Scoped by the emulator's API port, so instances sharing a Docker
+         * daemon never reconcile each other's networks.
+         */
+        @WithDefault("true")
+        boolean reconcileOnStartup();
+
+        /** Docker network driver for VPC networks. */
+        @WithDefault("bridge")
+        String driver();
     }
 
     interface AppConfigServiceConfig {
@@ -2332,6 +2675,18 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean validateRuntimeExists();
+
+        /**
+         * Prefix on the assistant reply InvokeHarness streams back. The reply echoes the caller's
+         * last user message: there is no model, and echoing makes a chat UI visibly work while
+         * keeping a request that failed to parse obvious.
+         */
+        @WithDefault("You said: ")
+        String harnessEchoPrefix();
+
+        /** Reply used when a request carries no user message, which is a legitimate call. */
+        @WithDefault("No user message was supplied.")
+        String harnessEmptyReply();
     }
 
     /** Classic (2012-06-01) Elastic Load Balancing — a separate API from {@link ElbV2ServiceConfig}. */
@@ -2442,7 +2797,9 @@ public interface EmulatorConfig {
         String defaultPostgresImage();
 
         /** Airflow versions environments may request. Combined with the image tag
-         *  {@code apache/airflow:<version>-python3.12}. */
+         *  {@code apache/airflow:<version>-<pythonTag>}, where the Python tag matches the
+         *  version real Amazon MWAA runs for that Airflow version: see
+         *  {@code MwaaEnvironmentManager.pythonTagFor}. */
         @WithDefault("2.10.5,2.9.3,2.8.4")
         List<String> supportedVersions();
 

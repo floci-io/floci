@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
+import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,7 +37,7 @@ class AslExecutorPathIntrinsicsTest {
                 mock(LambdaFunctionStore.class),
                 mock(DynamoDbService.class),
                 mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class),
+                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
                 mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
                 mock(io.github.hectorvent.floci.services.s3.S3Service.class),
@@ -100,10 +101,117 @@ class AslExecutorPathIntrinsicsTest {
 
     @Test
     void bracketQuotedMembersSupportNamesOutsideDotShorthand() throws Exception {
-        JsonNode root = mapper.readTree("{\"config\":{\"max-limit\":2},\"a.b\":3}");
+        JsonNode root = mapper.readTree(
+                "{\"config\":{\"max-limit\":2},\"a.b\":3,\"a..b\":4,\"[?(\":5}");
 
         assertEquals(2, executor.resolvePath("$['config']['max-limit']", root).asInt());
         assertEquals(3, executor.resolvePath("$['a.b']", root).asInt());
+        assertEquals(4, executor.resolvePath("$['a..b']", root).asInt());
+        assertEquals(5, executor.resolvePath("$['[?(']", root).asInt());
+    }
+
+    @Test
+    void filterExpressionsSupportExistenceAndComparisonPredicates() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"list":[{"keep":true,"id":1},{"keep":false,"id":2},{"id":3}]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"keep\":true,\"id\":1},{\"keep\":false,\"id\":2}]"),
+                executor.resolvePath("$.list[?(@.keep)]", root));
+        assertEquals(mapper.readTree("[{\"keep\":true,\"id\":1}]"),
+                executor.resolvePath("$.list[?(@.keep == true)]", root));
+    }
+
+    @Test
+    void filterNegationTreatsExplicitNullAndMissingPropertiesAsFalsy() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"session":null},
+                  {"id":2,"session":{"token":"active"}},
+                  {"id":3}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"id\":1,\"session\":null},{\"id\":3}]"),
+                executor.resolvePath("$.items[?(!@.session)]", root));
+    }
+
+    @Test
+    void filterNegationWorksInsideCompoundPredicates() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"student_programme":"A","archived_at":null},
+                  {"id":2,"student_programme":"B"},
+                  {"id":3,"student_programme":"C","archived_at":"2026-09-01"},
+                  {"id":4,"archived_at":null}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("""
+                        [{"id":1,"student_programme":"A","archived_at":null},
+                          {"id":2,"student_programme":"B"}]
+                        """),
+                executor.resolvePath("$.items[?(@.student_programme && !@.archived_at)]", root));
+    }
+
+    @Test
+    void filterNegationSupportsBracketQuotedMembers() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"archived-at":null},
+                  {"id":2,"archived-at":"2026-09-01"},
+                  {"id":3}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"id\":1,\"archived-at\":null},{\"id\":3}]"),
+                executor.resolvePath("$.items[?(!@['archived-at'])]", root));
+    }
+
+    @Test
+    void filterNegationCompatibilityDoesNotRewriteComparisonsOrStringLiterals() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"session":null,"label":"!@.session"},
+                  {"id":2,"session":"active","label":"other"},
+                  {"id":3,"label":"!@.session"}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("""
+                        [{"id":2,"session":"active","label":"other"},
+                          {"id":3,"label":"!@.session"}]
+                        """),
+                executor.resolvePath("$.items[?(@.session != null)]", root));
+        assertEquals(mapper.readTree("""
+                        [{"id":1,"session":null,"label":"!@.session"},
+                          {"id":3,"label":"!@.session"}]
+                        """),
+                executor.resolvePath("$.items[?(@.label == '!@.session')]", root));
+    }
+
+    @Test
+    void recursiveDescentPreservesAndFlattensNestedArrayMatches() throws Exception {
+        JsonNode root = mapper.readTree("{\"d\":{\"x\":{\"a\":[1,2]}}}");
+
+        assertEquals(mapper.readTree("[[1,2]]"), executor.resolvePath("$.d..a", root));
+        assertEquals(mapper.readTree("[1,2]"), executor.resolvePath("$.d..a[*]", root));
+    }
+
+    @Test
+    void advancedPathsWorkInPayloadTemplatesAndIntrinsics() throws Exception {
+        JsonNode root = mapper.readTree("{\"list\":[1,null,2]}");
+        JsonNode parameters = mapper.readTree("""
+                {
+                  "filtered.$": "$.list[?(@ != null)]",
+                  "count.$": "States.ArrayLength($.list[?(@ != null)])"
+                }
+                """);
+
+        JsonNode resolved = executor.resolveParameters(parameters, root, mapper.createObjectNode());
+
+        assertEquals(mapper.readTree("[1,2]"), resolved.path("filtered"));
+        assertEquals(2, resolved.path("count").asInt());
     }
 
     @Test

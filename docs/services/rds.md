@@ -19,6 +19,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBInstance` | Update instance settings |
 | `RebootDBInstance` | Restart a database instance |
 | `DescribeOrderableDBInstanceOptions` | List deterministic instance class options |
+| `DescribeEvents` | - |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
@@ -44,6 +45,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `CreateDBSnapshot` | Create a snapshot of a DB instance |
 | `RestoreDBInstanceFromDBSnapshot` | Create a new DB instance from a snapshot |
 | `DescribeDBSnapshots` | List DB instance snapshots |
+| `DescribeDBSnapshotAttributes` | Return a snapshot's `restore` attribute (accounts authorized to copy/restore it) |
+| `ModifyDBSnapshotAttribute` | Add or remove accounts authorized to copy/restore a snapshot |
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
@@ -73,6 +76,19 @@ usual default, a 30-minute window starting where the given one ends); a window g
 checked against the instance's other window. Modifications apply immediately —
 `PendingModifiedValues` is not modeled.
 
+!!! note "DB snapshot tagging and lifecycle"
+
+    `CreateDBSnapshot` accepts `Tags`, and `TagResource`/`UntagResource`/`ListTagsForResource`
+    work against a snapshot's ARN like they do for other tagged resource types.
+    `DescribeDBSnapshotAttributes`/`ModifyDBSnapshotAttribute` are modeled as plain in-memory
+    state (no real cross-account sharing). `DeleteDBSnapshot` is not implemented, so a snapshot
+    persists for the life of the account; Terraform's `aws_db_snapshot` can be created but not
+    destroyed. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
+    the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
+    for that same region. Aurora cluster snapshots and RDS reserved instances aren't modeled at
+    all (`DescribeDBClusterSnapshots` always returns an empty list, and there's no
+    reserved-instance API), so tagging doesn't apply to either.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -85,6 +101,9 @@ checked against the instance's other window. Modifications apply immediately —
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
+| `FLOCI_SERVICES_RDS_PROXY_HANDSHAKE_TIMEOUT_MILLIS` | `10000` | Max time a client has to complete the startup/auth handshake before the proxy drops it |
+| `FLOCI_SERVICES_RDS_PROXY_BACKEND_CONNECT_TIMEOUT_MILLIS` | `5000` | Max time the proxy waits for the backend TCP connect |
+| `FLOCI_SERVICES_RDS_PROXY_MAX_CONNECTIONS` | `100` | Max concurrent connections per proxy before new ones are refused |
 
 ### Docker Compose
 
@@ -163,8 +182,13 @@ services:
     Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
     `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
     matching the RDS API contract.
-    DB proxies currently support `IPV4` for both endpoint and target connections; `IPV6` and `DUAL`
-    endpoint networking require additional listener and Docker-network support.
+    `CreateDBProxy`/`AWS::RDS::DBProxy` accept `EndpointNetworkType` (`IPV4`, `IPV6`, or `DUAL`) and
+    `TargetConnectionNetworkType` (`IPV4` or `IPV6`) and round-trip them like the other proxy
+    settings above; the TCP relay itself still only listens on IPv4, so a non-`IPV4` value is
+    accepted as control-plane metadata rather than making the relay dual-stack. A non-`IPV4` value
+    is rejected with `InvalidParameterValue` unless the proxy's VPC and every subnet in
+    `VpcSubnetIds` already carry an associated IPv6 CIDR block, matching AWS's own network
+    prerequisites for RDS Proxy.
 
 ## Aurora Serverless v2 scaling
 
@@ -236,6 +260,7 @@ mysql -h 127.0.0.1 -P 7002 -u root -psecret123
 | `mariadb` | `mariadb:11` |
 
 Override the image per-instance with the `--engine-version` flag or globally via environment variables.
+Aurora MySQL versions such as `8.0.mysql_aurora.3.08.0` use the MySQL version in front, so that example runs `mysql:8.0`.
 
 ## Option Groups
 
@@ -326,6 +351,21 @@ IAM database authentication is also supported. Set `--enable-iam-database-authen
 On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
 
 Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
+
+On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
+`CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
+with `ERROR 1524 (HY000): Plugin 'AWSAuthenticationPlugin' is not loaded`. The proxy rewrites that
+clause to `IDENTIFIED WITH mysql_native_password AS '*000...0'`, an authentication string no
+password hashes to. The account is therefore created, can be granted to and can be dropped, but
+holds no password of its own, which is what an IAM DB user is: an account whose credentials come
+from IAM rather than from MySQL. This is the MySQL counterpart of the empty `rds_iam` role Floci
+pre-creates for PostgreSQL.
+
+Two limits follow from that. `SHOW CREATE USER` reports the substituted plugin rather than
+`AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`. And
+connecting with a token is not yet emulated for MySQL: unlike PostgreSQL, which receives the
+password in cleartext, MySQL sends a scramble, so the proxy would have to drive the
+`mysql_clear_password` auth switch that real RDS triggers before it could see a token to validate.
 
 ## TLS / SSL
 

@@ -63,6 +63,16 @@ class StepFunctionsExecutionHistoryIntegrationTest {
         waitForExecution(executionArn);
 
         given()
+                .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("{\"executionArn\":\"%s\"}", executionArn))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("history", nullValue());
+
+        given()
                 .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
                 .contentType(SFN_CONTENT_TYPE)
                 .body(String.format("""

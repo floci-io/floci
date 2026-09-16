@@ -267,6 +267,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>inspector2</artifactId>
         </dependency>
+        <!-- AWS Security Hub client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>securityhub</artifactId>
+        </dependency>
         <!-- AWS Account Management client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -276,6 +281,41 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>controlcatalog</artifactId>
+        </dependency>
+        <!-- AWS Marketplace Catalog client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>marketplacecatalog</artifactId>
+        </dependency>
+        <!-- AWS Marketplace Agreement client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>marketplaceagreement</artifactId>
+        </dependency>
+        <!-- AWS Marketplace Entitlement client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>marketplaceentitlement</artifactId>
+        </dependency>
+        <!-- AWS Marketplace Deployment client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>marketplacedeployment</artifactId>
+        </dependency>
+        <!-- AWS Marketplace Reporting client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>marketplacereporting</artifactId>
+        </dependency>
+        <!-- AWS Marketplace Metering client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>marketplacemetering</artifactId>
+        </dependency>
+        <!-- AWS Marketplace Discovery client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>marketplacediscovery</artifactId>
         </dependency>
         <!-- IAM Access Analyzer client -->
         <dependency>
@@ -336,6 +376,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>guardduty</artifactId>
         </dependency>
+        <!-- AWS Resource Access Manager client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ram</artifactId>
+        </dependency>
         <!-- Secrets Manager client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -375,6 +420,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>pipes</artifactId>
         </dependency>
+        <!-- Bedrock control-plane client (guardrails) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrock</artifactId>
+        </dependency>
         <!-- Bedrock AgentCore control-plane client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -412,6 +462,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>elasticloadbalancingv2</artifactId>
+        </dependency>
+        <!-- Global Accelerator client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>globalaccelerator</artifactId>
         </dependency>
         <!-- EventBridge Scheduler client -->
         <dependency>
@@ -457,6 +512,16 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>resourceexplorer2</artifactId>
         </dependency>
+        <!-- CloudWatch OAM client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>oam</artifactId>
+        </dependency>
+        <!-- BCM Pricing Calculator client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bcmpricingcalculator</artifactId>
+        </dependency>
         <!-- SSO credential support (needed for FLOCI_TARGET=aws with SSO profiles) -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -465,6 +530,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ssooidc</artifactId>
+        </dependency>
+        <!-- Amazon Verified Permissions client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>verifiedpermissions</artifactId>
         </dependency>
         <!-- AppSync client -->
         <dependency>
@@ -494,6 +564,16 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appconfigdata</artifactId>
+        </dependency>
+        <!-- Amazon AppIntegrations client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>appintegrations</artifactId>
+        </dependency>
+        <!-- DataSync client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>datasync</artifactId>
         </dependency>
         <!-- JDBC drivers for RDS data-plane tests -->
         <dependency>

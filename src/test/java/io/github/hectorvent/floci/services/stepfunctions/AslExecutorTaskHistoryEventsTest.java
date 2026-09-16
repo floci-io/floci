@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
@@ -23,6 +24,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -66,7 +68,7 @@ class AslExecutorTaskHistoryEventsTest {
                 functionStore,
                 mock(DynamoDbService.class),
                 mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class),
+                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
                 mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
                 mock(S3Service.class),
@@ -257,6 +259,106 @@ class AslExecutorTaskHistoryEventsTest {
         assertNull(started.getDetails());
     }
 
+    @Test
+    void directLambdaFailurePreservesFunctionErrorInHistory() {
+        var functionName = "failing-lambda";
+        var functionArn = lambdaArn(functionName);
+        var errorPayload = "{\"errorType\":\"ValidationError\",\"errorMessage\":\"invalid input\"}";
+        stubLambdaFailure(functionName, functionArn, errorPayload.getBytes(StandardCharsets.UTF_8));
+
+        var history = new ArrayList<HistoryEvent>();
+        var execution = run("""
+                {
+                  "StartAt": "Call",
+                  "States": {
+                    "Call": {
+                      "Type": "Task",
+                      "Resource": "%s",
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(functionArn), "{}", null, history);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("ValidationError", execution.getError());
+        assertEquals(errorPayload, execution.getCause());
+        assertEquals(
+                List.of("TaskStateEntered", "LambdaFunctionScheduled", "LambdaFunctionStarted",
+                        "LambdaFunctionFailed", "ExecutionFailed"),
+                typesOf(history));
+        var failed = eventOfType(history, "LambdaFunctionFailed");
+        assertEquals("ValidationError", failed.getDetails().get("error"));
+        assertEquals(errorPayload, failed.getDetails().get("cause"));
+        assertChain(history);
+    }
+
+    @Test
+    void optimizedLambdaFailurePreservesFunctionErrorInHistory() {
+        var functionName = "failing-lambda";
+        var functionArn = lambdaArn(functionName);
+        var errorPayload = "{\"errorType\":\"ValidationError\",\"errorMessage\":\"invalid input\"}";
+        stubLambdaFailure(functionName, functionArn, errorPayload.getBytes(StandardCharsets.UTF_8));
+
+        var history = new ArrayList<HistoryEvent>();
+        var execution = run("""
+                {
+                  "StartAt": "Call",
+                  "States": {
+                    "Call": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "%s",
+                        "Payload": {"value": 1}
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(functionArn), "{}", null, history);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("ValidationError", execution.getError());
+        assertEquals(errorPayload, execution.getCause());
+        assertEquals(
+                List.of("TaskStateEntered", "TaskScheduled", "TaskStarted", "TaskFailed", "ExecutionFailed"),
+                typesOf(history));
+        var failed = eventOfType(history, "TaskFailed");
+        assertEquals("lambda", failed.getDetails().get("resourceType"));
+        assertEquals("invoke", failed.getDetails().get("resource"));
+        assertEquals("ValidationError", failed.getDetails().get("error"));
+        assertEquals(errorPayload, failed.getDetails().get("cause"));
+        assertChain(history);
+    }
+
+    @Test
+    void malformedLambdaErrorPayloadFallsBackToException() {
+        var functionName = "failing-lambda";
+        var functionArn = lambdaArn(functionName);
+        var errorPayload = "not-json";
+        stubLambdaFailure(functionName, functionArn, errorPayload.getBytes(StandardCharsets.UTF_8));
+
+        var execution = run(directLambdaDefinition(functionArn), "{}", null, new ArrayList<>());
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Exception", execution.getError());
+        assertEquals(errorPayload, execution.getCause());
+    }
+
+    @Test
+    void missingLambdaErrorPayloadFallsBackToException() {
+        var functionName = "failing-lambda";
+        var functionArn = lambdaArn(functionName);
+        stubLambdaFailure(functionName, functionArn, null);
+
+        var execution = run(directLambdaDefinition(functionArn), "{}", null, new ArrayList<>());
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Exception", execution.getError());
+        assertNull(execution.getCause());
+    }
+
     /**
      * A Parallel branch and a Map iteration run states of their own whose events floci does not
      * publish. The published history is still one unbroken chain: the ids of the events around them
@@ -345,6 +447,30 @@ class AslExecutorTaskHistoryEventsTest {
         return new MockedResponseStep(from, to, null, error, cause);
     }
 
+    private void stubLambdaFailure(String functionName, String functionArn, byte[] errorPayload) {
+        var function = new LambdaFunction();
+        function.setFunctionName(functionName);
+        function.setFunctionArn(functionArn);
+        when(functionStore.get(REGION, functionName)).thenReturn(Optional.of(function));
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, "Handled", errorPayload, null, "failure-request"));
+    }
+
+    private static String directLambdaDefinition(String functionArn) {
+        return """
+                {
+                  "StartAt": "Call",
+                  "States": {
+                    "Call": {
+                      "Type": "Task",
+                      "Resource": "%s",
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(functionArn);
+    }
+
     private Execution run(String definition, String input, MockedTestCase mocks, List<HistoryEvent> history) {
         var stateMachine = new StateMachine();
         stateMachine.setName("history-events-test");
@@ -362,5 +488,9 @@ class AslExecutorTaskHistoryEventsTest {
         executor.executeSync(stateMachine, execution, history, mocks, (updated, events) -> {
         });
         return execution;
+    }
+
+    private static String lambdaArn(String name) {
+        return "arn:aws:lambda:%s:%s:function:%s".formatted(REGION, ACCOUNT, name);
     }
 }

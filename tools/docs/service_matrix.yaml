@@ -25,7 +25,8 @@ aliases:
   kafka: msk                            # MSK's SigV4 signing name is "kafka"
   mq: amazonmq                          # Amazon MQ's SigV4 signing name is "mq"
   signin: iam                           # AWS Sign-In facet, at iam.md#aws-sign-in-login-credentials
-  sso: iam                              # Identity Center ListInstances facet on the IAM page
+  sso: ssoadmin                         # descriptor("sso") is the Identity Center admin API; ssoadmin.md is its page
+  sso-oidc: ssooidc                     # IAM Identity Center OIDC REST API
   events: eventbridge
   servicediscovery: cloudmap            # Cloud Map's SigV4 signing name
   elasticmapreduce: emr                 # EMR's SigV4 signing name
@@ -34,6 +35,7 @@ aliases:
   secretsmanager: secrets-manager
   codeguru-reviewer: codegurureviewer   # SigV4 signing name is hyphenated; the doc slug is not
   cognito-identity: cognitoidentity     # SigV4 signing name is hyphenated; the doc slug is not
+  app-integrations: appintegrations     # SigV4 signing name is hyphenated; the doc slug is not
   servicecatalog: service-catalog
   cognito-idp: cognito                  # Cognito's SigV4 signing name
   states: step-functions                # Step Functions' SigV4 signing name
@@ -48,6 +50,7 @@ aliases:
   ec2messages: ssm                      # SSM Messages facet, documented alongside ssm.md
   iotdata: iot                          # IoT Data row shares iot.md with IoT Core
   resource-explorer-2: resource-explorer # API version suffix; the page is resource-explorer.md
+  bedrock-agentcore-control: bedrock-agentcore  # control plane owns the page; the data-plane row is the facet
 
 # A NEW switch/REST descriptor not listed here and not resolvable via an alias fails
 # `--strict`. Every entry MUST carry a `by:` expiry date (ISO, YYYY-MM-DD): once that
@@ -59,13 +62,7 @@ aliases:
 # add the row or come back and renew the date with a fresh justification; it can never
 # just be forgotten. Remove an entry outright once the referenced PR merges and the
 # row lands - don't wait for it to expire.
-deferred:
-  - key: bedrock-agentcore
-    reason: "documented by floci-io/floci#2436 (open at time of writing)"
-    by: "2026-09-15"
-  - key: bedrock-agentcore-control
-    reason: "documented by floci-io/floci#2436 (open at time of writing)"
-    by: "2026-09-15"
+deferred: []
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
 facet_pages: []

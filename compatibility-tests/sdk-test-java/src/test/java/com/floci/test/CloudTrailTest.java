@@ -87,7 +87,7 @@ class CloudTrailTest {
 
         GetTrailStatusResponse started = cloudTrail.getTrailStatus(r -> r.name(trailName));
         assertThat(started.isLogging()).isTrue();
-        assertThat(started.latestDeliveryTime()).isNotNull();
+        assertThat(started.latestDeliveryTime()).isNull();
 
         cloudTrail.stopLogging(r -> r.name(trailName));
 

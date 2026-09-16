@@ -225,7 +225,13 @@ public class IotMqttBrokerService {
         server = null;
         tlsServer = null;
         keyManager = null;
-        sessionsByClient.values().forEach(session -> session.endpoint().close());
+        sessionsByClient.values().forEach(session -> {
+            try {
+                session.endpoint().close();
+            } catch (IllegalStateException e) {
+                LOG.debugv("IoT MQTT client {0} was already closed during broker shutdown", session.clientId());
+            }
+        });
         sessionsByClient.clear();
         subscriptionsByClient.clear();
         if (mqttServer != null) {

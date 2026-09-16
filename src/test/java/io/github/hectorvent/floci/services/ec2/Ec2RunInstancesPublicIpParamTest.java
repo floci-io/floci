@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -59,11 +60,12 @@ class Ec2RunInstancesPublicIpParamTest {
                 anyInt(), anyInt(), nullable(String.class), anyList(), nullable(String.class),
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
                 nullable(Boolean.class), nullable(String.class), anyInt(), nullable(String.class),
-                nullable(LaunchTemplateData.MetadataOptions.class))).thenReturn(new Reservation());
+                nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false)))
+                .thenReturn(new Reservation());
 
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
-                mock(Ec2IpamService.class));
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class));
         handler.handle("RunInstances", p, REGION);
 
         ArgumentCaptor<Boolean> associatePublicIp = ArgumentCaptor.forClass(Boolean.class);
@@ -71,7 +73,7 @@ class Ec2RunInstancesPublicIpParamTest {
                 anyInt(), anyInt(), nullable(String.class), anyList(), nullable(String.class),
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
                 associatePublicIp.capture(), nullable(String.class), anyInt(), nullable(String.class),
-                nullable(LaunchTemplateData.MetadataOptions.class));
+                nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false));
         if (expected == null) {
             assertNull(associatePublicIp.getValue(),
                     "an absent override must stay null so the subnet default decides");

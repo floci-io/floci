@@ -62,7 +62,8 @@ class NeptuneContainerManagerTest {
         NeptuneContainerManager manager = newManager(lifecycleManager);
 
         for (int attempt = 0; attempt < 3; attempt++) {
-            assertNull(manager.tryStart("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN),
+            assertNull(manager.tryStart("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN,
+                    "000000000000", "us-east-1"),
                     "attempt " + attempt + " should report unavailable");
         }
         assertFalse(manager.isDockerReachable());
@@ -81,7 +82,8 @@ class NeptuneContainerManagerTest {
         NeptuneContainerManager manager = newManager(lifecycleManager);
 
         RuntimeException failure = assertThrows(RuntimeException.class,
-                () -> manager.tryStart("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN));
+                () -> manager.tryStart("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN,
+                        "000000000000", "us-east-1"));
         assertEquals("no such image: tinkerpop/gremlin-server:3.7.3", failure.getMessage());
     }
 
@@ -112,7 +114,8 @@ class NeptuneContainerManagerTest {
             NeptuneContainerManager manager = newManager(lifecycleManager);
 
             NeptuneContainerHandle handle =
-                    manager.tryStart("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN);
+                    manager.tryStart("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN,
+                            "000000000000", "us-east-1");
 
             assertEquals("container-id", handle.getContainerId());
             assertEquals(serverSocket.getLocalPort(), handle.getPort());
@@ -157,14 +160,16 @@ class NeptuneContainerManagerTest {
                     mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
                     new RegionResolver("us-east-1", "000000000000"));
 
-            manager.start("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN);
+            manager.start("cluster1", "tinkerpop/gremlin-server:3.7.3", NeptuneDbType.GREMLIN,
+                    "111111111111", "eu-west-1");
 
             verify(builder).withLabels(Map.of(
                     "io.floci", "aws",
                     "io.floci.service", "neptune",
                     "io.floci.resource-id", "cluster1",
-                    "io.floci.account", "000000000000",
-                    "io.floci.region", "us-east-1"));
+                    "io.floci.account", "111111111111",
+                    "io.floci.region", "eu-west-1"));
+            verify(builder).withName("floci-neptune-111111111111-eu-west-1-cluster1");
         }
     }
 

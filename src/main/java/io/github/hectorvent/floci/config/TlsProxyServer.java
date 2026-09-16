@@ -17,6 +17,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletionException;
 
 /**
  * A TCP proxy server that enables HTTP and HTTPS on the same port (LocalStack parity).
@@ -51,8 +52,8 @@ public class TlsProxyServer {
     /** TLS record content type for Handshake (ClientHello). */
     private static final byte TLS_HANDSHAKE = 0x16;
 
-    private static final int HTTP_BACKEND_PORT = 4510;
-    private static final int HTTPS_BACKEND_PORT = 4511;
+    private static final int HTTP_BACKEND_PORT = TlsConfigSource.HTTP_INTERNAL_PORT;
+    private static final int HTTPS_BACKEND_PORT = TlsConfigSource.HTTPS_INTERNAL_PORT;
 
     private final Vertx vertx;
     private final EmulatorConfig config;
@@ -109,7 +110,8 @@ public class TlsProxyServer {
             NetServer server = vertx.createNetServer(options);
             server.connectHandler(connectHandler);
             proxyServers.add(server);
-            server.listen().onComplete(ar -> {
+            var bind = server.listen();
+            bind.onComplete(ar -> {
                 if (ar.succeeded()) {
                     failedPorts.remove(port);
                     LOG.infov("TLS proxy: listening on port {0} (HTTP→{1}, HTTPS→{2})",
@@ -128,6 +130,16 @@ public class TlsProxyServer {
                             String.valueOf(port), ar.cause().getMessage());
                 }
             });
+            if (port == config.port()) {
+                try {
+                    bind.toCompletionStage().toCompletableFuture().join();
+                } catch (CompletionException e) {
+                    stop();
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    throw new IllegalStateException(
+                            "TLS proxy failed to bind public port " + port, cause);
+                }
+            }
         }
     }
 

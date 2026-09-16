@@ -998,17 +998,21 @@ public class SecretsManagerService implements ResourceProvider {
 
             // 2. Partial-ARN fallback: extract region + name and do a name-based lookup.
             //    AWS supports ARNs without the trailing "-XXXXXX" random suffix.
-            //    ARN format: arn:aws:secretsmanager:<region>:<account>:secret:<name>
-            String smPrefix = "arn:aws:secretsmanager:";
-            if (secretId.startsWith(smPrefix)) {
-                String[] parts = secretId.substring(smPrefix.length()).split(":", 4);
-                if (parts.length == 4 && "secret".equals(parts[2])) {
-                    String arnRegion = parts[0];
-                    String nameFromArn = parts[3];
-                    Secret byName = store.get(regionKey(arnRegion, nameFromArn)).orElse(null);
-                    if (byName != null) {
-                        return byName;
-                    }
+            //    ARN format: arn:<partition>:secretsmanager:<region>:<account>:secret:<name>
+            //    Parsed rather than matched against a literal prefix, because the ARN carries the
+            //    region's own partition and a pinned "arn:aws:" refused a GovCloud or China
+            //    secret its own ARN. The name comes off the parsed resource without a second
+            //    split: a secret name may itself contain colons.
+            AwsArnUtils.Arn parsedArn = parseOrNull(secretId);
+            String secretResourcePrefix = "secret:";
+            if (parsedArn != null
+                    && "secretsmanager".equals(parsedArn.service())
+                    && parsedArn.resource().startsWith(secretResourcePrefix)) {
+                String arnRegion = parsedArn.region();
+                String nameFromArn = parsedArn.resource().substring(secretResourcePrefix.length());
+                Secret byName = store.get(regionKey(arnRegion, nameFromArn)).orElse(null);
+                if (byName != null) {
+                    return byName;
                 }
             }
 
@@ -1037,6 +1041,15 @@ public class SecretsManagerService implements ResourceProvider {
     private String buildSecretArn(String region, String name) {
         String suffix = randomSuffix();
         return regionResolver.buildArn("secretsmanager", region, "secret:" + name + "-" + suffix);
+    }
+
+    /** {@link AwsArnUtils#parse} result, or {@code null} when the value is not an ARN. */
+    private static AwsArnUtils.Arn parseOrNull(String value) {
+        try {
+            return AwsArnUtils.parse(value);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private static String regionKey(String region, String name) {

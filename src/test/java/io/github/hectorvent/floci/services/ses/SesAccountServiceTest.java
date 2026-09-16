@@ -90,4 +90,13 @@ class SesAccountServiceTest {
         assertThrows(AwsException.class, () -> service.putAccountDetails(REGION, null,
                 null, null, null, null, false));
     }
+
+    @Test
+    void dedicatedIpAutoWarmup_defaultsTrue_thenRoundTrips() {
+        assertTrue(service.isDedicatedIpAutoWarmupEnabled(REGION));
+
+        service.setDedicatedIpAutoWarmup(REGION, false);
+        assertFalse(service.isDedicatedIpAutoWarmupEnabled(REGION));
+        assertTrue(service.isDedicatedIpAutoWarmupEnabled("eu-west-1"));
+    }
 }

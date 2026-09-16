@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.s3;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.services.s3.S3PublicAccessEvaluator.PublicAccessDecision.ALLOW;
@@ -140,6 +143,134 @@ class S3PublicAccessEvaluatorTest {
         assertEquals(ALLOW, S3PublicAccessEvaluator.principalPolicyDecision(
                 OBJECT_MAPPER, policy, "AWS", oaiArn,
                 "s3:GetObject", OBJECT_ARN, Map.of()));
+    }
+
+    @Test
+    void exactAwsPrincipalIsReportedAsADirectGrant() {
+        String userArn = "arn:aws:iam::123456789012:user/alice";
+        String policy = """
+                {"Version":"2012-10-17","Statement":{
+                  "Effect":"Allow",
+                  "Principal":{"AWS":"%s"},
+                  "Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::public-bucket/*"
+                }}""".formatted(userArn);
+
+        S3PublicAccessEvaluator.PrincipalPolicyEvaluation evaluation =
+                S3PublicAccessEvaluator.principalPolicyEvaluation(
+                        OBJECT_MAPPER, policy, "AWS", userArn,
+                        "s3:GetObject", OBJECT_ARN, Map.of());
+
+        assertEquals(ALLOW, evaluation.decision());
+        assertTrue(evaluation.directPrincipalAllow());
+    }
+
+    @Test
+    void exactPrincipalArnConditionIsReportedAsADirectGrant() {
+        String userArn = "arn:aws:iam::123456789012:user/alice";
+        String policy = """
+                {"Version":"2012-10-17","Statement":{
+                  "Effect":"Allow",
+                  "Principal":"*",
+                  "Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::public-bucket/*",
+                  "Condition":{"ArnEquals":{"aws:PrincipalArn":"%s"}}
+                }}""".formatted(userArn);
+
+        S3PublicAccessEvaluator.PrincipalPolicyEvaluation evaluation =
+                S3PublicAccessEvaluator.principalPolicyEvaluation(
+                        OBJECT_MAPPER, policy, "AWS", userArn,
+                        "s3:GetObject", OBJECT_ARN, Map.of("aws:PrincipalArn", userArn));
+
+        assertEquals(ALLOW, evaluation.decision());
+        assertTrue(evaluation.directPrincipalAllow());
+    }
+
+    @Test
+    void exactPrincipalArnConditionBypassesBoundaryImplicitDeny() {
+        String userArn = "arn:aws:iam::123456789012:user/alice";
+        String policy = """
+                {"Version":"2012-10-17","Statement":{
+                  "Effect":"Allow",
+                  "Principal":"*",
+                  "Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::public-bucket/*",
+                  "Condition":{"ArnEquals":{"aws:PrincipalArn":"%s"}}
+                }}""".formatted(userArn);
+        S3PublicAccessEvaluator.PrincipalPolicyEvaluation evaluation =
+                S3PublicAccessEvaluator.principalPolicyEvaluation(
+                        OBJECT_MAPPER, policy, "AWS", userArn,
+                        "s3:GetObject", OBJECT_ARN, Map.of("aws:PrincipalArn", userArn));
+        IamPolicyEvaluator.ResourcePolicyDecision resourceDecision =
+                evaluation.directPrincipalAllow()
+                        ? IamPolicyEvaluator.ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
+                        : IamPolicyEvaluator.ResourcePolicyDecision.ALLOW;
+        CallerContext caller = new CallerContext(
+                List.of(), null,
+                """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:*","Resource":"*"}
+                ]}""");
+
+        assertEquals(IamPolicyEvaluator.Decision.ALLOW,
+                new IamPolicyEvaluator(OBJECT_MAPPER).evaluateResolvedResourcePolicy(
+                        caller,
+                        resourceDecision,
+                        IamPolicyEvaluator.ResourceAccountRelationship.SAME_ACCOUNT,
+                        "s3:GetObject",
+                        OBJECT_ARN,
+                        Map.of("aws:PrincipalArn", List.of(userArn))));
+    }
+
+    @Test
+    void wildcardPrincipalArnConditionIsNotReportedAsADirectGrant() {
+        String userArn = "arn:aws:iam::123456789012:user/alice";
+        String policy = """
+                {"Version":"2012-10-17","Statement":{
+                  "Effect":"Allow",
+                  "Principal":{"AWS":"*"},
+                  "Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::public-bucket/*",
+                  "Condition":{"ArnLike":{"aws:PrincipalArn":"arn:aws:iam::123456789012:user/*"}}
+                }}""";
+
+        S3PublicAccessEvaluator.PrincipalPolicyEvaluation evaluation =
+                S3PublicAccessEvaluator.principalPolicyEvaluation(
+                        OBJECT_MAPPER, policy, "AWS", userArn,
+                        "s3:GetObject", OBJECT_ARN, Map.of("aws:PrincipalArn", userArn));
+
+        assertEquals(ALLOW, evaluation.decision());
+        assertFalse(evaluation.directPrincipalAllow());
+    }
+
+    @Test
+    void matchingDenyOverridesExactPrincipalArnCondition() {
+        String userArn = "arn:aws:iam::123456789012:user/alice";
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {
+                    "Effect":"Allow",
+                    "Principal":"*",
+                    "Action":"s3:GetObject",
+                    "Resource":"arn:aws:s3:::public-bucket/*",
+                    "Condition":{"StringEquals":{"aws:PrincipalArn":"%s"}}
+                  },
+                  {
+                    "Effect":"Deny",
+                    "Principal":"*",
+                    "Action":"s3:GetObject",
+                    "Resource":"arn:aws:s3:::public-bucket/*",
+                    "Condition":{"ArnEquals":{"aws:PrincipalArn":"%s"}}
+                  }
+                ]}""".formatted(userArn, userArn);
+
+        S3PublicAccessEvaluator.PrincipalPolicyEvaluation evaluation =
+                S3PublicAccessEvaluator.principalPolicyEvaluation(
+                        OBJECT_MAPPER, policy, "AWS", userArn,
+                        "s3:GetObject", OBJECT_ARN, Map.of("aws:PrincipalArn", userArn));
+
+        assertEquals(DENY, evaluation.decision());
+        assertFalse(evaluation.directPrincipalAllow());
     }
 
     @Test

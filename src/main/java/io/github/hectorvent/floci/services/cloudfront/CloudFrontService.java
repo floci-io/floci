@@ -266,20 +266,7 @@ public class CloudFrontService {
     public List<Distribution> listDistributions(String marker, int maxItems) {
         List<Distribution> all = new ArrayList<>(distStore.scan(k -> true));
         all.sort((a, b) -> a.getId().compareTo(b.getId()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, Distribution::getId);
     }
 
     public synchronized void associateAlias(String targetDistributionId, String alias) {
@@ -443,20 +430,7 @@ public class CloudFrontService {
         getDistribution(distributionId);
         List<Invalidation> all = new ArrayList<>(
                 invalidationStore.get(distributionId).orElse(List.of()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, Invalidation::getId);
     }
 
     // ── Cache Policies ────────────────────────────────────────────────────────
@@ -493,6 +467,11 @@ public class CloudFrontService {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        if (isCachePolicyInUse(id)) {
+            throw new AwsException("CachePolicyInUse",
+                    "Cannot delete the cache policy because it is attached to one or more cache behaviors.",
+                    409);
+        }
         cachePolicyStore.delete(id);
     }
 
@@ -500,20 +479,7 @@ public class CloudFrontService {
         List<CachePolicy> all = new ArrayList<>(cachePolicyStore.scan(k -> true));
         all.sort((a, b) -> a.getName() != null && b.getName() != null
                 ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, CachePolicy::getId);
     }
 
     // ── Origin Request Policies ───────────────────────────────────────────────
@@ -552,6 +518,11 @@ public class CloudFrontService {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        if (isOriginRequestPolicyInUse(id)) {
+            throw new AwsException("OriginRequestPolicyInUse",
+                    "Cannot delete the origin request policy because it is attached to one or more cache behaviors.",
+                    409);
+        }
         orpStore.delete(id);
     }
 
@@ -559,20 +530,7 @@ public class CloudFrontService {
         List<OriginRequestPolicy> all = new ArrayList<>(orpStore.scan(k -> true));
         all.sort((a, b) -> a.getName() != null && b.getName() != null
                 ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, OriginRequestPolicy::getId);
     }
 
     // ── Response Headers Policies ─────────────────────────────────────────────
@@ -750,21 +708,51 @@ public class CloudFrontService {
     }
 
     private boolean isResponseHeadersPolicyInUse(String id) {
-        return distStore.scan(k -> true).stream()
-                .map(Distribution::getConfig)
-                .anyMatch(config -> usesResponseHeadersPolicy(config, id));
+        return isAttachedToACacheBehavior(id,
+                DefaultCacheBehavior::getResponseHeadersPolicyId, CacheBehavior::getResponseHeadersPolicyId);
     }
 
-    private static boolean usesResponseHeadersPolicy(
-            DistributionConfig config, String id) {
-        if (config == null) {
-            return false;
-        }
+    /**
+     * Kept as its own entry point for the per-distribution association count, which asks the
+     * question of one config at a time and can be handed a distribution with none.
+     */
+    private static boolean usesResponseHeadersPolicy(DistributionConfig config, String id) {
+        return config != null && usesPolicy(config, id,
+                DefaultCacheBehavior::getResponseHeadersPolicyId, CacheBehavior::getResponseHeadersPolicyId);
+    }
+
+    private boolean isCachePolicyInUse(String id) {
+        return isAttachedToACacheBehavior(id,
+                DefaultCacheBehavior::getCachePolicyId, CacheBehavior::getCachePolicyId);
+    }
+
+    private boolean isOriginRequestPolicyInUse(String id) {
+        return isAttachedToACacheBehavior(id,
+                DefaultCacheBehavior::getOriginRequestPolicyId, CacheBehavior::getOriginRequestPolicyId);
+    }
+
+    /**
+     * Whether any distribution attaches {@code id} to its default or one of its ordered cache
+     * behaviors. Cache, origin request and response headers policies each hang off the same two
+     * places, so the three in-use checks differ only in which id they read.
+     */
+    private boolean isAttachedToACacheBehavior(String id,
+                                               Function<DefaultCacheBehavior, String> onDefault,
+                                               Function<CacheBehavior, String> onOrdered) {
+        return distStore.scan(k -> true).stream()
+                .map(Distribution::getConfig)
+                .filter(Objects::nonNull)
+                .anyMatch(config -> usesPolicy(config, id, onDefault, onOrdered));
+    }
+
+    private static boolean usesPolicy(DistributionConfig config, String id,
+                                      Function<DefaultCacheBehavior, String> onDefault,
+                                      Function<CacheBehavior, String> onOrdered) {
         boolean defaultUsesPolicy = config.getDefaultCacheBehavior() != null
-                && id.equals(config.getDefaultCacheBehavior().getResponseHeadersPolicyId());
+                && id.equals(onDefault.apply(config.getDefaultCacheBehavior()));
         boolean orderedUsesPolicy = config.getCacheBehaviors() != null
-                && config.getCacheBehaviors().stream().anyMatch(behavior ->
-                        id.equals(behavior.getResponseHeadersPolicyId()));
+                && config.getCacheBehaviors().stream()
+                        .anyMatch(behavior -> behavior != null && id.equals(onOrdered.apply(behavior)));
         return defaultUsesPolicy || orderedUsesPolicy;
     }
 
@@ -893,20 +881,7 @@ public class CloudFrontService {
         List<OriginAccessControl> all = new ArrayList<>(oacStore.scan(k -> true));
         all.sort((a, b) -> a.getName() != null && b.getName() != null
                 ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, OriginAccessControl::getId);
     }
 
     // ── Origin Access Identity (OAI) ──────────────────────────────────────────
@@ -963,20 +938,7 @@ public class CloudFrontService {
     public List<CloudFrontOriginAccessIdentity> listCloudFrontOriginAccessIdentities(
             String marker, int maxItems) {
         List<CloudFrontOriginAccessIdentity> all = new ArrayList<>(oaiStore.scan(k -> true));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return paginate(all, marker, maxItems, CloudFrontOriginAccessIdentity::getId);
     }
 
     private static void validateOriginAccessControl(OriginAccessControl oac) {

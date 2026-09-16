@@ -19,12 +19,12 @@ docker pull floci/floci:latest
 
 Each tag combines a **variant** (what's inside) and a **channel** (how stable).
 
-|  | Standard | Compat (+ AWS CLI + boto3) |
-|---|---|---|
-| **Release (latest)** | `latest` ✅ | `latest-compat` |
-| **Release (pinned)** | `x.y.z` | `x.y.z-compat` |
-| **Nightly (floating)** | `nightly` | `nightly-compat` |
-| **Nightly (dated)** | `nightly-mmddyyyy` | `nightly-mmddyyyy-compat` |
+|  | Standard | Baseline (ARM64 only) | Compat (+ AWS CLI + boto3) |
+|---|---|---|---|
+| **Release (latest)** | `latest` ✅ | `latest-baseline` | `latest-compat` |
+| **Release (pinned)** | `x.y.z` | `x.y.z-baseline` | `x.y.z-compat` |
+| **Nightly (floating)** | `nightly` | — | `nightly-compat` |
+| **Nightly (dated)** | `nightly-mmddyyyy` | — | `nightly-mmddyyyy-compat` |
 
 For the full breakdown see [Docker Images](../configuration/docker-images.md).
 
@@ -49,7 +49,7 @@ services:
       - "4566:4566"
 ```
 
-Both variants have identical startup time (~24 ms) and memory footprint (~13 MiB).
+Standard and compat have identical startup time (~24 ms) and memory footprint (~13 MiB). On Raspberry Pi 4-class ARM64 CPUs that lack LSE, use `floci/floci:latest-baseline` (or a pinned `x.y.z-baseline` release).
 
 ## Build from Source
 

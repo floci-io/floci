@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -15,6 +16,23 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class Ec2MetadataServerTest {
+
+    @Test
+    void reconciliationAndTerminationPreserveOtherInstances() {
+        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null);
+        Instance first = new Instance();
+        first.setInstanceId("i-first");
+        Instance second = new Instance();
+        second.setInstanceId("i-second");
+        server.reconcileContainerAddresses(Set.of("192.0.2.1", "192.0.2.2"), first);
+        server.reconcileContainerAddresses(Set.of("192.0.2.2", "192.0.2.3"), second);
+        server.reconcileContainerAddresses(Set.of("192.0.2.4"), first);
+        assertTrue(server.registeredContainer("192.0.2.1").isEmpty());
+        assertEquals(second, server.registeredContainer("192.0.2.2").orElseThrow());
+        server.unregisterInstance(first);
+        assertTrue(server.registeredContainer("192.0.2.4").isEmpty());
+        assertEquals(second, server.registeredContainer("192.0.2.3").orElseThrow());
+    }
 
     @Test
     void instanceMetadataListsTagKeys() {
@@ -87,6 +105,16 @@ class Ec2MetadataServerTest {
         assertEquals(
                 currentInstance,
                 server.registeredContainer("192.168.215.7").orElseThrow());
+    }
+
+    @Test
+    void unregisteredContainerMessageExplainsMissingEc2Record() {
+        String message = Ec2MetadataServer.unregisteredContainerMessage("172.17.0.9");
+
+        assertTrue(message.startsWith("Instance not found"));
+        assertTrue(message.contains("172.17.0.9"));
+        assertTrue(message.contains("RunInstances"));
+        assertTrue(message.contains("SSM managed instance"));
     }
 
     @Test

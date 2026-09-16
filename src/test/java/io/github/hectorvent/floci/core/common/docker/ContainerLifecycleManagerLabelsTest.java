@@ -9,6 +9,8 @@ import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Capability;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
@@ -27,6 +29,8 @@ import java.util.Optional;
 import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -98,6 +102,31 @@ class ContainerLifecycleManagerLabelsTest {
         assertEquals(
                 Map.of("floci", "true", "floci_emulator", "floci-aws", "floci_service", "lambda"),
                 capturedLabels(createCmd));
+    }
+
+    @Test
+    void protectedWorkloadCannotAdministerOrSpoofItsNetwork() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of("floci.security-group-workload", "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        List<Capability> dropped = List.of(hostConfig.getValue().getCapDrop());
+        assertTrue(dropped.contains(Capability.NET_ADMIN));
+        assertTrue(dropped.contains(Capability.NET_RAW));
+    }
+
+    @Test
+    void firewallHelperGetsNetAdminInsteadOfFullPrivilege() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of("floci.security-group-helper", "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        assertEquals(List.of(Capability.NET_ADMIN), List.of(hostConfig.getValue().getCapAdd()));
+        assertNotEquals(Boolean.TRUE, hostConfig.getValue().getPrivileged());
     }
 
     @Test
@@ -197,7 +226,7 @@ class ContainerLifecycleManagerLabelsTest {
 
     private static ContainerSpec specWithLabels(Map<String, String> labels) {
         return new ContainerSpec(
-                "busybox:stable", null, List.of(), null, null, null, Map.of(), List.of(), null,
+                "busybox:stable", null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
                 List.of(), List.of(), List.of(), labels, null, false, null, List.of(), null,
                 null, List.of());
     }

@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandler;
+import io.github.hectorvent.floci.services.marketplace.MarketplaceEntitlementController;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -57,6 +58,7 @@ public class AwsJsonCborController {
     private final KinesisJsonHandler kinesisJsonHandler;
     private final StepFunctionsJsonHandler sfnJsonHandler;
     private final CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler;
+    private final MarketplaceEntitlementController marketplaceEntitlementController;
 
     @Inject
     public AwsJsonCborController(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -66,7 +68,8 @@ public class AwsJsonCborController {
                                  SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                                  KinesisJsonHandler kinesisJsonHandler,
                                  StepFunctionsJsonHandler sfnJsonHandler,
-                                 CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler) {
+                                 CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler,
+                                 MarketplaceEntitlementController marketplaceEntitlementController) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
@@ -77,6 +80,7 @@ public class AwsJsonCborController {
         this.kinesisJsonHandler = kinesisJsonHandler;
         this.sfnJsonHandler = sfnJsonHandler;
         this.cloudWatchMetricsJsonHandler = cloudWatchMetricsJsonHandler;
+        this.marketplaceEntitlementController = marketplaceEntitlementController;
     }
 
 
@@ -482,6 +486,7 @@ public class AwsJsonCborController {
             case "kinesis" -> kinesisJsonHandler.handle(operation, request, region);
             case "states" -> sfnJsonHandler.handle(operation, request, region);
             case "monitoring" -> cloudWatchMetricsJsonHandler.handle(operation, request, region);
+            case "marketplace" -> marketplaceEntitlementController.handle(operation, request, region);
             default -> null;
         };
     }

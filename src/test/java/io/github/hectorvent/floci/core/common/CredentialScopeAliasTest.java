@@ -43,6 +43,12 @@ class CredentialScopeAliasTest {
         assertEquals("iot", catalog.canonicalCredentialScope("iot-jobs-data"));
     }
 
+
+    @Test
+    void ssoPortalAliasNormalisesToSso() {
+        assertEquals("sso", catalog.canonicalCredentialScope("awsssoportal"));
+    }
+
     @Test
     void canonicalScopeIsUnchanged() {
         assertEquals("s3", catalog.canonicalCredentialScope("s3"));
@@ -76,7 +82,7 @@ class CredentialScopeAliasTest {
                 .filter(scope -> !scope.equals(catalog.canonicalCredentialScope(scope)))
                 .collect(Collectors.toMap(scope -> scope, catalog::canonicalCredentialScope));
 
-        assertEquals(Map.of("s3express", "s3", "iot-jobs-data", "iot"), rewritten);
+        assertEquals(Map.of("s3express", "s3", "iot-jobs-data", "iot", "awsssoportal", "sso"), rewritten);
     }
 
     @Test

@@ -24,8 +24,6 @@ class LambdaArnUtilsTest {
             "arn:aws:lambda:us-east-1:000000000000:function:my-fn:prod, my-fn, prod, us-east-1",
             "arn:aws:lambda:us-east-1:000000000000:function:my-fn:$LATEST, my-fn, $LATEST, us-east-1",
             "arn:aws:lambda:us-east-1:000000000000:function:my_fn-1, my_fn-1, , us-east-1",
-            "my.fn.v2, my.fn.v2, , ",
-            "arn:aws:lambda:us-east-1:000000000000:function:my.fn.v2, my.fn.v2, , us-east-1",
     })
     void resolveAcceptsValidForms(String input, String expectedName, String expectedQualifier, String expectedRegion) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(input);
@@ -49,8 +47,6 @@ class LambdaArnUtilsTest {
             "arn:aws:lambda:us-east-1:000000000000:function:my-fn:q1:q2",
             "my-fn:bad/qualifier",
             "my:fn:extra:segments",
-            "name with spaces",
-            "name!bang",
     })
     void resolveRejectsMalformedInputs(String input) {
         AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(input));
@@ -58,19 +54,75 @@ class LambdaArnUtilsTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "name with spaces",
+            "name!bang",
+            "foo.v1",
+            "..",
+    })
+    void resolveRejectsNamesFailingTheFunctionNamePattern(String input) {
+        AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(input));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("failed to satisfy constraint"));
+    }
+
     @Test
-    void resolveRejectsNameLongerThan256Chars() {
-        String tooLong = "a".repeat(257);
+    void resolveRejectsNameLongerThan64Chars() {
+        String tooLong = "a".repeat(65);
         AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(tooLong));
-        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 
     @Test
-    void resolveAccepts256CharName() {
-        String maxLen = "a".repeat(256);
+    void resolveAccepts64CharName() {
+        String maxLen = "a".repeat(64);
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(maxLen);
         assertEquals(maxLen, ref.name());
+    }
+
+    @Test
+    void resolveAccepts140CharPartialArn() {
+        String name = "a".repeat(118);
+        String partialArn = "000000000000:function:" + name;
+        assertEquals(140, partialArn.length());
+
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(partialArn);
+        assertEquals(name, ref.name());
+    }
+
+    @Test
+    void resolveAccepts140CharFullArn() {
+        String name = "a".repeat(93);
+        String fullArn = "arn:aws:lambda:us-east-1:000000000000:function:" + name;
+        assertEquals(140, fullArn.length());
+
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(fullArn);
+        assertEquals(name, ref.name());
+    }
+
+    @Test
+    void resolveRejectsFullArnLongerThan140Chars() {
+        String name = "a".repeat(94);
+        String fullArn = "arn:aws:lambda:us-east-1:000000000000:function:" + name;
+        assertEquals(141, fullArn.length());
+
+        AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(fullArn));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void resolveRejectsPartialArnLongerThan140Chars() {
+        String name = "a".repeat(119);
+        String partialArn = "000000000000:function:" + name;
+        assertEquals(141, partialArn.length());
+
+        AwsException ex = assertThrows(AwsException.class, () -> LambdaArnUtils.resolve(partialArn));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test

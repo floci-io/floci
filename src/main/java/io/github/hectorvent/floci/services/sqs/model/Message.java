@@ -57,6 +57,26 @@ public class Message {
         this.md5OfBody = computeMd5(body);
     }
 
+    /** A copy for delivery to another queue by StartMessageMoveTask: identity and content carry
+     *  over; per-receive state (receive count, first-receive timestamp, receipt handle, visibility)
+     *  starts over. The source instance is untouched so a failed delivery can put it back as it was. */
+    public Message copyForRedrive() {
+        Message copy = new Message();
+        copy.messageId = messageId;
+        copy.body = body;
+        copy.messageAttributes = messageAttributes == null ? new HashMap<>() : new HashMap<>(messageAttributes);
+        copy.sentTimestamp = sentTimestamp;
+        copy.md5OfBody = md5OfBody;
+        copy.md5OfMessageAttributes = md5OfMessageAttributes;
+        copy.messageGroupId = messageGroupId;
+        copy.messageDeduplicationId = messageDeduplicationId;
+        copy.sequenceNumber = sequenceNumber;
+        copy.originalSourceQueueUrl = originalSourceQueueUrl;
+        copy.awsTraceHeader = awsTraceHeader;
+        // receiveCount 0, firstReceiveTimestamp / receiptHandle / visibleAt null: a fresh life.
+        return copy;
+    }
+
     public String getMessageId() { return messageId; }
     public void setMessageId(String messageId) { this.messageId = messageId; }
 

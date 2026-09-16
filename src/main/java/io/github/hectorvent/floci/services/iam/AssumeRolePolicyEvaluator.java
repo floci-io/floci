@@ -29,9 +29,10 @@ public class AssumeRolePolicyEvaluator {
 
     private static final Logger LOG = Logger.getLogger(AssumeRolePolicyEvaluator.class);
     private static final String ASSUME_ROLE_ACTION = "sts:AssumeRole";
-    private static final Pattern ACCOUNT_ROOT_ARN = Pattern.compile("^arn:aws:iam::(\\d{12}):root$");
-    private static final Pattern ASSUMED_ROLE_ARN =
-            Pattern.compile("^arn:aws:sts::(\\d{12}):assumed-role/([^/]+)/.*$");
+    private static final Pattern ACCOUNT_ROOT_ARN =
+            Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::(\\d{12}):root$");
+    private static final Pattern ASSUMED_ROLE_ARN = Pattern.compile(
+            "^arn:(" + AwsArnUtils.PARTITION_REGEX + "):sts::(\\d{12}):assumed-role/([^/]+)/.*$");
 
     private final ObjectMapper objectMapper;
 
@@ -183,9 +184,17 @@ public class AssumeRolePolicyEvaluator {
      * Maps an STS assumed-role ARN ({@code arn:aws:sts::ACCT:assumed-role/Role/session}) to the
      * underlying IAM role ARN ({@code arn:aws:iam::ACCT:role/Role}), or {@code null} if {@code arn}
      * is not an assumed-role ARN.
+     *
+     * <p>The caller's partition is carried across rather than assumed. IAM ARNs are regionless, so
+     * {@code Arn.of} cannot derive it, and hardcoding {@code aws} here would rewrite a GovCloud
+     * caller into a commercial role ARN that no GovCloud trust policy can match: the caller would
+     * be denied a role they are entitled to, with nothing in the response saying why.
      */
     private static String assumedRoleToRoleArn(String arn) {
         var m = ASSUMED_ROLE_ARN.matcher(arn);
-        return m.matches() ? AwsArnUtils.Arn.of("iam", "", m.group(1), "role/" + m.group(2)).toString() : null;
+        if (!m.matches()) {
+            return null;
+        }
+        return new AwsArnUtils.Arn(m.group(1), "iam", "", m.group(2), "role/" + m.group(3)).toString();
     }
 }

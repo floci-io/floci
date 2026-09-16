@@ -804,7 +804,29 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
-            .body("message", equalTo("Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided."));
+            .body("message", equalTo("1 validation error detected: Must specify the AttributesToGet or "
+                    + "ProjectionExpression when choosing to get SPECIFIC_ATTRIBUTES"));
+    }
+
+    @Test
+    @Order(10)
+    void scanWithSelectSpecificAttributesRequiresProjectionParameters() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "Select": "SPECIFIC_ATTRIBUTES"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Must specify the AttributesToGet or "
+                    + "ProjectionExpression when choosing to get SPECIFIC_ATTRIBUTES"));
     }
 
     @Test
@@ -3647,6 +3669,239 @@ given()
         assertEquals(5, allCollected.size(), "Expected 5 items total, got: " + allCollected);
         assertEquals(Set.of("ITEM_a", "ITEM_b", "ITEM_c", "ITEM_d", "ITEM_e"), new HashSet<>(allCollected));
         assertEquals(3, pages, "Expected ceil(5/2)=3 pages");
+    }
+
+    @Test
+    void partiqlBindsParametersOfEveryAttributeValueType() throws Exception {
+        var mapper = new ObjectMapper();
+        var tableName = "PartiqlOperandTypeTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {
+                        "pk": {"S": "row"},
+                        "tags": {"SS": ["b", "a"]},
+                        "scores": {"NS": ["2", "1"]},
+                        "blobs": {"BS": ["AQID"]},
+                        "items": {"L": [{"S": "a"}, {"N": "1"}]},
+                        "meta": {"M": {"k": {"S": "v"}}},
+                        "raw": {"B": "AQID"}
+                    }
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        // A set is unordered, so a permuted parameter is the same value.
+        assertEquals(1, partiqlMatchCount(mapper, tableName,
+                "tags", """
+                {"SS": ["a", "b"]}"""), "SS parameter should match regardless of member order");
+        assertEquals(1, partiqlMatchCount(mapper, tableName,
+                "scores", """
+                {"NS": ["1", "2"]}"""), "NS parameter should match regardless of member order");
+        assertEquals(1, partiqlMatchCount(mapper, tableName, "blobs", """
+                {"BS": ["AQID"]}"""));
+        assertEquals(1, partiqlMatchCount(mapper, tableName, "meta", """
+                {"M": {"k": {"S": "v"}}}"""));
+        assertEquals(1, partiqlMatchCount(mapper, tableName, "raw", """
+                {"B": "AQID"}"""));
+
+        // A list is ordered, so a permuted parameter is a different value.
+        assertEquals(1, partiqlMatchCount(mapper, tableName, "items", """
+                {"L": [{"S": "a"}, {"N": "1"}]}"""));
+        assertEquals(0, partiqlMatchCount(mapper, tableName, "items", """
+                {"L": [{"N": "1"}, {"S": "a"}]}"""), "A permuted list is a different value");
+
+        deleteTable(tableName);
+    }
+
+    private int partiqlMatchCount(ObjectMapper mapper, String tableName, String attribute, String parameter)
+            throws Exception {
+        var body = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND \\"%s\\" = ?",
+                    "Parameters": [{"S": "row"}, %s]
+                }
+                """.formatted(tableName, attribute, parameter))
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        return mapper.readTree(body).path("Items").size();
+    }
+
+    // Only S, N and B have an ordering, so every other operand type is a
+    // ValidationException naming the operator as it was written.
+    @Test
+    void partiqlOrderingOperatorRejectsAnOperandTypeWithNoOrdering() {
+        var tableName = "PartiqlOrderingTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND val < ?",
+                    "Parameters": [{"S": "row"}, {"BOOL": true}]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Incorrect operand type for operator or function; "
+                    + "operator or function: <, operand type: BOOL"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND val = ?",
+                    "Parameters": [{"S": "row"}, {"BOOL": true}]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        deleteTable(tableName);
+    }
+
+    // Checked against real DynamoDB (ap-northeast-1, 2026-09-10): a binary that is not
+    // base64 fails the request as a SerializationException before anything runs, and an
+    // AttributeValue with zero or several type keys is a ValidationException.
+    @Test
+    void partiqlRejectsAParameterThatIsNotAWellFormedAttributeValue() {
+        var tableName = "PartiqlParameterShapeTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Item": {"pk": {"S": "row"}, "raw": {"B": "AQID"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        for (var op : List.of("=", "<")) {
+            given()
+                .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                    {
+                        "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND raw %s ?",
+                        "Parameters": [{"S": "row"}, {"B": "not base64!!"}]
+                    }
+                    """.formatted(tableName, op))
+            .when().post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", containsString("SerializationException"));
+        }
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND raw = ?",
+                    "Parameters": [{"S": "row"}, {"B": "AQID", "SS": ["a"]}]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Supplied AttributeValue has more than one datatypes set, "
+                    + "must contain exactly one of the supported datatypes"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "Statement": "SELECT pk FROM \\"%s\\" WHERE pk = ? AND raw = ?",
+                    "Parameters": [{"S": "row"}, {}]
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Supplied AttributeValue is empty, "
+                    + "must contain exactly one of the supported datatypes"));
+
+        // The same decode guards a FilterExpression, which reaches the comparison directly.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "#r < :v",
+                    "ExpressionAttributeNames": {"#r": "raw"},
+                    "ExpressionAttributeValues": {":v": {"B": "not base64!!"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("SerializationException"));
+
+        deleteTable(tableName);
     }
 
     @Test

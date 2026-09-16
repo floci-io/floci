@@ -118,4 +118,53 @@ class SesDedicatedIpServiceTest {
     void delete_missingThrows() {
         assertThrows(AwsException.class, () -> service.deleteDedicatedIpPool("ghost", REGION));
     }
+
+    @Test
+    void ipLevelOperations_reportIpNotFound() {
+        // Floci models no leased dedicated IPs, so every IP-targeted op reports not-found.
+        assertThrows(AwsException.class, () -> service.getDedicatedIp("1.2.3.4", REGION));
+        assertThrows(AwsException.class, () -> service.putDedicatedIpInPool("1.2.3.4", "pool-a", REGION));
+        assertThrows(AwsException.class, () -> service.putDedicatedIpWarmupAttributes("1.2.3.4", 50, REGION));
+    }
+
+    @Test
+    void putWarmupAttributes_validatesPercentageBeforeIp() {
+        // Required and range checks fire before the IP lookup, matching AWS precedence.
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.putDedicatedIpWarmupAttributes("1.2.3.4", null, REGION));
+        assertEquals("Warmup Percentage can't be null.", missing.getMessage());
+
+        AwsException outOfRange = assertThrows(AwsException.class,
+                () -> service.putDedicatedIpWarmupAttributes("1.2.3.4", 101, REGION));
+        assertEquals("Warmup Percentage must be between 0 and 100.", outOfRange.getMessage());
+    }
+
+    @Test
+    void putDedicatedIpInPool_validatesBlankDestinationBeforeIp() {
+        assertThrows(AwsException.class, () -> service.putDedicatedIpInPool("1.2.3.4", " ", REGION));
+    }
+
+    @Test
+    void putScalingAttributes_rejectsInvalidMode() {
+        service.createDedicatedIpPool("pool-a", "STANDARD", null, REGION);
+        assertThrows(AwsException.class,
+                () -> service.putDedicatedIpPoolScalingAttributes("pool-a", "TURBO", REGION));
+    }
+
+    @Test
+    void putScalingAttributes_missingPoolThrows() {
+        assertThrows(AwsException.class,
+                () -> service.putDedicatedIpPoolScalingAttributes("ghost", "MANAGED", REGION));
+    }
+
+    @Test
+    void putScalingAttributes_upgradesStandardToManaged_thenRejectsDowngrade() {
+        service.createDedicatedIpPool("pool-a", "STANDARD", null, REGION);
+
+        service.putDedicatedIpPoolScalingAttributes("pool-a", "MANAGED", REGION);
+        assertEquals("MANAGED", service.getDedicatedIpPool("pool-a", REGION).getScalingMode());
+
+        assertThrows(AwsException.class,
+                () -> service.putDedicatedIpPoolScalingAttributes("pool-a", "STANDARD", REGION));
+    }
 }

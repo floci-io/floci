@@ -36,7 +36,7 @@ For the upstream API shape, see the AWS documentation:
 
 A request identifies its target cluster one of two ways:
 
-- **`ClusterIdentifier` + `DbUser` + `Database`.** The `DbUser` must be the cluster master user. Floci connects directly to the container, so a non-master `DbUser` needs a real PostgreSQL role; until `GetClusterCredentials` is emulated, a non-master `DbUser` returns `ValidationException`.
+- **`ClusterIdentifier` + `DbUser` + `Database`.** The `DbUser` is the cluster master, or the prefixed name returned by `GetClusterCredentials` / `GetClusterCredentialsWithIAM` (for example `IAM:analyst`) while that credential is unexpired. Floci connects to the container as the cluster master in both cases. Any other `DbUser` returns `ValidationException`.
 - **`SecretArn` + `ClusterIdentifier` + `Database`.** The secret must be a local Secrets Manager secret holding JSON credentials (`username` or `user`, plus `password`). A cross-region `SecretArn` is rejected.
 
 `WorkgroupName` (Amazon Redshift Serverless) is rejected with `ValidationException`. Redshift Serverless is not emulated.
@@ -54,7 +54,7 @@ A request identifies its target cluster one of two ways:
 - **`CancelStatement`** returns `{ "Status": true }`. In Floci a statement is already terminal by the time it can be cancelled, so `CancelStatement` sets `Status=ABORTED` only when the statement was not already `FINISHED`. An unknown statement id returns `ResourceNotFoundException`.
 - **`WithEvent`** is accepted and ignored: no EventBridge event is published.
 - **`ExecuteSql` and `BatchExecuteSql`** (the deprecated pre-2020 operations) return `ValidationException`.
-- **Type mapping.** JDBC `BOOLEAN` and `BIT` map to `booleanValue`; integer types to `longValue`; floating-point types to `doubleValue`; `NUMERIC` and `DECIMAL` to `stringValue` (as AWS does); binary types to `blobValue`; everything else, including dates, timestamps, uuid, and json, to `stringValue`. A SQL `NULL` maps to `isNull`.
+- **Type mapping.** JDBC `BOOLEAN` and `BIT` map to `booleanValue`; integer types to `longValue`; floating-point types to `doubleValue`; `NUMERIC` and `DECIMAL` to `stringValue` (as AWS does); binary types to `blobValue`; everything else, including dates, timestamps, and uuid, to `stringValue`. A SQL `NULL` maps to `isNull`. A result column of type `line`, `json`, or `jsonb` fails the statement with the Redshift error text.
 
 ## Configuration
 

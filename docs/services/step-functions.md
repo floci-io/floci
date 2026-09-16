@@ -16,6 +16,11 @@
 | `PublishStateMachineVersion` | - |
 | `ListStateMachineVersions` | - |
 | `DeleteStateMachineVersion` | - |
+| `CreateStateMachineAlias` | - |
+| `DescribeStateMachineAlias` | - |
+| `ListStateMachineAliases` | - |
+| `UpdateStateMachineAlias` | - |
+| `DeleteStateMachineAlias` | - |
 | `ValidateStateMachineDefinition` | Validate an ASL definition without creating a state machine |
 | `StartExecution` | Start a new execution |
 | `StartSyncExecution` | - |
@@ -105,8 +110,9 @@ scheduling time, not when a worker actually picks up the task. `TaskSubmitted`, 
 AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When a
 branch fails, AWS records `*StateAborted` and `MapIterationAborted` events for the states its
 sibling branches were in; Floci cancels the siblings without recording them. A Distributed
-`Map` whose item fails reports the item's own error rather than AWS's
-`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error.
+`Map` that declares no tolerance reports a failed item's own error rather than AWS's
+`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error. A `Map` that
+declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
 
 ## Map concurrency
 
@@ -118,6 +124,51 @@ omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline
 Results remain in input order even when iterations finish out of order. If an iteration fails,
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
 iterations.
+
+## Distributed Map ItemReader
+
+`ItemReader` supports `arn:aws:states:::s3:getObject` with `InputType: JSON` and
+`arn:aws:states:::s3:listObjectsV2`. The listing reads every page under `Prefix`, and each item
+carries the AWS fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`.
+An empty prefix gives zero iterations and the Map succeeds. `ReaderConfig.MaxItems` applies to
+both readers; `MaxItemsPath` is not supported. The `CSV`, `JSONL`, `PARQUET` and `MANIFEST` input
+types are accepted by `CreateStateMachine` and fail the execution with `States.ItemReaderFailed`.
+
+## Distributed Map ItemBatcher
+
+`ItemBatcher` hands each child execution a batch of items instead of a single item. The child input
+is `{"BatchInput": ..., "Items": [...]}`, with `BatchInput` present only when the state declares it.
+`ItemSelector` still runs per item, before the items are grouped.
+
+A batch closes on `MaxItemsPerBatch`, on `MaxInputBytesPerBatch`, or on the 256 KiB child-input
+ceiling AWS applies whether or not a byte limit is declared. Either limit may be given as a
+`...Path` field, or as an expression in a JSONata state machine. With neither declared, items fill
+one batch up to that ceiling. The size measured is the serialized child payload, envelope and
+`BatchInput` included, not the items alone. An item that would exceed the ceiling on its own can
+never start a child execution, so the state fails with `States.DataLimitExceeded` rather than
+building a batch AWS would reject: reduce the item with `ItemSelector` first.
+
+`MaxConcurrency` then bounds concurrent batches, and the Map result has one entry per batch rather
+than per item. `DescribeMapRun` reports items under `itemCounts` and batches under
+`executionCounts`.
+
+## Tolerated failures
+
+`ToleratedFailureCount` and `ToleratedFailurePercentage` let a Distributed `Map` absorb failed items
+instead of failing on the first one. Both accept a `...Path` field, or an expression in a JSONata
+state machine, and the percentage is taken over the item count. Declaring both applies the stricter
+of the two.
+
+An absorbed failure contributes no result, so the `Map` output carries one entry per successful
+child execution. A `ResultWriter` still exports it: successful children go to `SUCCEEDED_0.json` and
+absorbed failures to `FAILED_0.json`, each listed under the matching key of the manifest's
+`ResultFiles`. A failed record carries `Error` and `Cause` in place of an output. Once the budget is
+spent, the state fails with `States.ExceedToleratedFailureThreshold` and the run emits
+`MapRunFailed`.
+
+`DescribeMapRun` reports the declared values under `toleratedFailureCount` and
+`toleratedFailurePercentage`. A `Map` that declares neither keeps the earlier behaviour: the first
+failed item fails the state, carrying that item's own error.
 
 ## Retry policies
 
@@ -357,10 +408,40 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
+| `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
 
 `sendTaskSuccess` and `sendTaskFailure` resolve a token a `.waitForTaskToken` task is parked on. A
 token nobody is waiting for fails the calling task rather than reporting a delivery that never
 happened.
+
+## Publishing to SNS
+
+`arn:aws:states:::sns:publish` calls the SNS Publish API with the task's parameters and returns the
+Publish response, `{MessageId}`. `TopicArn`, `TargetArn`, `PhoneNumber`, `Message`, `Subject`,
+`MessageStructure`, `MessageAttributes`, `MessageGroupId` and `MessageDeduplicationId` are the API's
+own fields, so a FIFO topic needs a `MessageGroupId` here just as it does from the SDK. A `Message`
+given as an object rather than a string is published as its JSON text, which is how a
+`.waitForTaskToken` task hands its token to the subscriber:
+
+```json
+{
+  "Type": "Task",
+  "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+  "Parameters": {
+    "TopicArn": "arn:aws:sns:us-east-1:000000000000:myTopic",
+    "Message": {
+      "Input.$": "$.message",
+      "TaskToken.$": "$$.Task.Token"
+    }
+  },
+  "End": true
+}
+```
+
+A failure names the SDK exception class under the `SNS.` prefix, so a topic that does not exist
+fails the task with `SNS.NotFoundException` and a missing `Message` with
+`SNS.InvalidParameterException`. `arn:aws:states:::aws-sdk:sns:publish` is the same call under the
+`Sns.` prefix, as the AWS SDK integration table above shows.
 
 ## Publishing events
 
@@ -510,11 +591,12 @@ of every account are swept, each written back under its own account. Executions 
 reached a terminal status are left untouched, and so is the status and `stopDate` of one this sweep
 aborted on an earlier boot.
 
-Execution histories are held in memory, not in storage. The events recorded before the restart are
-gone, so the execution cannot be resumed, and `GetExecutionHistory` reports a single
-`ExecutionAborted` event, with an empty `executionAbortedEventDetails`, only for the boot that
-aborted it: after a further restart the execution is already terminal, no event is written, and the
-history is empty while `DescribeExecution` still reports the status and `stopDate`.
+Execution history is stored with the execution. While an execution is running, the current history
+is checkpointed every 100 events and when the execution reaches a terminal state. A graceful
+shutdown flushes the current execution state before the emulator stops. On restart, persisted
+history is retained, and a previously running execution is marked `ABORTED` with one
+`ExecutionAborted` event appended. After a further restart, the execution is already terminal, so
+no additional event is written.
 
 ## Configuration
 

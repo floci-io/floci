@@ -25,6 +25,7 @@ public class S3Object {
     private String contentDisposition;
     private String cacheControl;
     private String serverSideEncryption;
+    private String sseKmsKeyId;
     private String sseCustomerAlgorithm;
     private String sseCustomerKeyMd5;
     private long size;
@@ -60,17 +61,20 @@ public class S3Object {
     }
 
     public S3Object(String bucketName, String key, byte[] data, String contentType) {
+        this(bucketName, key, data, contentType, computeETag(data));
+    }
+
+    public S3Object(String bucketName, String key, byte[] data, String contentType, String eTag) {
         this.bucketName = bucketName;
         this.key = key;
         this.data = data;
         this.contentType = contentType != null ? contentType : "application/octet-stream";
         this.size = data.length;
         this.lastModified = Instant.now().truncatedTo(ChronoUnit.MILLIS);
-        this.eTag = computeETag(data);
+        this.eTag = eTag;
         this.metadata = new HashMap<>();
         this.storageClass = "STANDARD";
         this.checksum = new S3Checksum();
-        this.checksum.setChecksumSHA256(S3Checksum.sha256Base64(data));
         this.checksum.setChecksumType(ChecksumType.FULL_OBJECT);
         this.parts = new ArrayList<>();
         this.tags = new HashMap<>();
@@ -102,6 +106,9 @@ public class S3Object {
 
     public String getServerSideEncryption() { return serverSideEncryption; }
     public void setServerSideEncryption(String serverSideEncryption) { this.serverSideEncryption = serverSideEncryption; }
+
+    public String getSseKmsKeyId() { return sseKmsKeyId; }
+    public void setSseKmsKeyId(String sseKmsKeyId) { this.sseKmsKeyId = sseKmsKeyId; }
 
     public String getSseCustomerAlgorithm() { return sseCustomerAlgorithm; }
     public void setSseCustomerAlgorithm(String sseCustomerAlgorithm) { this.sseCustomerAlgorithm = sseCustomerAlgorithm; }
@@ -154,7 +161,7 @@ public class S3Object {
     public String getDataGeneration() { return dataGeneration; }
     public void setDataGeneration(String dataGeneration) { this.dataGeneration = dataGeneration; }
 
-    private static String computeETag(byte[] data) {
+    public static String computeETag(byte[] data) {
         try {
             var md = java.security.MessageDigest.getInstance("MD5");
             byte[] digest = md.digest(data);

@@ -27,7 +27,7 @@ public enum KmsKeySpec {
     HMAC_384(KeyType.HMAC, Algorithm.HMAC_SHA_384),
     HMAC_512(KeyType.HMAC, Algorithm.HMAC_SHA_512),
 
-    SM2(KeyType.SM2, Algorithm.SM2_DSA),
+    SM2(KeyType.SM2, Algorithm.SM2DSA),
 
     ML_DSA_44(KeyType.ML_DSA, Algorithm.ML_DSA_SHAKE_256),
     ML_DSA_65(KeyType.ML_DSA, Algorithm.ML_DSA_SHAKE_256),
@@ -152,7 +152,7 @@ public enum KmsKeySpec {
         ECDSA_SHA_512("ECDSA_SHA_512", "SHA512withECDSA", KmsKeyUsage.SIGN_VERIFY),
         ED25519_SHA_512("ED25519_SHA_512","Ed25519", KmsKeyUsage.SIGN_VERIFY),
         ED25519_PH_SHA_512("ED25519_PH_SHA_512", "Ed25519", KmsKeyUsage.SIGN_VERIFY),
-        SM2_DSA("SM2DSA","", KmsKeyUsage.SIGN_VERIFY),
+        SM2DSA("SM2DSA","", KmsKeyUsage.SIGN_VERIFY),
         ML_DSA_SHAKE_256("ML_DSA_SHAKE_256", "ML-DSA", KmsKeyUsage.SIGN_VERIFY),
         HMAC_SHA_224("HMAC_SHA_224",""),
         HMAC_SHA_256("HMAC_SHA_256",""),

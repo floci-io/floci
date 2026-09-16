@@ -457,13 +457,17 @@ public final class ChoiceOperators {
     }
 
     /**
-     * Pragmatic ASL reference-path syntax check: must start with {@code $}; {@code $} alone is valid; a
-     * longer path must be a sequence of non-empty {@code .segment} steps and balanced non-empty
-     * {@code [..]} steps. Rejects the common malformations ({@code not-a-path}, {@code $.}, {@code $[}).
+     * Pragmatic ASL reference-path syntax check: must start with {@code $} or {@code $$}; either root
+     * alone is valid; a longer path must be a sequence of non-empty {@code .segment} steps and balanced
+     * non-empty {@code [..]} steps. Rejects common malformations ({@code not-a-path}, {@code $.},
+     * {@code $$.}, {@code $[}).
      */
     static boolean isReferencePath(String p) {
         if (p == null || p.isEmpty() || p.charAt(0) != '$') {
             return false;
+        }
+        if (p.startsWith("$$")) {
+            p = "$" + p.substring(2);
         }
         if (p.equals("$")) {
             return true;

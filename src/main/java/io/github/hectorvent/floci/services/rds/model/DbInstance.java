@@ -44,6 +44,7 @@ public class DbInstance {
     private String preferredBackupWindow;
     private String preferredMaintenanceWindow;
     private boolean copyTagsToSnapshot;
+    private boolean publiclyAccessible;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
     private String dbiResourceId;
     private String dbInstanceArn;
@@ -155,6 +156,9 @@ public class DbInstance {
     public void setAutoMinorVersionUpgrade(boolean autoMinorVersionUpgrade) {
         this.autoMinorVersionUpgrade = autoMinorVersionUpgrade;
     }
+
+    public boolean isPubliclyAccessible() { return publiclyAccessible; }
+    public void setPubliclyAccessible(boolean publiclyAccessible) { this.publiclyAccessible = publiclyAccessible; }
 
     public Map<String, String> getSubnetAvailabilityZones() { return subnetAvailabilityZones; }
     public void setSubnetAvailabilityZones(Map<String, String> subnetAvailabilityZones) {

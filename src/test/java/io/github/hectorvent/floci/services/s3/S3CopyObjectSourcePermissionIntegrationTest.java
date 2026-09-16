@@ -1,0 +1,534 @@
+package io.github.hectorvent.floci.services.s3;
+
+import io.github.hectorvent.floci.testutil.S3RequestSigner;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+import java.util.UUID;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+
+/**
+ * Regression tests for issue #2333: CopyObject and UploadPartCopy only authorized
+ * {@code s3:PutObject} on the destination and never checked {@code s3:GetObject} on
+ * the copy source, which only ever appears in the {@code x-amz-copy-source} header.
+ * A caller with write-only access to a bucket could therefore copy the contents of
+ * any object it could not otherwise read, as long as it could guess the bucket/key.
+ */
+@QuarkusTest
+@TestProfile(S3CopyObjectSourcePermissionIntegrationTest.IamEnforcementProfile.class)
+class S3CopyObjectSourcePermissionIntegrationTest {
+
+    /**
+     * #3573 added S3HeaderSignatureFilter, which verifies the SigV4 header signature whenever
+     * floci.services.s3.enforce-auth is on, and this profile turns it on. A hand built header with a
+     * placeholder signature no longer reaches the handler, so every S3 call here signs for real.
+     */
+    private static final S3RequestSigner ROOT_SIGNER = S3RequestSigner.signedAs("test", "test");
+
+    /** An access key pair: signing needs the secret, not only the id. */
+    private record UserCredentials(String accessKeyId, String secretAccessKey) {
+        S3RequestSigner signer() {
+            return S3RequestSigner.signedAs(accessKeyId, secretAccessKey);
+        }
+    }
+
+    private static final String REGION = "us-east-1";
+    private static final String ACCOUNT_A = "111122223333";
+    private static final String ACCOUNT_B = "222233334444";
+
+    @Test
+    void copyObjectIsDeniedWhenCallerCannotReadTheSource() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-source-" + suffix;
+        String destBucket = "copy-dest-" + suffix;
+        String userName = "copy-write-only-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "private-secret.txt", "top secret payload");
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "DestWriteOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%1$s/*"}
+                ]}""".formatted(destBucket));
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/private-secret.txt")
+        .when()
+                .put("/" + destBucket + "/exfiltrated.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void copyObjectSucceedsWhenCallerCanReadSourceAndWriteDestination() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-source-ok-" + suffix;
+        String destBucket = "copy-dest-ok-" + suffix;
+        String userName = "copy-read-write-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "allowed.txt", "not secret");
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "SourceReadDestWrite", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%2$s/*"}
+                ]}""".formatted(sourceBucket, destBucket));
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/allowed.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void copyObjectSucceedsWhenSourceBucketPolicyAllowsCaller() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-resource-allow-source-" + suffix;
+        String destBucket = "copy-resource-allow-dest-" + suffix;
+        String userName = "copy-resource-allow-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "allowed.txt", "resource policy grant");
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "DestWriteOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
+                ]}""".formatted(destBucket));
+        putBucketPolicyAsRoot(
+                sourceBucket, allowUserReadPolicy(sourceBucket, userName, "s3:GetObject"));
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/allowed.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void crossAccountCopyRequiresIdentityAndSourceBucketPolicyAllows() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-cross-source-" + suffix;
+        String destBucket = "copy-cross-dest-" + suffix;
+        String userName = "copy-cross-user-" + suffix;
+
+        UserCredentials accountAAdmin = createAccountAdmin("copy-source-admin-" + suffix, ACCOUNT_A);
+        UserCredentials accountBAdmin = createAccountAdmin("copy-dest-admin-" + suffix, ACCOUNT_B);
+        createBucketAsRoot(sourceBucket, accountAAdmin.signer());
+        putObjectAsRoot(sourceBucket, "shared.txt", "cross-account source", accountAAdmin.signer());
+        createBucketAsRoot(destBucket, accountBAdmin.signer());
+
+        UserCredentials caller = createUser(userName, ACCOUNT_B);
+        putUserPolicy(userName, "CopyAccess", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
+                ]}""".formatted(destBucket), ACCOUNT_B);
+        putBucketPolicyAsRoot(
+                sourceBucket,
+                allowUserReadPolicy(sourceBucket, ACCOUNT_B, userName, "s3:GetObject"),
+                accountAAdmin.signer());
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/shared.txt")
+        .when()
+                .put("/" + destBucket + "/denied.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+
+        putUserPolicy(userName, "CopyAccess", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%2$s/*"}
+                ]}""".formatted(sourceBucket, destBucket), ACCOUNT_B);
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/shared.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void versionedCopyUsesGetObjectVersionPermission() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-version-source-" + suffix;
+        String destBucket = "copy-version-dest-" + suffix;
+        String userName = "copy-version-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        enableVersioningAsRoot(sourceBucket);
+        String versionId = putVersionedObjectAsRoot(sourceBucket, "versioned.txt", "versioned source");
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "DestWriteOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
+                ]}""".formatted(destBucket));
+        putBucketPolicyAsRoot(
+                sourceBucket, allowUserReadPolicy(sourceBucket, userName, "s3:GetObjectVersion"));
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source",
+                        "/" + sourceBucket + "/versioned.txt?versionId=" + versionId)
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void uploadPartCopyIsDeniedWhenCallerCannotReadTheSource() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "part-copy-source-" + suffix;
+        String destBucket = "part-copy-dest-" + suffix;
+        String userName = "part-copy-write-only-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "private-secret.txt", "top secret payload");
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "DestWriteOnly", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%1$s/*"}
+                ]}""".formatted(destBucket));
+
+        String uploadId = initiateMultipartUploadAsRoot(destBucket, "exfiltrated.txt");
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/private-secret.txt")
+                .queryParam("uploadId", uploadId)
+                .queryParam("partNumber", 1)
+        .when()
+                .put("/" + destBucket + "/exfiltrated.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void copyObjectIsDeniedBySourceBucketPolicy() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-policy-source-" + suffix;
+        String destBucket = "copy-policy-dest-" + suffix;
+        String userName = "copy-policy-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "denied.txt", "bucket policy protected");
+        putBucketPolicyAsRoot(sourceBucket, denyGetObjectPolicy(sourceBucket));
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "SourceReadDestWrite", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%2$s/*"}
+                ]}""".formatted(sourceBucket, destBucket));
+
+        given()
+                .filter(caller.signer())
+        .when()
+                .get("/" + sourceBucket + "/denied.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/denied.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void anonymousCopyObjectSucceedsWhenSourceAclAllowsRead() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-public-source-" + suffix;
+        String destBucket = "copy-public-dest-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putPublicObjectAsRoot(sourceBucket, "public.txt", "public source");
+        putBucketPolicyAsRoot(destBucket, allowPublicPutObjectPolicy(destBucket));
+
+        given()
+                .header("x-amz-copy-source", "/" + sourceBucket + "/public.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void uploadPartCopyIsDeniedBySourceBucketPolicy() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "part-policy-source-" + suffix;
+        String destBucket = "part-policy-dest-" + suffix;
+        String userName = "part-policy-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "denied.txt", "bucket policy protected");
+        putBucketPolicyAsRoot(sourceBucket, denyGetObjectPolicy(sourceBucket));
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "SourceReadDestWrite", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%2$s/*"}
+                ]}""".formatted(sourceBucket, destBucket));
+        String uploadId = initiateMultipartUploadAsRoot(destBucket, "copied.txt");
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/denied.txt")
+                .queryParam("uploadId", uploadId)
+                .queryParam("partNumber", 1)
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void anonymousCopyObjectIsDeniedWhenSourceIsPrivate() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-private-source-" + suffix;
+        String destBucket = "copy-public-dest-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "private.txt", "private source");
+        putBucketPolicyAsRoot(destBucket, allowPublicPutObjectPolicy(destBucket));
+
+        given()
+                .header("x-amz-copy-source", "/" + sourceBucket + "/private.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+    }
+
+    private static void createBucketAsRoot(String bucket) {
+        createBucketAsRoot(bucket, ROOT_SIGNER);
+    }
+
+    private static void createBucketAsRoot(String bucket, S3RequestSigner signer) {
+        given()
+                .filter(signer)
+        .when()
+                .put("/" + bucket)
+        .then()
+                .statusCode(200);
+    }
+
+    private static void putObjectAsRoot(String bucket, String key, String body) {
+        putObjectAsRoot(bucket, key, body, ROOT_SIGNER);
+    }
+
+    private static void putObjectAsRoot(
+            String bucket, String key, String body, S3RequestSigner signer) {
+        given()
+                .filter(signer)
+                .contentType("text/plain")
+                .body(body)
+        .when()
+                .put("/" + bucket + "/" + key)
+        .then()
+                .statusCode(200);
+    }
+
+    private static void putPublicObjectAsRoot(String bucket, String key, String body) {
+        given()
+                .filter(ROOT_SIGNER)
+                .header("x-amz-acl", "public-read")
+                .contentType("text/plain")
+                .body(body)
+        .when()
+                .put("/" + bucket + "/" + key)
+        .then()
+                .statusCode(200);
+    }
+
+    private static void enableVersioningAsRoot(String bucket) {
+        given()
+                .filter(ROOT_SIGNER)
+                .contentType("application/xml")
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+                .put("/" + bucket + "?versioning")
+        .then()
+                .statusCode(200);
+    }
+
+    private static String putVersionedObjectAsRoot(String bucket, String key, String body) {
+        return given()
+                .filter(ROOT_SIGNER)
+                .contentType("text/plain")
+                .body(body)
+        .when()
+                .put("/" + bucket + "/" + key)
+        .then()
+                .statusCode(200)
+                .extract()
+                .header("x-amz-version-id");
+    }
+
+    private static void putBucketPolicyAsRoot(String bucket, String policy) {
+        putBucketPolicyAsRoot(bucket, policy, ROOT_SIGNER);
+    }
+
+    private static void putBucketPolicyAsRoot(
+            String bucket, String policy, S3RequestSigner signer) {
+        given()
+                .filter(signer)
+                .contentType("application/json")
+                .body(policy)
+        .when()
+                .put("/" + bucket + "?policy")
+        .then()
+                .statusCode(200);
+    }
+
+    private static String denyGetObjectPolicy(String bucket) {
+        return """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*"}
+                ]}""".formatted(bucket);
+    }
+
+    private static String allowUserReadPolicy(String bucket, String userName, String action) {
+        return allowUserReadPolicy(bucket, "000000000000", userName, action);
+    }
+
+    private static String allowUserReadPolicy(
+            String bucket, String accountId, String userName, String action) {
+        return """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%1$s:user/%2$s"},
+                   "Action":"%3$s","Resource":"arn:aws:s3:::%4$s/*"}
+                ]}""".formatted(accountId, userName, action, bucket);
+    }
+
+    private static String allowPublicPutObjectPolicy(String bucket) {
+        return """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Principal":"*","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"}
+                ]}""".formatted(bucket);
+    }
+
+    private static String initiateMultipartUploadAsRoot(String bucket, String key) {
+        return given()
+                .filter(ROOT_SIGNER)
+                .queryParam("uploads", "")
+        .when()
+                .post("/" + bucket + "/" + key)
+        .then()
+                .statusCode(200)
+                .extract()
+                .body()
+                .xmlPath()
+                .getString("InitiateMultipartUploadResult.UploadId");
+    }
+
+    private static UserCredentials createUser(String userName) {
+        return createUser(userName, "test");
+    }
+
+    private static UserCredentials createUser(String userName, String accountId) {
+        given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserName", userName)
+                .header("Authorization", auth(accountId, "iam"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        io.restassured.path.xml.XmlPath key = given()
+                .formParam("Action", "CreateAccessKey")
+                .formParam("UserName", userName)
+                .header("Authorization", auth(accountId, "iam"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .extract()
+                .xmlPath();
+        return new UserCredentials(
+                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"),
+                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey"));
+    }
+
+    private static UserCredentials createAccountAdmin(String userName, String accountId) {
+        UserCredentials credentials = createUser(userName, accountId);
+        putUserPolicy(userName, "S3Admin", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:*","Resource":"*"}
+                ]}""", accountId);
+        return credentials;
+    }
+
+    private static void putUserPolicy(String userName, String policyName, String policyDocument) {
+        putUserPolicy(userName, policyName, policyDocument, "test");
+    }
+
+    private static void putUserPolicy(
+            String userName, String policyName, String policyDocument, String accountId) {
+        given()
+                .formParam("Action", "PutUserPolicy")
+                .formParam("UserName", userName)
+                .formParam("PolicyName", policyName)
+                .formParam("PolicyDocument", policyDocument)
+                .header("Authorization", auth(accountId, "iam"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+    }
+
+    private static String auth(String accessKeyId, String service) {
+        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/" + REGION + "/" + service
+                + "/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+
+    public static final class IamEnforcementProfile implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of(
+                    "floci.services.iam.enforcement-enabled", "true",
+                    "floci.services.s3.enforce-auth", "true",
+                    "floci.services.s3.global-bucket-namespace", "true");
+        }
+    }
+}

@@ -13,12 +13,16 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
-import static org.mockito.Mockito.times;
 
 @ExtendWith(MockitoExtension.class)
 class HookScriptExecutorTest {
+
+    @org.junit.jupiter.api.io.TempDir
+    Path tempDirectory;
 
     @Mock(answer = Answers.RETURNS_DEEP_STUBS)
     private EmulatorConfig emulatorConfigMock;
@@ -74,12 +78,12 @@ class HookScriptExecutorTest {
         Mockito.when(emulatorConfigMock.initHooks().shutdownGracePeriodSeconds()).thenReturn(2L);
         Mockito.when(process.waitFor(30L, TimeUnit.SECONDS)).thenReturn(false);
         Mockito.when(process.isAlive()).thenReturn(true, false);
-        Mockito.when(process.waitFor(2L, TimeUnit.SECONDS)).thenReturn(false);
+        Mockito.when(process.waitFor(Mockito.anyLong(), Mockito.eq(TimeUnit.NANOSECONDS))).thenReturn(false);
 
         IllegalStateException exception = Assertions.assertThrows(IllegalStateException.class, () -> hookScriptExecutor.run(process, "script.sh"));
 
         Mockito.verify(process).destroy();
-        Mockito.verify(process, times(2)).waitFor(2L, TimeUnit.SECONDS);
+        Mockito.verify(process).waitFor(Mockito.anyLong(), Mockito.eq(TimeUnit.NANOSECONDS));
         Mockito.verify(process).destroyForcibly();
 
         Assertions.assertAll(
@@ -97,7 +101,7 @@ class HookScriptExecutorTest {
         Mockito.when(emulatorConfigMock.initHooks().shutdownGracePeriodSeconds()).thenReturn(2L);
         Mockito.when(process.waitFor(30L, TimeUnit.SECONDS)).thenReturn(false);
         Mockito.when(process.isAlive()).thenReturn(true, false);
-        Mockito.when(process.waitFor(2L, TimeUnit.SECONDS)).thenReturn(true);
+        Mockito.when(process.waitFor(Mockito.anyLong(), Mockito.eq(TimeUnit.NANOSECONDS))).thenReturn(true);
 
         IllegalStateException exception = Assertions.assertThrows(IllegalStateException.class, () -> hookScriptExecutor.run(process, "script.sh"));
 
@@ -153,13 +157,40 @@ class HookScriptExecutorTest {
         IllegalStateException exception = Assertions.assertThrows(IllegalStateException.class, () -> hookScriptExecutor.run(process, "script.sh"));
 
         Mockito.verify(process).destroy();
-        Mockito.verify(process, Mockito.never()).waitFor(2L, TimeUnit.SECONDS);
+        Mockito.verify(process, Mockito.never()).waitFor(Mockito.anyLong(), Mockito.eq(TimeUnit.NANOSECONDS));
         Mockito.verify(process, Mockito.never()).destroyForcibly();
 
         Assertions.assertAll(
                 () -> Assertions.assertEquals("Hook script timed out after 30 seconds: script.sh", exception.getMessage()),
                 () -> Assertions.assertNull(exception.getCause())
         );
+    }
+
+    @Test
+    @DisplayName("Should terminate hook descendants when the timeout expires")
+    void shouldTerminateHookDescendantsWhenTheTimeoutExpires() throws Exception {
+        Mockito.when(emulatorConfigMock.initHooks().timeoutSeconds()).thenReturn(1L);
+        Mockito.when(emulatorConfigMock.initHooks().shutdownGracePeriodSeconds()).thenReturn(1L);
+        Mockito.when(emulatorConfigMock.initHooks().shellExecutable()).thenReturn("/bin/sh");
+
+        Path childPidFile = tempDirectory.resolve("child.pid");
+        Path script = tempDirectory.resolve("timeout.sh");
+        Files.writeString(script, "(sleep 30) &\n"
+                + "echo $! > child.pid\n"
+                + "wait\n");
+
+        Assertions.assertThrows(IllegalStateException.class, () -> hookScriptExecutor.run(script.toFile()));
+
+        long childPid = Long.parseLong(Files.readString(childPidFile).trim());
+        try {
+            Assertions.assertFalse(ProcessHandle.of(childPid).map(ProcessHandle::isAlive).orElse(false));
+        } finally {
+            ProcessHandle.of(childPid).ifPresent(handle -> {
+                if (handle.isAlive()) {
+                    handle.destroyForcibly();
+                }
+            });
+        }
     }
 
     @Test

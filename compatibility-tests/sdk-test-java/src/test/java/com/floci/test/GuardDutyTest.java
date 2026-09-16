@@ -3,6 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.guardduty.GuardDutyClient;
+import software.amazon.awssdk.services.guardduty.model.AccountDetail;
 import software.amazon.awssdk.services.guardduty.model.AdminStatus;
 import software.amazon.awssdk.services.guardduty.model.AutoEnableMembers;
 import software.amazon.awssdk.services.guardduty.model.BadRequestException;
@@ -160,6 +161,45 @@ class GuardDutyTest {
                                 "ECS_FARGATE_AGENT_MANAGEMENT",
                                 "EC2_AGENT_MANAGEMENT",
                                 "EKS_ADDON_MANAGEMENT");
+            }
+        }
+    }
+
+    @Test
+    void crossAccountDetectorAndDelegatedAdministratorStateUsesAwsSdk() throws Exception {
+        String managementAccount = "222222222222";
+        String adminAccount = "111111111111";
+
+        try (GuardDutyClient management = TestFixtures.guardDutyClient(managementAccount);
+             GuardDutyClient administrator = TestFixtures.guardDutyClient(adminAccount)) {
+            String managementDetector = management.createDetector(request -> request.enable(true)).detectorId();
+            String adminDetector = administrator.createDetector(request -> request.enable(true)).detectorId();
+
+            assertThat(management.listDetectors(request -> {}).detectorIds()).containsExactly(managementDetector);
+            assertThat(administrator.listDetectors(request -> {}).detectorIds()).containsExactly(adminDetector);
+
+            management.enableOrganizationAdminAccount(request -> request.adminAccountId(adminAccount));
+            try {
+                administrator.createMembers(request -> request
+                        .detectorId(adminDetector)
+                        .accountDetails(AccountDetail.builder()
+                                .accountId(managementAccount)
+                                .email("management@example.com")
+                                .build()));
+
+                assertThat(administrator.listMembers(request -> request
+                        .detectorId(adminDetector)
+                        .onlyAssociated("true"))
+                        .members())
+                        .singleElement()
+                        .satisfies(member -> {
+                            assertThat(member.accountId()).isEqualTo(managementAccount);
+                            assertThat(member.relationshipStatus()).isEqualTo("Enabled");
+                        });
+            } finally {
+                management.disableOrganizationAdminAccount(request -> request.adminAccountId(adminAccount));
+                management.deleteDetector(request -> request.detectorId(managementDetector));
+                administrator.deleteDetector(request -> request.detectorId(adminDetector));
             }
         }
     }

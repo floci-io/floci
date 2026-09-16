@@ -134,6 +134,23 @@ services:
 
 The value is a hostname or `host:port`, never a URL, and is returned as is for every endpoint type: AWS hands out one hostname per type (`iot:Data-ATS`, `iot:Data`, `iot:Jobs`, `iot:CredentialProvider`), Floci answers all four with this one. The name is added to the generated server certificate, like `FLOCI_HOSTNAME`, so devices verify it on 8883 and 443; a name under `localhost.floci.io` resolves to `127.0.0.1` on its own, any other needs a DNS or `/etc/hosts` entry. Floci does not detect published ports itself: unset, or set to an empty value, `DescribeEndpoint` keeps returning `host:4566`, so the plain `-p 4566:4566` setup keeps working for IoT Data clients.
 
+### MQTT over WebSocket
+
+The broker is also reachable as MQTT over WebSocket at `/mqtt` on Floci's HTTP and HTTPS ports
+(`ws://<host>:4566/mqtt`, `wss://<host>:4566/mqtt`), the path AWS IoT serves on 443 for browser
+clients, the AWS IoT Device SDK's WebSocket transport and secure tunnelling. With the `443:443`
+mapping above (or `443:4566`) the AWS URL `wss://<endpoint>:443/mqtt` works unchanged. The handshake echoes
+the `mqtt` subprotocol and uses the same certificate as HTTPS, so hostnames learned at runtime
+apply to it too. Frames are piped to the plaintext MQTT listener, so every broker feature behaves
+the same on both transports. There is no separate port or setting for it; disabling the broker
+(`FLOCI_SERVICES_IOT_MQTT_ENABLED=false`) makes `/mqtt` answer 503 to an upgrade, and a plain
+request to `/mqtt` gets the usual 404.
+
+No client certificate is requested on this path. On AWS it authenticates by SigV4 (signed query
+string on the upgrade URL) or by a custom authorizer (`<clientId>?x-amz-customauthorizer-name=<name>`
+as the MQTT username with a token as the password); Floci accepts such a CONNECT as is and does
+not evaluate the signature or the authorizer yet.
+
 ## Reserved Topics
 
 AWS IoT reserved topics such as `$aws/things/{thingName}/shadow/update` are service control topics, not ordinary application topics. Floci should handle these publishes by invoking IoT shadow behavior and then publishing the AWS-compatible response topics through the broker.

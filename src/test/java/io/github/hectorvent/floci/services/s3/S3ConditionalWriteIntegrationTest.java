@@ -208,12 +208,12 @@ class S3ConditionalWriteIntegrationTest {
         String bucket = createBucket("mpu-if-none-existing");
         putObject(bucket, "object.txt", "first");
         String uploadId = initiateMultipartUpload(bucket, "object.txt");
-        uploadPart(bucket, "object.txt", uploadId, 1, "second");
+        String partETag = uploadPart(bucket, "object.txt", uploadId, 1, "second");
 
         ValidatableResponse response = given()
             .contentType("application/xml")
             .header("If-None-Match", "*")
-            .body(completeMultipartXml(1))
+            .body(completeMultipartXml(1, partETag))
         .when()
             .post("/" + bucket + "/object.txt?uploadId=" + uploadId)
         .then();
@@ -228,12 +228,12 @@ class S3ConditionalWriteIntegrationTest {
         String bucket = createBucket("mpu-if-match");
         String eTag = putObject(bucket, "object.txt", "first");
         String uploadId = initiateMultipartUpload(bucket, "object.txt");
-        uploadPart(bucket, "object.txt", uploadId, 1, "second");
+        String partETag = uploadPart(bucket, "object.txt", uploadId, 1, "second");
 
         given()
             .contentType("application/xml")
             .header("If-Match", eTag)
-            .body(completeMultipartXml(1))
+            .body(completeMultipartXml(1, partETag))
         .when()
             .post("/" + bucket + "/object.txt?uploadId=" + uploadId)
         .then()
@@ -309,21 +309,26 @@ class S3ConditionalWriteIntegrationTest {
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
     }
 
-    private static void uploadPart(String bucket, String key, String uploadId, int partNumber, String body) {
-        given()
+    private static String uploadPart(String bucket, String key, String uploadId, int partNumber, String body) {
+        return given()
             .body(body)
         .when()
             .put("/" + bucket + "/" + key + "?uploadId=" + uploadId + "&partNumber=" + partNumber)
-        .then()
+            .then()
             .statusCode(200)
-            .header("ETag", notNullValue());
+            .header("ETag", notNullValue())
+            .extract().header("ETag");
     }
 
     private static String completeMultipartXml(int partNumber) {
+        return completeMultipartXml(partNumber, "etag");
+    }
+
+    private static String completeMultipartXml(int partNumber, String eTag) {
         return """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>%d</PartNumber><ETag>etag</ETag></Part>
-                </CompleteMultipartUpload>""".formatted(partNumber);
+                    <Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(partNumber, eTag);
     }
 
     private static String stripQuotes(String eTag) {

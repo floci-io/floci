@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -60,9 +61,63 @@ class LambdaAccountScopedCodeTest {
 
         svcB.deleteFunction(REGION, "shared-fn");
 
-        assertTrue(sharedCodeStore.exists(ACCOUNT_A, "shared-fn"),
+        assertTrue(sharedCodeStore.exists(ACCOUNT_A, REGION, "shared-fn"),
                 "deleting B's function must not delete A's code");
         assertEquals("A", Files.readString(Path.of(a.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void sameFunctionNameInTwoRegionsKeepsItsOwnCodeOnDisk(@TempDir Path baseDir) throws Exception {
+        CodeStore sharedCodeStore = new CodeStore(baseDir);
+        LambdaService service = serviceFor(ACCOUNT_A, sharedCodeStore);
+
+        LambdaFunction east = service.createFunction(REGION, zipRequest("regional-fn", "east"));
+        LambdaFunction west = service.createFunction("eu-west-1", zipRequest("regional-fn", "west"));
+
+        assertNotEquals(east.getCodeLocalPath(), west.getCodeLocalPath());
+        assertEquals("east", Files.readString(Path.of(east.getCodeLocalPath()).resolve("index.js")));
+        assertEquals("west", Files.readString(Path.of(west.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void updateAndDeleteInOneRegionLeaveTheOtherRegionCodeIntact(@TempDir Path baseDir) throws Exception {
+        CodeStore sharedCodeStore = new CodeStore(baseDir);
+        LambdaService service = serviceFor(ACCOUNT_A, sharedCodeStore);
+        service.createFunction(REGION, zipRequest("regional-fn", "east-v1"));
+        LambdaFunction west = service.createFunction("eu-west-1", zipRequest("regional-fn", "west-v1"));
+
+        service.updateFunctionCode(REGION, "regional-fn", Map.of("ZipFile", zipBase64("index.js", "east-v2")));
+
+        assertEquals("west-v1", Files.readString(Path.of(west.getCodeLocalPath()).resolve("index.js")));
+        service.deleteFunction(REGION, "regional-fn");
+        assertTrue(sharedCodeStore.exists(ACCOUNT_A, "eu-west-1", "regional-fn"));
+        assertEquals("west-v1", Files.readString(Path.of(west.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void regionScopedCodeSurvivesAStoreRestart(@TempDir Path baseDir) throws Exception {
+        LambdaService first = serviceFor(ACCOUNT_A, new CodeStore(baseDir));
+        LambdaFunction created = first.createFunction("ap-southeast-2", zipRequest("restart-fn", "persisted"));
+
+        CodeStore afterRestart = new CodeStore(baseDir);
+        assertTrue(afterRestart.exists(ACCOUNT_A, "ap-southeast-2", "restart-fn"));
+        assertEquals("persisted", Files.readString(Path.of(created.getCodeLocalPath()).resolve("index.js")));
+    }
+
+    @Test
+    void concurrentExtractionInTwoRegionsDoesNotOverwriteCode(@TempDir Path baseDir) throws Exception {
+        CodeStore sharedCodeStore = new CodeStore(baseDir);
+        LambdaService service = serviceFor(ACCOUNT_A, sharedCodeStore);
+
+        CompletableFuture<LambdaFunction> east = CompletableFuture.supplyAsync(() -> createUnchecked(
+                service, REGION, "concurrent-fn", "east"));
+        CompletableFuture<LambdaFunction> west = CompletableFuture.supplyAsync(() -> createUnchecked(
+                service, "eu-west-1", "concurrent-fn", "west"));
+
+        LambdaFunction eastFunction = east.join();
+        LambdaFunction westFunction = west.join();
+        assertEquals("east", Files.readString(Path.of(eastFunction.getCodeLocalPath()).resolve("index.js")));
+        assertEquals("west", Files.readString(Path.of(westFunction.getCodeLocalPath()).resolve("index.js")));
     }
 
     @Test
@@ -203,6 +258,14 @@ class LambdaAccountScopedCodeTest {
         fn.setAccountId(accountId);
         fn.setFunctionName("shared-fn");
         return fn;
+    }
+
+    private LambdaFunction createUnchecked(LambdaService service, String region, String name, String source) {
+        try {
+            return service.createFunction(region, zipRequest(name, source));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private LambdaService serviceFor(String accountId, CodeStore codeStore) {

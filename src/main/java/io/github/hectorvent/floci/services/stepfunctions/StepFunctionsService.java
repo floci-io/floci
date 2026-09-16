@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -19,7 +21,9 @@ import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.MapRun;
 import io.github.hectorvent.floci.services.stepfunctions.model.MockedTestCase;
+import io.github.hectorvent.floci.services.stepfunctions.model.RoutingConfiguration;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineAlias;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineVersion;
 import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -34,16 +38,20 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.IntConsumer;
 
 @ApplicationScoped
 public class StepFunctionsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(StepFunctionsService.class);
+    private static final int HISTORY_PERSIST_CHECKPOINT = 100;
 
     private final StorageBackend<String, StateMachine> stateMachineStore;
+    private final StorageBackend<String, StateMachineAlias> stateMachineAliasStore;
     // Account-aware: the startup sweep has no request context and must reach every account.
     private final AccountAwareStorageBackend<Execution> executionStore;
     private final StorageBackend<String, Activity> activityStore;
@@ -70,7 +78,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     // AWS-observed, it is simply the one this code commits to.
     private static final List<String> JSONPATH_ONLY_FIELDS = List.of(
             "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath",
-            "MaxConcurrencyPath");
+            "MaxConcurrencyPath", "ErrorPath", "CausePath");
     // Fields that are valid only in JSONata mode. Validated against real AWS: a JSONPath state
     // carrying any of them returns SCHEMA_VALIDATION_FAILED. Assign is deliberately absent: AWS
     // accepts it on a JSONPath state, so it belongs to neither list. A List for the same reason as
@@ -126,6 +134,11 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                 new TypeReference<Map<String, Activity>>() {});
         this.mapRunStore = storageFactory.create("stepfunctions", "sfn-map-runs.json",
                 new TypeReference<Map<String, MapRun>>() {});
+        // Keep the established state-machine/execution/activity/map-run factory order stable for
+        // embedders and tests that supply sequential backends. New stores are appended.
+        this.stateMachineAliasStore = storageFactory.create(
+                "stepfunctions", "sfn-state-machine-aliases.json",
+                new TypeReference<Map<String, StateMachineAlias>>() {});
         this.regionResolver = regionResolver;
         this.aslExecutor = aslExecutor;
         this.objectMapper = objectMapper;
@@ -417,30 +430,49 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             return copyStateMachine(stateMachine.get());
         }
 
-        int versionSeparator = arn != null ? arn.lastIndexOf(':') : -1;
-        if (versionSeparator > 0 && versionSeparator < arn.length() - 1) {
-            String versionText = arn.substring(versionSeparator + 1);
-            if (versionText.chars().allMatch(Character::isDigit)) {
-                String baseArn = arn.substring(0, versionSeparator);
-                Optional<StateMachine> baseStateMachine = stateMachineStore.get(baseArn);
-                if (baseStateMachine.isPresent()) {
-                    return baseStateMachine.get().getVersions().stream()
-                            .filter(version -> arn.equals(version.getStateMachineVersionArn()))
-                            .findFirst()
-                            .map(version -> stateMachineFromVersion(baseStateMachine.get(), version))
-                            .orElseThrow(() -> new AwsException(
-                                    "StateMachineDoesNotExist",
-                                    "State machine does not exist", 400));
-                }
+        QualifiedStateMachineArn qualifiedArn = parseQualifiedStateMachineArn(arn);
+        if (qualifiedArn != null) {
+            String versionArn = qualifiedArn.isVersion()
+                    ? arn
+                    : stateMachineAliasStore.get(arn)
+                            .map(alias -> alias.getRoutingConfiguration().get(0)
+                                    .getStateMachineVersionArn())
+                            .orElse(null);
+            if (versionArn != null) {
+                return describeStateMachineVersion(qualifiedArn.baseArn(), versionArn);
             }
         }
         throw new AwsException(
                 "StateMachineDoesNotExist", "State machine does not exist", 400);
     }
 
+    private StateMachine describeStateMachineVersion(String baseArn, String versionArn) {
+        StateMachine baseStateMachine = stateMachineStore.get(baseArn)
+                .orElseThrow(() -> new AwsException(
+                        "StateMachineDoesNotExist", "State machine does not exist", 400));
+        return baseStateMachine.getVersions().stream()
+                .filter(version -> versionArn.equals(version.getStateMachineVersionArn()))
+                .findFirst()
+                .map(version -> stateMachineFromVersion(baseStateMachine, version))
+                .orElseThrow(() -> new AwsException(
+                        "StateMachineDoesNotExist", "State machine does not exist", 400));
+    }
+
+    /**
+     * Key prefix matching every Step Functions ARN in {@code region}. This store is keyed by the
+     * full ARN, unlike the other services, which key by {@code region::name}, so the prefix has to
+     * carry the region's partition or a list cannot find what a create wrote.
+     *
+     * <p>Deliberately stops before the account segment: the store holds resources for more than
+     * one account under account isolation, so {@code RegionResolver.buildArn} is the wrong helper
+     * here, since it appends its own account id.
+     */
+    private static String regionArnPrefix(String region) {
+        return "arn:" + AwsRegions.partitionFor(region) + ":states:" + region + ":";
+    }
+
     public List<StateMachine> listStateMachines(String region) {
-        String prefix = "arn:aws:states:" + region + ":";
-        return stateMachineStore.scan(k -> k.startsWith(prefix));
+        return stateMachineStore.scan(k -> k.startsWith(regionArnPrefix(region)));
     }
 
     // ── State machine versions ──────────────────────────────────────────────
@@ -503,12 +535,155 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return List.copyOf(versions);
     }
 
+    // ── State machine aliases ───────────────────────────────────────────────
+
+    public synchronized StateMachineAlias createStateMachineAlias(
+            String name, String description, List<RoutingConfiguration> routingConfiguration) {
+        validateStateMachineAliasName(name);
+        validateAliasDescription(description);
+        String stateMachineArn = validateRoutingConfiguration(routingConfiguration);
+        String aliasArn = stateMachineArn + ":" + name;
+
+        Optional<StateMachineAlias> existing = stateMachineAliasStore.get(aliasArn);
+        if (existing.isPresent()) {
+            StateMachineAlias alias = existing.get();
+            if (Objects.equals(description, alias.getDescription())
+                    && routingConfigurationsEqual(
+                            routingConfiguration, alias.getRoutingConfiguration())) {
+                return copyAlias(alias);
+            }
+            throw new AwsException(
+                    "ConflictException", "State machine alias already exists: " + aliasArn, 409);
+        }
+        if (stateMachineAliasStore.scan(key -> key.startsWith(stateMachineArn + ":")).size()
+                >= MAX_ALIASES_PER_STATE_MACHINE) {
+            throw new AwsException("ServiceQuotaExceededException",
+                    "The state machine already has the maximum of " + MAX_ALIASES_PER_STATE_MACHINE
+                            + " aliases.",
+                    402);
+        }
+
+        StateMachineAlias alias = new StateMachineAlias();
+        alias.setStateMachineAliasArn(aliasArn);
+        alias.setStateMachineArn(stateMachineArn);
+        alias.setName(name);
+        alias.setDescription(description);
+        alias.setRoutingConfiguration(copyRoutingConfiguration(routingConfiguration));
+        stateMachineAliasStore.put(aliasArn, alias);
+        return copyAlias(alias);
+    }
+
+    public StateMachineAlias describeStateMachineAlias(String aliasArn) {
+        validateStateMachineAliasArn(aliasArn);
+        return stateMachineAliasStore.get(aliasArn)
+                .map(this::copyAlias)
+                .orElseThrow(() -> new AwsException(
+                        "ResourceNotFound", "State machine alias does not exist: " + aliasArn, 400));
+    }
+
+    public List<StateMachineAlias> listStateMachineAliases(String stateMachineArn) {
+        return listStateMachineAliases(stateMachineArn, null, null).items();
+    }
+
+    public PaginatedResult<StateMachineAlias> listStateMachineAliases(
+            String stateMachineArn, Integer maxResults, String nextToken) {
+        QualifiedStateMachineArn qualifiedArn = parseQualifiedStateMachineArn(stateMachineArn);
+        String baseArn = qualifiedArn != null && qualifiedArn.isVersion()
+                ? qualifiedArn.baseArn() : stateMachineArn;
+        validateStateMachineArn(baseArn);
+        if (stateMachineStore.get(baseArn).isEmpty()) {
+            throw new AwsException(
+                    "StateMachineDoesNotExist", "State machine does not exist: " + baseArn, 400);
+        }
+
+        List<StateMachineAlias> aliases = stateMachineAliasStore.scan(key -> key.startsWith(baseArn + ":"));
+        if (qualifiedArn != null) {
+            aliases.removeIf(alias -> alias.getRoutingConfiguration().stream()
+                    .noneMatch(route -> stateMachineArn.equals(route.getStateMachineVersionArn())));
+        }
+        return Pagination.paginate(
+                aliases.stream().map(this::copyAlias).toList(),
+                StepFunctionsService::aliasPaginationCursor,
+                maxResults,
+                nextToken,
+                100,
+                1000,
+                "ValidationException");
+    }
+
+    private static String aliasPaginationCursor(StateMachineAlias alias) {
+        // ListStateMachineAliases is newest-first. Pagination sorts cursors ascending, so invert
+        // the millisecond timestamp and use the ARN to make aliases created together deterministic.
+        long creationMillis = (long) (alias.getCreationDate() * 1000);
+        return String.format(Locale.ROOT, "%020d:%s",
+                Long.MAX_VALUE - creationMillis, alias.getStateMachineAliasArn());
+    }
+
+    public synchronized StateMachineAlias updateStateMachineAlias(
+            String aliasArn,
+            String description,
+            boolean descriptionProvided,
+            List<RoutingConfiguration> routingConfiguration) {
+        validateStateMachineAliasArn(aliasArn);
+        if (!descriptionProvided && routingConfiguration == null) {
+            throw new AwsException(
+                    "MissingRequiredParameter",
+                    "Either description or routingConfiguration must be specified.", 400);
+        }
+        if (descriptionProvided) {
+            validateAliasDescription(description);
+        }
+        StateMachineAlias current = stateMachineAliasStore.get(aliasArn)
+                .orElseThrow(() -> new AwsException(
+                        "ResourceNotFound", "State machine alias does not exist: " + aliasArn, 400));
+        if (routingConfiguration != null) {
+            String stateMachineArn = validateRoutingConfiguration(routingConfiguration);
+            if (!Objects.equals(current.getStateMachineArn(), stateMachineArn)) {
+                throw new AwsException(
+                        "ValidationException",
+                        "Alias routes must reference versions of the same state machine.", 400);
+            }
+        }
+
+        StateMachineAlias updated = copyAlias(current);
+        if (descriptionProvided) {
+            updated.setDescription(description);
+        }
+        if (routingConfiguration != null) {
+            updated.setRoutingConfiguration(copyRoutingConfiguration(routingConfiguration));
+        }
+        updated.setUpdateDate(System.currentTimeMillis() / 1000.0);
+        stateMachineAliasStore.put(aliasArn, updated);
+        return copyAlias(updated);
+    }
+
+    public synchronized void deleteStateMachineAlias(String aliasArn) {
+        validateStateMachineAliasArn(aliasArn);
+        if (stateMachineAliasStore.get(aliasArn).isEmpty()) {
+            throw new AwsException(
+                    "ResourceNotFound", "State machine alias does not exist: " + aliasArn, 400);
+        }
+        stateMachineAliasStore.delete(aliasArn);
+    }
+
     public synchronized void deleteStateMachineVersion(String stateMachineVersionArn) {
-        int lastColon = stateMachineVersionArn.lastIndexOf(':');
-        if (lastColon < 0) {
+        VersionArn parsed = parseVersionArn(stateMachineVersionArn);
+        if (parsed == null) {
             return;
         }
-        String baseArn = stateMachineVersionArn.substring(0, lastColon);
+        String baseArn = parsed.baseArn();
+        boolean referencedByAlias = stateMachineAliasStore.scan(
+                        key -> key.startsWith(baseArn + ":")).stream()
+                .flatMap(alias -> alias.getRoutingConfiguration().stream())
+                .anyMatch(route -> stateMachineVersionArn.equals(
+                        route.getStateMachineVersionArn()));
+        if (referencedByAlias) {
+            throw new AwsException(
+                    "ConflictException",
+                    "State machine version is referenced by an alias: "
+                            + stateMachineVersionArn,
+                    409);
+        }
         stateMachineStore.get(baseArn).ifPresent(current -> {
             StateMachine updated = copyStateMachine(current);
             updated.getVersions().removeIf(
@@ -520,6 +695,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
     public void deleteStateMachine(String arn) {
         stateMachineStore.delete(arn);
+        deleteStateMachineAliases(arn);
     }
 
     public synchronized boolean deleteStateMachineIfRevisionMatches(
@@ -533,14 +709,23 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             return false;
         }
         stateMachineStore.delete(arn);
+        deleteStateMachineAliases(arn);
         return true;
+    }
+
+    private void deleteStateMachineAliases(String stateMachineArn) {
+        for (StateMachineAlias alias : stateMachineAliasStore.scan(
+                key -> key.startsWith(stateMachineArn + ":"))) {
+            stateMachineAliasStore.delete(alias.getStateMachineAliasArn());
+        }
     }
 
     // ──────────────────────────── Executions ────────────────────────────
 
     public Execution startExecution(String stateMachineArn, String name, String input, String region) {
         var selection = splitTestCaseSuffix(stateMachineArn);
-        var sm = describeStateMachine(selection.stateMachineArn());
+        var resolved = resolveStateMachineForExecution(selection.stateMachineArn());
+        var sm = resolved.stateMachine();
         var mockedTestCase = resolveMockedTestCase(sm, selection);
         var execName = (name != null && !name.isBlank()) ? name : UUID.randomUUID().toString();
         boolean express = "EXPRESS".equals(sm.getType());
@@ -573,13 +758,17 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
             exec = new Execution();
             exec.setExecutionArn(arn);
-            exec.setStateMachineArn(selection.stateMachineArn());
+            exec.setStateMachineArn(resolved.baseArn());
+            exec.setStateMachineVersionArn(resolved.versionArn());
+            exec.setStateMachineAliasArn(resolved.aliasArn());
             exec.setName(execName);
             exec.setInput(input);
             exec.setStatus("RUNNING");
-            executionStore.put(arn, exec);
-
-            history = new ExecutionHistory();
+            history = new ExecutionHistory(eventCount -> {
+                if (eventCount % HISTORY_PERSIST_CHECKPOINT == 0) {
+                    executionStore.put(arn, exec);
+                }
+            });
             var startEvent = new HistoryEvent();
             startEvent.setId(1L);
             startEvent.setPreviousEventId(0L);
@@ -587,7 +776,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             startEvent.setDetails(Map.of("input", input != null ? input : "{}",
                                          "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : "",
                                          "inputDetails", Map.of("truncated", false)));
+            exec.setHistory(history);
             history.add(startEvent);
+            executionStore.put(arn, exec);
             historyCache.put(arn, history);
         }
 
@@ -613,7 +804,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         }
         // A bare trailing '#' is not stripped on this operation: Step Functions Local looks up
         // the raw ARN and fails with StateMachineDoesNotExist, so Floci does the same.
-        var sm = describeStateMachine(stateMachineArn);
+        var resolved = resolveStateMachineForExecution(stateMachineArn);
+        var sm = resolved.stateMachine();
         if (!"EXPRESS".equals(sm.getType())) {
             throw new AwsException("StateMachineTypeNotSupported",
                     "StartSyncExecution is only supported for EXPRESS state machines", 400);
@@ -630,7 +822,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
         var exec = new Execution();
         exec.setExecutionArn(arn);
-        exec.setStateMachineArn(stateMachineArn);
+        exec.setStateMachineArn(resolved.baseArn());
+        exec.setStateMachineVersionArn(resolved.versionArn());
+        exec.setStateMachineAliasArn(resolved.aliasArn());
         exec.setName(execName);
         exec.setInput(input);
         exec.setStatus("RUNNING");
@@ -653,6 +847,40 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     private record TestCaseSelection(String stateMachineArn, String testCaseName) {
+    }
+
+    private record ResolvedStateMachine(
+            StateMachine stateMachine, String baseArn, String versionArn, String aliasArn) {
+    }
+
+    private ResolvedStateMachine resolveStateMachineForExecution(String arn) {
+        QualifiedStateMachineArn qualifiedArn = parseQualifiedStateMachineArn(arn);
+        if (qualifiedArn == null) {
+            return new ResolvedStateMachine(describeStateMachine(arn), arn, null, null);
+        }
+        if (qualifiedArn.isVersion()) {
+            return new ResolvedStateMachine(
+                    describeStateMachine(arn), qualifiedArn.baseArn(), arn, null);
+        }
+
+        StateMachineAlias alias = stateMachineAliasStore.get(arn)
+                .orElseThrow(() -> new AwsException(
+                        "StateMachineDoesNotExist", "State machine does not exist", 400));
+        int selection = ThreadLocalRandom.current().nextInt(100);
+        int cumulativeWeight = 0;
+        RoutingConfiguration selected = alias.getRoutingConfiguration()
+                .get(alias.getRoutingConfiguration().size() - 1);
+        for (RoutingConfiguration route : alias.getRoutingConfiguration()) {
+            cumulativeWeight += route.getWeight();
+            if (selection < cumulativeWeight) {
+                selected = route;
+                break;
+            }
+        }
+        String versionArn = selected.getStateMachineVersionArn();
+        return new ResolvedStateMachine(
+                describeStateMachineVersion(alias.getStateMachineArn(), versionArn),
+                alias.getStateMachineArn(), versionArn, arn);
     }
 
     /**
@@ -713,8 +941,15 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     public List<Execution> listExecutions(String stateMachineArn) {
-        return executionStore.scan(k -> executionStore.get(k)
-                .map(e -> e.getStateMachineArn().equals(stateMachineArn)).orElse(false));
+        QualifiedStateMachineArn qualifiedArn = parseQualifiedStateMachineArn(stateMachineArn);
+        return executionStore.scan(k -> executionStore.get(k).map(execution -> {
+            if (qualifiedArn == null) {
+                return Objects.equals(execution.getStateMachineArn(), stateMachineArn);
+            }
+            return qualifiedArn.isVersion()
+                    ? Objects.equals(execution.getStateMachineVersionArn(), stateMachineArn)
+                    : Objects.equals(execution.getStateMachineAliasArn(), stateMachineArn);
+        }).orElse(false));
     }
 
     /**
@@ -794,18 +1029,23 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         if (cause != null) {
             details.put("cause", cause);
         }
-        // An execution can outlive its history: the executions are stored, the histories are held in
-        // memory only, so a restart in persistent mode brings a RUNNING execution back with nothing
-        // behind it. The abort still gets recorded, against a history that starts here.
-        historyCache.computeIfAbsent(arn, key -> new ExecutionHistory())
-                .sealWith("ExecutionAborted", details);
+        // A restart can leave a RUNNING execution without its worker and token future. Preserve all
+        // persisted events, then append the terminal event that explains the deterministic recovery.
+        ExecutionHistory history = historyCache.computeIfAbsent(arn,
+                key -> new ExecutionHistory(exec.getHistory(), () -> { }, false));
+        exec.setHistory(history);
+        history.sealWith("ExecutionAborted", details);
         return true;
     }
 
     public List<HistoryEvent> getExecutionHistory(String arn) {
-        describeExecution(arn);
-        ExecutionHistory history = historyCache.get(arn);
-        return history != null ? history : Collections.emptyList();
+        Execution exec = describeExecution(arn);
+        return historyCache.computeIfAbsent(arn,
+                key -> new ExecutionHistory(exec.getHistory(), () -> { }, isTerminal(exec.getStatus())));
+    }
+
+    private static boolean isTerminal(String status) {
+        return !"RUNNING".equals(status);
     }
 
     /**
@@ -821,14 +1061,37 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
         private static final long serialVersionUID = 1L;
 
+        private final IntConsumer onAppend;
         private boolean sealed;
+
+        ExecutionHistory() {
+            this(eventCount -> { });
+        }
+
+        ExecutionHistory(Runnable onAppend) {
+            this(eventCount -> onAppend.run());
+        }
+
+        ExecutionHistory(IntConsumer onAppend) {
+            this.onAppend = onAppend;
+        }
+
+        ExecutionHistory(List<HistoryEvent> events, Runnable onAppend, boolean sealed) {
+            super(events != null ? events : List.of());
+            this.onAppend = eventCount -> onAppend.run();
+            this.sealed = sealed;
+        }
 
         @Override
         public synchronized boolean add(HistoryEvent event) {
             if (sealed) {
                 return false;
             }
-            return super.add(event);
+            boolean added = super.add(event);
+            if (added) {
+                onAppend.accept(size());
+            }
+            return added;
         }
 
         /** Appends the terminal event, numbered from the end of the history, and takes no more. */
@@ -867,7 +1130,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     public List<Activity> listActivities(String region) {
-        String prefix = "arn:aws:states:" + region + ":";
+        String prefix = regionArnPrefix(region);
         return activityStore.scan(k -> k.startsWith(prefix) && k.contains(":activity:"));
     }
 
@@ -1051,6 +1314,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     private StateMachineVersion addVersion(StateMachine stateMachine, String description) {
+        if (stateMachine.getVersions().size() >= MAX_VERSIONS_PER_STATE_MACHINE) {
+            throw new AwsException("ServiceQuotaExceededException",
+                    "The state machine already has the maximum of " + MAX_VERSIONS_PER_STATE_MACHINE
+                            + " published versions.",
+                    402);
+        }
         int next = stateMachine.getVersionCounter() + 1;
         stateMachine.setVersionCounter(next);
         StateMachineVersion version = new StateMachineVersion(
@@ -1184,25 +1453,174 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return copy;
     }
 
+    private StateMachineAlias copyAlias(StateMachineAlias source) {
+        StateMachineAlias copy = new StateMachineAlias();
+        copy.setStateMachineAliasArn(source.getStateMachineAliasArn());
+        copy.setStateMachineArn(source.getStateMachineArn());
+        copy.setName(source.getName());
+        copy.setDescription(source.getDescription());
+        copy.setRoutingConfiguration(copyRoutingConfiguration(
+                source.getRoutingConfiguration()));
+        copy.setCreationDate(source.getCreationDate());
+        copy.setUpdateDate(source.getUpdateDate());
+        return copy;
+    }
+
+    private static List<RoutingConfiguration> copyRoutingConfiguration(
+            List<RoutingConfiguration> routingConfiguration) {
+        List<RoutingConfiguration> copy = new ArrayList<>();
+        for (RoutingConfiguration route : routingConfiguration) {
+            copy.add(new RoutingConfiguration(
+                    route.getStateMachineVersionArn(), route.getWeight()));
+        }
+        return copy;
+    }
+
+    private static boolean routingConfigurationsEqual(
+            List<RoutingConfiguration> left, List<RoutingConfiguration> right) {
+        if (left.size() != right.size()) {
+            return false;
+        }
+        for (int index = 0; index < left.size(); index++) {
+            RoutingConfiguration leftRoute = left.get(index);
+            RoutingConfiguration rightRoute = right.get(index);
+            if (leftRoute.getWeight() != rightRoute.getWeight()
+                    || !Objects.equals(
+                            leftRoute.getStateMachineVersionArn(),
+                            rightRoute.getStateMachineVersionArn())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String validateRoutingConfiguration(
+            List<RoutingConfiguration> routingConfiguration) {
+        if (routingConfiguration == null
+                || routingConfiguration.isEmpty()
+                || routingConfiguration.size() > 2) {
+            throw new AwsException(
+                    "ValidationException",
+                    "routingConfiguration must contain one or two version targets.", 400);
+        }
+
+        String baseArn = null;
+        int totalWeight = 0;
+        Set<String> versionArns = new HashSet<>();
+        for (RoutingConfiguration route : routingConfiguration) {
+            if (route == null || route.getStateMachineVersionArn() == null) {
+                throw new AwsException(
+                        "ValidationException",
+                        "Each routingConfiguration entry must contain a stateMachineVersionArn.",
+                        400);
+            }
+            VersionArn versionArn = parseVersionArn(route.getStateMachineVersionArn());
+            if (versionArn == null) {
+                throw new AwsException(
+                        "InvalidArn",
+                        "Invalid state machine version ARN: "
+                                + route.getStateMachineVersionArn(),
+                        400);
+            }
+            if (!versionArns.add(route.getStateMachineVersionArn())) {
+                throw new AwsException(
+                        "ValidationException",
+                        "routingConfiguration cannot contain a version more than once.", 400);
+            }
+            if (baseArn == null) {
+                baseArn = versionArn.baseArn();
+            } else if (!baseArn.equals(versionArn.baseArn())) {
+                throw new AwsException(
+                        "ValidationException",
+                        "Alias routes must reference versions of the same state machine.", 400);
+            }
+            if (route.getWeight() < 0 || route.getWeight() > 100) {
+                throw new AwsException(
+                        "ValidationException", "Alias routing weights must be between 0 and 100.",
+                        400);
+            }
+            totalWeight += route.getWeight();
+            StateMachine stateMachine = stateMachineStore.get(versionArn.baseArn())
+                    .orElseThrow(() -> new AwsException(
+                            "ResourceNotFound",
+                            "State machine version does not exist: "
+                                    + route.getStateMachineVersionArn(),
+                            400));
+            boolean versionExists = stateMachine.getVersions().stream()
+                    .anyMatch(version -> route.getStateMachineVersionArn().equals(
+                            version.getStateMachineVersionArn()));
+            if (!versionExists) {
+                throw new AwsException(
+                        "ResourceNotFound",
+                        "State machine version does not exist: "
+                                + route.getStateMachineVersionArn(),
+                        400);
+            }
+        }
+        if (totalWeight != 100) {
+            throw new AwsException(
+                    "ValidationException", "Alias routing weights must add up to 100.", 400);
+        }
+        return baseArn;
+    }
+
+    private static final String STATE_MACHINE_RESOURCE = "stateMachine";
+
+    private record QualifiedStateMachineArn(String baseArn, String qualifier) {
+        private boolean isVersion() {
+            return qualifier.chars().allMatch(Character::isDigit);
+        }
+    }
+
     private record VersionArn(String baseArn, int version) {
     }
 
-    private static VersionArn parseVersionArn(String arn) {
+    /**
+     * Splits either a version or alias ARN into the unqualified state-machine ARN and qualifier.
+     * A Distributed Map ARN uses {@code /label}, not a third colon segment, and is deliberately
+     * left to the operation-specific validation that returns AWS's {@code ValidationException}.
+     */
+    private static QualifiedStateMachineArn parseQualifiedStateMachineArn(String arn) {
         if (arn == null) {
             return null;
         }
-        int separator = arn.lastIndexOf(':');
-        if (separator < 0 || separator == arn.length() - 1) {
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
             return null;
         }
-        String suffix = arn.substring(separator + 1);
-        if (!suffix.chars().allMatch(Character::isDigit)) {
+        String[] segments = parsed.resource().split(":", -1);
+        if (!"states".equals(parsed.service())
+                || segments.length != 3
+                || !STATE_MACHINE_RESOURCE.equals(segments[0])
+                || segments[1].isEmpty()
+                || segments[2].isEmpty()) {
+            return null;
+        }
+        return new QualifiedStateMachineArn(
+                arn.substring(0, arn.length() - segments[2].length() - 1), segments[2]);
+    }
+
+    /**
+     * Splits a state machine <em>version</em> ARN into its base ARN and version number, or returns
+     * {@code null} when {@code arn} is not one.
+     *
+     * <p>Decided by the shape of the resource, not by whether the tail happens to be digits. A
+     * state machine ARN is {@code stateMachine:<name>} and a version ARN is
+     * {@code stateMachine:<name>:<version>}, so the segment count settles it. Digits are legal in
+     * a state machine name, and reading the tail alone meant a machine named {@code 2024} was
+     * taken apart into version 2024 of a nameless ARN, which the caller then rejected as
+     * InvalidArn: an existing state machine that could not be described.
+     */
+    private static VersionArn parseVersionArn(String arn) {
+        QualifiedStateMachineArn qualifiedArn = parseQualifiedStateMachineArn(arn);
+        if (qualifiedArn == null || !qualifiedArn.isVersion()) {
             return null;
         }
         try {
             return new VersionArn(
-                    arn.substring(0, separator),
-                    Integer.parseInt(suffix));
+                    qualifiedArn.baseArn(), Integer.parseInt(qualifiedArn.qualifier()));
         } catch (NumberFormatException ignored) {
             return null;
         }
@@ -1236,6 +1654,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     private static final int MAX_DEFINITION_LENGTH = 1_048_576;
     private static final int MAX_ARN_LENGTH = 256;
     private static final int MAX_VERSION_DESCRIPTION_LENGTH = 256;
+    private static final int MAX_VERSIONS_PER_STATE_MACHINE = 1000;
+    private static final int MAX_ALIASES_PER_STATE_MACHINE = 100;
     private static final String INVALID_STATE_MACHINE_NAME_CHARACTERS =
             "<>[]{}?*\"#%\\^|~`$&,;:/";
     private static final Set<String> STATE_TYPES = Set.of(
@@ -1399,6 +1819,23 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         }
     }
 
+    private static void validateStateMachineAliasName(String name) {
+        if (name == null
+                || name.length() > 80
+                || !name.matches("(?=.*[A-Za-z_.-])[A-Za-z0-9_.-]+")) {
+            throw new AwsException(
+                    "InvalidName", "Invalid state machine alias name: '" + name + "'", 400);
+        }
+    }
+
+    private static void validateAliasDescription(String description) {
+        if (description != null && description.length() > 256) {
+            throw new AwsException(
+                    "ValidationException",
+                    "State machine alias description must not exceed 256 characters.", 400);
+        }
+    }
+
     private static void validateStateMachineArn(String arn) {
         if (arn == null || arn.isBlank() || arn.length() > MAX_ARN_LENGTH) {
             throw new AwsException("InvalidArn", "Invalid Arn: '" + arn + "'", 400);
@@ -1446,9 +1883,24 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidArn", "Invalid Arn: '" + arn + "'", 400);
         }
 
-        VersionArn versionArn = parseVersionArn(arn);
+        QualifiedStateMachineArn qualifiedArn = parseQualifiedStateMachineArn(arn);
         validateStateMachineArn(
-                versionArn != null ? versionArn.baseArn() : arn);
+                qualifiedArn != null ? qualifiedArn.baseArn() : arn);
+        if (qualifiedArn != null && !qualifiedArn.isVersion()) {
+            validateStateMachineAliasName(qualifiedArn.qualifier());
+        }
+    }
+
+    private static void validateStateMachineAliasArn(String arn) {
+        if (arn == null || arn.isBlank() || arn.length() > MAX_ARN_LENGTH) {
+            throw new AwsException("InvalidArn", "Invalid Arn: '" + arn + "'", 400);
+        }
+        QualifiedStateMachineArn qualifiedArn = parseQualifiedStateMachineArn(arn);
+        if (qualifiedArn == null || qualifiedArn.isVersion()) {
+            throw new AwsException("InvalidArn", "Invalid Arn: '" + arn + "'", 400);
+        }
+        validateStateMachineArn(qualifiedArn.baseArn());
+        validateStateMachineAliasName(qualifiedArn.qualifier());
     }
 
     private static void validateUpdateStateMachineArn(String arn) {
@@ -1938,6 +2390,10 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             }
         }
 
+        if ("Fail".equals(stateType)) {
+            validateFailErrorAndCauseFields(statePath, stateDef, errors);
+        }
+
         if ("Map".equals(stateType)) {
             validateMapConcurrency(statePath, stateDef, stateIsJsonata, errors);
             if (stateDef.has("ItemReader")) {
@@ -2087,6 +2543,37 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         // are always walked for reachability regardless of whether they have a terminal state.
         validateReachability(statesPath, states, subWorkflow.path("StartAt").asText(null),
                 subWorkflowPath + "/StartAt", errors);
+    }
+
+    /**
+     * A Fail state resolves its {@code Error} either from the literal {@code Error} field or
+     * dynamically from {@code ErrorPath}, never both; the same holds for {@code Cause} and
+     * {@code CausePath}. Real AWS refuses a definition that specifies both at CreateStateMachine.
+     */
+    private static void validateFailErrorAndCauseFields(String statePath, JsonNode stateDef, List<String> errors) {
+        if (stateDef.has("Error") && stateDef.has("ErrorPath")) {
+            errors.add("A Fail state cannot include both field 'Error' and 'ErrorPath' at " + statePath);
+        }
+        if (stateDef.has("Cause") && stateDef.has("CausePath")) {
+            errors.add("A Fail state cannot include both field 'Cause' and 'CausePath' at " + statePath);
+        }
+        validateFailPathFieldIsString(statePath, stateDef, "ErrorPath", errors);
+        validateFailPathFieldIsString(statePath, stateDef, "CausePath", errors);
+    }
+
+    /**
+     * {@code ErrorPath}/{@code CausePath} are reference paths or {@code States.*} intrinsics,
+     * always given as a JSON string; a non-string value (a number, object, array, or boolean)
+     * is a definition error AWS rejects at {@code CreateStateMachine}, not something that should
+     * reach execution and fail there instead.
+     */
+    private static void validateFailPathFieldIsString(String statePath, JsonNode stateDef, String field,
+                                                       List<String> errors) {
+        JsonNode value = stateDef.get(field);
+        if (value != null && !value.isTextual()) {
+            errors.add(EXPLICIT_LOCATION_MARKER + "Expected value of type [STRING]"
+                    + MARKER_PAYLOAD_SEPARATOR + statePath + "/" + field);
+        }
     }
 
     private void validateMapConcurrency(String statePath, JsonNode stateDef,

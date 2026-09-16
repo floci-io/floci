@@ -156,6 +156,37 @@ class S3ObjectKeyResolverTest {
     }
 
     @Test
+    void explicitExtensionKeysEndWithItUnlessFileExtensionReplacesIt() {
+        String key = S3ObjectKeyResolver.resolveKey(destination(null, null, null), "s", "1",
+                INSTANT, ".parquet");
+        assertTrue(key.endsWith(".parquet"), key);
+
+        String replaced = S3ObjectKeyResolver.resolveKey(destination(null, null, ".custom.log"), "s", "1",
+                INSTANT, ".parquet");
+        assertTrue(replaced.endsWith(".custom.log"), replaced);
+        assertFalse(replaced.contains(".parquet"), replaced);
+    }
+
+    /** Verified against real AWS: the error object carries no file extension. */
+    @Test
+    void errorKeyEvaluatesErrorOutputTypeAndCarriesNoExtension() {
+        S3Destination s3 = destination(null, null, ".custom.log");
+        s3.setErrorOutputPrefix("errors/!{firehose:error-output-type}/!{timestamp:yyyy}/");
+        String key = S3ObjectKeyResolver.resolveErrorKey(s3, "my-stream", "2", INSTANT,
+                "format-conversion-failed");
+        assertTrue(key.matches("errors/format-conversion-failed/2026/"
+                + "my-stream-2-2026-07-13-10-42-07-" + UUID_REGEX), key);
+    }
+
+    /** Unlike the data prefix, an absent ErrorOutputPrefix gets no default time prefix. */
+    @Test
+    void absentErrorOutputPrefixYieldsABareSuffixAtTheBucketRoot() {
+        String key = S3ObjectKeyResolver.resolveErrorKey(destination(null, null, null), "s", "1",
+                INSTANT, "format-conversion-failed");
+        assertTrue(key.matches("s-1-2026-07-13-10-42-07-" + UUID_REGEX), key);
+    }
+
+    @Test
     void resolveZoneFallsBackToUtc() {
         assertEquals(ZoneOffset.UTC, S3ObjectKeyResolver.resolveZone(null));
         assertEquals(ZoneOffset.UTC, S3ObjectKeyResolver.resolveZone("  "));

@@ -226,7 +226,86 @@ class ElastiCacheServiceTest {
         return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
                 AuthMode.NO_AUTH, null, "us-east-1", "valkey", "8.2", "cache.t4g.micro",
                 "default.valkey8.cluster.on", null, null, numNodeGroups, replicasPerNodeGroup,
-                null, true, null, ReplicationGroupSettings.defaults(), Map.of());
+                null, true, null, null, ReplicationGroupSettings.defaults(), Map.of());
+    }
+
+    private static ElastiCacheService.CreateReplicationGroupRequest singleNodeRequest(
+            String groupId, Integer port) {
+        return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
+                AuthMode.NO_AUTH, null, "us-east-1", null, null, null, null, null, null,
+                null, null, null, null, null, port, ReplicationGroupSettings.defaults(), Map.of());
+    }
+
+    // botocore models Port as an optional input on CreateReplicationGroup ("the port number on
+    // which each member of the replication group accepts connections"). Ignoring it made every
+    // caller that pins a port read back a different one, which Terraform treats as
+    // replacement-forcing and reports as permanent drift.
+    @Test
+    void requestedPortIsHonoredWhenFreeAndInRange() {
+        ReplicationGroup group = service.createReplicationGroup(singleNodeRequest("grp", 16390));
+
+        assertEquals(16390, group.getProxyPort(),
+                "A free, in-range requested Port must be the port the group reports");
+    }
+
+    @Test
+    void unpinnedCreateStillAllocatesFromTheBasePort() {
+        ReplicationGroup group = service.createReplicationGroup(singleNodeRequest("grp", null));
+
+        assertEquals(16379, group.getProxyPort(),
+                "A create with no Port keeps the previous behavior of taking the base port");
+    }
+
+    @Test
+    void requestedPortAlreadyInUseIsRejected() {
+        // floci multiplexes every group's proxy onto one host, so two groups cannot share a port.
+        // Substituting a different one would hand back the drift honoring Port exists to remove,
+        // and it could only ever hit a caller who did pin a port.
+        service.createReplicationGroup(singleNodeRequest("grp1", 16390));
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(singleNodeRequest("grp2", 16390)));
+
+        assertEquals("InvalidParameterValue", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("16390"));
+    }
+
+    @Test
+    void requestedPortOutsideTheProxyRangeIsRejected() {
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(singleNodeRequest("grp", 9999)));
+
+        assertEquals("InvalidParameterValue", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("9999"));
+    }
+
+    @Test
+    void anUnpinnedCreateStillFallsBackWhenTheBasePortIsTaken() {
+        // The fallback survives for callers that named no port: only an explicit one is refused.
+        service.createReplicationGroup(singleNodeRequest("grp1", 16379));
+
+        ReplicationGroup second = service.createReplicationGroup(singleNodeRequest("grp2", null));
+
+        assertEquals(16380, second.getProxyPort());
+    }
+
+    @Test
+    void clusterModeHonorsTheRequestedPortOnTheFirstNode() {
+        // The group's Port is reported from the first node's proxy port, so that is the only
+        // node whose port a caller can pin; the remaining members take whatever is free.
+        stubPerNodeContainers();
+
+        ReplicationGroup group = service.createReplicationGroup(
+                new ElastiCacheService.CreateReplicationGroupRequest("grp", "test",
+                        AuthMode.NO_AUTH, null, "us-east-1", "valkey", "8.2", "cache.t4g.micro",
+                        "default.valkey8.cluster.on", null, null, 2, 1,
+                        null, true, null, 16390, ReplicationGroupSettings.defaults(), Map.of()));
+
+        assertEquals(16390, group.getConfigurationEndpoint().port());
+        assertEquals(16390, group.getClusterNodes().getFirst().getProxyPort());
+        assertEquals(4, group.getClusterNodes().stream()
+                        .map(ClusterNode::getProxyPort).distinct().count(),
+                "Each node must still own its own proxy port");
     }
 
     private void stubPerNodeContainers() {
@@ -687,7 +766,7 @@ class ElastiCacheServiceTest {
         return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
                 AuthMode.NO_AUTH, null, "us-east-1", null, null, null,
                 parameterGroupName, null, null, null, null,
-                null, null, null, ReplicationGroupSettings.defaults(), Map.of());
+                null, null, null, null, ReplicationGroupSettings.defaults(), Map.of());
     }
 
     @Test

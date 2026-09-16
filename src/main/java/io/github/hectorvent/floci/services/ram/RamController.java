@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
@@ -48,22 +50,33 @@ public class RamController {
     private final ObjectMapper objectMapper;
     private final ObjectReader requestReader;
     private final RegionResolver regionResolver;
+    private final OrganizationsService organizationsService;
+    private final IamService iamService;
 
     @Inject
-    public RamController(RamService service, ObjectMapper objectMapper, RegionResolver regionResolver) {
+    public RamController(RamService service, ObjectMapper objectMapper, RegionResolver regionResolver,
+                         OrganizationsService organizationsService, IamService iamService) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.requestReader = objectMapper.reader()
                 .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.regionResolver = regionResolver;
+        this.organizationsService = organizationsService;
+        this.iamService = iamService;
     }
 
     @POST
     @Path("/enablesharingwithawsorganization")
     @Consumes(MediaType.WILDCARD)
     public Response enableSharingWithAwsOrganization() {
+        String callerAccountId = regionResolver.getAccountId();
+        organizationsService.enableAWSServiceAccess(callerAccountId, "ram.amazonaws.com");
+        if (iamService.findRole(callerAccountId, "AWSServiceRoleForResourceAccessManager").isEmpty()) {
+            iamService.createServiceLinkedRole("ram.amazonaws.com", null,
+                    "Allows AWS Resource Access Manager to access AWS Organizations on your behalf.");
+        }
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("returnValue", service.enableSharingWithAwsOrganization());
+        response.put("returnValue", service.enableSharingWithAwsOrganization(regionResolver.getAccountId()));
         return Response.ok(response).build();
     }
 

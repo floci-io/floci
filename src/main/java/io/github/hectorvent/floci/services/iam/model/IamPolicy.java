@@ -40,16 +40,36 @@ public class IamPolicy {
 
     public IamPolicy(String policyId, String policyName, String path, String arn,
                      String description, String document) {
+        this(policyId, policyName, path, arn, description, new PolicyVersion("v1", document, true));
+    }
+
+    private IamPolicy(String policyId, String policyName, String path, String arn,
+                      String description, PolicyVersion v1) {
+        this(policyId, policyName, path, arn, description, v1, v1.getCreateDate(), v1.getCreateDate());
+    }
+
+    /**
+     * Creates a policy whose single stored version is {@code defaultVersion}, which need not
+     * be {@code v1}. AWS-managed policies are bundled at whatever version AWS has revised them
+     * to (for example {@code v3}), with only that version's document available, so the version
+     * counter starts just past it. {@code createDate} is when the policy itself was first
+     * published and {@code updateDate} when its current default version was, the two dates
+     * {@code GetPolicy} reports separately.
+     */
+    public IamPolicy(String policyId, String policyName, String path, String arn,
+                     String description, PolicyVersion defaultVersion,
+                     Instant createDate, Instant updateDate) {
         this.policyId = policyId;
         this.policyName = policyName;
         this.path = path;
         this.arn = arn;
         this.description = description;
-        this.createDate = Instant.now();
-        this.updateDate = Instant.now();
-        PolicyVersion v1 = new PolicyVersion("v1", document, true);
-        this.versions.put("v1", v1);
-        this.nextVersionNumber = 2;
+        this.createDate = createDate;
+        this.updateDate = updateDate;
+        defaultVersion.setDefaultVersion(true);
+        this.defaultVersionId = defaultVersion.getVersionId();
+        this.versions.put(defaultVersion.getVersionId(), defaultVersion);
+        this.nextVersionNumber = Integer.parseInt(defaultVersion.getVersionId().substring(1)) + 1;
     }
 
     public String getDefaultDocument() {

@@ -302,24 +302,26 @@ public class EmulatorLifecycle {
         // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
         // in-memory (hybrid) data would be lost on an otherwise-graceful shutdown. shutdownAll()
         // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
-        storageFactory.flushAll();
-        if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
-            ec2MetadataServer.stop();
-        }
-        elastiCacheProxyManager.stopAll();
-        rdsProxyManager.stopAll();
-        memoryDbProxyManager.stopAll();
-        neptuneProxyManager.stopAll();
-        elastiCacheContainerManager.stopAll();
-        elastiCacheMemcachedContainerManager.stopAll();
-        rdsContainerManager.stopAll();
-        memoryDbContainerManager.stopAll();
-        docDbContainerManager.stopAll();
-        neptuneContainerManager.stopAll();
-        rabbitMqManager.stopAll();
-        flinkContainerManager.stopAll();
-        ecrRegistryManager.shutdown();
-        flociUiManager.shutdown();
+        runCleanup("storage flush", storageFactory::flushAll);
+        runCleanup("EC2 metadata server", () -> {
+            if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+                ec2MetadataServer.stop();
+            }
+        });
+        runCleanup("ElastiCache proxy", elastiCacheProxyManager::stopAll);
+        runCleanup("RDS proxy", rdsProxyManager::stopAll);
+        runCleanup("MemoryDB proxy", memoryDbProxyManager::stopAll);
+        runCleanup("Neptune proxy", neptuneProxyManager::stopAll);
+        runCleanup("ElastiCache container", elastiCacheContainerManager::stopAll);
+        runCleanup("ElastiCache Memcached container", elastiCacheMemcachedContainerManager::stopAll);
+        runCleanup("RDS container", rdsContainerManager::stopAll);
+        runCleanup("MemoryDB container", memoryDbContainerManager::stopAll);
+        runCleanup("DocDB container", docDbContainerManager::stopAll);
+        runCleanup("Neptune container", neptuneContainerManager::stopAll);
+        runCleanup("RabbitMQ", rabbitMqManager::stopAll);
+        runCleanup("Flink", flinkContainerManager::stopAll);
+        runCleanup("ECR registry", ecrRegistryManager::shutdown);
+        runCleanup("Floci UI", flociUiManager::shutdown);
         // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
         // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
         // state written while stopping is captured by the final flush.
@@ -331,8 +333,16 @@ public class EmulatorLifecycle {
                         teardown.getClass().getSimpleName(), e.getMessage());
             }
         }
-        storageFactory.shutdownAll();
+        runCleanup("storage shutdown", storageFactory::shutdownAll);
 
         LOG.info("=== AWS Local Emulator Stopped ===");
+    }
+
+    private void runCleanup(String resource, Runnable cleanup) {
+        try {
+            cleanup.run();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Shutdown cleanup failed for {0}; continuing with the remaining steps", resource);
+        }
     }
 }

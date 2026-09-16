@@ -80,9 +80,10 @@ public class AppConfigDataService {
         String activeVersion = appConfigService.getActiveVersion(session.getEnvironmentId(), session.getConfigurationProfileId());
         
         HostedConfigurationVersion version = null;
-        if (activeVersion != null) {
+        if (activeVersion != null && !activeVersion.equals(session.getLastConfigurationVersion())) {
             try {
                 version = appConfigService.getHostedConfigurationVersion(session.getApplicationId(), session.getConfigurationProfileId(), Integer.parseInt(activeVersion));
+                session.setLastConfigurationVersion(activeVersion);
             } catch (Exception e) {
                 LOG.warnv("Active version {0} not found for session {1}", activeVersion, session.getId());
             }

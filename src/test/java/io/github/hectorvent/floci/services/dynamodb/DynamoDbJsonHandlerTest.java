@@ -18,8 +18,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -612,5 +615,1250 @@ class DynamoDbJsonHandlerTest {
                 () -> assertTrue(error instanceof AwsException awsError
                         && "ValidationException".equals(awsError.getErrorCode())),
                 () -> assertEquals(1, describedIndexes.size()));
+    }
+
+    // Request validation for AWS parity: real DynamoDB rejects each of these with a
+    // ValidationException (paritysuite dynamodb-conformance tier1).
+
+    private JsonNode json(String body) {
+        try {
+            return mapper.readTree(body);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private AwsException expectValidationException(String action, JsonNode request) {
+        var ex = assertThrows(AwsException.class, () -> handler.handle(action, request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        return ex;
+    }
+
+    @Test
+    void createTableRejectsProvisionedThroughputWithPayPerRequest() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "PprTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: Neither ReadCapacityUnits nor "
+                + "WriteCapacityUnits can be specified when BillingMode is PAY_PER_REQUEST", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsGsiIncludeProjectionWithoutNonKeyAttributes() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "GsiIncTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "INCLUDE"}
+                    }]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsLsiIncludeProjectionWithoutNonKeyAttributes() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "LsiIncTable",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "lsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "lsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "lsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "INCLUDE"}
+                    }]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsKeysOnlyProjectionCarryingNonKeyAttributes() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "KeysOnlyTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY", "NonKeyAttributes": ["x"]}
+                    }]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is KEYS_ONLY, but NonKeyAttributes is specified", ex.getMessage());
+    }
+
+    @Test
+    void updateTableRejectsGsiIncludeProjectionWithoutNonKeyAttributes() {
+        createUsersTable("eu-west-1");
+        var ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "Users",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "INCLUDE"}
+                    }}]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
+        assertTrue(service.describeTable("Users", "eu-west-1").getGlobalSecondaryIndexes().isEmpty());
+    }
+
+    @Test
+    void updateTableRejectsAllProjectionCarryingNonKeyAttributes() {
+        createUsersTable("eu-west-1");
+        var ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "Users",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "ALL", "NonKeyAttributes": ["x"]}
+                    }}]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is ALL, but NonKeyAttributes is specified", ex.getMessage());
+    }
+
+    // Checked against real DynamoDB: the projection is validated before the table lookup.
+    @Test
+    void updateTableValidatesGsiProjectionBeforeTableLookup() {
+        var ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "NoSuchTable",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "INCLUDE"}
+                    }}]
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "ProjectionType is INCLUDE, but NonKeyAttributes is not specified", ex.getMessage());
+    }
+
+    // The empty-list, null, and index-position cases below were checked against real DynamoDB.
+    @Test
+    void createTableRejectsEmptyGsiNonKeyAttributesWithItsPosition() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "EmptyGsiNonKey",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "gsi1",
+                            "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "ALL"}
+                        },
+                        {
+                            "IndexName": "gsi2",
+                            "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "KEYS_ONLY", "NonKeyAttributes": []}
+                        }
+                    ]
+                }
+                """));
+        assertEquals("1 validation error detected: Value '[]' at "
+                + "'globalSecondaryIndexes.2.member.projection.nonKeyAttributes' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void createTableRejectsEmptyLsiNonKeyAttributes() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "EmptyLsiNonKey",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "lsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "lsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "lsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY", "NonKeyAttributes": []}
+                    }]
+                }
+                """));
+        assertEquals("1 validation error detected: Value '[]' at "
+                + "'localSecondaryIndexes.1.member.projection.nonKeyAttributes' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void updateTableRejectsEmptyGsiNonKeyAttributesBeforeProjectionTypeCheck() {
+        createUsersTable("eu-west-1");
+        var ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "Users",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": []}
+                    }}]
+                }
+                """));
+        assertEquals("1 validation error detected: Value '[]' at "
+                + "'globalSecondaryIndexUpdates.1.member.create.projection.nonKeyAttributes' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void createTableTreatsNullNonKeyAttributesAsNotSpecified() throws Exception {
+        Response response = handler.handle("CreateTable", json("""
+                {
+                    "TableName": "NullNonKey",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY", "NonKeyAttributes": null}
+                    }]
+                }
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        var gsi = service.describeTable("NullNonKey", "eu-west-1").findGsi("gsi1").orElseThrow();
+        assertEquals("KEYS_ONLY", gsi.getProjectionType());
+    }
+
+    @Test
+    void createTableRejectsStreamViewTypeWithStreamEnabledFalse() {
+        var ex = expectValidationException("CreateTable", json("""
+                {
+                    "TableName": "StreamFalseTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "StreamSpecification": {"StreamEnabled": false, "StreamViewType": "NEW_AND_OLD_IMAGES"}
+                }
+                """));
+        assertEquals("One or more parameter values were invalid: "
+                + "StreamViewType cannot be specified when StreamEnabled is false", ex.getMessage());
+    }
+
+    @Test
+    void scanRejectsTotalSegmentsAboveTheMaximum() {
+        var ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Segment": 0, "TotalSegments": 1000001}
+                """));
+        assertEquals("1 validation error detected: Value '1000001' at 'totalSegments' failed to "
+                + "satisfy constraint: Member must have value less than or equal to 1000000", ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsExpressionAttributeNamesWithNoExpression() {
+        createUsersTable("eu-west-1");
+        var ex = expectValidationException("UpdateItem", json("""
+                {
+                    "TableName": "Users",
+                    "Key": {"userId": {"S": "u1"}},
+                    "ExpressionAttributeNames": {"#s": "status"}
+                }
+                """));
+        assertEquals("ExpressionAttributeNames can only be specified when using expressions: "
+                + "UpdateExpression is null, ConditionExpression is null", ex.getMessage());
+    }
+
+    @Test
+    void scanRejectsANegativeSegment() {
+        var ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Segment": -1, "TotalSegments": 4}
+                """));
+        assertEquals("1 validation error detected: Value '-1' at 'segment' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 0", ex.getMessage());
+    }
+
+    @Test
+    void scanRejectsTotalSegmentsBelowOne() {
+        var ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Segment": 0, "TotalSegments": 0}
+                """));
+        assertEquals("1 validation error detected: Value '0' at 'totalSegments' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsTotalSegmentsBeforeSegmentWhenBothAreOutOfRange() {
+        var ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Segment": -1, "TotalSegments": 0}
+                """));
+        assertEquals("2 validation errors detected: "
+                + "Value '0' at 'totalSegments' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 1; "
+                + "Value '-1' at 'segment' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 0", ex.getMessage());
+    }
+
+    @Test
+    void scanAcceptsSegmentsAtTheBounds() throws Exception {
+        createUsersTable("eu-west-1");
+
+        var response = handler.handle("Scan", json("""
+                {"TableName": "Users", "Segment": 0, "TotalSegments": 1000000}
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void parallelScanSegmentsAreStableWhenItemsDeleted() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        for (int i = 0; i < 10; i++) {
+            service.putItem("Users", item("userId", "item-" + i), region);
+        }
+
+        int totalSegments = 10;
+        int totalDeleted = 0;
+        for (int segment = 0; segment < totalSegments; segment++) {
+            var scanReq = mapper.createObjectNode();
+            scanReq.put("TableName", "Users");
+            scanReq.put("Segment", segment);
+            scanReq.put("TotalSegments", totalSegments);
+
+            var response = handler.handle("Scan", scanReq, region);
+            assertEquals(200, response.getStatus());
+            var entity = mapper.readTree(response.getEntity().toString());
+            var items = entity.get("Items");
+            for (var item : items) {
+                totalDeleted++;
+                String key = item.get("userId").get("S").asText();
+                service.deleteItem("Users", item("userId", key), region);
+            }
+        }
+
+        assertEquals(10, totalDeleted, "All 10 items should have been returned and deleted across segments");
+
+        var checkResponse = handler.handle("Scan", json("""
+                {"TableName": "Users", "Select": "COUNT"}
+                """), region);
+        var checkEntity = mapper.readTree(checkResponse.getEntity().toString());
+        assertEquals(0, checkEntity.get("Count").asInt(), "No remaining items should be in the table");
+    }
+
+    @Test
+    void parallelScanPaginationWithLimit() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        for (int i = 0; i < 20; i++) {
+            service.putItem("Users", item("userId", "user-" + i), region);
+        }
+
+        int totalSegments = 4;
+        Set<String> collectedKeys = new HashSet<>();
+        for (int segment = 0; segment < totalSegments; segment++) {
+            JsonNode exclusiveStartKey = null;
+            do {
+                var scanReq = mapper.createObjectNode();
+                scanReq.put("TableName", "Users");
+                scanReq.put("Segment", segment);
+                scanReq.put("TotalSegments", totalSegments);
+                scanReq.put("Limit", 2);
+                if (exclusiveStartKey != null) {
+                    scanReq.set("ExclusiveStartKey", exclusiveStartKey);
+                }
+
+                var response = handler.handle("Scan", scanReq, region);
+                assertEquals(200, response.getStatus());
+                var entity = mapper.readTree(response.getEntity().toString());
+                var items = entity.get("Items");
+                assertTrue(items.size() <= 2, "Page size must not exceed limit");
+                for (var item : items) {
+                    String key = item.get("userId").get("S").asText();
+                    assertTrue(collectedKeys.add(key), "Item must not be returned multiple times: " + key);
+                }
+                exclusiveStartKey = entity.get("LastEvaluatedKey");
+            } while (exclusiveStartKey != null && !exclusiveStartKey.isNull());
+        }
+
+        assertEquals(20, collectedKeys.size(), "All 20 items must be collected across paginated segments");
+    }
+
+    @Test
+    void parallelScanSelectCount() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        for (int i = 0; i < 15; i++) {
+            service.putItem("Users", item("userId", "id-" + i), region);
+        }
+
+        int totalSegments = 5;
+        int sumCount = 0;
+        int sumScannedCount = 0;
+        for (int segment = 0; segment < totalSegments; segment++) {
+            var scanReq = mapper.createObjectNode();
+            scanReq.put("TableName", "Users");
+            scanReq.put("Segment", segment);
+            scanReq.put("TotalSegments", totalSegments);
+            scanReq.put("Select", "COUNT");
+
+            var response = handler.handle("Scan", scanReq, region);
+            assertEquals(200, response.getStatus());
+            var entity = mapper.readTree(response.getEntity().toString());
+            sumCount += entity.get("Count").asInt();
+            sumScannedCount += entity.get("ScannedCount").asInt();
+        }
+
+        assertEquals(15, sumCount, "Sum of Count across segments must equal total items");
+        assertEquals(15, sumScannedCount, "Sum of ScannedCount across segments must equal total items");
+    }
+
+    @Test
+    void parallelScanSamePartitionKeySameSegment() throws Exception {
+        String region = "eu-west-1";
+        service.createTable("Orders",
+                List.of(
+                        new KeySchemaElement("userId", "HASH"),
+                        new KeySchemaElement("orderId", "RANGE")),
+                List.of(
+                        new AttributeDefinition("userId", "S"),
+                        new AttributeDefinition("orderId", "S")),
+                5L, 5L, region);
+
+        for (int i = 0; i < 5; i++) {
+            service.putItem("Orders", item("userId", "alice", "orderId", "ord-" + i), region);
+            service.putItem("Orders", item("userId", "bob", "orderId", "ord-" + i), region);
+        }
+
+        int totalSegments = 10;
+        Map<String, Set<Integer>> userSegments = new HashMap<>();
+        userSegments.put("alice", new HashSet<>());
+        userSegments.put("bob", new HashSet<>());
+
+        for (int segment = 0; segment < totalSegments; segment++) {
+            var scanReq = mapper.createObjectNode();
+            scanReq.put("TableName", "Orders");
+            scanReq.put("Segment", segment);
+            scanReq.put("TotalSegments", totalSegments);
+
+            var response = handler.handle("Scan", scanReq, region);
+            assertEquals(200, response.getStatus());
+            var entity = mapper.readTree(response.getEntity().toString());
+            var items = entity.get("Items");
+            for (var item : items) {
+                String userId = item.get("userId").get("S").asText();
+                userSegments.get(userId).add(segment);
+            }
+        }
+
+        assertEquals(1, userSegments.get("alice").size(), "All alice items must belong to the exact same segment");
+        assertEquals(1, userSegments.get("bob").size(), "All bob items must belong to the exact same segment");
+    }
+
+    private ObjectNode updateUserRequest() {
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.set("Key", mapper.createObjectNode().set("userId", attributeValue("S", "u1")));
+        return request;
+    }
+
+    @Test
+    void updateItemUpdatedNewReturnsOnlyTheChangedMapFragment() throws Exception {
+        createUsersTable("eu-west-1");
+        var parent = mapper.createObjectNode();
+        parent.set("keep", attributeValue("S", "k"));
+        parent.set("child", attributeValue("S", "old"));
+        var putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        var item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", "u1"));
+        item.set("parent", mapper.createObjectNode().set("M", parent));
+        putRequest.set("Item", item);
+        handler.handle("PutItem", putRequest, "eu-west-1");
+
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "SET parent.child = :v");
+        request.set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":v", attributeValue("S", "new")));
+        request.put("ReturnValues", "UPDATED_NEW");
+
+        var response = handler.handle("UpdateItem", request, "eu-west-1");
+        var body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        var attributes = body.get("Attributes");
+        assertEquals("new", attributes.get("parent").get("M").get("child").get("S").asText());
+        assertFalse(attributes.get("parent").get("M").has("keep"));
+    }
+
+    @Test
+    void updateItemRemoveWithUpdatedNewOmitsAttributes() throws Exception {
+        createUsersTable("eu-west-1");
+        var putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        var item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", "u1"));
+        item.set("y", attributeValue("S", "drop"));
+        putRequest.set("Item", item);
+        handler.handle("PutItem", putRequest, "eu-west-1");
+
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "REMOVE y");
+        request.put("ReturnValues", "UPDATED_NEW");
+
+        var response = handler.handle("UpdateItem", request, "eu-west-1");
+        var body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.has("Attributes"));
+    }
+
+    @Test
+    void updateItemReportsOnlyTheFirstInvalidEnum() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("ReturnValues", "INVALID");
+        request.put("ReturnConsumedCapacity", "INVALID");
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().startsWith("1 validation error detected:"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("'returnValues'"), ex.getMessage());
+    }
+
+    private static String nameOfBytes(int bytes) {
+        return "a".repeat(bytes);
+    }
+
+    private ObjectNode singleValue(String placeholder) {
+        return (ObjectNode) mapper.createObjectNode().set(placeholder, attributeValue("S", "x"));
+    }
+
+    @Test
+    void updateItemRejectsAnUpdateExpressionOver4096BytesBeforeTheTableLookup() {
+        var request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", "SET " + nameOfBytes(4088) + " = :v");
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: "
+                + "Expression size has exceeded the maximum allowed size;", ex.getMessage());
+    }
+
+    @Test
+    void updateItemAcceptsAnUpdateExpressionOfExactly4096Bytes() throws Exception {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "SET " + nameOfBytes(4087) + " = :v");
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        var response = handler.handle("UpdateItem", request, "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void putItemRejectsAConditionExpressionOver4096Bytes() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.set("Item", item("userId", "u1"));
+        request.put("ConditionExpression", "attribute_not_exists(" + nameOfBytes(4075) + ")");
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid ConditionExpression: "
+                + "Expression size has exceeded the maximum allowed size;", ex.getMessage());
+    }
+
+    @Test
+    void queryRejectsAFilterExpressionOver4096Bytes() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.put("KeyConditionExpression", "userId = :pk");
+        request.put("FilterExpression", nameOfBytes(4092) + " = :v");
+        var values = singleValue(":pk");
+        values.set(":v", attributeValue("S", "x"));
+        request.set("ExpressionAttributeValues", values);
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("Query", request, "eu-west-1"));
+        assertEquals("Invalid FilterExpression: Expression size has exceeded the maximum allowed size;",
+                ex.getMessage());
+    }
+
+    @Test
+    void scanRejectsAFilterExpressionOver4096BytesAndReportsTheSize() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.put("FilterExpression", nameOfBytes(4092) + " = :v");
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("Scan", request, "eu-west-1"));
+        assertEquals("Invalid FilterExpression: Expression size has exceeded the maximum allowed size; "
+                + "expression size: 4097", ex.getMessage());
+    }
+
+    @Test
+    void getItemRejectsAProjectionExpressionOver4096Bytes() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("ProjectionExpression", nameOfBytes(4097));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("GetItem", request, "eu-west-1"));
+        assertEquals("Invalid ProjectionExpression: Expression size has exceeded the maximum allowed size;",
+                ex.getMessage());
+    }
+
+    private ObjectNode nestedMaps(int levels) {
+        ObjectNode value = attributeValue("S", "leaf");
+        for (var i = 0; i < levels; i++) {
+            var map = mapper.createObjectNode();
+            map.set("n", value);
+            value = mapper.createObjectNode();
+            value.set("M", map);
+        }
+        return value;
+    }
+
+    private ObjectNode putRequest(JsonNode value) {
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        var item = item("userId", "u1");
+        item.set("data", value);
+        request.set("Item", item);
+        return request;
+    }
+
+    private static final String NESTING_MESSAGE = "1 validation error detected: Nesting Levels have exceeded "
+            + "supported limits: Attributes in the item have nested levels beyond supported limit";
+
+    @Test
+    void putItemAcceptsAnAttributeWithALeafAtLevel32() throws Exception {
+        createUsersTable("eu-west-1");
+
+        var response = handler.handle("PutItem", putRequest(nestedMaps(31)), "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void putItemRejectsAnAttributeWithALeafAtLevel33BeforeTheTableLookup() {
+        var request = putRequest(nestedMaps(32));
+        request.put("TableName", "Missing");
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(NESTING_MESSAGE, ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsAnExpressionAttributeValueWithALeafAtLevel33() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "SET touched = :t");
+        request.put("ConditionExpression", "#d = :deep");
+        request.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
+        var values = singleValue(":t");
+        values.set(":deep", nestedMaps(32));
+        request.set("ExpressionAttributeValues", values);
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals(NESTING_MESSAGE, ex.getMessage());
+    }
+
+    private ObjectNode transactWrite(String action, ObjectNode op) {
+        op.put("TableName", "Users");
+        var member = mapper.createObjectNode();
+        member.set(action, op);
+        var request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(member));
+        return request;
+    }
+
+    @Test
+    void transactWriteItemsRejectsAConditionExpressionOver4096BytesWithTheSizeBeforeTheTableLookup() {
+        var put = mapper.createObjectNode();
+        put.set("Item", item("userId", "u1"));
+        put.put("ConditionExpression", "attribute_not_exists(" + nameOfBytes(4075) + ")");
+        var request = transactWrite("Put", put);
+        ((ObjectNode) request.get("TransactItems").get(0).get("Put")).put("TableName", "Missing");
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ConditionExpression: Expression size has exceeded the maximum allowed size; "
+                + "expression size: 4097", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRejectsAnUpdateExpressionOver4096Bytes() {
+        createUsersTable("eu-west-1");
+        var update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "SET " + nameOfBytes(4088) + " = :v");
+        update.set("ExpressionAttributeValues", singleValue(":v"));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: Expression size has exceeded the maximum allowed size;",
+                ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRejectsAPutItemWithALeafAtLevel33() {
+        createUsersTable("eu-west-1");
+        var put = mapper.createObjectNode();
+        var item = item("userId", "u1");
+        item.set("data", nestedMaps(32));
+        put.set("Item", item);
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Put", put), "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
+    }
+
+    @Test
+    void batchWriteItemRejectsAPutItemWithALeafAtLevel33BeforeTheTableLookup() {
+        var item = item("userId", "u1");
+        item.set("data", nestedMaps(32));
+        var putRequest = mapper.createObjectNode();
+        putRequest.set("PutRequest", mapper.createObjectNode().set("Item", item));
+        var request = mapper.createObjectNode();
+        request.set("RequestItems", mapper.createObjectNode().set("Missing", mapper.createArrayNode().add(putRequest)));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("BatchWriteItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAnUpdateValueWithALeafAtLevel33() throws Exception {
+        createUsersTable("eu-west-1");
+        var update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "SET deep = :deep");
+        update.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+
+        var response = handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1");
+        assertEquals(400, response.getStatus());
+        var body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("TransactionCanceledException", body.get("__type").asText());
+        var reason = body.get("CancellationReasons").get(0);
+        assertEquals("ValidationError", reason.get("Code").asText());
+        assertEquals("Nesting Levels have exceeded supported limits", reason.get("Message").asText());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsDoesNotCheckTheDepthOfAConditionCheckValue() throws Exception {
+        createUsersTable("eu-west-1");
+        var putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        putRequest.set("Item", item("userId", "u1", "marker", "x"));
+        handler.handle("PutItem", putRequest, "eu-west-1");
+        var check = mapper.createObjectNode();
+        check.set("Key", item("userId", "u1"));
+        check.put("ConditionExpression", "#d = :deep");
+        check.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
+        check.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+
+        var response = handler.handle("TransactWriteItems", transactWrite("ConditionCheck", check), "eu-west-1");
+        assertEquals(400, response.getStatus());
+        var reason = mapper.convertValue(response.getEntity(), JsonNode.class).get("CancellationReasons").get(0);
+        assertEquals("ConditionalCheckFailed", reason.get("Code").asText());
+        assertEquals("The conditional request failed", reason.get("Message").asText());
+    }
+
+    @Test
+    void updateItemRejectsAnOutOfRangeAddOperandBeforeTheTableLookup() {
+        var request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", "ADD n :a");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":a", attributeValue("N", "1e126")));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Number overflow. "
+                + "Attempting to store a number with magnitude larger than supported range", ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsATooSmallExpressionAttributeValue() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        request.put("UpdateExpression", "SET x = :a");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":a", attributeValue("N", "1e-131")));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Number underflow. "
+                + "Attempting to store a number with magnitude smaller than supported range", ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsAnAttributeUpdatesValueWithTooManyDigits() {
+        createUsersTable("eu-west-1");
+        var request = updateUserRequest();
+        var update = mapper.createObjectNode();
+        update.put("Action", "ADD");
+        update.set("Value", attributeValue("N", "123456789012345678901234567890123456789"));
+        request.set("AttributeUpdates", mapper.createObjectNode().set("n", update));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Attempting to store more than 38 significant digits in a Number",
+                ex.getMessage());
+    }
+
+    @Test
+    void queryRejectsAnOutOfRangeExpressionAttributeValueWithoutTheEnvelope() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        request.put("KeyConditionExpression", "userId = :p");
+        request.put("FilterExpression", "n = :a");
+        var values = singleValue(":p");
+        values.set(":a", attributeValue("N", "1e126"));
+        request.set("ExpressionAttributeValues", values);
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("Query", request, "eu-west-1"));
+        assertEquals("Number overflow. Attempting to store a number with magnitude larger than supported range",
+                ex.getMessage());
+    }
+
+    @Test
+    void updateItemRejectsAnAttributeUpdatesValueWithALeafAtLevel33BeforeTheTableLookup() {
+        var request = updateUserRequest();
+        request.put("TableName", "Missing");
+        var update = mapper.createObjectNode();
+        update.put("Action", "PUT");
+        update.set("Value", nestedMaps(32));
+        request.set("AttributeUpdates", mapper.createObjectNode().set("data", update));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(NESTING_MESSAGE, ex.getMessage());
+    }
+
+    @Test
+    void putItemRejectsAnExpectedValueWithALeafAtLevel33() {
+        createUsersTable("eu-west-1");
+        var request = putRequest(attributeValue("S", "x"));
+        request.set("Expected", mapper.createObjectNode().set("data",
+                mapper.createObjectNode().set("Value", nestedMaps(32))));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals(NESTING_MESSAGE, ex.getMessage());
+    }
+
+    @Test
+    void queryRejectsAQueryFilterValueWithALeafAtLevel33WithoutTheEnvelope() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("TableName", "Users");
+        var keyCondition = mapper.createObjectNode();
+        keyCondition.put("ComparisonOperator", "EQ");
+        keyCondition.set("AttributeValueList", mapper.createArrayNode().add(attributeValue("S", "u1")));
+        request.set("KeyConditions", mapper.createObjectNode().set("userId", keyCondition));
+        var filter = mapper.createObjectNode();
+        filter.put("ComparisonOperator", "EQ");
+        filter.set("AttributeValueList", mapper.createArrayNode().add(nestedMaps(32)));
+        request.set("QueryFilter", mapper.createObjectNode().set("data", filter));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("Query", request, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
+    }
+
+    private void seedUpdateReturnValuesItem() throws Exception {
+        createUsersTable("eu-west-1");
+        var parent = mapper.createObjectNode();
+        parent.set("keep", attributeValue("S", "k"));
+        parent.set("child", attributeValue("S", "old"));
+        var list = mapper.createArrayNode()
+                .add(attributeValue("S", "l0")).add(attributeValue("S", "l1")).add(attributeValue("S", "l2"));
+        var item = item("userId", "u1");
+        item.set("parent", mapper.createObjectNode().set("M", parent));
+        item.set("l", mapper.createObjectNode().set("L", list));
+        var putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        putRequest.set("Item", item);
+        handler.handle("PutItem", putRequest, "eu-west-1");
+    }
+
+    private JsonNode updateAttributes(String expression, ObjectNode values, String returnValues) throws Exception {
+        var request = updateUserRequest();
+        request.put("UpdateExpression", expression);
+        if (values != null) {
+            request.set("ExpressionAttributeValues", values);
+        }
+        request.put("ReturnValues", returnValues);
+        var body = mapper.convertValue(handler.handle("UpdateItem", request, "eu-west-1").getEntity(), JsonNode.class);
+        return body.get("Attributes");
+    }
+
+    @Test
+    void updateItemUpdatedNewReturnsTheWholeMapWhenTheMapItselfIsSet() throws Exception {
+        seedUpdateReturnValuesItem();
+        var parent = mapper.createObjectNode();
+        parent.set("keep", attributeValue("S", "k"));
+        parent.set("child", attributeValue("S", "new"));
+        var values = mapper.createObjectNode();
+        values.set(":v", mapper.createObjectNode().set("M", parent));
+
+        var attributes = updateAttributes("SET parent = :v", values, "UPDATED_NEW");
+        assertEquals("k", attributes.get("parent").get("M").get("keep").get("S").asText());
+        assertEquals("new", attributes.get("parent").get("M").get("child").get("S").asText());
+    }
+
+    @Test
+    void updateItemUpdatedOldReturnsTheWholeOldMapWhenTheMapItselfIsSet() throws Exception {
+        seedUpdateReturnValuesItem();
+        var values = mapper.createObjectNode();
+        values.set(":v", mapper.createObjectNode().set("M", mapper.createObjectNode().set("child", attributeValue("S", "new"))));
+
+        var attributes = updateAttributes("SET parent = :v", values, "UPDATED_OLD");
+        assertEquals("k", attributes.get("parent").get("M").get("keep").get("S").asText());
+        assertEquals("old", attributes.get("parent").get("M").get("child").get("S").asText());
+    }
+
+    @Test
+    void updateItemUpdatedNewReturnsANestedSetEvenWhenTheValueDidNotChange() throws Exception {
+        seedUpdateReturnValuesItem();
+
+        var attributes = updateAttributes("SET parent.child = :v", singleValueOf("old"), "UPDATED_NEW");
+        assertEquals("old", attributes.get("parent").get("M").get("child").get("S").asText());
+        assertFalse(attributes.get("parent").get("M").has("keep"));
+    }
+
+    @Test
+    void updateItemUpdatedNewPacksTouchedListElementsInIndexOrder() throws Exception {
+        seedUpdateReturnValuesItem();
+        var values = mapper.createObjectNode();
+        values.set(":v", attributeValue("S", "L2"));
+        values.set(":w", attributeValue("S", "L0"));
+
+        var attributes = updateAttributes("SET l[2] = :v, l[0] = :w", values, "UPDATED_NEW");
+        var packed = attributes.get("l").get("L");
+        assertEquals(2, packed.size());
+        assertEquals("L0", packed.get(0).get("S").asText());
+        assertEquals("L2", packed.get(1).get("S").asText());
+    }
+
+    @Test
+    void updateItemUpdatedNewAfterRemovingAListElementReturnsTheElementNowAtThatIndex() throws Exception {
+        seedUpdateReturnValuesItem();
+
+        var attributes = updateAttributes("REMOVE l[1]", null, "UPDATED_NEW");
+        assertEquals(1, attributes.get("l").get("L").size());
+        assertEquals("l2", attributes.get("l").get("L").get(0).get("S").asText());
+    }
+
+    @Test
+    void updateItemUpdatedNewOmitsAttributesWhenAppendingPastTheEndOfAList() throws Exception {
+        seedUpdateReturnValuesItem();
+
+        assertNull(updateAttributes("SET l[5] = :v", singleValueOf("L5"), "UPDATED_NEW"));
+    }
+
+    private ObjectNode singleValueOf(String value) {
+        return (ObjectNode) mapper.createObjectNode().set(":v", attributeValue("S", value));
+    }
+
+    @Test
+    void transactGetItemsRejectsAnOversizedProjectionBeforeTheTableLookup() {
+        var get = mapper.createObjectNode();
+        get.put("TableName", "Missing");
+        get.set("Key", item("userId", "u1"));
+        get.put("ProjectionExpression", nameOfBytes(4097));
+        var request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(mapper.createObjectNode().set("Get", get)));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactGetItems", request, "eu-west-1"));
+        assertEquals("Invalid ProjectionExpression: Expression size has exceeded the maximum allowed size;",
+                ex.getMessage());
+    }
+
+    @Test
+    void executeStatementRejectsATooDeepParameter() {
+        createUsersTable("eu-west-1");
+        var request = mapper.createObjectNode();
+        request.put("Statement", "UPDATE \"Users\" SET deep=? WHERE userId=?");
+        request.set("Parameters", mapper.createArrayNode().add(nestedMaps(32)).add(attributeValue("S", "u1")));
+
+        var ex = assertThrows(AwsException.class,
+                () -> handler.handle("ExecuteStatement", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+    }
+
+    @Test
+    void executeTransactionCancelsOnATooDeepParameterWithThatStatementsReason() throws Exception {
+        createUsersTable("eu-west-1");
+        var fine = mapper.createObjectNode();
+        fine.put("Statement", "UPDATE \"Users\" SET x=? WHERE userId=?");
+        fine.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "x")).add(attributeValue("S", "u1")));
+        var deep = mapper.createObjectNode();
+        deep.put("Statement", "INSERT INTO \"Users\" VALUE {'userId': ?, 'deep': ?}");
+        deep.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "u2")).add(nestedMaps(32)));
+        var request = mapper.createObjectNode();
+        request.set("TransactStatements", mapper.createArrayNode().add(fine).add(deep));
+
+        var response = handler.handle("ExecuteTransaction", request, "eu-west-1");
+        assertEquals(400, response.getStatus());
+        var body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("TransactionCanceledException", body.get("__type").asText());
+        var reasons = body.get("CancellationReasons");
+        assertEquals("None", reasons.get(0).get("Code").asText());
+        assertEquals("ValidationError", reasons.get(1).get("Code").asText());
+        assertEquals("Nesting Levels have exceeded supported limits", reasons.get(1).get("Message").asText());
+        assertNull(service.getItem("Users", item("userId", "u2"), "eu-west-1"));
+    }
+
+    private ObjectNode transactMember(String action, String tableName, String field, ObjectNode value) {
+        ObjectNode op = mapper.createObjectNode();
+        op.put("TableName", tableName);
+        op.set(field, value);
+        ObjectNode member = mapper.createObjectNode();
+        member.set(action, op);
+        return member;
+    }
+
+    private ObjectNode transactWriteOf(ObjectNode... members) {
+        ArrayNode items = mapper.createArrayNode();
+        for (ObjectNode member : members) {
+            items.add(member);
+        }
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", items);
+        return request;
+    }
+
+    private String onlyValidationErrorMessage(Response response) {
+        assertEquals(400, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("TransactionCanceledException", body.get("__type").asText());
+        assertEquals("Transaction cancelled, please refer cancellation reasons for specific reasons [ValidationError]",
+                body.get("message").asText());
+        JsonNode reason = body.get("CancellationReasons").get(0);
+        assertEquals("ValidationError", reason.get("Code").asText());
+        return reason.get("Message").asText();
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutKeyOfTheWrongType() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("N", "5"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Users", "Item", item)), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for key userId expected: S actual: N",
+                onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutItemMissingItsKey() throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Users", "Item", item("name", "x"))), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Missing the key userId in the item",
+                onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnADeleteKeyOfTheWrongTypeWithTheSchemaMessage() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("N", "5"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Delete", "Users", "Key", key)), "eu-west-1");
+
+        assertEquals("The provided key element does not match the schema", onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAConditionCheckKeyMissingItsAttribute() throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("ConditionCheck", "Users", "Key", mapper.createObjectNode())),
+                "eu-west-1");
+
+        assertEquals("The provided key element does not match the schema", onlyValidationErrorMessage(response));
+    }
+
+    // Checked against DynamoDB in eu-west-2: the failing condition and the duplicate pair report None.
+    @Test
+    void transactWriteItemsCancelsAtTheFirstKeyMismatchBeforeConditionsAndDuplicates() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode check = transactMember("ConditionCheck", "Users", "Key", item("userId", "u9"));
+        ((ObjectNode) check.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(userId)");
+        ObjectNode firstWrong = mapper.createObjectNode();
+        firstWrong.set("userId", attributeValue("N", "5"));
+        ObjectNode secondWrong = mapper.createObjectNode();
+        secondWrong.set("userId", attributeValue("N", "6"));
+
+        Response response = handler.handle("TransactWriteItems", transactWriteOf(check,
+                transactMember("Put", "Users", "Item", item("userId", "u1")),
+                transactMember("Put", "Users", "Item", item("userId", "u1")),
+                transactMember("Put", "Users", "Item", firstWrong),
+                transactMember("Put", "Users", "Item", secondWrong)), "eu-west-1");
+
+        assertEquals(400, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("Transaction cancelled, please refer cancellation reasons for specific reasons "
+                + "[None, None, None, ValidationError, None]", body.get("message").asText());
+        assertEquals("One or more parameter values were invalid: Type mismatch for key userId expected: S actual: N",
+                body.get("CancellationReasons").get(3).get("Message").asText());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    // Checked against DynamoDB in eu-west-2: a CREATING table is not found before any key is checked.
+    @Test
+    void transactWriteItemsAnswersResourceNotFoundForACreatingTableBeforeTheKeyCheck() {
+        createUsersTable("eu-west-1").setTableStatus("CREATING");
+        ObjectNode wrong = mapper.createObjectNode();
+        wrong.set("userId", attributeValue("N", "5"));
+        ObjectNode request = transactWriteOf(transactMember("Put", "Users", "Item", wrong));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("Requested resource not found", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsFailsTheRequestOnAnEmptyKeyAheadOfAKeyMismatch() {
+        createUsersTable("eu-west-1");
+        ObjectNode wrong = mapper.createObjectNode();
+        wrong.set("userId", attributeValue("N", "5"));
+        ObjectNode request = transactWriteOf(
+                transactMember("Put", "Users", "Item", item("userId", "")),
+                transactMember("Put", "Users", "Item", wrong));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key attribute "
+                + "cannot contain an empty string value. Key: userId", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode item = item("id", "m1");
+        item.set("title", attributeValue("N", "1"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Movies", "Item", item)), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAnUpdateSettingAnIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode update = transactMember("Update", "Movies", "Key", item("id", "m1"));
+        ((ObjectNode) update.get("Update")).put("UpdateExpression", "SET title = :t");
+        ((ObjectNode) update.get("Update")).set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":t", attributeValue("N", "1")));
+
+        Response response = handler.handle("TransactWriteItems", transactWriteOf(update), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+        assertNull(service.getItem("Movies", item("id", "m1"), "eu-west-1"));
+    }
+
+    @Test
+    void executeTransactionCancelsOnAnUpdateSettingAnIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Movies");
+        putRequest.set("Item", item("id", "m1", "title", "Old"));
+        handler.handle("PutItem", putRequest, "eu-west-1");
+        ObjectNode statement = mapper.createObjectNode();
+        statement.put("Statement", "UPDATE \"Movies\" SET title = ? WHERE id = ?");
+        statement.set("Parameters", mapper.createArrayNode()
+                .add(attributeValue("N", "1")).add(attributeValue("S", "m1")));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactStatements", mapper.createArrayNode().add(statement));
+
+        Response response = handler.handle("ExecuteTransaction", request, "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+        assertEquals("Old", service.getItem("Movies", item("id", "m1"), "eu-west-1").get("title").get("S").asText());
     }
 }

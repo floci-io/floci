@@ -444,6 +444,40 @@ class EmulatorLifecycleTest {
     }
 
     @Test
+    @DisplayName("Should continue cleanup and shut down storage when the initial flush fails")
+    void shouldContinueCleanupWhenInitialFlushFails() {
+        doThrow(new IllegalStateException("flush failed")).when(storageFactory).flushAll();
+
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        verify(elastiCacheProxyManager).stopAll();
+        verify(rdsProxyManager).stopAll();
+        verify(storageFactory).shutdownAll();
+    }
+
+    @Test
+    @DisplayName("Should continue cleanup after a middle resource cleanup fails")
+    void shouldContinueCleanupAfterMiddleResourceFailure() {
+        doThrow(new IllegalStateException("proxy failed")).when(rdsProxyManager).stopAll();
+
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        verify(memoryDbProxyManager).stopAll();
+        verify(neptuneProxyManager).stopAll();
+        verify(storageFactory).shutdownAll();
+    }
+
+    @Test
+    @DisplayName("Should shut down storage when a late resource cleanup fails")
+    void shouldShutDownStorageAfterLateResourceFailure() {
+        doThrow(new IllegalStateException("UI shutdown failed")).when(flociUiManager).shutdown();
+
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        verify(storageFactory).shutdownAll();
+    }
+
+    @Test
     @DisplayName("Should still run full resource cleanup when a pre-shutdown hook fails")
     void shouldRunFullCleanupAfterFailingPreShutdownHook() throws IOException, InterruptedException {
         doThrow(new IOException("hook blew up")).when(initializationHooksRunner).run(InitializationHook.STOP);

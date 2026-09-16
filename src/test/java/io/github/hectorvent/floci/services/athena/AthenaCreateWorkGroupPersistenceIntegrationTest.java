@@ -18,6 +18,7 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -289,6 +290,62 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
 
         assertEquals("Athena engine version 3", engineVersion.get("SelectedEngineVersion"));
         assertEquals("Athena engine version 3", engineVersion.get("EffectiveEngineVersion"));
+    }
+
+    @Test
+    void updateWorkGroupPersistsMergedState() throws Exception {
+        Files.deleteIfExists(WORKGROUPS_FILE);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "Name": "persistent-update",
+                  "Configuration": {
+                    "EnforceWorkGroupConfiguration": true,
+                    "BytesScannedCutoffPerQuery": 10000000
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.UpdateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "WorkGroup": "persistent-update",
+                  "Description": "persisted after update",
+                  "State": "DISABLED",
+                  "ConfigurationUpdates": {
+                    "PublishCloudWatchMetricsEnabled": true,
+                    "RemoveBytesScannedCutoffPerQuery": true
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        PersistentStorage<String, Map<String, Object>> store = new PersistentStorage<>(
+                WORKGROUPS_FILE,
+                new TypeReference<Map<String, Map<String, Object>>>() {});
+        store.load();
+
+        Map<String, Object> persisted = store.get("000000000000/us-east-1:persistent-update").orElseThrow();
+        assertEquals("persisted after update", persisted.get("Description"));
+        assertEquals("DISABLED", persisted.get("State"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> configuration = (Map<String, Object>) persisted.get("Configuration");
+        assertEquals(true, configuration.get("EnforceWorkGroupConfiguration"));
+        assertEquals(true, configuration.get("PublishCloudWatchMetricsEnabled"));
+        assertNull(configuration.get("BytesScannedCutoffPerQuery"));
     }
 
     public static final class PersistentStorageProfile implements QuarkusTestProfile {

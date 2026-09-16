@@ -7,35 +7,48 @@ import java.util.List;
  *
  * <p>Carries all inputs required for the complete AWS policy evaluation algorithm:
  * <ul>
- *   <li>{@code identityPolicies} — inline + attached policies of the user, role, and groups</li>
- *   <li>{@code sessionPolicyDocument} — optional inline session policy from AssumeRole (Phase 3)</li>
- *   <li>{@code boundaryPolicyDocument} — optional permissions boundary document (Phase 3)</li>
- *   <li>{@code scpLevels} — optional effective service control policies for the caller's
+ *   <li>{@code identityPolicies}: inline + attached policies of the user, role, and groups</li>
+ *   <li>{@code sessionPolicyDocument}: optional inline session policy from AssumeRole (Phase 3)</li>
+ *   <li>{@code boundaryPolicyDocument}: optional permissions boundary document (Phase 3)</li>
+ *   <li>{@code scpLevels}: optional effective service control policies for the caller's
  *       account, one list of policy documents per organization level (root, each OU on the
  *       path, account). An action must be allowed at every level and denied at none.
  *       {@code null} when SCPs don't apply (no organization, management account, or SCP
  *       enforcement disabled).</li>
+ *   <li>{@code principalArn}: optional caller principal ARN used for resource policy evaluation.</li>
  * </ul>
  */
 public record CallerContext(
         List<String> identityPolicies,
         String sessionPolicyDocument,
         String boundaryPolicyDocument,
-        List<List<String>> scpLevels
+        List<List<String>> scpLevels,
+        String principalArn
 ) {
+    /** Source-compatible constructor for callers predating principalArn support. */
+    public CallerContext(List<String> identityPolicies, String sessionPolicyDocument,
+                         String boundaryPolicyDocument, List<List<String>> scpLevels) {
+        this(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, scpLevels, null);
+    }
+
     /** Source-compatible constructor for callers predating SCP support. */
     public CallerContext(List<String> identityPolicies, String sessionPolicyDocument,
                          String boundaryPolicyDocument) {
-        this(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, null);
+        this(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, null, null);
     }
 
     /** Convenience factory: no session policy, no boundary, no SCPs. */
     public static CallerContext of(List<String> identityPolicies) {
-        return new CallerContext(identityPolicies, null, null, null);
+        return new CallerContext(identityPolicies, null, null, null, null);
     }
 
     /** Copy of this context with the effective SCP levels attached. */
     public CallerContext withScpLevels(List<List<String>> levels) {
-        return new CallerContext(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, levels);
+        return new CallerContext(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, levels, principalArn);
+    }
+
+    /** Copy of this context with the caller principal ARN attached. */
+    public CallerContext withPrincipalArn(String principalArn) {
+        return new CallerContext(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, scpLevels, principalArn);
     }
 }

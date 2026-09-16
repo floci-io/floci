@@ -134,6 +134,28 @@ ln -s AGENTS.md GEMINI.md
 ln -s AGENTS.md COPILOT.md
 ```
 
+## Code Style
+
+[AGENTS.md](AGENTS.md#code-style) carries the full list. The rules worth knowing
+before your first PR:
+
+- **Write explicit types. Do not use `var`.** Floci reproduces AWS wire contracts,
+  so the concrete type at a call site is usually what a reviewer needs to see:
+  whether a value is a `LinkedHashMap` or a `Map`, an AWS model type or a JDK one.
+  The one exception is a record deconstruction pattern.
+- **Import the classes you use. No fully-qualified names inline.**
+  `new ArrayList<>()`, never `new java.util.ArrayList<>()`. Qualify inline only for
+  a genuine name collision in that file, and say in a comment what collides.
+- **No wildcard imports in `src/main`.** Static wildcards are fine in tests.
+- **Never leave a `catch` block empty.** If swallowing is correct, name the
+  variable `ignored` or `expected` and say why in a comment.
+- **Always use braces in conditionals**, and use constructor injection.
+- **Tests**: JUnit 5 with Hamcrest and RestAssured. Name methods as a camelCase
+  sentence or `method_scenario_expectation`, never `testX`.
+
+Existing code does not yet satisfy all of these everywhere. Match the rules in code
+you add or change; leave unrelated cleanups for their own PR.
+
 ## Adding a New AWS Service
 
 1. Create a package under `src/main/java/.../services/<service>/`

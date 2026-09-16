@@ -98,6 +98,16 @@ public class IdentityStoreService implements Resettable {
                 optionalMaxResults(request), text(request, "NextToken"), 50, 100, "ValidationException");
     }
 
+    List<Group> listGroupsForScim(String storeId) {
+        return listGroupsAll(requireStore(storeId), null);
+    }
+
+    List<Membership> listMembershipsForScim(String storeId) {
+        return listMembershipsAll(requireStore(storeId)).stream()
+                .sorted(Comparator.comparing(Membership::membershipId))
+                .toList();
+    }
+
     public Group describeGroup(JsonNode request) {
         String storeId = requireStore(required(request, "IdentityStoreId"));
         return requireGroup(storeId, requireResourceId(required(request, "GroupId"), "GroupId"));
@@ -165,6 +175,32 @@ public class IdentityStoreService implements Resettable {
         String userName = filterValue(request, "UserName");
         return Pagination.paginate(listUsersAll(storeId, userName), User::userId,
                 optionalMaxResults(request), text(request, "NextToken"), 50, 100, "ValidationException");
+    }
+
+    List<User> listUsersForScim(String storeId) {
+        return listUsersAll(requireStore(storeId), null);
+    }
+
+    synchronized User replaceUserForScim(String storeId, String userId, JsonNode request) {
+        storeId = requireStore(storeId);
+        userId = requireResourceId(userId, "UserId");
+        String finalUserId = userId;
+        User user = requireUser(storeId, finalUserId);
+        ObjectNode attributes = copyAttributes(request, Set.of("IdentityStoreId"));
+        String userName = optionalTextLength(attributes, "UserName", 1, 128);
+        if (userName != null) {
+            requireNotReserved(userName);
+            boolean duplicate = listUsersAll(storeId, userName).stream()
+                    .anyMatch(candidate -> !candidate.userId().equals(finalUserId));
+            if (duplicate) {
+                throw conflict("A user with UserName " + userName + " already exists.");
+            }
+        }
+        optionalTextLength(attributes, "DisplayName", 1, 1024);
+        user.setAttributes(attributes);
+        user.setUpdatedAt(Instant.now().toString());
+        users.putForAccount(GLOBAL_PARTITION, userKey(storeId, userId), user);
+        return user;
     }
 
     public User describeUser(JsonNode request) {
@@ -287,6 +323,17 @@ public class IdentityStoreService implements Resettable {
                         && finalGroupId.equals(membership.groupId()));
     }
 
+    public Set<String> groupIdsForUser(String storeId, String userId) {
+        storeId = requireStore(storeId);
+        userId = requireResourceId(userId, "UserId");
+        requireUser(storeId, userId);
+        String finalUserId = userId;
+        return listMembershipsAll(storeId).stream()
+                .filter(membership -> finalUserId.equals(membership.userId()))
+                .map(Membership::groupId)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
     public List<String> validateGroupIds(JsonNode groupIds) {
         if (groupIds == null || !groupIds.isArray() || groupIds.size() < 1 || groupIds.size() > 100) {
             throw validation("GroupIds must contain between 1 and 100 identifiers.");
@@ -299,6 +346,19 @@ public class IdentityStoreService implements Resettable {
                     return requireResourceId(node.textValue(), "GroupId");
                 })
                 .toList();
+    }
+
+    public synchronized void deleteIdentityStore(String storeId) {
+        storeId = requireStore(storeId);
+        for (Membership membership : listMembershipsAll(storeId)) {
+            memberships.deleteForAccount(GLOBAL_PARTITION, membershipKey(storeId, membership.membershipId()));
+        }
+        for (Group group : scanGroups(storeId)) {
+            groups.deleteForAccount(GLOBAL_PARTITION, groupKey(storeId, group.groupId()));
+        }
+        for (User user : scanUsers(storeId)) {
+            users.deleteForAccount(GLOBAL_PARTITION, userKey(storeId, user.userId()));
+        }
     }
 
     @Override

@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService;
+import io.github.hectorvent.floci.services.organizations.model.Organization;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -14,6 +16,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Verifies RAM organization settings and cross-account resource shares survive a restart. */
 class RamServicePersistenceTest {
@@ -27,7 +32,7 @@ class RamServicePersistenceTest {
     void resourceSharesAndOrganizationSettingSurviveRestart() {
         SharedStorageFactory storage = new SharedStorageFactory();
         RamService first = serviceWithStorage(storage);
-        first.enableSharingWithAwsOrganization();
+        first.enableSharingWithAwsOrganization(OWNER);
         ResourceShare created = first.createResourceShare(
                 "us-east-1-tgw-share",
                 List.of("arn:aws:organizations::000000000000:ou/o-abc/ou-infra"),
@@ -35,7 +40,7 @@ class RamServicePersistenceTest {
 
         RamService reloaded = serviceWithStorage(storage);
 
-        assertTrue(reloaded.isSharingWithOrganizationEnabled());
+        assertTrue(reloaded.isSharingWithOrganizationEnabled(OWNER));
         List<ResourceShare> owned = reloaded.getResourceShares(OWNER, "SELF");
         assertEquals(1, owned.size());
         assertEquals(created.getResourceShareArn(), owned.getFirst().getResourceShareArn());
@@ -50,7 +55,13 @@ class RamServicePersistenceTest {
     }
 
     private static RamService serviceWithStorage(StorageFactory storage) {
-        RamService service = new RamService(storage);
+        OrganizationsService organizations = mock(OrganizationsService.class);
+        Organization organization = new Organization();
+        organization.setId("o-abc");
+        when(organizations.describeOrganization(anyString())).thenReturn(organization);
+        when(organizations.organizationPath(anyString(), anyString()))
+                .thenReturn("o-abc/r-root/ou-infra/222222222222/");
+        RamService service = new RamService(storage, organizations);
         service.initializeStorage();
         return service;
     }

@@ -471,6 +471,105 @@ class SamTransformIntegrationTest {
     }
 
     @Test
+    void samImplicitApi_globalRequestAuthorizerCreatesAndWiresApiGatewayAuthorizer() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "sam-api-auth-" + suffix;
+        String apiName = "sam-api-auth-" + suffix;
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Globals:
+              Api:
+                Name: %s
+                Auth:
+                  DefaultAuthorizer: MyAuth
+                  Authorizers:
+                    MyAuth:
+                      FunctionPayloadType: REQUEST
+                      FunctionArn: !GetAtt AuthFn.Arn
+                      Identity:
+                        Headers: [Authorization]
+                        ReauthorizeEvery: 0
+            Resources:
+              ApiFn:
+                Type: AWS::Serverless::Function
+                Properties:
+                  Handler: index.handler
+                  Runtime: nodejs22.x
+                  InlineCode: "exports.handler = async () => ({statusCode:200, body:'ok'});"
+                  Events:
+                    Get:
+                      Type: Api
+                      Properties:
+                        Path: /secret
+                        Method: get
+              AuthFn:
+                Type: AWS::Serverless::Function
+                Properties:
+                  Handler: index.handler
+                  Runtime: nodejs22.x
+                  InlineCode: >-
+                    exports.handler = async () => ({principalId:'p',
+                    policyDocument:{Version:'2012-10-17', Statement:[]}});
+            """.formatted(apiName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+
+        String apiId = given()
+        .when()
+            .get("/restapis")
+        .then()
+            .statusCode(200)
+            .body("item.find { it.name == '" + apiName + "' }.name", equalTo(apiName))
+            .extract()
+            .path("item.find { it.name == '" + apiName + "' }.id");
+
+        String authorizerId = given()
+        .when()
+            .get("/restapis/" + apiId + "/authorizers")
+        .then()
+            .statusCode(200)
+            .body("item.size()", equalTo(1))
+            .body("item[0].name", equalTo("MyAuth"))
+            .body("item[0].type", equalTo("REQUEST"))
+            .body("item[0].identitySource", equalTo("method.request.header.Authorization"))
+            .body("item[0].authorizerResultTtlInSeconds", equalTo(0))
+            .extract()
+            .path("item[0].id");
+
+        String resourceId = given()
+        .when()
+            .get("/restapis/" + apiId + "/resources")
+        .then()
+            .statusCode(200)
+            .body("item.path", hasItem("/secret"))
+            .extract()
+            .path("item.find { it.path == '/secret' }.id");
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+        .then()
+            .statusCode(200)
+            .body("authorizationType", equalTo("CUSTOM"))
+            .body("authorizerId", equalTo(authorizerId));
+    }
+
+    @Test
     void samApi_definitionBodyCreatesApiGatewayMethods() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "sam-api-body-" + suffix;

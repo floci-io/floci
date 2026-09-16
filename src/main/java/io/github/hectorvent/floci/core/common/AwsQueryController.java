@@ -155,7 +155,10 @@ public class AwsQueryController {
             "DescribeSecurityGroupRules", "ModifySecurityGroupRules",
             "UpdateSecurityGroupRuleDescriptionsIngress", "UpdateSecurityGroupRuleDescriptionsEgress",
             "CreateKeyPair", "DescribeKeyPairs", "DeleteKeyPair", "ImportKeyPair",
-            "DescribeImages", "RegisterImage", "DescribeSnapshots",
+            "DescribeImages", "RegisterImage", "DeregisterImage", "CreateImage", "CopyImage",
+            "DescribeSnapshots",
+            "EnableSnapshotBlockPublicAccess", "DisableSnapshotBlockPublicAccess",
+            "GetSnapshotBlockPublicAccessState",
             "CreateTags", "DeleteTags", "DescribeTags",
             "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
             "AttachInternetGateway", "DetachInternetGateway",
@@ -171,7 +174,7 @@ public class AwsQueryController {
             "DescribeAddressesAttribute",
             "DescribeIamInstanceProfileAssociations",
             "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
-            "DescribeInstanceTypes", "DescribeInstanceTypeOfferings",
+            "DescribeInstanceTypes", "DescribeInstanceTypeOfferings", "DescribeSpotPriceHistory",
             "CreateLaunchTemplate", "CreateLaunchTemplateVersion", "DescribeLaunchTemplates", "DescribeLaunchTemplateVersions",
             "ModifyLaunchTemplate", "DeleteLaunchTemplate",
             "DescribeNetworkInterfaces",
@@ -356,7 +359,7 @@ public class AwsQueryController {
                     : elbV2QueryHandler.handle(action, formParams, region);
             case "autoscaling" -> autoScalingQueryHandler.handle(action, formParams, region);
             case "elasticbeanstalk" -> elasticBeanstalkQueryHandler.handle(action, formParams, region);
-            case "redshift" -> redshiftQueryHandler.handle(action, formParams);
+            case "redshift" -> redshiftQueryHandler.handle(action, formParams, authorization);
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
@@ -503,7 +506,9 @@ public class AwsQueryController {
             "PutMetricData", "ListMetrics", "GetMetricStatistics", "GetMetricData",
             "PutMetricAlarm", "DescribeAlarms", "DeleteAlarms", "SetAlarmState",
             "ListTagsForResource", "TagResource", "UntagResource",
-            "PutDashboard", "GetDashboard", "ListDashboards", "DeleteDashboards"
+            "PutDashboard", "GetDashboard", "ListDashboards", "DeleteDashboards",
+            "PutMetricStream", "GetMetricStream", "ListMetricStreams", "DeleteMetricStream",
+            "StartMetricStreams", "StopMetricStreams"
     );
 
     private static final Set<String> ELASTIC_BEANSTALK_ACTIONS = Set.of(
@@ -603,7 +608,8 @@ public class AwsQueryController {
             "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
             "ModifyClusterParameterGroup",
             "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
-            "CreateTags", "DeleteTags", "DescribeTags"
+            "CreateTags", "DeleteTags", "DescribeTags",
+            "GetClusterCredentials", "GetClusterCredentialsWithIAM"
     );
 
     private String resolveService(String authorization, String action) {

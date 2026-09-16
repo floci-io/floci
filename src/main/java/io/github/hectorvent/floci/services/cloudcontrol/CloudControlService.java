@@ -5,7 +5,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -25,6 +30,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -33,14 +39,15 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class CloudControlService {
 
-    /** Cloud Control has no account context in the request; Floci's default test account. */
-    private static final String ACCOUNT = "000000000000";
+    private static final String DEFAULT_ACCOUNT = "000000000000";
 
     private final S3Service s3Service;
     private final Ec2Service ec2Service;
     private final IamService iamService;
     private final CloudFormationResourceProvisioner provisioner;
     private final ObjectMapper mapper;
+    private final AccountAwareStorageBackend<PersistedRequest> requestStore;
+    private final AccountAwareStorageBackend<PersistedCreatedResource> createdStore;
     /** How many finished request tokens to keep before evicting the oldest. */
     private static final int MAX_RETAINED_REQUESTS = 1000;
 
@@ -71,22 +78,132 @@ public class CloudControlService {
         executor.shutdownNow();
     }
 
-    /** Create-time state for a resource this service provisioned. */
-    private record CreatedResource(Map<String, String> attributes, String model) {}
-
-    private static String createdKey(String region, String typeName, String identifier) {
-        return region + "|" + typeName + "|" + identifier;
+    private void restorePersistedState() {
+        for (AccountAwareStorageBackend.AccountEntry<PersistedCreatedResource> entry
+                : createdStore.scanAllAccountEntries(key -> true)) {
+            PersistedCreatedResource persisted = entry.value();
+            String accountId = persisted.accountId() == null ? DEFAULT_ACCOUNT : persisted.accountId();
+            created.put(createdKey(accountId, persisted.region(), persisted.typeName(), persisted.identifier()),
+                    new CreatedResource(persisted.requestToken(), accountId,
+                            persisted.attributes() == null ? Map.of() : Map.copyOf(persisted.attributes()),
+                            persisted.model()));
+        }
+        List<AccountAwareStorageBackend.AccountEntry<PersistedRequest>> persistedRequests =
+                requestStore.scanAllAccountEntries(key -> true);
+        persistedRequests.sort(Comparator.comparingLong(
+                        (AccountAwareStorageBackend.AccountEntry<PersistedRequest> entry) -> entry.value().createdAt())
+                .thenComparing(entry -> entry.value().event().requestToken()));
+        for (AccountAwareStorageBackend.AccountEntry<PersistedRequest> entry : persistedRequests) {
+            PersistedRequest persisted = entry.value();
+            ProgressEvent event = persisted.event();
+            String accountId = event.accountId() == null ? DEFAULT_ACCOUNT : event.accountId();
+            ProgressEvent normalized = event.accountId() == null
+                    ? new ProgressEvent(event.typeName(), event.identifier(), event.requestToken(),
+                    event.operation(), event.operationStatus(), event.statusMessage(),
+                    event.resourceModel(), accountId) : event;
+            String requestToken = normalized.requestToken();
+            CreatedResource recovered = created.values().stream()
+                    .filter(resource -> requestToken.equals(resource.requestToken()))
+                    .findFirst().orElse(null);
+            if (recovered != null && "IN_PROGRESS".equals(normalized.operationStatus())
+                    && "CREATE".equals(normalized.operation())) {
+                String identifier = created.entrySet().stream()
+                        .filter(resource -> resource.getValue() == recovered)
+                        .map(Map.Entry::getKey)
+                        .map(key -> key.substring((accountId + "|").length()))
+                        .map(key -> key.substring(key.lastIndexOf('|') + 1))
+                        .findFirst().orElse(normalized.identifier());
+                normalized = new ProgressEvent(normalized.typeName(), identifier, normalized.requestToken(),
+                        normalized.operation(), "SUCCESS", null, recovered.model(), accountId);
+                persistRequest(new PersistedRequest(normalized, persisted.region(), persisted.desiredStateJson(),
+                        persisted.createdAt()));
+            }
+            requests.put(normalized.requestToken(), normalized);
+            requestOrder.add(normalized.requestToken());
+            if ("IN_PROGRESS".equals(normalized.operationStatus())
+                    && "CREATE".equals(normalized.operation())
+                    && persisted.desiredStateJson() != null) {
+                try {
+                    JsonNode props = mapper.readTree(persisted.desiredStateJson());
+                    submitCreate(persisted.region(), accountId, normalized.typeName(),
+                            persisted.desiredStateJson(), normalized.requestToken(), normalized, props);
+                } catch (Exception e) {
+                    record(normalized.failed("Persisted DesiredState is not valid JSON."));
+                }
+            }
+        }
+        trimPersistedRequests();
     }
+
+    private void persistRequest(PersistedRequest persisted) {
+        String accountId = persisted.event().accountId() == null ? DEFAULT_ACCOUNT : persisted.event().accountId();
+        requestStore.putForAccount(accountId, persisted.event().requestToken(), persisted);
+    }
+
+    private void persistCreated(String accountId, String region, String typeName, String identifier,
+                                CreatedResource resource) {
+        createdStore.putForAccount(accountId, region + "|" + typeName + "|" + identifier,
+                new PersistedCreatedResource(resource.requestToken(), accountId, region, typeName, identifier,
+                        resource.attributes(), resource.model()));
+    }
+
+    private void removePersistedCreated(String accountId, String region, String typeName, String identifier) {
+        createdStore.deleteForAccount(accountId, region + "|" + typeName + "|" + identifier);
+    }
+
+    /** Create-time state for a resource this service provisioned. */
+    private record CreatedResource(String requestToken, String accountId,
+                                   Map<String, String> attributes, String model) {}
+
+    @RegisterForReflection
+    record PersistedRequest(ProgressEvent event, String region, String desiredStateJson, long createdAt) {
+        PersistedRequest(ProgressEvent event, String region, String desiredStateJson) {
+            this(event, region, desiredStateJson, 0L);
+        }
+    }
+
+    @RegisterForReflection
+    record PersistedCreatedResource(String requestToken, String accountId, String region, String typeName,
+                                            String identifier, Map<String, String> attributes,
+                                            String model) {}
+
+    private static String createdKey(String accountId, String region, String typeName, String identifier) {
+        return accountId + "|" + region + "|" + typeName + "|" + identifier;
+    }
+
 
     @Inject
     public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
                                IamService iamService, CloudFormationResourceProvisioner provisioner,
+                               ObjectMapper mapper, StorageFactory storageFactory) {
+        this(s3Service, ec2Service, iamService, provisioner, mapper,
+                storageFactory.create("cloudcontrol", "cloudcontrol-requests.json",
+                        new TypeReference<Map<String, PersistedRequest>>() {}),
+                storageFactory.create("cloudcontrol", "cloudcontrol-created.json",
+                        new TypeReference<Map<String, PersistedCreatedResource>>() {}));
+    }
+
+    public CloudControlService(S3Service s3Service, Ec2Service ec2Service,
+                               IamService iamService, CloudFormationResourceProvisioner provisioner,
                                ObjectMapper mapper) {
+        this(s3Service, ec2Service, iamService, provisioner, mapper,
+                AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT));
+    }
+
+    CloudControlService(S3Service s3Service, Ec2Service ec2Service,
+                                IamService iamService, CloudFormationResourceProvisioner provisioner,
+                                ObjectMapper mapper,
+                                AccountAwareStorageBackend<PersistedRequest> requestStore,
+                                AccountAwareStorageBackend<PersistedCreatedResource> createdStore) {
         this.s3Service = s3Service;
         this.ec2Service = ec2Service;
         this.iamService = iamService;
         this.provisioner = provisioner;
         this.mapper = mapper;
+        this.requestStore = requestStore;
+        this.createdStore = createdStore;
+        restorePersistedState();
     }
 
     /**
@@ -96,7 +213,20 @@ public class CloudControlService {
      * some resources (e.g. an EC2 instance, which launches a container) take longer than a client's
      * synchronous-call deadline — a synchronous create would time out on the caller.
      */
+    private boolean hasCreatedResourceForAnotherAccount(String region, String typeName,
+                                                         String identifier, String accountId) {
+        String suffix = "|" + region + "|" + typeName + "|" + identifier;
+        return created.entrySet().stream()
+                .anyMatch(entry -> entry.getKey().endsWith(suffix)
+                        && !accountId.equals(entry.getValue().accountId()));
+    }
+
+    /** Compatibility entry point for direct callers without request account context. */
     public ProgressEvent createResource(String region, String typeName, String desiredStateJson) {
+        return createResource(region, DEFAULT_ACCOUNT, typeName, desiredStateJson);
+    }
+
+    public ProgressEvent createResource(String region, String accountId, String typeName, String desiredStateJson) {
         // DesiredState is a required member of CreateResourceInput. Defaulting an absent one to an
         // empty object provisioned a resource the caller never described.
         if (desiredStateJson == null || desiredStateJson.isBlank()) {
@@ -109,30 +239,33 @@ public class CloudControlService {
             throw new AwsException("InvalidRequestException", "DesiredState is not valid JSON.", 400);
         }
         String token = UUID.randomUUID().toString();
-        ProgressEvent pending = new ProgressEvent(typeName, null, token, "CREATE", "IN_PROGRESS", null, null);
+        ProgressEvent pending = new ProgressEvent(typeName, null, token, "CREATE", "IN_PROGRESS", null, null, accountId);
         record(pending);
-        executor.submit(() -> {
+        submitCreate(region, accountId, typeName, desiredStateJson, token, pending, props);
+        return pending;
+    }
+
+    private void submitCreate(String region, String accountId, String typeName, String desiredStateJson,
+                              String token, ProgressEvent pending, JsonNode props) {
+        persistRequest(new PersistedRequest(pending, region, desiredStateJson, System.currentTimeMillis()));
+        executor.submit(() -> RequestScopes.runAs(accountId, () -> {
             try {
-                var resource = provisioner.provisionStandalone(typeName, props, region, ACCOUNT);
+                var resource = provisioner.provisionStandalone(typeName, props, region, accountId);
                 if (resource == null || resource.getPhysicalId() == null) {
                     record(pending.failed("CreateResource is not supported for " + typeName + "."));
                 } else {
                     String model = resourceModel(region, typeName, resource.getPhysicalId(), props);
-                    // Kept so GetResource can read back a type the read side does not list, and so
-                    // DeleteResource has the attributes its delete path needs.
-                    created.put(createdKey(region, typeName, resource.getPhysicalId()),
-                            new CreatedResource(
-                                    resource.getAttributes() == null
-                                            ? Map.of() : Map.copyOf(resource.getAttributes()),
-                                    model));
+                    CreatedResource createdResource = new CreatedResource(token, accountId,
+                            resource.getAttributes() == null ? Map.of() : Map.copyOf(resource.getAttributes()), model);
+                    created.put(createdKey(accountId, region, typeName, resource.getPhysicalId()), createdResource);
+                    persistCreated(accountId, region, typeName, resource.getPhysicalId(), createdResource);
                     record(new ProgressEvent(typeName, resource.getPhysicalId(),
-                            token, "CREATE", "SUCCESS", null, model));
+                            token, "CREATE", "SUCCESS", null, model, accountId));
                 }
             } catch (Exception e) {
                 record(pending.failed(e.getMessage() == null ? e.toString() : e.getMessage()));
             }
-        });
-        return pending;
+        }));
     }
 
     /**
@@ -174,12 +307,20 @@ public class CloudControlService {
         };
     }
 
-    /** Cloud Control {@code DeleteResource}. Deletes are quick, so this stays synchronous. */
+    /** Compatibility entry point for direct callers without request account context. */
     public ProgressEvent deleteResource(String region, String typeName, String identifier) {
-        String key = createdKey(region, typeName, identifier);
+        return deleteResource(region, DEFAULT_ACCOUNT, typeName, identifier);
+    }
+
+    /** Cloud Control {@code DeleteResource}. Deletes are quick, so this stays synchronous. */
+    public ProgressEvent deleteResource(String region, String accountId, String typeName, String identifier) {
+        String key = createdKey(accountId, region, typeName, identifier);
         CreatedResource state = created.get(key);
         Map<String, String> attributes = state == null ? Map.of() : state.attributes();
-
+        if (state == null && hasCreatedResourceForAnotherAccount(region, typeName, identifier, accountId)) {
+            return record(new ProgressEvent(typeName, identifier, UUID.randomUUID().toString(),
+                    "DELETE", "FAILED", "Resource belongs to another account.", null, accountId));
+        }
         boolean custom = typeName != null
                 && (typeName.startsWith("Custom::") || "AWS::CloudFormation::CustomResource".equals(typeName));
         if (attributes.isEmpty() && (custom || ATTRIBUTE_BACKED_DELETES.contains(typeName))) {
@@ -188,28 +329,41 @@ public class CloudControlService {
             return record(new ProgressEvent(typeName, identifier, UUID.randomUUID().toString(),
                     "DELETE", "FAILED",
                     "DeleteResource for " + typeName + " needs create-time state that Cloud Control does "
-                    + "not hold for " + identifier + ".", null));
+                    + "not hold for " + identifier + ".", null, accountId));
         }
 
-        provisioner.deleteStandalone(typeName, identifier, region, attributes);
+        RequestScopes.runAs(accountId,
+                () -> provisioner.deleteStandalone(typeName, identifier, region, accountId, attributes));
         created.remove(key);
+        removePersistedCreated(accountId, region, typeName, identifier);
         return record(new ProgressEvent(typeName, identifier,
-                UUID.randomUUID().toString(), "DELETE", "SUCCESS", null, null));
+                UUID.randomUUID().toString(), "DELETE", "SUCCESS", null, null, accountId));
+    }
+
+    /** Compatibility entry point for direct callers without request account context. */
+    public ProgressEvent requestStatus(String requestToken) {
+        return requestStatus(DEFAULT_ACCOUNT, requestToken);
     }
 
     /** Cloud Control {@code GetResourceRequestStatus}. */
-    public ProgressEvent requestStatus(String requestToken) {
+    public ProgressEvent requestStatus(String accountId, String requestToken) {
         ProgressEvent event = requests.get(requestToken);
-        if (event == null) {
+        if (event == null || !accountId.equals(event.accountId())) {
             throw new AwsException("RequestTokenNotFoundException",
                     "Request token " + requestToken + " was not found.", 404);
         }
         return event;
     }
 
-    /** Cloud Control {@code GetResource}: a single resource from the read side, by identifier. */
+    /** Compatibility entry point for direct callers without request account context. */
     public ResourceDescription getResource(String region, String typeName, String identifier) {
-        List<ResourceDescription> listed = resourcesForType(region, typeName);
+        return getResource(region, DEFAULT_ACCOUNT, typeName, identifier);
+    }
+
+    /** Cloud Control {@code GetResource}: a single resource from the read side, by identifier. */
+    public ResourceDescription getResource(String region, String accountId, String typeName, String identifier) {
+        List<ResourceDescription> listed = RequestScopes.callAs(accountId,
+                () -> resourcesForType(region, typeName));
         if (listed != null) {
             for (ResourceDescription d : listed) {
                 if (d.identifier().equals(identifier)) {
@@ -219,7 +373,7 @@ public class CloudControlService {
         }
         // CreateResource provisions the whole CFN type set while the read side lists six types, so
         // fall back to what the create recorded — otherwise a successful create is unreadable.
-        CreatedResource state = created.get(createdKey(region, typeName, identifier));
+        CreatedResource state = created.get(createdKey(accountId, region, typeName, identifier));
         if (state != null) {
             return new ResourceDescription(identifier, state.model());
         }
@@ -236,26 +390,51 @@ public class CloudControlService {
         if (requests.put(event.requestToken(), event) == null) {
             requestOrder.add(event.requestToken());
         }
-        while (requests.size() > MAX_RETAINED_REQUESTS) {
+        PersistedRequest previous = requestStore.getForAccount(
+                event.accountId() == null ? DEFAULT_ACCOUNT : event.accountId(), event.requestToken()).orElse(null);
+        persistRequest(new PersistedRequest(event,
+                previous == null ? null : previous.region(),
+                previous == null ? null : previous.desiredStateJson(),
+                previous == null ? System.currentTimeMillis() : previous.createdAt()));
+        trimPersistedRequests();
+        return event;
+    }
+
+    private void trimPersistedRequests() {
+        int inspected = 0;
+        int candidates = requestOrder.size();
+        while (requests.size() > MAX_RETAINED_REQUESTS && inspected < candidates) {
             String oldest = requestOrder.poll();
             if (oldest == null) {
                 break;
             }
             ProgressEvent existing = requests.get(oldest);
+            inspected++;
             if (existing != null && "IN_PROGRESS".equals(existing.operationStatus())) {
                 requestOrder.add(oldest); // still running — keep it and move on
-                break;
+                continue;
             }
-            requests.remove(oldest);
+            if (existing != null) {
+                requests.remove(oldest);
+                String accountId = existing.accountId() == null ? DEFAULT_ACCOUNT : existing.accountId();
+                requestStore.deleteForAccount(accountId, oldest);
+            }
         }
-        return event;
     }
 
+    @RegisterForReflection
     public record ProgressEvent(String typeName, String identifier, String requestToken,
                                 String operation, String operationStatus, String statusMessage,
-                                String resourceModel) {
+                                String resourceModel, String accountId) {
+        public ProgressEvent(String typeName, String identifier, String requestToken,
+                             String operation, String operationStatus, String statusMessage,
+                             String resourceModel) {
+            this(typeName, identifier, requestToken, operation, operationStatus, statusMessage,
+                    resourceModel, DEFAULT_ACCOUNT);
+        }
+
         ProgressEvent failed(String message) {
-            return new ProgressEvent(typeName, identifier, requestToken, operation, "FAILED", message, resourceModel);
+            return new ProgressEvent(typeName, identifier, requestToken, operation, "FAILED", message, resourceModel, accountId);
         }
     }
 
@@ -269,7 +448,12 @@ public class CloudControlService {
      * AWS at all.
      */
     public List<ResourceDescription> listResources(String region, String typeName) {
-        List<ResourceDescription> resources = resourcesForType(region, typeName);
+        return listResources(region, DEFAULT_ACCOUNT, typeName);
+    }
+
+    public List<ResourceDescription> listResources(String region, String accountId, String typeName) {
+        List<ResourceDescription> resources = RequestScopes.callAs(accountId,
+                () -> resourcesForType(region, typeName));
         if (resources == null) {
             throw new AwsException("UnsupportedActionException",
                     "ListResources is not supported for resource type " + typeName + ".", 400);

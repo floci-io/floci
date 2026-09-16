@@ -4,12 +4,15 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'sidecars/cedar/**'
       - 'pom.xml'
       - 'docker/Dockerfile.native-package'
       - 'docker/Dockerfile.compat'
       - 'docker/entrypoint.sh'
       - 'docker/localstack-parity.sh'
       - 'docker/healthcheck.sh'
+      - 'docker/run-docker-tests.sh'
+      - 'docker/test-run-docker-tests.sh'
       - 'compatibility-tests/**'
       - '.github/ci/compat-timing-report.py'
       - '.github/ci/compat-opentofu-drift-check.py'
@@ -25,6 +28,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docker-runner-regression:
+    name: compat / Docker runner failure aggregation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test Docker runner failure aggregation
+        run: bash docker/test-run-docker-tests.sh
+
   compat-aws-cli-shim:
     name: compat / aws CLI endpoint resolution
     runs-on: ubuntu-24.04-arm
@@ -112,6 +125,7 @@ jobs:
         with:
           sparse-checkout: |
             compatibility-tests
+            sidecars/cedar
             .github/ci
 
       - name: Compare compat-terraform and compat-opentofu resource lists
@@ -286,6 +300,10 @@ jobs:
       - name: Start floci
         run: |
           DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+          EXTRA_ENV=""
+          if [ "${{ matrix.test }}" = "sdk-test-java" ]; then
+            EXTRA_ENV="-e FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_URL=http://floci-cedar:8180"
+          fi
           docker run -d --name floci --network compat-net \
             -p 4566:4566 \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -295,9 +313,11 @@ jobs:
             -e FLOCI_HOSTNAME=floci \
             -e FLOCI_SERVICES_IOT_MQTT_ENABLED=true \
             -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
+            $EXTRA_ENV \
             -e FLOCI_TLS_ENABLED=true \
             -e FLOCI_SERVICES_EC2_MOCK=true \
             -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
+            -e FLOCI_SERVICES_SSOOIDC_LOCAL_PRINCIPAL_ID=11111111-2222-3333-4444-555555555555 \
             floci:test-native
 
       # Waits on Docker's health status rather than curling the port so the image's
@@ -328,7 +348,23 @@ jobs:
         with:
           sparse-checkout: |
             compatibility-tests
+            sidecars/cedar
             .github/ci
+
+      - name: Build and start Cedar sidecar
+        if: matrix.test == 'sdk-test-java'
+        run: |
+          docker build -f sidecars/cedar/Dockerfile -t floci-cedar:test .
+          docker run -d --name floci-cedar --network compat-net -p 18180:8180 floci-cedar:test
+          for _ in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18180/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Cedar sidecar did not become healthy"
+          docker logs floci-cedar
+          exit 1
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 

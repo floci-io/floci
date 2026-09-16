@@ -4,6 +4,8 @@ import io.quarkus.vertx.http.HttpServerOptionsCustomizer;
 import io.vertx.core.http.HttpServerOptions;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.List;
+
 /**
  * Customizes Vert.x HTTP server options for Floci's requirements.
  *
@@ -19,6 +21,8 @@ import jakarta.enterprise.context.ApplicationScoped;
  *       defaults to 64 KB per frame, which causes Netty to silently reject larger
  *       frames before the application-level size check in
  *       {@code WebSocketHandler} can fire.</li>
+ *   <li>Echoes the MQTT WebSocket subprotocol names, so MQTT over WebSocket clients
+ *       complete their handshake on {@code /mqtt}.</li>
  * </ul>
  *
  * The overall request body size is still bounded by
@@ -41,17 +45,29 @@ public class HttpOptionsCustomizer implements HttpServerOptionsCustomizer {
      */
     private static final int MAX_WS_MESSAGE_SIZE = 256 * 1024;
 
+    /**
+     * Subprotocol names an MQTT over WebSocket client offers in {@code Sec-WebSocket-Protocol}
+     * (AWS IoT documents {@code mqtt}; the others are the names Vert.x MQTT accepts). Vert.x only
+     * echoes a name from this list, and Paho and the AWS Device SDKs refuse a handshake whose
+     * response does not echo one. Netty completes a handshake that asks for any other name without
+     * the header, so API Gateway WebSocket clients are unaffected.
+     */
+    static final List<String> MQTT_WEBSOCKET_SUBPROTOCOLS = List.of("mqtt", "mqttv3.1", "mqttv3.1.1");
+
     @Override
     public void customizeHttpServer(HttpServerOptions options) {
-        options.setMaxFormAttributeSize(-1);
-        options.setMaxWebSocketFrameSize(MAX_WS_FRAME_SIZE);
-        options.setMaxWebSocketMessageSize(MAX_WS_MESSAGE_SIZE);
+        customize(options);
     }
 
     @Override
     public void customizeHttpsServer(HttpServerOptions options) {
+        customize(options);
+    }
+
+    private static void customize(HttpServerOptions options) {
         options.setMaxFormAttributeSize(-1);
         options.setMaxWebSocketFrameSize(MAX_WS_FRAME_SIZE);
         options.setMaxWebSocketMessageSize(MAX_WS_MESSAGE_SIZE);
+        options.setWebSocketSubProtocols(MQTT_WEBSOCKET_SUBPROTOCOLS);
     }
 }

@@ -170,11 +170,13 @@ public class SnsJsonHandler {
         String message = request.path("Message").asText(null);
         String subject = request.path("Subject").asText(null);
         String messageStructure = request.path("MessageStructure").asText(null);
+        String messageGroupId = request.path("MessageGroupId").asText(null);
+        String messageDeduplicationId = request.path("MessageDeduplicationId").asText(null);
 
         Map<String, MessageAttributeValue> attributes = SnsMessageAttributes.parse(request.path("MessageAttributes"));
 
         String messageId = snsService.publish(topicArn, targetArn, phoneNumber, message, subject,
-                messageStructure, attributes, null, null, region);
+                messageStructure, attributes, messageGroupId, messageDeduplicationId, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("MessageId", messageId);
         return Response.ok(response).build();

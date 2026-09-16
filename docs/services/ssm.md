@@ -28,7 +28,7 @@
 
 | Action | Description |
 |---|---|
-| `UpdateInstanceInformation` | Register or update an SSM agent record for an instance |
+| `UpdateInstanceInformation` | Register or update an SSM agent record for an instance. Does not create an EC2 instance or register the container with IMDS (see [Run Command Execution](#run-command-execution)) |
 | `DescribeInstanceInformation` | List registered SSM managed instances |
 | `SendCommand` | Create command invocations for target instances |
 | `GetCommandInvocation` | Return a command invocation result |
@@ -49,6 +49,11 @@
 `SendCommand` supports the `AWS-RunShellScript` document. For EC2 instances launched by Floci in real Docker mode, Floci creates the command invocation, returns the command response, and then runs the script asynchronously inside the target instance container. Callers observe completion through `GetCommandInvocation`. `stdout`, `stderr`, response code, start time, and end time are recorded on the invocation.
 
 If the target is not a Floci EC2 container, or if the document is not supported for direct execution, Floci falls back to the SSM agent polling flow. In that mode, `SendCommand` queues an ec2messages payload and the invocation completes after an agent calls `SendReply`.
+
+!!! note "Managed instance registration is independent of EC2 and IMDS"
+    Registering a container's SSM agent with `UpdateInstanceInformation` only creates the managed instance record. It does not create an EC2 instance, does not install the link-local `169.254.169.254` proxy in the container, and does not register the container with the [EC2 IMDS server](ec2.md#imds-and-ssm-managed-instances). A container that was only registered with SSM therefore has no working IMDS endpoint and no instance profile credentials, and `SendCommand` against it uses the agent polling flow rather than direct execution.
+
+    To get a container that both answers IMDS and runs `SendCommand` directly, launch it with EC2 `RunInstances` first and then register that same container's SSM agent. Floci logs a warning when an agent registers from a container that is not backed by a Floci EC2 instance.
 
 Direct command output follows the AWS inline output limits: first 24,000 characters of stdout and first 8,000 characters of stderr. Commands that exceed `TimeoutSeconds` are constrained inside the target container when the container has the `timeout` command available, and terminal timeout results are marked `TimedOut` with `StatusDetails` set to `Execution Timed Out`; commands with nonzero exit codes are marked `Failed`.
 

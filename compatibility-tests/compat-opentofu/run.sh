@@ -1,7 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# Environment setup for Docker container
+# Runs the OpenTofu compatibility suite against a Floci already listening on
+# FLOCI_ENDPOINT. Delegates to run-bats-in-container.sh, the same entrypoint the
+# Docker image uses, so a local run and a CI run execute identical logic.
+
 export AWS_REGION=us-east-1
 export AWS_DEFAULT_REGION=us-east-1
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
@@ -12,13 +15,13 @@ export AWS_ENDPOINT_URL="$FLOCI_ENDPOINT"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Ensure bats is available
 if [ ! -d "$REPO_ROOT/lib/bats-core" ]; then
     echo "Error: bats-core not found. Run 'just setup-bats' first."
     exit 1
 fi
 
-# Run bats tests
-exec "$REPO_ROOT/lib/run-bats-with-junit.sh" \
-    "$SCRIPT_DIR/test/" \
-    "${BATS_JUNIT_XML:-$SCRIPT_DIR/test-results/junit.xml}"
+# BATS_JUNIT_XML used to name a single file; the suite now writes one report per
+# bats file, so the variable names the directory they land in.
+export RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/test-results}"
+
+exec "$SCRIPT_DIR/run-bats-in-container.sh"

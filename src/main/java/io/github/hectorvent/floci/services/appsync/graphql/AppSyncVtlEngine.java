@@ -1,5 +1,9 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.apigateway.BoundedWriter;
+import io.github.hectorvent.floci.services.apigateway.VtlExecutionGuard;
+import io.github.hectorvent.floci.services.apigateway.VtlSandbox;
 import io.github.hectorvent.floci.services.appsync.graphql.util.AppSyncUtil;
 import io.github.hectorvent.floci.services.appsync.graphql.util.VtlErrorSignal;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -9,6 +13,7 @@ import org.apache.velocity.app.VelocityEngine;
 import org.apache.velocity.runtime.RuntimeConstants;
 
 import java.io.StringWriter;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -16,9 +21,11 @@ import java.util.Map;
 public class AppSyncVtlEngine {
 
     private final VelocityEngine engine;
+    private final EmulatorConfig config;
 
     @Inject
-    public AppSyncVtlEngine() {
+    public AppSyncVtlEngine(EmulatorConfig config) {
+        this.config = config;
         this.engine = new VelocityEngine();
         engine.setProperty(RuntimeConstants.INPUT_ENCODING, "UTF-8");
         engine.setProperty(RuntimeConstants.RUNTIME_LOG_NAME,
@@ -29,7 +36,10 @@ public class AppSyncVtlEngine {
         engine.setProperty(RuntimeConstants.RUNTIME_REFERENCES_STRICT, false);
         engine.setProperty("userdirective",
                 "io.github.hectorvent.floci.services.appsync.graphql.ReturnDirective");
+        engine.setProperty(RuntimeConstants.MAX_NUMBER_LOOPS, config.services().appsync().vtlMaxLoops());
+        VtlSandbox.restrictIntrospection(engine);
         engine.init();
+        VtlSandbox.installSandboxedForeach(engine);
     }
 
     public AppSyncVtlResult evaluate(String template, AppSyncVtlContext ctx) {
@@ -51,7 +61,9 @@ public class AppSyncVtlEngine {
         vc.put("util", util);
         vc.put("utils", util);
 
-        StringWriter writer = new StringWriter();
+        StringWriter rawWriter = new StringWriter();
+        BoundedWriter writer = new BoundedWriter(rawWriter, config.services().appsync().vtlMaxOutputChars());
+        VtlExecutionGuard.begin(Duration.ofMillis(config.services().appsync().vtlTimeoutMillis()));
         try {
             engine.evaluate(vc, writer, "appsync-template", template);
         } catch (ReturnSignal signal) {
@@ -65,9 +77,11 @@ public class AppSyncVtlEngine {
                 cause = cause.getCause();
             }
             throw new RuntimeException("VTL evaluation failed", e);
+        } finally {
+            VtlExecutionGuard.end();
         }
 
-        return new AppSyncVtlResult(writer.toString(), null, ctx.getAppendedErrors());
+        return new AppSyncVtlResult(rawWriter.toString(), null, ctx.getAppendedErrors());
     }
 
 }

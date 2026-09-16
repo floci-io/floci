@@ -109,17 +109,18 @@ class S3AclIntegrationTest {
             .statusCode(200)
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        given()
+        String partETag = given()
             .body("part-one")
         .when()
             .put("/" + BUCKET + "/multipart-public.txt?uploadId=" + multipartUploadId + "&partNumber=1")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().header("ETag");
 
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
-                </CompleteMultipartUpload>""";
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(partETag);
 
         given()
             .contentType("application/xml")

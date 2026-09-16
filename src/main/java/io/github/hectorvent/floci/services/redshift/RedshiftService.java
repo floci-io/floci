@@ -6,11 +6,16 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.UUID;
+import java.util.regex.Pattern;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
@@ -29,6 +34,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,27 +52,41 @@ public class RedshiftService {
     private final AccountAwareStorageBackend<Snapshot> snapshots;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroups;
+    private static final int MIN_INTEGRATION_RECORDS = 20;
+    private static final int MAX_INTEGRATION_RECORDS = 100;
+    private static final int MAX_INTEGRATION_DESCRIPTION = 1000;
+    private static final int MAX_INTEGRATION_NAME = 63;
+    // Modelled constraint on CreateIntegration.IntegrationName: a letter first, then alphanumeric
+    // groups joined by single hyphens. No leading digit, underscore, or trailing hyphen.
+    private static final String INTEGRATION_NAME_PATTERN = "^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*$";
+    private static final Pattern INTEGRATION_NAME = Pattern.compile(INTEGRATION_NAME_PATTERN);
+
+    private final AccountAwareStorageBackend<Integration> integrations;
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final RedshiftProxyManager proxyManager;
     private final DockerHostResolver dockerHostResolver;
+    private final RedshiftCredentialBroker credentialBroker;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
                             EmulatorConfig config, RegionResolver regionResolver,
-                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver) {
+                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
+                            RedshiftCredentialBroker credentialBroker) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
         this.subnetGroups = storageFactory.create("redshift", "redshift-subnet-groups.json", new TypeReference<Map<String, ClusterSubnetGroup>>() {});
+        this.integrations = storageFactory.create("redshift", "redshift-integrations.json", new TypeReference<Map<String, Integration>>() {});
         this.containerManager = containerManager;
         this.config = config;
         this.regionResolver = regionResolver;
         this.proxyManager = proxyManager;
         this.dockerHostResolver = dockerHostResolver;
+        this.credentialBroker = credentialBroker;
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
@@ -133,6 +153,9 @@ public class RedshiftService {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
+        // A previous cluster with this identifier may have been deleted without its temp
+        // credentials being cleared; drop them so the new cluster starts with none.
+        credentialBroker.revokeCluster(clusters.accountId(), identifier);
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(identifier);
@@ -168,6 +191,7 @@ public class RedshiftService {
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             if (proxyStopped) {
                 clusters.delete(identifier);
+                credentialBroker.revokeCluster(clusters.accountId(), identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -179,6 +203,7 @@ public class RedshiftService {
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             if (proxyStopped) {
                 clusters.delete(identifier);
+                credentialBroker.revokeCluster(clusters.accountId(), identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -190,6 +215,173 @@ public class RedshiftService {
         clusters.put(identifier, cluster);
         clusters.flush();
         return cluster;
+    }
+
+    // ── Zero-ETL integrations ────────────────────────────────────
+    //
+    // Metadata only: no data is replicated from the source. The shape and the lower case status
+    // were captured from a live integration in us-west-2.
+
+    public synchronized Integration createIntegration(String integrationName, String sourceArn, String targetArn,
+                                                      String kmsKeyId, String description,
+                                                      Map<String, String> additionalEncryptionContext,
+                                                      Map<String, String> tags, String region) {
+        if (integrationName == null || integrationName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "IntegrationName is required.", 400);
+        }
+        if (integrationName.length() > MAX_INTEGRATION_NAME
+                || !INTEGRATION_NAME.matcher(integrationName).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "IntegrationName must match " + INTEGRATION_NAME_PATTERN
+                            + " and be at most " + MAX_INTEGRATION_NAME + " characters.", 400);
+        }
+        if (sourceArn == null || sourceArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SourceArn is required.", 400);
+        }
+        if (targetArn == null || targetArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetArn is required.", 400);
+        }
+        if (description != null && description.length() > MAX_INTEGRATION_DESCRIPTION) {
+            throw new AwsException("InvalidParameterValue",
+                    "Description must be at most " + MAX_INTEGRATION_DESCRIPTION + " characters.", 400);
+        }
+        // AdditionalEncryptionContext only means anything alongside a customer managed key.
+        if (additionalEncryptionContext != null && !additionalEncryptionContext.isEmpty()
+                && (kmsKeyId == null || kmsKeyId.isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "AdditionalEncryptionContext is only valid when KMSKeyId is supplied.", 400);
+        }
+
+        boolean nameTaken = integrations.scan(k -> true).stream()
+                .anyMatch(existing -> integrationName.equals(existing.getIntegrationName()));
+        if (nameTaken) {
+            throw new AwsException("IntegrationAlreadyExistsFault",
+                    "The integration " + integrationName + " already exists.", 400);
+        }
+
+        String integrationId = UUID.randomUUID().toString();
+        Integration integration = new Integration();
+        integration.setIntegrationArn("arn:aws:redshift:" + region + ":" + regionResolver.getAccountId()
+                + ":integration:" + integrationId);
+        integration.setIntegrationName(integrationName);
+        integration.setSourceArn(sourceArn);
+        integration.setTargetArn(targetArn);
+        // Real integrations pass through creating before settling; nothing here has work to do.
+        integration.setStatus("active");
+        integration.setKmsKeyId(kmsKeyId);
+        integration.setCreateTime(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        integration.setDescription(description);
+        integration.setAdditionalEncryptionContext(additionalEncryptionContext);
+        integration.setTags(tags);
+        integrations.put(integrationId, integration);
+        LOG.infov("Created Redshift zero-ETL integration: {0}", integration.getIntegrationArn());
+        return integration;
+    }
+
+    /**
+     * Lists integrations with the documented filters and marker pagination.
+     *
+     * <p>An unknown {@code IntegrationArn} is {@code IntegrationNotFoundFault}, measured against
+     * real Redshift. An account with no integrations at all is an empty list rather than an error,
+     * and no {@code Marker} is emitted on the terminal page.
+     */
+    public IntegrationPage describeIntegrations(String integrationArn, Integer maxRecords, String marker,
+                                                List<IntegrationFilter> filters) {
+        List<Integration> all = integrations.scan(k -> true).stream()
+                .sorted(Comparator.comparing(Integration::getIntegrationArn))
+                .toList();
+
+        if (integrationArn != null && !integrationArn.isBlank()) {
+            Integration match = all.stream()
+                    .filter(integration -> integrationArn.equals(integration.getIntegrationArn()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("IntegrationNotFoundFault",
+                            "The requested integration doesn't exist.", 404));
+            all = List.of(match);
+        }
+
+        for (IntegrationFilter filter : filters == null ? List.<IntegrationFilter>of() : filters) {
+            all = all.stream().filter(integration -> matchesFilter(integration, filter)).toList();
+        }
+
+        int pageSize = resolveMaxRecords(maxRecords);
+        int from = 0;
+        if (marker != null && !marker.isBlank()) {
+            int previous = -1;
+            for (int i = 0; i < all.size(); i++) {
+                if (marker.equals(all.get(i).getIntegrationArn())) {
+                    previous = i;
+                    break;
+                }
+            }
+            if (previous < 0) {
+                throw new AwsException("InvalidParameterValue", "Invalid Marker specified.", 400);
+            }
+            from = previous + 1;
+        }
+
+        List<Integration> page = all.subList(Math.min(from, all.size()), Math.min(from + pageSize, all.size()));
+        boolean more = from + pageSize < all.size();
+        // The marker is the last ARN already returned, so a page resumes after a known record
+        // rather than at an offset a concurrent create could shift.
+        String next = more && !page.isEmpty() ? page.get(page.size() - 1).getIntegrationArn() : null;
+        return new IntegrationPage(List.copyOf(page), next);
+    }
+
+    /** One page of integrations plus the marker to continue with, or {@code null} at the end. */
+    public record IntegrationPage(List<Integration> integrations, String marker) {}
+
+    /** One {@code Filters.DescribeIntegrationsFilter.N} entry. */
+    public record IntegrationFilter(String name, List<String> values) {}
+
+    private static boolean matchesFilter(Integration integration, IntegrationFilter filter) {
+        String name = filter.name() == null ? "" : filter.name();
+        List<String> values = filter.values() == null ? List.of() : filter.values();
+        String actual = switch (name) {
+            case "integration-arn" -> integration.getIntegrationArn();
+            case "source-arn" -> integration.getSourceArn();
+            case "status" -> integration.getStatus();
+            // source-types filters on the source's AWS service, which the ARN's third field names.
+            case "source-types" -> sourceType(integration.getSourceArn());
+            default -> throw new AwsException("InvalidParameterValue",
+                    "Unrecognized filter name: " + name, 400);
+        };
+        return actual != null && values.contains(actual);
+    }
+
+    private static String sourceType(String sourceArn) {
+        if (sourceArn == null) {
+            return null;
+        }
+        String[] parts = sourceArn.split(":");
+        return parts.length > 2 ? parts[2] : null;
+    }
+
+    private static int resolveMaxRecords(Integer maxRecords) {
+        if (maxRecords == null) {
+            return MAX_INTEGRATION_RECORDS;
+        }
+        if (maxRecords < MIN_INTEGRATION_RECORDS || maxRecords > MAX_INTEGRATION_RECORDS) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_INTEGRATION_RECORDS + " and "
+                            + MAX_INTEGRATION_RECORDS + ".", 400);
+        }
+        return maxRecords;
+    }
+
+    public synchronized Integration deleteIntegration(String integrationArn) {
+        if (integrationArn == null || integrationArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "IntegrationArn is required.", 400);
+        }
+        for (String key : integrations.keys()) {
+            Optional<Integration> stored = integrations.get(key);
+            if (stored.isPresent() && integrationArn.equals(stored.get().getIntegrationArn())) {
+                integrations.delete(key);
+                LOG.infov("Deleted Redshift zero-ETL integration: {0}", integrationArn);
+                return stored.get();
+            }
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
     }
 
     public List<Cluster> describeClusters(String identifier) {
@@ -220,7 +412,10 @@ public class RedshiftService {
         containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
         clusters.flush();
-        
+        // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this
+        // identifier does not accept them as master-equivalent.
+        credentialBroker.revokeCluster(clusters.accountId(), identifier);
+
         cluster.setClusterStatus("deleting");
         return cluster;
     }
@@ -936,11 +1131,40 @@ public class RedshiftService {
         return accountId + ":" + clusterIdentifier;
     }
 
-    // Validates the master password at the proxy against current cluster state, so a
-    // ModifyCluster password change is reflected for new connections without a proxy restart.
-    private RdsAuthProxy.PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
-        return (user, password) -> clusters.getForAccount(accountId, clusterIdentifier)
-                .map(c -> user.equals(c.getMasterUsername()) && password.equals(c.getMasterPassword()))
-                .orElse(false);
+    // Classifies a proxy login against current cluster state: the master pair and any live
+    // GetClusterCredentials credential both run the backend leg as the cluster master, a known
+    // broker user with a stale password is rejected, everyone else passes through to the backend.
+    // Reading cluster state per call means a ModifyCluster password change takes effect for new
+    // connections without a proxy restart.
+    private PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
+        return (user, password) -> {
+            Optional<Cluster> cluster = clusters.getForAccount(accountId, clusterIdentifier);
+            if (cluster.isEmpty()) {
+                // No cluster row to validate against: vouch for nothing. Falling through to the
+                // broker would classify an unknown user as PASSTHROUGH, and the wire proxy reads
+                // isMaster from its own start-time config, so a PASSTHROUGH there still opens the
+                // backend as master, authenticating any password for the master username.
+                return PasswordValidator.AuthResult.REJECT;
+            }
+            Cluster c = cluster.get();
+            if (user.equals(c.getMasterUsername())) {
+                // The master username is authoritative here: a wrong password must be rejected,
+                // never handed to the broker (which only knows minted DbUsers) and never passed
+                // through as if the user were unknown.
+                return password.equals(c.getMasterPassword())
+                        ? PasswordValidator.AuthResult.MASTER_EQUIVALENT
+                        : PasswordValidator.AuthResult.REJECT;
+            }
+            return switch (credentialBroker.classify(accountId, clusterIdentifier, user, password)) {
+                case MASTER_EQUIVALENT -> PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+                case REJECT -> PasswordValidator.AuthResult.REJECT;
+                case PASSTHROUGH -> PasswordValidator.AuthResult.PASSTHROUGH;
+            };
+        };
+    }
+
+    // Package-private hook for tests: passwordValidatorFor is otherwise private.
+    PasswordValidator passwordValidatorForTesting(String accountId, String clusterIdentifier) {
+        return passwordValidatorFor(accountId, clusterIdentifier);
     }
 }

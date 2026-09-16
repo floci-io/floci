@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
@@ -22,7 +23,9 @@ import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
@@ -31,6 +34,8 @@ import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -38,7 +43,11 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -122,6 +131,7 @@ class RdsCfnProvisionerTest {
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
         when(instance.getEndpoint()).thenReturn(new DbEndpoint("mydb.local", 5432));
         when(instance.getDbInstanceArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db:mydb");
+        when(instance.getDbiResourceId()).thenReturn("db-ABCDEFGHIJKLMNOP");
         when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), anyMap(), nullable(String.class))).thenReturn(instance);
@@ -137,6 +147,9 @@ class RdsCfnProvisionerTest {
         assertEquals("mydb.local", r.getAttributes().get("Endpoint.Address"));
         assertEquals("5432", r.getAttributes().get("Endpoint.Port"));
         assertEquals("arn:aws:rds:us-east-1:000000000000:db:mydb", r.getAttributes().get("DBInstanceArn"));
+        // The schema declares DbiResourceId readOnly and RdsService already assigns one, so it is
+        // a real GetAtt key rather than a recorded gap.
+        assertEquals("db-ABCDEFGHIJKLMNOP", r.getAttributes().get("DbiResourceId"));
         // CFN properties mapped to the create-method arguments; absent optionals are null.
         verify(rdsService).createDbInstance("mydb", "postgres", "16", "admin", "secret",
                 "appdb", "db.t3.small", 50, false, null, null, null,
@@ -168,8 +181,10 @@ class RdsCfnProvisionerTest {
         when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
         when(cluster.getReaderEndpoint()).thenReturn(new DbEndpoint("mycluster-ro.local", 5432));
         when(cluster.getDbClusterArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:cluster:mycluster");
+        when(cluster.getDbClusterResourceId()).thenReturn("cluster-ABCDEFGHIJKLMNOP");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -181,8 +196,14 @@ class RdsCfnProvisionerTest {
         assertEquals("mycluster.local", r.getAttributes().get("Endpoint.Address"));
         assertEquals("mycluster-ro.local", r.getAttributes().get("ReadEndpoint.Address"));
         assertEquals("5432", r.getAttributes().get("Endpoint.Port"));
+        assertEquals("arn:aws:rds:us-east-1:000000000000:cluster:mycluster",
+                r.getAttributes().get("DBClusterArn"));
+        // Same as DbiResourceId on the instance: declared readOnly and already assigned by the
+        // service, so it belongs in the attributes rather than in the gaps file.
+        assertEquals("cluster-ABCDEFGHIJKLMNOP", r.getAttributes().get("DBClusterResourceId"));
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", "16.3",
-                "admin", "secret", "appdb", false, null, null, null, false, "us-east-1");
+                "admin", "secret", "appdb", false, null, null, null, false, "us-east-1",
+                null, null, null, false, null, null, false);
     }
 
     @Test
@@ -190,7 +211,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -198,7 +220,8 @@ class RdsCfnProvisionerTest {
                 """, "us-west-2");
 
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
-                null, null, null, false, null, null, null, false, "us-west-2");
+                null, null, null, false, null, null, null, false, "us-west-2",
+                null, null, null, false, null, null, false);
     }
 
     @Test
@@ -206,7 +229,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any(), any(), any(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -217,7 +241,26 @@ class RdsCfnProvisionerTest {
 
         verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
                 null, null, null, false, null, null, null, false, "us-east-1",
-                0.0, 16.0, 600);
+                0.0, 16.0, 600, false, null, null, false);
+    }
+
+    @Test
+    void provisionsDbClusterWithEngineModeAndStorageEncrypted() {
+        DbCluster cluster = mock(DbCluster.class);
+        when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
+                .thenReturn(cluster);
+
+        provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "EngineMode":"serverless","StorageEncrypted":true}
+                """);
+
+        verify(rdsService).createDbCluster("mycluster", "aurora-postgresql", null,
+                null, null, null, false, null, null, null, false, "us-east-1",
+                null, null, null, false, null, "serverless", true);
     }
 
     @Test
@@ -255,7 +298,8 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -267,7 +311,8 @@ class RdsCfnProvisionerTest {
 
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), eq("16.3"),
                 eq("resolved-user"), eq("resolved-secret"), eq("appdb"), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any());
+                any(), any(), anyBoolean(), any(),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
         verify(secretsManagerService, times(2))
                 .getSecretValue("my-secret", null, null, "us-west-2");
     }
@@ -308,7 +353,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -320,7 +366,8 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(
                 eq("mycluster"), eq("aurora-postgresql"), any(), eq("admin"),
                 eq("resolved-secret"), any(), anyBoolean(), any(), any(), any(),
-                anyBoolean(), eq("us-east-1"));
+                anyBoolean(), eq("us-east-1"),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
         verify(secretsManagerService)
                 .getSecretValue("my-secret", null, null, "us-east-1");
     }
@@ -334,7 +381,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         String secretArn =
@@ -348,7 +396,8 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(
                 eq("mycluster"), eq("aurora-postgresql"), any(), eq("admin"),
                 eq("resolved-secret"), any(), anyBoolean(), any(), any(), any(),
-                anyBoolean(), eq("us-east-1"));
+                anyBoolean(), eq("us-east-1"),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
         verify(secretsManagerService)
                 .getSecretValue(secretArn, null, null, "us-west-2");
     }
@@ -362,7 +411,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         String secretArn =
@@ -376,7 +426,8 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(
                 eq("mycluster"), eq("aurora-postgresql"), any(), eq("admin"),
                 eq("resolved-secret"), any(), anyBoolean(), any(), any(), any(),
-                anyBoolean(), eq("us-east-1"));
+                anyBoolean(), eq("us-east-1"),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
         verify(secretsManagerService)
                 .getSecretValue(secretArn, null, null, "us-west-2");
     }
@@ -390,7 +441,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         String secretArn =
@@ -404,7 +456,8 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(
                 eq("mycluster"), eq("aurora-postgresql"), any(), eq("admin"),
                 eq("resolved-secret"), any(), anyBoolean(), any(), any(), any(),
-                anyBoolean(), eq("us-east-1"));
+                anyBoolean(), eq("us-east-1"),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
         verify(secretsManagerService)
                 .getSecretValue(secretArn, null, null, "us-west-2");
     }
@@ -484,7 +537,8 @@ class RdsCfnProvisionerTest {
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(cluster.getEndpoint()).thenReturn(new DbEndpoint("mycluster.local", 5432));
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         provision("Cluster", "AWS::RDS::DBCluster", """
@@ -497,7 +551,8 @@ class RdsCfnProvisionerTest {
         // The {{resolve:ssm:<name>}} dynamic reference is substituted with the parameter value.
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), eq("16.3"),
                 eq("admin"), eq("resolved-ssm"), eq("appdb"), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any());
+                any(), any(), anyBoolean(), any(),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -508,7 +563,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -520,7 +576,8 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_COMPLETE", resource.getStatus());
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("resolved-user"), eq("secret"), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), eq("us-east-1"));
+                any(), any(), anyBoolean(), eq("us-east-1"),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -531,7 +588,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -543,7 +601,8 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_COMPLETE", resource.getStatus());
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("admin"), eq("first,second"), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), eq("us-east-1"));
+                any(), any(), anyBoolean(), eq("us-east-1"),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -635,7 +694,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -647,7 +707,8 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_COMPLETE", resource.getStatus());
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("admin"), eq("first-password"), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), eq("us-west-2"));
+                any(), any(), anyBoolean(), eq("us-west-2"),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
         verify(ssmService, never()).getParameter(any(), any());
     }
 
@@ -663,7 +724,8 @@ class RdsCfnProvisionerTest {
         DbCluster cluster = mock(DbCluster.class);
         when(cluster.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), any()))
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
                 .thenReturn(cluster);
 
         StackResource resource = provision("Cluster", "AWS::RDS::DBCluster", """
@@ -675,7 +737,8 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_COMPLETE", resource.getStatus());
         verify(rdsService).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("admin"), eq("first-password"), any(), anyBoolean(), any(),
-                any(), any(), anyBoolean(), eq("us-west-2"));
+                any(), any(), anyBoolean(), eq("us-west-2"),
+                any(), any(), any(), anyBoolean(), any(), any(), anyBoolean());
         verify(ssmService, never()).getParameter(any(), any());
     }
 
@@ -947,13 +1010,13 @@ class RdsCfnProvisionerTest {
         when(proxy.getDbProxyArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db-proxy:prx-abc");
         when(proxy.getVpcId()).thenReturn("vpc-default");
         when(rdsService.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any()))
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
                 .thenReturn(proxy);
 
         StackResource r = provision("Proxy", "AWS::RDS::DBProxy", """
                 {"DBProxyName":"app-proxy","EngineFamily":"POSTGRESQL","RequireTLS":true,
                  "DebugLogging":true,"IdleClientTimeout":120,"DefaultAuthScheme":"IAM_AUTH",
-                 "EndpointNetworkType":"IPV4","TargetConnectionNetworkType":"IPV4",
+                 "EndpointNetworkType":"DUAL","TargetConnectionNetworkType":"IPV6",
                  "RoleArn":"arn:aws:iam::000000000000:role/proxy",
                  "VpcSubnetIds":["subnet-a","subnet-b"],
                  "Tags":[{"Key":"owner","Value":"platform"}]}
@@ -968,7 +1031,8 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbProxy(eq("app-proxy"), eq("POSTGRESQL"), eq(true), eq(true),
                 eq("IAM_AUTH"), eq("arn:aws:iam::000000000000:role/proxy"),
                 eq(List.of("subnet-a", "subnet-b")), eq(List.of()), eq(List.of()),
-                eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-east-1"));
+                eq(120), eq(true), eq(Map.of("owner", "platform")), eq("us-east-1"),
+                eq("DUAL"), eq("IPV6"));
     }
 
     @Test
@@ -988,7 +1052,7 @@ class RdsCfnProvisionerTest {
                 "DefaultAuthScheme must be NONE or IAM_AUTH"));
         verify(rdsService, never()).createDbProxy(
                 any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any());
     }
 
     @Test
@@ -997,7 +1061,7 @@ class RdsCfnProvisionerTest {
         when(proxy.getDbProxyName()).thenReturn("sqlserver-proxy");
         when(rdsService.createDbProxy(
                 any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any()))
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
                 .thenReturn(proxy);
 
         StackResource resource = provision("Proxy", "AWS::RDS::DBProxy", """
@@ -1017,24 +1081,25 @@ class RdsCfnProvisionerTest {
                 eq("sqlserver-proxy"), eq("SQLSERVER"), eq(false), eq(true), eq("NONE"),
                 eq("arn:aws:iam::000000000000:role/proxy"),
                 eq(List.of("subnet-a", "subnet-b")), eq(List.of()), authCaptor.capture(),
-                eq(1800), eq(false), eq(Map.of()), eq("us-east-1"));
+                eq(1800), eq(false), eq(Map.of()), eq("us-east-1"), isNull(), isNull());
         assertEquals("database-user", authCaptor.getValue().getFirst().getUserName());
         assertEquals("ENABLED", authCaptor.getValue().getFirst().getIamAuth());
     }
 
     @Test
-    void rejectsUnsupportedDbProxyNetworkTypesBeforeMutation() {
-        StackResource ipv6 = provision("Proxy", "AWS::RDS::DBProxy", """
+    void rejectsInvalidDbProxyNetworkTypeValueBeforeMutation() {
+        StackResource invalidTarget = provision("Proxy", "AWS::RDS::DBProxy", """
                 {"DBProxyName":"app-proxy","EngineFamily":"POSTGRESQL",
-                 "DefaultAuthScheme":"IAM_AUTH","EndpointNetworkType":"IPV6",
+                 "DefaultAuthScheme":"IAM_AUTH","TargetConnectionNetworkType":"DUAL",
                  "RoleArn":"arn:aws:iam::000000000000:role/proxy",
                  "VpcSubnetIds":["subnet-a","subnet-b"]}
                 """);
 
-        assertEquals("CREATE_FAILED", ipv6.getStatus());
-        assertTrue(ipv6.getStatusReason().contains("IPv4 proxy networking only"));
+        assertEquals("CREATE_FAILED", invalidTarget.getStatus());
+        assertTrue(invalidTarget.getStatusReason().contains("TargetConnectionNetworkType must be"));
         verify(rdsService, never()).createDbProxy(any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(),
+                any(), any());
     }
 
     @Test
@@ -1075,7 +1140,8 @@ class RdsCfnProvisionerTest {
                 eq(90), eq(true), eq("arn:aws:iam::000000000000:role/proxy"),
                 eq(List.of("sg-updated")), eq(Map.of("owner", "platform")), eq("us-west-2"));
         verify(rdsService, never()).createDbProxy(any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(),
+                any(), any());
     }
 
     @Test
@@ -1097,7 +1163,30 @@ class RdsCfnProvisionerTest {
         verify(rdsService, never()).modifyDbProxy(any(), any(), any(), any(), any(), any(),
                 any(), any(), any(), any());
         verify(rdsService, never()).createDbProxy(any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                any(), any(), anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(),
+                any(), any());
+    }
+
+    @Test
+    void changingDbProxyNetworkTypeFailsBeforeMutationSinceModifyDbProxyHasNoSuchParameter() {
+        DbProxy existing = mock(DbProxy.class);
+        when(existing.getDbProxyName()).thenReturn("app-proxy");
+        when(existing.getEngineFamily()).thenReturn("POSTGRESQL");
+        when(existing.getVpcSubnetIds()).thenReturn(List.of("subnet-a", "subnet-b"));
+        when(existing.getEndpointNetworkType()).thenReturn("IPV4");
+        when(existing.getTargetConnectionNetworkType()).thenReturn("IPV4");
+        when(rdsService.getDbProxy("app-proxy", "us-east-1")).thenReturn(existing);
+
+        StackResource resource = provisionExisting("Proxy", "AWS::RDS::DBProxy", """
+                {"DBProxyName":"app-proxy","EngineFamily":"POSTGRESQL","DefaultAuthScheme":"NONE",
+                 "RoleArn":"arn:aws:iam::000000000000:role/proxy",
+                 "VpcSubnetIds":["subnet-a","subnet-b"],"EndpointNetworkType":"DUAL"}
+                """, "us-east-1", "app-proxy", Map.of());
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertTrue(resource.getStatusReason().contains("requires CloudFormation replacement"));
+        verify(rdsService, never()).modifyDbProxy(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
     }
 
     @Test
@@ -1237,9 +1326,514 @@ class RdsCfnProvisionerTest {
 
         assertEquals("mycluster", r.getPhysicalId());
         verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
-                anyBoolean(), any(), any(), any(), anyBoolean(), any());
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
         verify(rdsService).modifyDbCluster("mycluster", "secret", false,
                 null, null, null, "us-east-1");
+    }
+
+    private static final String PRIOR_CLUSTER = "my-stack-cluster-0123456789ab";
+
+    /** RdsService hands back a cluster named after whatever id the provisioner asked to create. */
+    private void createDbClusterEchoesRequestedId() {
+        org.mockito.stubbing.Answer<DbCluster> echo = invocation -> {
+            DbCluster created = mock(DbCluster.class);
+            doReturn(invocation.getArgument(0)).when(created).getDbClusterIdentifier();
+            return created;
+        };
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean())).thenAnswer(echo);
+    }
+
+    /** The unnamed cluster a previous CreateStack left on file under a generated physical id. */
+    private DbCluster priorUnnamedCluster(String engineMode, boolean storageEncrypted) {
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getEngineMode()).thenReturn(engineMode);
+        when(existing.isStorageEncrypted()).thenReturn(storageEncrypted);
+        when(rdsService.getDbCluster(PRIOR_CLUSTER)).thenReturn(existing);
+        return existing;
+    }
+
+    private StackResource updateUnnamedCluster(String json) {
+        return provisionExisting("Cluster", "AWS::RDS::DBCluster", json, "us-east-1", PRIOR_CLUSTER,
+                Map.of("DBClusterIdentifier", PRIOR_CLUSTER, "Endpoint.Address", "prior.rds.local"));
+    }
+
+    @Test
+    void updateStackReplacesDbClusterWhenEngineModeChangesAndDeletesThePriorOneOnlyAfterCommit() {
+        // EngineMode is a createOnlyProperty of AWS::RDS::DBCluster. CloudFormation replacement
+        // creates the new cluster under a distinct physical id while the prior cluster stays
+        // untouched, and removes the prior one only in the post-commit cleanup.
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","MasterUsername":"admin","MasterUserPassword":"secret",
+                 "EngineMode":"serverless"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        String replacement = r.getPhysicalId();
+        assertNotEquals(PRIOR_CLUSTER, replacement);
+        assertTrue(replacement.startsWith("my-stack-cluster-"), replacement);
+        assertEquals(replacement, r.getAttributes().get("DBClusterIdentifier"));
+        verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null,
+                "admin", "secret", null, false, null, null, null, false, "us-east-1",
+                null, null, null, false, null, "serverless", false);
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+
+        // The engine announces and runs the cleanup after the stack update has committed.
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        assertTrue(cleanup.applicable());
+        assertTrue(cleanup.complete());
+        InOrder inOrder = inOrder(rdsService);
+        inOrder.verify(rdsService).createDbCluster(eq(replacement), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
+        inOrder.verify(rdsService).deleteDbCluster(PRIOR_CLUSTER, "us-east-1");
+        verify(rdsService, never()).deleteDbCluster(replacement, "us-east-1");
+        provisioner.clearUpdate(r);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void updateStackReplacesDbClusterWhenStorageEncryptedChanges() {
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","StorageEncrypted":true}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        String replacement = r.getPhysicalId();
+        assertNotEquals(PRIOR_CLUSTER, replacement);
+        verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null,
+                null, null, null, false, null, null, null, false, "us-east-1",
+                null, null, null, false, null, null, true);
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+    }
+
+    @Test
+    void failedDbClusterReplacementLeavesThePriorClusterIntact() {
+        // The replacement is created before anything is removed, so a create that fails leaves
+        // the prior cluster standing and the resource still naming it; the engine then restores
+        // the committed resource and nothing is owed to the cleanup.
+        priorUnnamedCluster("provisioned", false);
+        when(rdsService.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean()))
+                .thenThrow(new AwsException("InvalidParameterCombination",
+                        "The engine mode serverless is not supported for aurora-postgresql 16.3.", 400));
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","EngineVersion":"16.3","EngineMode":"serverless"}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("engine mode serverless is not supported"));
+        assertEquals(PRIOR_CLUSTER, r.getPhysicalId(), "the resource still names the prior cluster");
+        assertEquals(PRIOR_CLUSTER, r.getAttributes().get("DBClusterIdentifier"));
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        assertFalse(provisioner.hasReplacementUpdate(r), "nothing is owed to the cleanup");
+        assertFalse(provisioner.rollbackUpdate(r), "there is no replacement to undo");
+    }
+
+    @Test
+    void failedLaterUpdateRollsBackDbClusterReplacementToThePriorCluster() {
+        // A later resource failing the stack update rolls the replacement back: the resource names
+        // the prior cluster again, with the attributes it had, and only the replacement is deleted.
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","EngineMode":"serverless"}
+                """);
+        String replacement = r.getPhysicalId();
+        assertNotEquals(PRIOR_CLUSTER, replacement);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(PRIOR_CLUSTER, r.getPhysicalId());
+        assertEquals(PRIOR_CLUSTER, r.getAttributes().get("DBClusterIdentifier"));
+        assertEquals("prior.rds.local", r.getAttributes().get("Endpoint.Address"));
+        verify(rdsService).deleteDbCluster(replacement, "us-east-1");
+        verify(rdsService, never()).deleteDbCluster(PRIOR_CLUSTER, "us-east-1");
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void dbClusterCleanupKeepsThePriorClusterOwedWhileInstancesAreStillAttached() {
+        // RDS refuses to delete a cluster with members. The replacement stands regardless; the
+        // prior cluster stays owed a delete for the engine's retries, the next committed update
+        // or the stack delete, instead of the replacement being blocked on it.
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+        doThrow(new AwsException("InvalidDBClusterStateFault",
+                "DB cluster " + PRIOR_CLUSTER + " still has DB instances.", 400))
+                .when(rdsService).deleteDbCluster(PRIOR_CLUSTER, "us-east-1");
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","EngineMode":"serverless"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        assertNotEquals(PRIOR_CLUSTER, r.getPhysicalId());
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        assertTrue(cleanup.applicable());
+        assertFalse(cleanup.complete());
+        assertEquals(PRIOR_CLUSTER, cleanup.previousPhysicalId());
+        assertEquals(1, cleanup.attempts());
+        assertTrue(cleanup.failureReason().contains("still has DB instances"));
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r), "still owed");
+    }
+
+    @Test
+    void dbClusterCleanupTreatsAnAlreadyGoneClusterAsDeleted() {
+        doThrow(new AwsException("DBClusterNotFoundFault", "DB cluster gone not found.", 404))
+                .when(rdsService).deleteDbCluster("gone", "us-east-1");
+
+        assertDoesNotThrow(() -> provisioner.delete("AWS::RDS::DBCluster", "gone", "us-east-1"));
+        verify(rdsService).deleteDbCluster("gone", "us-east-1");
+    }
+
+    @Test
+    void customNamedDbClusterRefusesCreateOnlyPropertyChangeAndKeepsTheCluster() {
+        // A cluster the template names explicitly has no distinct physical id to move to, which is
+        // the update CloudFormation refuses for a custom-named resource.
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getEngineMode()).thenReturn("provisioned");
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "EngineMode":"serverless"}
+                """, "mycluster");
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains(
+                "custom-named resource requires replacing. Rename mycluster and update the stack again."));
+        assertEquals("mycluster", r.getPhysicalId());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
+    }
+
+    @Test
+    void renamedDbClusterIsCreatedFirstAndThePriorOneDeletedOnlyAfterCommit() {
+        // DBClusterIdentifier is createOnly too: a rename is the same replacement lifecycle, not an
+        // eager delete of the prior cluster right after the create.
+        createDbClusterEchoesRequestedId();
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"renamed","Engine":"aurora-postgresql"}
+                """, "mycluster");
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        assertEquals("renamed", r.getPhysicalId());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("mycluster", provisioner.updateCleanupPhysicalId(r));
+        provisioner.completeUpdate(r);
+        verify(rdsService).deleteDbCluster("mycluster", "us-east-1");
+    }
+
+    @Test
+    void updateStackKeepsExistingDbClusterWhenCreateOnlyPropertiesUnchanged() {
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getEngineMode()).thenReturn("serverless");
+        when(existing.isStorageEncrypted()).thenReturn(true);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "MasterUserPassword":"rotated",
+                 "EngineMode":"serverless","StorageEncrypted":true}
+                """, "mycluster");
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
+        verify(rdsService).modifyDbCluster("mycluster", "rotated", false,
+                null, null, null, "us-east-1");
+    }
+
+    @Test
+    void updateStackTreatsMissingEngineModeAsProvisionedInsteadOfReplacing() {
+        // A cluster persisted before EngineMode was tracked reports no mode; a template that names
+        // the RDS default explicitly describes the same cluster and must not replace it.
+        DbCluster existing = mock(DbCluster.class);
+        when(existing.getEngineMode()).thenReturn(null);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+
+        StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
+                 "EngineMode":"provisioned","StorageEncrypted":false}
+                """, "mycluster");
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, "us-east-1");
+    }
+
+    // ── the remaining createOnlyProperties of AWS::RDS::DBCluster ──
+
+    private static final String CREATE_ONLY_ATTR = "__FlociDbClusterCreateOnly";
+    private static final String CREATE_ONLY_PRIOR_ATTR = "__FlociDbClusterCreateOnlyPrior";
+
+    /**
+     * A CreateStack of the template, leaving the cluster on file under a generated physical id
+     * and the resource carrying the createOnly record the next update compares against.
+     */
+    private StackResource createUnnamedCluster(String json) {
+        createDbClusterEchoesRequestedId();
+        StackResource created = provision("Cluster", "AWS::RDS::DBCluster", json);
+        assertEquals("CREATE_COMPLETE", created.getStatus(), created.getStatusReason());
+        DbCluster existing = mock(DbCluster.class);
+        when(rdsService.getDbCluster(any())).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn(created.getPhysicalId());
+        when(rdsService.modifyDbCluster(eq(created.getPhysicalId()), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+        return created;
+    }
+
+    private StackResource updateCluster(StackResource committed, String json) {
+        return provisionExisting("Cluster", "AWS::RDS::DBCluster", json, "us-east-1",
+                committed.getPhysicalId(), committed.getAttributes());
+    }
+
+    /** A template with {@code Engine} and one more property, quoted unless it is a boolean. */
+    private static String clusterTemplate(String property, String value) {
+        String literal = "true".equals(value) || "false".equals(value) ? value : "\"" + value + "\"";
+        return "{\"Engine\":\"aurora-postgresql\",\"" + property + "\":" + literal + "}";
+    }
+
+    @Test
+    void updateStackReplacesDbClusterWhenDatabaseNameChanges() {
+        // DatabaseName is createOnly and the cluster on file records it, so the change is read
+        // from the cluster like EngineMode and StorageEncrypted.
+        DbCluster existing = priorUnnamedCluster("provisioned", false);
+        when(existing.getDatabaseName()).thenReturn("appdb");
+        createDbClusterEchoesRequestedId();
+
+        StackResource r = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","DatabaseName":"reports"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+        String replacement = r.getPhysicalId();
+        assertNotEquals(PRIOR_CLUSTER, replacement);
+        verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null, null, null,
+                "reports", false, null, null, null, false, "us-east-1",
+                null, null, null, false, null, null, false);
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "KmsKeyId, alias/aws/rds, arn:aws:kms:us-east-1:000000000000:key/11111111-2222-3333-4444-555555555555",
+            "DBSubnetGroupName, private-subnets, public-subnets",
+            "DBSystemId, rdsCustomOracle, rdsCustomOracle2",
+            "PubliclyAccessible, false, true",
+            "ClusterScalabilityType, standard, limitless",
+            "SnapshotIdentifier, nightly-1, nightly-2",
+            "SourceDBClusterIdentifier, source-a, source-b",
+            "SourceDbClusterResourceId, cluster-AAAA, cluster-BBBB",
+            "SourceRegion, us-west-2, eu-west-1",
+            "RestoreType, full-copy, copy-on-write",
+            "RestoreToTime, 2026-01-01T00:00:00Z, 2026-02-01T00:00:00Z",
+            "UseLatestRestorableTime, false, true"
+    })
+    void updateStackReplacesDbClusterWhenARecordedCreateOnlyPropertyChanges(
+            String property, String before, String after) {
+        // Nothing on the cluster on file records these, so the change is read against what the
+        // template said when the cluster was created: the same replacement lifecycle as EngineMode,
+        // with the prior cluster owed a delete only after the update commits.
+        StackResource created = createUnnamedCluster(clusterTemplate(property, before));
+        String prior = created.getPhysicalId();
+        assertTrue(created.getAttributes().get(CREATE_ONLY_ATTR).contains("\"" + property + "\""));
+        assertFalse(created.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR),
+                "a create has no record to roll back to");
+
+        StackResource r = updateCluster(created, clusterTemplate(property, after));
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        assertNotEquals(prior, r.getPhysicalId());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        assertTrue(r.getAttributes().get(CREATE_ONLY_ATTR).contains(after));
+        assertEquals(prior, provisioner.updateCleanupPhysicalId(r));
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        assertTrue(cleanup.complete());
+        verify(rdsService).deleteDbCluster(prior, "us-east-1");
+        assertFalse(r.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR),
+                "the committed update drops the record it replaced");
+    }
+
+    @Test
+    void updateStackKeepsDbClusterWhenRecordedCreateOnlyPropertiesUnchanged() {
+        // The same values, a boolean with a fixed default omitted instead of written as false, and
+        // a changed mutable property describe the same cluster: it is modified in place and the
+        // record stands.
+        StackResource created = createUnnamedCluster("""
+                {"Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds","UseLatestRestorableTime":false,
+                 "DBSubnetGroupName":"private-subnets","MasterUserPassword":"secret"}
+                """);
+        String record = created.getAttributes().get(CREATE_ONLY_ATTR);
+
+        StackResource r = updateCluster(created, """
+                {"Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds",
+                 "DBSubnetGroupName":"private-subnets","MasterUserPassword":"rotated"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        assertEquals(created.getPhysicalId(), r.getPhysicalId());
+        verify(rdsService).modifyDbCluster(created.getPhysicalId(), "rotated", false,
+                null, null, null, "us-east-1");
+        verify(rdsService, times(1)).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
+        assertEquals(record, r.getAttributes().get(CREATE_ONLY_ATTR));
+        assertFalse(r.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void updateStackReplacesDbClusterWhenPubliclyAccessibleIsSpelledOutAfterBeingOmitted(String value) {
+        // PubliclyAccessible has no fixed default: AWS makes an omitted one true or false depending
+        // on the subnet group, so a cluster created without it may well be public, and a template
+        // that later writes either value is a change CloudFormation replaces on. Absent stays
+        // absent in the record rather than being read as false.
+        StackResource created = createUnnamedCluster("""
+                {"Engine":"aurora-postgresql","DBSubnetGroupName":"private-subnets"}
+                """);
+        String prior = created.getPhysicalId();
+        assertFalse(created.getAttributes().get(CREATE_ONLY_ATTR).contains("PubliclyAccessible"));
+
+        StackResource r = updateCluster(created, """
+                {"Engine":"aurora-postgresql","DBSubnetGroupName":"private-subnets",
+                 "PubliclyAccessible":%s}
+                """.formatted(value));
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        assertNotEquals(prior, r.getPhysicalId());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        assertEquals(prior, provisioner.updateCleanupPhysicalId(r));
+        assertTrue(r.getAttributes().get(CREATE_ONLY_ATTR).contains("\"PubliclyAccessible\":\"" + value + "\""));
+
+        // And the other way round: dropping it again is a change too.
+        provisioner.completeUpdate(r);
+        StackResource dropped = updateCluster(r, """
+                {"Engine":"aurora-postgresql","DBSubnetGroupName":"private-subnets"}
+                """);
+        assertEquals("CREATE_COMPLETE", dropped.getStatus(), dropped.getStatusReason());
+        assertNotEquals(r.getPhysicalId(), dropped.getPhysicalId());
+    }
+
+    @Test
+    void updateStackRecordsCreateOnlyPropertiesOfAClusterProvisionedBeforeTheyWereTracked() {
+        // A resource from before the record existed says nothing about what its cluster was
+        // created with, so the first update keeps the cluster and records the template; the update
+        // after that is compared against the record.
+        priorUnnamedCluster("provisioned", false);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn(PRIOR_CLUSTER);
+        when(rdsService.modifyDbCluster(eq(PRIOR_CLUSTER), any(), anyBoolean(),
+                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+
+        StackResource first = updateUnnamedCluster("""
+                {"Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", first.getStatus(), first.getStatusReason());
+        assertEquals(PRIOR_CLUSTER, first.getPhysicalId());
+        verify(rdsService).modifyDbCluster(PRIOR_CLUSTER, null, false, null, null, null, "us-east-1");
+        assertTrue(first.getAttributes().get(CREATE_ONLY_ATTR).contains("alias/aws/rds"));
+        assertEquals("", first.getAttributes().get(CREATE_ONLY_PRIOR_ATTR),
+                "a rollback of this update drops the record again");
+        provisioner.clearUpdate(first);
+        assertFalse(first.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR));
+
+        createDbClusterEchoesRequestedId();
+        StackResource second = updateCluster(first, """
+                {"Engine":"aurora-postgresql","KmsKeyId":"alias/other"}
+                """);
+
+        assertEquals("CREATE_COMPLETE", second.getStatus(), second.getStatusReason());
+        assertNotEquals(PRIOR_CLUSTER, second.getPhysicalId());
+        assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(second));
+    }
+
+    @Test
+    void failedLaterUpdateRollsBackTheCreateOnlyRecordWithTheDbCluster() {
+        // The record follows the cluster: rolled back to the prior cluster, the resource compares
+        // the next template against what that cluster was created with, not the replacement.
+        StackResource created = createUnnamedCluster(clusterTemplate("KmsKeyId", "alias/aws/rds"));
+        String prior = created.getPhysicalId();
+        String priorRecord = created.getAttributes().get(CREATE_ONLY_ATTR);
+        StackResource r = updateCluster(created, clusterTemplate("KmsKeyId", "alias/other"));
+        String replacement = r.getPhysicalId();
+        assertNotEquals(prior, replacement);
+        assertEquals(priorRecord, r.getAttributes().get(CREATE_ONLY_PRIOR_ATTR));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(prior, r.getPhysicalId());
+        assertEquals(priorRecord, r.getAttributes().get(CREATE_ONLY_ATTR));
+        assertFalse(r.getAttributes().containsKey(CREATE_ONLY_PRIOR_ATTR));
+        verify(rdsService).deleteDbCluster(replacement, "us-east-1");
+        verify(rdsService, never()).deleteDbCluster(prior, "us-east-1");
+
+        StackResource again = updateCluster(r, clusterTemplate("KmsKeyId", "alias/aws/rds"));
+
+        assertEquals("CREATE_COMPLETE", again.getStatus(), again.getStatusReason());
+        assertEquals(prior, again.getPhysicalId(), "the rolled-back template describes the prior cluster");
+        verify(rdsService).modifyDbCluster(prior, null, false, null, null, null, "us-east-1");
+        verify(rdsService, times(2)).createDbCluster(any(), any(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), anyBoolean());
+    }
+
+    @Test
+    void customNamedDbClusterRefusesRecordedCreateOnlyPropertyChange() {
+        createDbClusterEchoesRequestedId();
+        StackResource created = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds"}
+                """);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(mock(DbCluster.class));
+
+        StackResource r = updateCluster(created, """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","KmsKeyId":"alias/other"}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains(
+                "custom-named resource requires replacing. Rename mycluster and update the stack again."));
+        assertEquals("mycluster", r.getPhysicalId());
+        verify(rdsService, never()).deleteDbCluster(any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1289,7 +1883,8 @@ class RdsCfnProvisionerTest {
         when(proxy.getDbProxyName()).thenReturn("my-proxy");
         when(proxy.getDbProxyArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db-proxy:my-proxy");
         when(rdsService.createDbProxy(any(), any(), anyBoolean(), anyBoolean(), any(), any(),
-                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any())).thenReturn(proxy);
+                anyList(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(), any(), any()))
+                .thenReturn(proxy);
 
         provision("Proxy", "AWS::RDS::DBProxy", """
                 {"DBProxyName":"my-proxy","EngineFamily":"POSTGRESQL",
@@ -1300,7 +1895,8 @@ class RdsCfnProvisionerTest {
 
         ArgumentCaptor<List<String>> subnets = ArgumentCaptor.forClass(List.class);
         verify(rdsService).createDbProxy(eq("my-proxy"), eq("POSTGRESQL"), anyBoolean(), anyBoolean(),
-                any(), any(), subnets.capture(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any());
+                any(), any(), subnets.capture(), anyList(), anyList(), anyInt(), anyBoolean(), anyMap(), any(),
+                isNull(), isNull());
         assertEquals(List.of("subnet-a", "subnet-b"), subnets.getValue());
     }
 }

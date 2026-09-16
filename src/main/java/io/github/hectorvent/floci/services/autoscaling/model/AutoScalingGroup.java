@@ -42,6 +42,14 @@ public class AutoScalingGroup {
     private Map<String, String> tags = new ConcurrentHashMap<>();
     private Map<String, Boolean> tagPropagateAtLaunch = new ConcurrentHashMap<>();
     private String status;  // null = active, "Delete in progress" = deleting
+    // The four optional CreateAutoScalingGroup/UpdateAutoScalingGroup members below are boxed and
+    // left null on purpose. DescribeAutoScalingGroups omits an unset optional member, so a
+    // primitive field with an initialiser would leak that initialiser into the wire response for
+    // every group that never set it.
+    private String desiredCapacityType;
+    private Boolean capacityRebalance;
+    private Integer maxInstanceLifetime;
+    private Integer defaultInstanceWarmup;
 
     public AutoScalingGroup() {}
 
@@ -122,4 +130,16 @@ public class AutoScalingGroup {
 
     public String getStatus() { return status; }
     public void setStatus(String v) { this.status = v; }
+
+    public String getDesiredCapacityType() { return desiredCapacityType; }
+    public void setDesiredCapacityType(String v) { this.desiredCapacityType = v; }
+
+    public Boolean getCapacityRebalance() { return capacityRebalance; }
+    public void setCapacityRebalance(Boolean v) { this.capacityRebalance = v; }
+
+    public Integer getMaxInstanceLifetime() { return maxInstanceLifetime; }
+    public void setMaxInstanceLifetime(Integer v) { this.maxInstanceLifetime = v; }
+
+    public Integer getDefaultInstanceWarmup() { return defaultInstanceWarmup; }
+    public void setDefaultInstanceWarmup(Integer v) { this.defaultInstanceWarmup = v; }
 }

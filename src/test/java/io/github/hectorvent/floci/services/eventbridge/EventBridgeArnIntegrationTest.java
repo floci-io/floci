@@ -226,6 +226,77 @@ class EventBridgeArnIntegrationTest {
                 .statusCode(200);
     }
 
+    /**
+     * The bus ARN EventBridge mints carries the region's own partition, and DescribeEventBus
+     * accepts an ARN in place of a name. The gate that recognised an ARN required a literal
+     * {@code arn:aws:events:}, so outside the commercial partition the emulator handed back an ARN
+     * it then read as a literal bus name and reported ResourceNotFound for a bus it had created.
+     *
+     * <p>Region comes from the SigV4 credential scope. The bus is deleted again: @QuarkusTest
+     * classes share one emulator, and a non-commercial ARN left behind fails the cross-service
+     * scan in ResourceExplorer2IntegrationTest.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "us-east-1,      arn:aws:events:",
+            "us-gov-west-1,  arn:aws-us-gov:events:",
+            "cn-north-1,     arn:aws-cn:events:"})
+    @Order(10)
+    void describeEventBus_withArn_inAnyPartition(String region, String expectedArnPrefix) {
+        String busName = "partition-bus-" + region;
+        String auth = "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region
+                + "/events/aws4_request, SignedHeaders=host, Signature=abc";
+
+        String busArn = given()
+                .header("Authorization", auth)
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.CreateEventBus")
+                .body("{\"Name\":\"" + busName + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("EventBusArn");
+
+        org.hamcrest.MatcherAssert.assertThat(busArn, org.hamcrest.Matchers.startsWith(expectedArnPrefix));
+
+        try {
+            given()
+                    .header("Authorization", auth)
+                    .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                    .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+                    .body("{\"Name\":\"" + busArn + "\"}")
+                    .when().post("/")
+                    .then()
+                    .statusCode(200)
+                    .body("Name", equalTo(busName))
+                    .body("Arn", equalTo(busArn));
+        } finally {
+            given()
+                    .header("Authorization", auth)
+                    .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                    .header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                    .body("{\"Name\":\"" + busName + "\"}")
+                    .when().post("/");
+        }
+    }
+
+    /**
+     * A truncated ARN must still be reported as a malformed ARN rather than quietly taken as a
+     * literal bus name. This is why the gate matches an ARN <em>prefix</em> instead of asking
+     * whether the whole string is a well-formed EventBridge ARN.
+     */
+    @Test
+    @Order(10)
+    void describeEventBus_withTruncatedArn_isRejected() {
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+                .body("{\"Name\":\"arn:aws:events:\"}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body(containsString("ValidationException"));
+    }
+
     @Test
     @Order(11)
     void describeEventBus_withArn() {

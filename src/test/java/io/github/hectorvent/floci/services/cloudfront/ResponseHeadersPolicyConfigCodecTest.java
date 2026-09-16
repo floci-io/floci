@@ -287,4 +287,50 @@ class ResponseHeadersPolicyConfigCodecTest {
         }
         return map;
     }
+
+    @Test
+    void fromItemsTreeStoresTheShapeParseProducesAndSurvivesTheRoundTrip() {
+        Map<String, Object> tree = new LinkedHashMap<>();
+        tree.put("SecurityHeadersConfig", Map.of("FrameOptions", Map.of("Override", "true", "FrameOption", "DENY")));
+        Map<String, Object> cors = new LinkedHashMap<>();
+        cors.put("AccessControlAllowOrigins", Map.of("Items", List.of("https://app.example.test")));
+        cors.put("AccessControlAllowMethods", Map.of("Items", List.of("GET", "HEAD")));
+        cors.put("AccessControlAllowCredentials", "false");
+        cors.put("OriginOverride", "true");
+        tree.put("CorsConfig", cors);
+        tree.put("CustomHeadersConfig", Map.of("Items", List.of(
+                Map.of("Header", "X-Floci-Repro", "Value", "enabled", "Override", "true"))));
+        tree.put("RemoveHeadersConfig", Map.of("Items", List.of(Map.of("Header", "Server"))));
+        tree.put("ServerTimingHeadersConfig", Map.of("Enabled", "true", "SamplingRate", "50"));
+
+        Map<String, Object> config = ResponseHeadersPolicyConfigCodec.fromItemsTree(tree);
+
+        assertEquals(List.of("https://app.example.test"),
+                ((Map<?, ?>) config.get("CorsConfig")).get("AccessControlAllowOrigins"));
+        assertEquals(List.of("GET", "HEAD"), ((Map<?, ?>) config.get("CorsConfig")).get("AccessControlAllowMethods"));
+        assertEquals("true", ((Map<?, ?>) config.get("CorsConfig")).get("OriginOverride"));
+        assertEquals(List.of(Map.of("Header", "X-Floci-Repro", "Value", "enabled", "Override", "true")),
+                config.get("CustomHeadersConfig"));
+        assertEquals(List.of("Server"), config.get("RemoveHeadersConfig"));
+        assertEquals(Map.of("Enabled", "true", "SamplingRate", "50"), config.get("ServerTimingHeadersConfig"));
+
+        XmlBuilder xml = new XmlBuilder().start("ResponseHeadersPolicyConfig");
+        ResponseHeadersPolicyConfigCodec.serialize(xml, config);
+        Map<String, Object> reparsed = ResponseHeadersPolicyConfigCodec.parse(xml.end("ResponseHeadersPolicyConfig").build());
+        assertEquals(config, reparsed);
+    }
+
+    @Test
+    void fromItemsTreePassesUnknownBlocksAndBareListsThrough() {
+        Map<String, Object> tree = new LinkedHashMap<>();
+        tree.put("CustomHeadersConfig", List.of(Map.of("Header", "X-A", "Value", "1", "Override", "false")));
+        tree.put("RemoveHeadersConfig", Map.of("Items", List.of("Server")));
+        tree.put("Unknown", Map.of("Items", List.of("x")));
+
+        Map<String, Object> config = ResponseHeadersPolicyConfigCodec.fromItemsTree(tree);
+
+        assertEquals(List.of(Map.of("Header", "X-A", "Value", "1", "Override", "false")), config.get("CustomHeadersConfig"));
+        assertEquals(List.of("Server"), config.get("RemoveHeadersConfig"));
+        assertEquals(Map.of("Items", List.of("x")), config.get("Unknown"));
+    }
 }

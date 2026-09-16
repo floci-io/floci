@@ -192,7 +192,8 @@ public class SesEventPublisher {
         try {
             Record record = new Record();
             record.setData(payloadJson.getBytes(StandardCharsets.UTF_8));
-            firehoseService.putRecord(streamName, record);
+            AwsArnUtils.Arn parsedArn = AwsArnUtils.parse(streamArn);
+            firehoseService.putRecord(parsedArn.accountId(), parsedArn.region(), streamName, record);
         } catch (Exception e) {
             LOG.warnf(e, "SES event publish to Firehose stream %s skipped", streamName);
         }

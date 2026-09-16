@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.BackupWindows;
+import io.github.hectorvent.floci.core.common.RdsFamilyQuerySupport;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneCluster;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneClusterSettings;
@@ -114,8 +115,8 @@ public class NeptuneQueryHandler {
     /**
      * The rows the list form of DescribeDBClusters would return for the region a request is signed
      * for, for the RDS-family listing {@code RdsQueryHandler} assembles: a live account lists
-     * Neptune clusters from the RDS endpoint too. The Neptune store is not keyed by region, so the
-     * region is read off each record's ARN.
+     * Neptune clusters from the RDS endpoint too. The service storage is scoped by account and
+     * region before the rows are rendered.
      */
     public List<String> clusterRowsXml(String filterId, String region) {
         return service.listDbClusters(filterId).stream()
@@ -188,30 +189,7 @@ public class NeptuneQueryHandler {
     }
 
     private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
-        String maxRecords = params.getFirst("MaxRecords");
-        if (maxRecords != null && !maxRecords.isBlank()) {
-            int max = -1;
-            try {
-                max = Integer.parseInt(maxRecords.trim());
-            } catch (NumberFormatException e) {
-                LOG.debugv("Non-numeric MaxRecords {0} on DescribeGlobalClusters", maxRecords);
-            }
-            if (max < 20 || max > 100) {
-                throw new AwsException("InvalidParameterValue",
-                        "Invalid value " + maxRecords + " for MaxRecords. Must be between 20 and 100", 400);
-            }
-        }
-        String identifier = params.getFirst("GlobalClusterIdentifier");
-        if (identifier != null && !identifier.isBlank()) {
-            throw new AwsException("GlobalClusterNotFoundFault",
-                    "Global cluster '" + identifier + "' not found", 404);
-        }
-        String marker = params.getFirst("Marker");
-        if (marker != null && !marker.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "The request token is invalid.", 400);
-        }
-        XmlBuilder xml = new XmlBuilder().start("GlobalClusters").end("GlobalClusters");
-        return Response.ok(AwsQueryResponse.envelope("DescribeGlobalClusters", AwsNamespaces.RDS, xml.build())).build();
+        return RdsFamilyQuerySupport.handleDescribeGlobalClusters(LOG, params);
     }
 
     // ── Instances ─────────────────────────────────────────────────────────────

@@ -95,11 +95,32 @@ Quick summary:
 5. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
 6. Add the docs page, its `mkdocs.yml` nav entry, a Service Matrix row and a README row (`make docs-check` gates the matrix)
 
+## Code Style
+
+`AGENTS.md` carries the full list. The ones worth knowing before your first PR:
+
+- **Write explicit types. Do not use `var`.** Floci reproduces AWS wire contracts,
+  so the concrete type at a call site is usually what a reviewer needs to see. The
+  one exception is a record deconstruction pattern.
+- **Import the classes you use. No fully-qualified names inline.** `new ArrayList<>()`,
+  never `new java.util.ArrayList<>()`. Qualify only for a real name collision in that
+  file, and say in a comment what collides.
+- **No wildcard imports in `src/main`.** Static wildcards are fine in tests.
+- **Never leave a `catch` block empty.** If swallowing is correct, name the variable
+  `ignored` or `expected` and say why in a comment.
+- **Always use braces in conditionals**, and use constructor injection.
+- **Tests**: JUnit 5 with Hamcrest and RestAssured. Name methods as a camelCase
+  sentence or `method_scenario_expectation`, never `testX`.
+
+Existing code does not yet satisfy all of these everywhere. Match them in code you
+add or change, and leave unrelated cleanups for their own PR.
+
 ## Pull Request Checklist
 
 - [ ] `mvn test` passes
 - [ ] New or updated integration test added
 - [ ] Commit messages follow Conventional Commits
+- [ ] Code follows the style rules above
 
 Please keep at most **5 open PRs** at a time. A bot leaves an advisory note (label `over-pr-limit`) on PRs opened beyond that. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-guidelines) for details.
 

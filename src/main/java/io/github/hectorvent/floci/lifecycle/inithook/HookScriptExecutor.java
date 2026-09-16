@@ -7,7 +7,11 @@ import org.jboss.logging.Logger;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @ApplicationScoped
 public class HookScriptExecutor {
@@ -57,22 +61,90 @@ public class HookScriptExecutor {
         } finally {
             if (process.isAlive()) {
                 LOG.debugv("Hook script process still alive during cleanup, forcing termination: {0}", scriptFileName);
-                process.destroyForcibly();
+                forceTerminateProcessTree(process);
             }
         }
     }
 
     private void terminateProcess(final Process process, final String scriptFileName) throws InterruptedException {
         // Try a graceful shutdown first, then force termination if the process does not exit in time.
+        List<ProcessHandle> descendants = processDescendants(process);
+        descendants.forEach(ProcessHandle::destroy);
         process.destroy();
-        if (process.isAlive()) {
-            final long shutdownGracePeriodSeconds = initHooksConfig.shutdownGracePeriodSeconds();
-            final boolean terminatedGracefully = process.waitFor(shutdownGracePeriodSeconds, TimeUnit.SECONDS);
-            if (!terminatedGracefully) {
-                LOG.debugv("Hook script process did not terminate gracefully, forcing termination: {0}", scriptFileName);
-                process.destroyForcibly();
-                process.waitFor(shutdownGracePeriodSeconds, TimeUnit.SECONDS);
+        final long shutdownGracePeriodSeconds = initHooksConfig.shutdownGracePeriodSeconds();
+        final long gracefulDeadline = deadlineNanos(shutdownGracePeriodSeconds);
+        final boolean terminatedGracefully = waitForProcess(process, gracefulDeadline);
+        final boolean descendantsTerminated = waitForDescendants(descendants, gracefulDeadline);
+        if (!terminatedGracefully || !descendantsTerminated) {
+            LOG.debugv("Hook script process tree did not terminate gracefully, forcing termination: {0}",
+                    scriptFileName);
+            process.destroyForcibly();
+            List<ProcessHandle> remainingDescendants = new ArrayList<>(descendants);
+            remainingDescendants.addAll(processDescendants(process));
+            remainingDescendants.forEach(ProcessHandle::destroyForcibly);
+            final long forceDeadline = deadlineNanos(shutdownGracePeriodSeconds);
+            waitForProcess(process, forceDeadline);
+            waitForDescendants(remainingDescendants, forceDeadline);
+        }
+    }
+
+    private List<ProcessHandle> processDescendants(final Process process) {
+        ProcessHandle handle = process.toHandle();
+        return handle == null ? List.of() : handle.descendants().toList();
+    }
+
+    private boolean waitForDescendants(List<ProcessHandle> descendants, long deadlineNanos)
+            throws InterruptedException {
+        for (ProcessHandle descendant : descendants) {
+            if (!waitForExit(descendant, deadlineNanos)) {
+                return false;
             }
+        }
+        return true;
+    }
+
+    private boolean waitForExit(ProcessHandle process, long deadlineNanos) throws InterruptedException {
+        if (!process.isAlive()) {
+            return true;
+        }
+        long remainingNanos = deadlineNanos - System.nanoTime();
+        if (remainingNanos <= 0) {
+            return false;
+        }
+        try {
+            process.onExit().get(remainingNanos, TimeUnit.NANOSECONDS);
+            return true;
+        } catch (TimeoutException e) {
+            return false;
+        } catch (ExecutionException e) {
+            return !process.isAlive();
+        }
+    }
+
+    private boolean waitForProcess(Process process, long deadlineNanos) throws InterruptedException {
+        if (!process.isAlive()) {
+            return true;
+        }
+        long remainingNanos = deadlineNanos - System.nanoTime();
+        return remainingNanos > 0 && process.waitFor(remainingNanos, TimeUnit.NANOSECONDS);
+    }
+
+    private long deadlineNanos(long timeoutSeconds) {
+        return System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+    }
+
+    private void forceTerminateProcessTree(Process process) {
+        final long shutdownGracePeriodSeconds = initHooksConfig.shutdownGracePeriodSeconds();
+        final long deadline = deadlineNanos(shutdownGracePeriodSeconds);
+        List<ProcessHandle> descendants = new ArrayList<>(processDescendants(process));
+        process.destroyForcibly();
+        descendants.addAll(processDescendants(process));
+        descendants.forEach(ProcessHandle::destroyForcibly);
+        try {
+            waitForProcess(process, deadline);
+            waitForDescendants(descendants, deadline);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

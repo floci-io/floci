@@ -23,10 +23,8 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Response;
 
-import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
-import java.io.StringReader;
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -63,14 +61,7 @@ public class Route53Controller {
             "af-south-1", "eu-south-1", "eu-south-2",
             "il-central-1", "mx-central-1");
 
-    private static final XMLInputFactory XML_FACTORY;
-
-    static {
-        XML_FACTORY = XMLInputFactory.newInstance();
-        XML_FACTORY.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
-        XML_FACTORY.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
-        XML_FACTORY.setProperty(XMLInputFactory.SUPPORT_DTD, false);
-    }
+    private static final Set<String> CHANGE_ACTIONS = Set.of("CREATE", "DELETE", "UPSERT");
 
     @Inject
     Route53Service service;
@@ -904,16 +895,44 @@ public class Route53Controller {
         }
     }
 
+    private static void requireExactlyOneRecordShape(String action, ResourceRecordSet rrs, boolean hasRecords) {
+        boolean hasAlias = rrs.getAliasTarget() != null;
+        boolean hasTtl = rrs.getTtl() != null;
+        String found;
+        if (hasAlias && (hasTtl || hasRecords)) {
+            found = "more than one";
+        } else if (!hasAlias && !(hasTtl && hasRecords)) {
+            found = "none";
+        } else {
+            return;
+        }
+        throw new AwsException("InvalidInput",
+                "Invalid request: Expected exactly one of [AliasTarget, all of [TTL, and ResourceRecords], "
+                        + "or TrafficPolicyInstanceId], but found " + found + " in Change with [Action=" + action
+                        + ", Name=" + rrs.getName() + ", Type=" + rrs.getType()
+                        + ", SetIdentifier=" + rrs.getSetIdentifier() + "]", 400);
+    }
+
     /**
      * Parses the ChangeBatch XML using StAX to correctly handle multiple Change elements,
      * each containing a ResourceRecordSet with its own set of ResourceRecord/Value children.
      */
     private List<Map<String, Object>> parseChangeBatch(String body) {
         List<Map<String, Object>> result = new ArrayList<>();
-        if (body == null || body.isEmpty()) return result;
+        if (body != null && !body.isEmpty()) {
+            parseChangeBatchInto(body, result);
+        }
+        if (result.isEmpty()) {
+            throw new AwsException("InvalidInput",
+                    "Invalid XML ; cvc-complex-type.2.4.b: The content of element 'Changes' is not complete. "
+                            + "One of '{\"" + NS + "\":Change}' is expected.", 400);
+        }
+        return result;
+    }
 
+    private void parseChangeBatchInto(String body, List<Map<String, Object>> result) {
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             String currentAction = null;
             ResourceRecordSet currentRrs = null;
             List<ResourceRecord> currentRecords = null;
@@ -941,7 +960,14 @@ public class Route53Controller {
                             }
                         }
                         case "Action" -> {
-                            if (inChange && !inRrs) currentAction = r.getElementText();
+                            if (inChange && !inRrs) {
+                                currentAction = r.getElementText();
+                                if (!CHANGE_ACTIONS.contains(currentAction)) {
+                                    throw new AwsException("InvalidInput",
+                                            "Invalid value '" + currentAction + "' at 'Action' failed to satisfy "
+                                                    + "constraint: Member must satisfy enum value set.", 400);
+                                }
+                            }
                         }
                         case "ResourceRecordSet" -> {
                             if (inChange) {
@@ -971,8 +997,14 @@ public class Route53Controller {
                         }
                         case "TTL" -> {
                             if (inRrs && currentRrs != null) {
-                                try { currentRrs.setTtl(Long.parseLong(r.getElementText())); }
-                                catch (NumberFormatException ignored) {}
+                                String ttl = r.getElementText();
+                                try {
+                                    currentRrs.setTtl(Long.parseLong(ttl));
+                                } catch (NumberFormatException e) {
+                                    throw new AwsException("InvalidInput",
+                                            "Invalid value '" + ttl + "' at 'TTL' failed to satisfy constraint: "
+                                                    + "Member must be a valid long.", 400);
+                                }
                             }
                         }
                         case "Value" -> {
@@ -985,8 +1017,14 @@ public class Route53Controller {
                         }
                         case "Weight" -> {
                             if (inRrs && currentRrs != null) {
-                                try { currentRrs.setWeight(Long.parseLong(r.getElementText())); }
-                                catch (NumberFormatException ignored) {}
+                                String weight = r.getElementText();
+                                try {
+                                    currentRrs.setWeight(Long.parseLong(weight));
+                                } catch (NumberFormatException e) {
+                                    throw new AwsException("InvalidInput",
+                                            "Invalid value '" + weight + "' at 'Weight' failed to satisfy "
+                                                    + "constraint: Member must be a valid long.", 400);
+                                }
                             }
                         }
                         case "Region" -> {
@@ -1024,13 +1062,26 @@ public class Route53Controller {
                             currentAlias = null;
                         }
                         case "ResourceRecordSet" -> {
-                            if (inRrs && currentRrs != null && currentRecords != null) {
-                                if (!currentRecords.isEmpty()) currentRrs.setRecords(currentRecords);
+                            if (inRrs && currentRrs != null) {
+                                if (currentRrs.getName() == null || currentRrs.getType() == null) {
+                                    throw new AwsException("InvalidInput",
+                                            "ResourceRecordSet is missing a required Name or Type element.", 400);
+                                }
+                                boolean hasRecords = currentRecords != null && !currentRecords.isEmpty();
+                                if (hasRecords) {
+                                    currentRrs.setRecords(currentRecords);
+                                }
+                                requireExactlyOneRecordShape(currentAction, currentRrs, hasRecords);
                             }
                             inRrs = false;
                         }
                         case "Change" -> {
-                            if (inChange && currentAction != null && currentRrs != null) {
+                            if (inChange) {
+                                if (currentAction == null || currentRrs == null) {
+                                    throw new AwsException("InvalidInput",
+                                            "Change is missing a required Action or ResourceRecordSet element.",
+                                            400);
+                                }
                                 Map<String, Object> change = new HashMap<>();
                                 change.put("action", currentAction);
                                 change.put("rrs", currentRrs);
@@ -1045,8 +1096,11 @@ public class Route53Controller {
                 }
             }
             r.close();
-        } catch (Exception ignored) {}
-        return result;
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("InvalidInput", "The XML you provided was not well-formed.", 400);
+        }
     }
 
     private HealthCheckConfig parseHealthCheckConfig(String body) {
@@ -1078,7 +1132,7 @@ public class Route53Controller {
         List<String> keys = new ArrayList<>();
         if (body == null || body.isEmpty()) return keys;
         try {
-            XMLStreamReader r = XML_FACTORY.createXMLStreamReader(new StringReader(body));
+            XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inRemove = false;
             while (r.hasNext()) {
                 int event = r.next();

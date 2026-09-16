@@ -199,6 +199,8 @@ unchanged.
 
 ## Configuration
 
+Docker-backed `awsvpc` tasks receive an emulated ENI and share one protected network namespace across their containers when `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state and does not enforce packet filtering.
+
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ECS_ENABLED` | `true` | Enable or disable the ECS service |
@@ -206,6 +208,34 @@ unchanged.
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | *(unset)* | Docker network for task containers |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default memory (MB) when the task definition omits it |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | *(unset)* | Approved parent directories for host volume bind mounts (`volumes[].host.sourcePath`) |
+| `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing the `HOST_VOLUME_ROOTS` allowlist; traversal, the bare root, and the Docker socket are still always rejected |
+
+### Host volume safety
+
+A task definition's `volumes[].host.sourcePath` is a caller-controlled filesystem path that Floci bind-mounts straight into the launched container, so both `RegisterTaskDefinition` and the actual bind mount at `RunTask` time validate it (the second check narrows the window between validation and mount, and also covers task definitions registered before this policy existed).
+
+Always rejected, regardless of configuration:
+
+- Relative paths, and any path containing a `..` segment.
+- The bare filesystem root (`/`).
+- The Docker daemon socket and any directory that contains it (e.g. `/var/run`, `/run`, `/var`), including via a symlink that resolves onto one of these paths. The protected socket is the one Floci's own Docker client connects to, resolved the same way the client resolves it: `floci.docker.docker-host`, then `DOCKER_HOST`, then the active Docker context (Colima, OrbStack, Rancher Desktop, Podman), then `/var/run/docker.sock`. The conventional locations `/var/run/docker.sock` and `/run/docker.sock` are always protected as well.
+
+**By default, with no configuration, every host `sourcePath` is rejected.** You must explicitly opt in with one of:
+
+- `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`: a comma-separated allowlist of approved parent directories. A `sourcePath` must resolve (symlinks included) under one of them:
+
+  ```yaml
+  services:
+    floci:
+      image: floci/floci:latest
+      environment:
+        FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS: /srv/floci/volumes,/data
+  ```
+
+- `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES=true`: allow any host path (for local development where any host path should be mountable). The traversal, bare-root, and Docker socket blocks above are never bypassed by this flag.
+
+A rejected `sourcePath` fails `RegisterTaskDefinition` with `InvalidParameterException`; a rejection caught again at `RunTask` time (e.g. a task definition registered before this policy existed) stops the task with that message as its `stoppedReason`. Named Docker volumes, EFS volumes, and host volumes with no `sourcePath` (ephemeral, container-local storage) are unaffected by these checks.
 
 ### EFS volume ownership
 

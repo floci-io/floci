@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.guardduty.model.AdminAccount;
@@ -33,10 +34,9 @@ import java.util.regex.Pattern;
  * GuardDuty detector lifecycle and organization configuration backed by the configured
  * Floci storage mode.
  *
- * <p>Organization semantics are readback-only: Floci has no Organizations service, so
- * {@code adminAccountId} membership is not validated, delegated-administrator permissions are
- * not enforced, and member accounts are not fanned out. Organization configuration is stored
- * per calling account and echoed back as submitted.
+ * <p>Organization state is shared across account partitions where AWS models it at organization
+ * scope. Delegated-administrator status is therefore visible to requests made with the delegated
+ * account's credentials, while detector and member resources remain scoped to their owning account.
  */
 @ApplicationScoped
 public class GuardDutyService {
@@ -109,7 +109,9 @@ public class GuardDutyService {
         List<DetectorFeature> features = readDetectorFeatures(request);
         Map<String, String> tags = readTags(request);
 
-        if (!detectorStore.scan(key -> key.startsWith(region + "::")).isEmpty()) {
+        boolean detectorExists = detectorStore.scan(key -> key.startsWith(region + "::")).stream()
+                .anyMatch(detector -> accountId.equals(accountIdFromServiceRole(detector.getServiceRole())));
+        if (detectorExists) {
             throw badRequest("The request is rejected because a detector already exists for the current account.");
         }
 
@@ -157,9 +159,11 @@ public class GuardDutyService {
         detectorStore.delete(key);
     }
 
-    public Page<String> listDetectorIds(String region, String maxResultsValue, String nextToken) {
+    public Page<String> listDetectorIds(String region, String accountId, String maxResultsValue, String nextToken) {
         int maxResults = parseMaxResults(maxResultsValue);
-        List<Detector> detectors = detectorStore.scan(key -> key.startsWith(region + "::"));
+        List<Detector> detectors = detectorStore.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(detector -> accountId.equals(accountIdFromServiceRole(detector.getServiceRole())))
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
         detectors.sort(Comparator.comparing(Detector::getId));
         List<String> ids = detectors.stream().map(Detector::getId).toList();
 
@@ -207,7 +211,7 @@ public class GuardDutyService {
 
     public synchronized void enableOrganizationAdminAccount(String region, JsonNode request) {
         String adminAccountId = readAdminAccountId(request);
-        List<AdminAccount> existing = adminAccountStore.scan(key -> key.startsWith(region + "::"));
+        List<AdminAccount> existing = organizationAdminAccounts(region);
         if (!existing.isEmpty() && !existing.get(0).getAdminAccountId().equals(adminAccountId)) {
             throw badRequest("The request is rejected because the organization already has a "
                     + "delegated administrator account for GuardDuty.");
@@ -227,7 +231,7 @@ public class GuardDutyService {
     public Page<AdminAccount> listOrganizationAdminAccounts(
             String region, String maxResultsValue, String nextToken) {
         int maxResults = parseMaxResults(maxResultsValue);
-        List<AdminAccount> accounts = adminAccountStore.scan(key -> key.startsWith(region + "::"));
+        List<AdminAccount> accounts = new ArrayList<>(organizationAdminAccounts(region));
         accounts.sort(Comparator.comparing(AdminAccount::getAdminAccountId));
 
         int offset = decodeOffset(nextToken, accounts.size());
@@ -243,9 +247,9 @@ public class GuardDutyService {
             throw badRequest("accountDetails must contain between 1 and 50 accounts.");
         }
         String administratorId = accountIdFromServiceRole(detector.getServiceRole());
-        boolean organizationDelegatedAdministrator = adminAccountStore.get(storageKey(region, administratorId))
-                .map(account -> "ENABLED".equals(account.getAdminStatus()))
-                .orElse(false);
+        boolean organizationDelegatedAdministrator = organizationAdminAccounts(region).stream()
+                .anyMatch(account -> administratorId.equals(account.getAdminAccountId())
+                        && "ENABLED".equals(account.getAdminStatus()));
         String relationshipStatus = organizationDelegatedAdministrator ? "Enabled" : "Created";
         String now = Instant.now().toString();
         List<MemberWrite> writes = new ArrayList<>(details.size());
@@ -535,6 +539,16 @@ public class GuardDutyService {
             tags.put(entry.getKey(), valueNode.textValue());
         });
         return tags;
+    }
+
+    private List<AdminAccount> organizationAdminAccounts(String region) {
+        String prefix = region + "::";
+        if (adminAccountStore instanceof AccountAwareStorageBackend<AdminAccount> accountAware) {
+            return accountAware.scanAllAccountEntries(key -> key.startsWith(prefix)).stream()
+                    .map(AccountAwareStorageBackend.AccountEntry::value)
+                    .toList();
+        }
+        return adminAccountStore.scan(key -> key.startsWith(prefix));
     }
 
     private static String readAdminAccountId(JsonNode request) {

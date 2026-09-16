@@ -283,11 +283,55 @@ class RdsSigV4ValidatorTest {
                 accessKeyId,
                 secretAccessKey,
                 Instant.now().minusSeconds(60),
-                900
+                900,
+                "session-token"
         );
 
         assertTrue(validator.validate(token, "admin"),
                 "Validator must accept RDS IAM tokens signed with STS session credentials (ASIA… keys)");
+    }
+
+    @Test
+    void validateRejectsStsCredentialWithoutIssuedSessionToken() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "sts-generated-secret-key";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(accessKeyId, secretAccessKey);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 5432, "admin", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900);
+
+        assertFalse(validator.validate(token, "admin"));
+    }
+
+    @Test
+    void validateRejectsStsCredentialWithMismatchedSessionToken() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "sts-generated-secret-key";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(accessKeyId, secretAccessKey);
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 5432, "admin", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900, "wrong-session-token");
+
+        assertFalse(validator.validate(token, "admin"));
+    }
+
+    @Test
+    void validateRejectsExpiredStsCredentialEvenWithMatchingSessionToken() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "sts-generated-secret-key";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
+                accessKeyId, secretAccessKey, "session-token", Instant.now().minusSeconds(1));
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local", 5432, "admin", accessKeyId, secretAccessKey,
+                Instant.now().minusSeconds(60), 900, "session-token");
+
+        assertFalse(validator.validate(token, "admin"));
     }
 
     @Test

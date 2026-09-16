@@ -8,8 +8,11 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -262,7 +265,11 @@ class CodePipelineIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("stageStates", hasSize(2))
-                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Succeeded"));
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates[0].latestExecution.pipelineExecutionId", equalTo(executionId))
+                .body("stageStates[0].latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates[1].latestExecution.pipelineExecutionId", equalTo(executionId))
+                .body("stageStates[1].latestExecution.status", equalTo("Succeeded"));
 
         post("ListActionExecutions", """
                 {
@@ -315,6 +322,222 @@ class CodePipelineIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("pipelines.name", hasItem(pipelineName));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void s3SourcePollingStartsExactlyOneExecutionForARevisionChange() throws Exception {
+        createBucket("codepipeline-poll-source");
+        createBucket("codepipeline-poll-destination");
+        putObject("codepipeline-poll-source", "source.zip", "baseline artifact");
+
+        String pipelineName = "s3-source-polling-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-poll-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-poll-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        Thread.sleep(1200);
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(0));
+
+        putObject("codepipeline-poll-source", "source.zip", "changed artifact");
+
+        Response executions = waitForPipelineExecutionCount(pipelineName, 1);
+        String executionId = executions.jsonPath().getString("pipelineExecutionSummaries[0].pipelineExecutionId");
+        waitForExecution(pipelineName, executionId, "Succeeded");
+
+        post("GetPipelineExecution", """
+                {"pipelineName": "%s", "pipelineExecutionId": "%s"}
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecution.trigger.triggerType", equalTo("PollForSourceChanges"))
+                .body("pipelineExecution.trigger.triggerDetail",
+                        equalTo("s3://codepipeline-poll-source/source.zip"));
+
+        given()
+                .get("/codepipeline-poll-destination/deployed.zip")
+        .then()
+                .statusCode(200)
+                .body(equalTo("changed artifact"));
+
+        Thread.sleep(1200);
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(1));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void s3SourcePollingStartsWhenPreviouslyMissingObjectAppears() throws Exception {
+        createBucket("codepipeline-poll-missing-source");
+        createBucket("codepipeline-poll-missing-destination");
+
+        String pipelineName = "s3-source-polling-missing-object";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-poll-missing-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-poll-missing-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        Thread.sleep(700);
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(0));
+
+        putObject("codepipeline-poll-missing-source", "source.zip", "first available artifact");
+
+        Response executions = waitForPipelineExecutionCount(pipelineName, 1);
+        String executionId = executions.jsonPath().getString("pipelineExecutionSummaries[0].pipelineExecutionId");
+        waitForExecution(pipelineName, executionId, "Succeeded");
+        post("GetPipelineExecution", """
+                {"pipelineName": "%s", "pipelineExecutionId": "%s"}
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecution.trigger.triggerType", equalTo("PollForSourceChanges"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void s3SourcePollingDisabledDoesNotStartExecution() throws Exception {
+        createBucket("codepipeline-poll-disabled-source");
+        putObject("codepipeline-poll-disabled-source", "source.zip", "baseline artifact");
+
+        String pipelineName = "s3-source-polling-disabled";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-poll-disabled-source",
+                            "S3ObjectKey": "source.zip",
+                            "PollForSourceChanges": "false"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "PlaceholderAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "unused-codepipeline-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        putObject("codepipeline-poll-disabled-source", "source.zip", "changed artifact");
+        Thread.sleep(1200);
+
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(0));
 
         post("DeletePipeline", """
                 {"name": "%s"}
@@ -629,6 +852,191 @@ class CodePipelineIntegrationTest {
     }
 
     @Test
+    void stoppingCustomActionWaitsForWorkerSuccess() throws Exception {
+        String provider = "StopWaitSuccessWorker";
+        String pipelineName = "custom-worker-stop-wait-success";
+        createCustomWorkerPipeline(provider, pipelineName);
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().extract().path("pipelineExecutionId");
+        String jobId = waitForJob(provider).path("jobs[0].id");
+
+        post("StopPipelineExecution", """
+                {
+                    "pipelineName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "reason": "Wait for the custom worker"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200);
+
+        assertCustomWorkerIsStopping(pipelineName);
+        post("PutJobSuccessResult", """
+                {
+                    "jobId": "%s",
+                    "executionDetails": {
+                        "summary": "worker completed after stop request",
+                        "externalExecutionId": "stop-wait-success",
+                        "percentComplete": 100
+                    }
+                }
+                """.formatted(jobId)).then().statusCode(200);
+
+        waitForExecution(pipelineName, executionId, "Stopped");
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.status", equalTo("Stopped"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates[1].latestExecution", nullValue());
+
+        deleteCustomWorkerPipeline(provider, pipelineName);
+    }
+
+    @Test
+    void stoppingCustomActionWaitsForWorkerFailure() throws Exception {
+        String provider = "StopWaitFailureWorker";
+        String pipelineName = "custom-worker-stop-wait-failure";
+        createCustomWorkerPipeline(provider, pipelineName);
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().extract().path("pipelineExecutionId");
+        String jobId = waitForJob(provider).path("jobs[0].id");
+
+        post("StopPipelineExecution", """
+                {
+                    "pipelineName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "reason": "Wait for the failing custom worker"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200);
+
+        assertCustomWorkerIsStopping(pipelineName);
+        post("PutJobFailureResult", """
+                {
+                    "jobId": "%s",
+                    "failureDetails": {
+                        "type": "JobFailed",
+                        "message": "worker failed after stop request",
+                        "externalExecutionId": "stop-wait-failure"
+                    }
+                }
+                """.formatted(jobId)).then().statusCode(200);
+
+        waitForExecution(pipelineName, executionId, "Stopped");
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.status", equalTo("Failed"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Failed"))
+                .body("stageStates[1].latestExecution", nullValue());
+
+        deleteCustomWorkerPipeline(provider, pipelineName);
+    }
+
+    @Test
+    void abandoningCustomActionStopsWaitingImmediately() throws Exception {
+        String provider = "AbandonWorker";
+        String pipelineName = "custom-worker-stop-abandon";
+        createCustomWorkerPipeline(provider, pipelineName);
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().extract().path("pipelineExecutionId");
+        waitForJob(provider);
+
+        post("StopPipelineExecution", """
+                {
+                    "pipelineName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "abandon": true,
+                    "reason": "Abandon the custom worker"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200);
+
+        waitForExecution(pipelineName, executionId, "Stopped");
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.status", equalTo("Stopped"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Abandoned"))
+                .body("stageStates[1].latestExecution", nullValue());
+
+        deleteCustomWorkerPipeline(provider, pipelineName);
+    }
+
+    private void createCustomWorkerPipeline(String provider, String pipelineName) {
+        post("CreateCustomActionType", """
+                {
+                    "category": "Build",
+                    "provider": "%s",
+                    "version": "1",
+                    "inputArtifactDetails": {"minimumCount": 0, "maximumCount": 0},
+                    "outputArtifactDetails": {"minimumCount": 0, "maximumCount": 0}
+                }
+                """.formatted(provider))
+                .then()
+                .statusCode(200);
+
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Build",
+                    "actions": [{
+                        "name": "WorkerBuild",
+                        "actionTypeId": {
+                            "category": "Build",
+                            "owner": "Custom",
+                            "provider": "%s",
+                            "version": "1"
+                        }
+                    }]
+                },
+                {
+                    "name": "Complete",
+                    "actions": [{
+                        "name": "ManualApproval",
+                        "actionTypeId": {
+                            "category": "Approval",
+                            "owner": "AWS",
+                            "provider": "Manual",
+                            "version": "1"
+                        }
+                    }]
+                }
+                """.formatted(provider))).then().statusCode(200);
+    }
+
+    private void assertCustomWorkerIsStopping(String pipelineName) {
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.status", equalTo("Stopping"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("InProgress"))
+                .body("stageStates[1].latestExecution", nullValue());
+    }
+
+    private void deleteCustomWorkerPipeline(String provider, String pipelineName) {
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+        post("DeleteCustomActionType", """
+                {"category": "Build", "provider": "%s", "version": "1"}
+                """.formatted(provider)).then().statusCode(200);
+    }
+
+    @Test
     void putApprovalResultApprovesAndRejectsManualApprovalActions() throws Exception {
         String pipelineName = "approval-test-pipeline";
         post("CreatePipeline", pipeline(pipelineName, """
@@ -764,7 +1172,133 @@ class CodePipelineIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Failed"))
-                .body("stageStates[0].actionStates[0].latestExecution.summary", equalTo("Rejected by test"));
+                .body("stageStates[0].actionStates[0].latestExecution.summary", equalTo("Rejected by test"))
+                .body("stageStates[0].latestExecution.pipelineExecutionId", equalTo(executionId2))
+                .body("stageStates[0].latestExecution.status", equalTo("Failed"));
+    }
+
+    @Test
+    void stageStatusTracksMultipleRunOrdersAndStopBeforeLaterGroup() throws Exception {
+        String pipelineName = "multi-run-order-stage-status";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Approve",
+                    "actions": [
+                        {
+                            "name": "FirstApproval",
+                            "actionTypeId": {
+                                "category": "Approval",
+                                "owner": "AWS",
+                                "provider": "Manual",
+                                "version": "1"
+                            },
+                            "configuration": {},
+                            "runOrder": 1
+                        },
+                        {
+                            "name": "SecondApproval",
+                            "actionTypeId": {
+                                "category": "Approval",
+                                "owner": "AWS",
+                                "provider": "Manual",
+                                "version": "1"
+                            },
+                            "configuration": {},
+                            "runOrder": 2
+                        },
+                        {
+                            "name": "NeverStartedApproval",
+                            "actionTypeId": {
+                                "category": "Approval",
+                                "owner": "AWS",
+                                "provider": "Manual",
+                                "version": "1"
+                            },
+                            "configuration": {},
+                            "runOrder": 3
+                        }
+                    ]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "PlaceholderAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-artifacts",
+                            "ObjectKey": "placeholder"
+                        },
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        String firstToken = waitForApprovalToken(pipelineName, 0);
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "FirstApproval",
+                    "token": "%s",
+                    "result": {"status": "Approved", "summary": "First group complete"}
+                }
+                """.formatted(pipelineName, firstToken))
+                .then()
+                .statusCode(200);
+
+        waitForApprovalToken(pipelineName, 1);
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.pipelineExecutionId", equalTo(executionId))
+                .body("stageStates[0].latestExecution.status", equalTo("InProgress"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates[0].actionStates[1].latestExecution.status", equalTo("InProgress"))
+                .body("stageStates[0].actionStates[2].latestExecution", nullValue());
+
+        post("StopPipelineExecution", """
+                {
+                    "pipelineName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "abandon": true,
+                    "reason": "Verify stage status"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionId", equalTo(executionId));
+
+        waitForExecution(pipelineName, executionId, "Stopped");
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates[0].latestExecution.pipelineExecutionId", equalTo(executionId))
+                .body("stageStates[0].latestExecution.status", equalTo("Stopped"))
+                .body("stageStates[0].actionStates[0].latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates[0].actionStates[1].latestExecution.status", equalTo("Abandoned"))
+                .body("stageStates[0].actionStates[2].latestExecution", nullValue());
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
     }
 
     @Test
@@ -1035,7 +1569,55 @@ class CodePipelineIntegrationTest {
                 .body("__type", containsString("InvalidStructureException"));
     }
 
+    @Test
+    void parallelPipelineRejectsExecutionAfterAwsActiveLimit() throws Exception {
+        String pipelineName = "parallel-limit-pipeline";
+        post("CreatePipeline", approvalPipeline(pipelineName, "PARALLEL")).then().statusCode(200);
+        List<String> executionIds = new ArrayList<>();
+        try {
+            while (executionIds.size() < 50) {
+                executionIds.add(startExecution(pipelineName));
+            }
+            waitForActiveExecutions(pipelineName, 50);
+
+            post("StartPipelineExecution", "{\"name\": \"%s\"}".formatted(pipelineName))
+                    .then()
+                    .statusCode(400)
+                    .body("__type", containsString("ConcurrentPipelineExecutionsLimitExceededException"));
+        } finally {
+            stopExecutions(pipelineName, executionIds);
+        }
+    }
+
+    @Test
+    void queuedPipelineAcceptsStartsWhileAnExecutionRunsAndRejectsTheFiftyFirst() throws Exception {
+        String pipelineName = "queued-limit-pipeline";
+        post("CreatePipeline", approvalPipeline(pipelineName, "QUEUED")).then().statusCode(200);
+        List<String> executionIds = new ArrayList<>();
+        try {
+            executionIds.add(startExecution(pipelineName));
+            waitForApprovalToken(pipelineName);
+
+            assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+                while (executionIds.size() < 50) {
+                    executionIds.add(startExecution(pipelineName));
+                }
+            }, "StartPipelineExecution waited for the running execution to finish");
+
+            post("StartPipelineExecution", "{\"name\": \"%s\"}".formatted(pipelineName))
+                    .then()
+                    .statusCode(400)
+                    .body("__type", containsString("ConcurrentPipelineExecutionsLimitExceededException"));
+        } finally {
+            stopExecutions(pipelineName, executionIds);
+        }
+    }
+
     private Response waitForJob() throws Exception {
+        return waitForJob("FlociWorker");
+    }
+
+    private Response waitForJob(String provider) throws Exception {
         Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
         Response response;
         do {
@@ -1044,17 +1626,32 @@ class CodePipelineIntegrationTest {
                         "actionTypeId": {
                             "category": "Build",
                             "owner": "Custom",
-                            "provider": "FlociWorker",
+                            "provider": "%s",
                             "version": "1"
                         }
                     }
-                    """);
+                    """.formatted(provider));
             if (response.jsonPath().getList("jobs").size() == 1) {
                 return response;
             }
             Thread.sleep(50);
         } while (Instant.now().isBefore(deadline));
         throw new AssertionError("Custom action job was not created");
+    }
+
+    private Response waitForPipelineExecutionCount(String pipelineName, int expectedCount) throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
+        Response response;
+        do {
+            response = post("ListPipelineExecutions", """
+                    {"pipelineName": "%s"}
+                    """.formatted(pipelineName));
+            if (response.jsonPath().getList("pipelineExecutionSummaries").size() == expectedCount) {
+                return response;
+            }
+            Thread.sleep(50);
+        } while (Instant.now().isBefore(deadline));
+        throw new AssertionError("Pipeline execution count did not reach " + expectedCount);
     }
 
     private void waitForExecution(String pipelineName, String executionId, String expected) throws Exception {
@@ -1094,19 +1691,92 @@ class CodePipelineIntegrationTest {
     }
 
     private String waitForApprovalToken(String pipelineName) throws Exception {
+        return waitForApprovalToken(pipelineName, 0);
+    }
+
+    private String waitForApprovalToken(String pipelineName, int actionIndex) throws Exception {
         Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
         String token;
         do {
             token = post("GetPipelineState", """
                     {"name": "%s"}
                     """.formatted(pipelineName))
-                    .jsonPath().getString("stageStates[0].actionStates[0].latestExecution.token");
+                    .jsonPath().getString(
+                            "stageStates[0].actionStates[%d].latestExecution.token".formatted(actionIndex));
             if (token != null) {
                 return token;
             }
             Thread.sleep(50);
         } while (Instant.now().isBefore(deadline));
         throw new AssertionError("Approval token was not issued for pipeline " + pipelineName);
+    }
+
+    private void waitForActiveExecutions(String pipelineName, int expected) throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
+        do {
+            int active = post("ListPipelineExecutions", "{\"pipelineName\": \"%s\"}".formatted(pipelineName))
+                    .jsonPath().getList("pipelineExecutionSummaries.status", String.class).stream()
+                    .filter("InProgress"::equals)
+                    .toList()
+                    .size();
+            if (active >= expected) {
+                return;
+            }
+            Thread.sleep(50);
+        } while (Instant.now().isBefore(deadline));
+        throw new AssertionError("Pipeline did not reach " + expected + " active executions");
+    }
+
+    private static String approvalPipeline(String name, String executionMode) {
+        return """
+                {
+                    "pipeline": {
+                        "name": "%s",
+                        "roleArn": "arn:aws:iam::000000000000:role/codepipeline-role",
+                        "pipelineType": "V2",
+                        "executionMode": "%s",
+                        "artifactStore": {"type": "S3", "location": "codepipeline-artifacts"},
+                        "stages": [{
+                            "name": "Approve",
+                            "actions": [{
+                                "name": "ManualApproval",
+                                "actionTypeId": {
+                                    "category": "Approval",
+                                    "owner": "AWS",
+                                    "provider": "Manual",
+                                    "version": "1"
+                                }
+                            }]
+                        }, {
+                            "name": "Complete",
+                            "actions": [{
+                                "name": "ManualApprovalComplete",
+                                "actionTypeId": {
+                                    "category": "Approval",
+                                    "owner": "AWS",
+                                    "provider": "Manual",
+                                    "version": "1"
+                                }
+                            }]
+                        }]
+                    }
+                }
+                """.formatted(name, executionMode);
+    }
+
+    private static String startExecution(String pipelineName) {
+        return post("StartPipelineExecution", "{\"name\": \"%s\"}".formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().jsonPath().getString("pipelineExecutionId");
+    }
+
+    private static void stopExecutions(String pipelineName, List<String> executionIds) {
+        for (String executionId : executionIds) {
+            post("StopPipelineExecution", """
+                    {"pipelineName": "%s", "pipelineExecutionId": "%s", "abandon": true}
+                    """.formatted(pipelineName, executionId)).then().statusCode(200);
+        }
     }
 
     private static Response post(String action, String body) {

@@ -538,7 +538,7 @@ class LambdaServiceTest {
     }
 
     @Test
-    void createFunctionWithMissingHandler() throws Exception {
+    void createFunctionDoesNotValidateHandlerAtDeployTime() throws Exception {
         Map<String, Object> req = new java.util.HashMap<>(Map.of(
                 "FunctionName", "missing-handler-fn",
                 "Runtime", "nodejs20.x",
@@ -546,22 +546,24 @@ class LambdaServiceTest {
                 "Handler", "src/index.handler",
                 "Code", Map.of("ZipFile", createZipBase64("other.js"))
         ));
-        AwsException ex = assertThrows(AwsException.class, () -> service.createFunction(REGION, req));
-        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        LambdaFunction fn = service.createFunction(REGION, req);
+        assertEquals("src/index.handler", fn.getHandler());
     }
 
     @Test
-    void createFunctionWithMissingNestedPythonModuleHandler() throws Exception {
+    void updateFunctionCodeDoesNotValidateHandlerAtDeployTime() throws Exception {
         Map<String, Object> req = new java.util.HashMap<>(Map.of(
                 "FunctionName", "missing-nested-python-handler-fn",
                 "Runtime", "python3.11",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
                 "Handler", "apps.foo.src.lambda_handler.lambda_handler",
-                "Code", Map.of("ZipFile", createZipBase64("apps/foo/src/other.py"))
+                "Code", Map.of("ZipFile", createZipBase64("apps/foo/src/lambda_handler.py"))
         ));
-        AwsException ex = assertThrows(AwsException.class, () -> service.createFunction(REGION, req));
-        assertEquals("InvalidParameterValueException", ex.getErrorCode());
-        assertTrue(ex.getMessage().contains("apps/foo/src/lambda_handler"));
+        service.createFunction(REGION, req);
+
+        LambdaFunction fn = service.updateFunctionCode(REGION, "missing-nested-python-handler-fn",
+                Map.of("ZipFile", createZipBase64("apps/foo/src/other.py")));
+        assertEquals("apps.foo.src.lambda_handler.lambda_handler", fn.getHandler());
     }
 
     @Test

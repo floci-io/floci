@@ -4,11 +4,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEventService;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.Branch;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.MemoryEvent;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.PayloadType;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.Memory;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -27,6 +30,9 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * AgentCore memory endpoints. The operation is a literal path suffix
@@ -40,13 +46,16 @@ public class BedrockAgentCoreMemoryController {
     private static final Logger LOG = Logger.getLogger(BedrockAgentCoreMemoryController.class);
 
     private final BedrockAgentCoreMemoryService service;
+    private final BedrockAgentCoreEventService eventService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public BedrockAgentCoreMemoryController(BedrockAgentCoreMemoryService service,
+                                            BedrockAgentCoreEventService eventService,
                                             RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.service = service;
+        this.eventService = eventService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -170,32 +179,116 @@ public class BedrockAgentCoreMemoryController {
     }
 
     private static String text(JsonNode node, String field) {
-        JsonNode v = node.get(field);
-        return (v == null || v.isNull()) ? null : v.asText();
+        return BedrockAgentCoreControllerSupport.text(node, field);
     }
 
-    private static java.util.Map<String, String> stringMap(JsonNode node) {
-        if (node == null || !node.isObject()) {
-            return null;
-        }
-        java.util.Map<String, String> map = new java.util.HashMap<>();
-        node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
-        return map;
+    private static Map<String, String> stringMap(JsonNode node) {
+        return BedrockAgentCoreControllerSupport.stringMap(node);
     }
 
     private Response error(Exception e, String action) {
-        if (e instanceof AwsException aws) {
-            return Response.status(aws.getHttpStatus())
-                    .type(MediaType.APPLICATION_JSON)
-                    .header("X-Amzn-Errortype", aws.jsonType())
-                    .entity(new AwsErrorResponse(aws.jsonType(), aws.getMessage()))
-                    .build();
-        }
-        LOG.errorv(e, "Error {0}", action);
-        return Response.status(400)
-                .type(MediaType.APPLICATION_JSON)
-                .header("X-Amzn-Errortype", "ValidationException")
-                .entity(new AwsErrorResponse("ValidationException", e.getMessage()))
-                .build();
+        return BedrockAgentCoreControllerSupport.error(LOG, e, action);
     }
+
+    // ── AgentCore Memory events (data plane) ─────────────────────
+    //
+    // These are data-plane operations, but they live under /memories, and a JAX-RS request is
+    // matched against one root resource class only: a class rooted at "/" never gets a look in
+    // once this class claims the subtree. So the endpoints sit here while the behaviour stays in
+    // BedrockAgentCoreEventService.
+
+    @POST
+    @Path("/{memoryId}/events")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response createEvent(@Context HttpHeaders headers,
+                                @PathParam("memoryId") String memoryId,
+                                CreateEventRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            CreateEventRequest body = request == null ? new CreateEventRequest() : request;
+            // payload is required but may legitimately be empty, so presence is passed separately
+            // from the value: null means the member was omitted, not that it was an empty list.
+            MemoryEvent event = eventService.createEvent(memoryId, body.actorId(), body.sessionId(),
+                    body.eventTimestamp(), body.payload(), body.payload() != null, body.branch(), region);
+            // AWS answers CreateEvent with 201, not 200.
+            return Response.status(201).entity(Map.of("event", event)).build();
+        } catch (AwsException e) {
+            return error(e, "creating event");
+        }
+    }
+
+    /** ListEvents is a POST to the session path, not a GET. That is the real wire shape. */
+    @POST
+    @Path("/{memoryId}/actor/{actorId}/sessions/{sessionId}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listEvents(@Context HttpHeaders headers,
+                               @PathParam("memoryId") String memoryId,
+                               @PathParam("actorId") String actorId,
+                               @PathParam("sessionId") String sessionId,
+                               ListEventsRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ListEventsRequest body = request == null ? new ListEventsRequest() : request;
+            BedrockAgentCoreEventService.EventPage page = eventService.listEvents(memoryId, actorId, sessionId,
+                    body.includePayloads(), body.maxResults(), body.nextToken(), region);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("events", page.events());
+            // Only present when another page exists: an absent token ends a caller's loop.
+            if (page.nextToken() != null) {
+                response.put("nextToken", page.nextToken());
+            }
+            return Response.ok(response).build();
+        } catch (AwsException e) {
+            return error(e, "listing events");
+        }
+    }
+
+    @GET
+    @Path("/{memoryId}/actor/{actorId}/sessions/{sessionId}/events/{eventId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getEvent(@Context HttpHeaders headers,
+                             @PathParam("memoryId") String memoryId,
+                             @PathParam("actorId") String actorId,
+                             @PathParam("sessionId") String sessionId,
+                             @PathParam("eventId") String eventId) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            return Response.ok(Map.of("event",
+                    eventService.getEvent(memoryId, actorId, sessionId, eventId, region))).build();
+        } catch (AwsException e) {
+            return error(e, "getting event");
+        }
+    }
+
+    @DELETE
+    @Path("/{memoryId}/actor/{actorId}/sessions/{sessionId}/events/{eventId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteEvent(@Context HttpHeaders headers,
+                                @PathParam("memoryId") String memoryId,
+                                @PathParam("actorId") String actorId,
+                                @PathParam("sessionId") String sessionId,
+                                @PathParam("eventId") String eventId) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            // DeleteEvent echoes the id rather than answering with an empty body.
+            return Response.ok(Map.of("eventId",
+                    eventService.deleteEvent(memoryId, actorId, sessionId, eventId, region))).build();
+        } catch (AwsException e) {
+            return error(e, "deleting event");
+        }
+    }
+
+    /** Request body of {@code CreateEvent}; {@code sessionId} and {@code branch} are optional. */
+    public record CreateEventRequest(String actorId, String sessionId, Double eventTimestamp,
+                                     List<PayloadType> payload, Branch branch) {
+        public CreateEventRequest() { this(null, null, null, null, null); }
+    }
+
+    /** Request body of {@code ListEvents}. */
+    public record ListEventsRequest(Boolean includePayloads, Integer maxResults, String nextToken) {
+        public ListEventsRequest() { this(null, null, null); }
+    }
+
 }

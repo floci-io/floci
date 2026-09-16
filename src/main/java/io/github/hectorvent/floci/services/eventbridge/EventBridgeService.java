@@ -1096,8 +1096,8 @@ public class EventBridgeService implements ResourceProvider {
         if (busName == null || busName.isBlank()) {
             return "default";
         }
-        // Handle ARN format: arn:aws:events:region:account-id:event-bus/bus-name
-        if (busName.startsWith("arn:aws:events:")) {
+        // Handle ARN format: arn:<partition>:events:region:account-id:event-bus/bus-name
+        if (EVENT_BUS_ARN_PREFIX.matcher(busName).lookingAt()) {
             try {
                 return extractBusNameFromArn(busName);
             } catch (IllegalArgumentException e) {
@@ -1106,6 +1106,14 @@ public class EventBridgeService implements ResourceProvider {
         }
         return busName;
     }
+
+    /**
+     * The partition-tolerant form of {@code startsWith("arn:aws:events:")}: it matches a prefix,
+     * not a whole ARN, so a truncated {@code arn:aws:events:} still enters the branch below and is
+     * reported as a malformed ARN rather than silently taken as a literal bus name.
+     */
+    private static final Pattern EVENT_BUS_ARN_PREFIX =
+            Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX + ":events:");
 
     private static String extractBusNameFromArn(String arn) {
         // ARN format: arn:aws:events:region:account-id:event-bus/bus-name

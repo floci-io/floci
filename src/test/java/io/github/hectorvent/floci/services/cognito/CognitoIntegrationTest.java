@@ -2473,6 +2473,129 @@ class CognitoIntegrationTest {
                 .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
     }
 
+    /**
+     * github.com/floci-io/floci/issues/2864: found while addressing review feedback on the
+     * identity-provider version of this bug (#2858) - deleteUserPool cascaded to groups and
+     * identity providers but not users or resource servers, so a pool id pinned with the
+     * floci:override-id tag and recreated after delete inherited the deleted pool's users,
+     * password hashes included. This is the more serious of the two orphan cases.
+     */
+    @Test
+    @Order(103)
+    void deletedUserPoolDoesNotLeaveOrphanedUsersForAReusedPoolId() throws Exception {
+        String pinnedId = "us-east-1_userorph1";
+
+        cognitoAction("CreateUserPool", """
+                {
+                  "PoolName": "UserOrphanPool",
+                  "UserPoolTags": {"floci:override-id": "%s"}
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "orphanuser",
+                  "MessageAction": "SUPPRESS"
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("DeleteUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("CreateUserPool", """
+                {
+                  "PoolName": "UserOrphanPoolAgain",
+                  "UserPoolTags": {"floci:override-id": "%s"}
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+
+        assertEquals(0, cognitoJson("ListUsers", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(pinnedId)).path("Users").size(),
+                "a recreated pool must not inherit the deleted pool's users");
+
+        cognitoAction("DeleteUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+    }
+
+    /** Same as above, for resource servers (issue #2864's second orphan case). */
+    @Test
+    @Order(104)
+    void deletedUserPoolDoesNotLeaveOrphanedResourceServersForAReusedPoolId() throws Exception {
+        String pinnedId = "us-east-1_rsorph1";
+
+        cognitoAction("CreateUserPool", """
+                {
+                  "PoolName": "ResourceServerOrphanPool",
+                  "UserPoolTags": {"floci:override-id": "%s"}
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("CreateResourceServer", """
+                {
+                  "UserPoolId": "%s",
+                  "Identifier": "https://api.example.com",
+                  "Name": "API",
+                  "Scopes": [{"ScopeName": "read", "ScopeDescription": "r"}]
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("DeleteUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("CreateUserPool", """
+                {
+                  "PoolName": "ResourceServerOrphanPoolAgain",
+                  "UserPoolTags": {"floci:override-id": "%s"}
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+
+        assertEquals(0, cognitoJson("ListResourceServers", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(pinnedId)).path("ResourceServers").size(),
+                "a recreated pool must not inherit the deleted pool's resource servers");
+
+        cognitoAction("DeleteUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(pinnedId))
+                .then()
+                .statusCode(200);
+    }
+
     private static JsonNode decodeJwtPayload(String token) throws Exception {
         return decodeJwtPart(token, 1);
     }

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,6 +47,7 @@ class RedshiftServiceTest {
     private RegionResolver regionResolver;
     private RedshiftProxyManager proxyManager;
     private DockerHostResolver dockerHostResolver;
+    private RedshiftCredentialBroker credentialBroker;
     private RedshiftService service;
 
     @BeforeEach
@@ -85,7 +87,10 @@ class RedshiftServiceTest {
 
         regionResolver = new RegionResolver("us-east-1", "111111111111");
 
-        service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver);
+        credentialBroker = new RedshiftCredentialBroker();
+
+        service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker);
     }
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
@@ -250,14 +255,21 @@ class RedshiftServiceTest {
     void createClusterRemovesMetadataOnFailure() {
         when(clusterBackend.accountId()).thenReturn("111111111111");
         when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        // Simulate a concurrent GetClusterCredentials landing while the row exists, then fail
+        // container startup so the rollback path runs.
         when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
-                .thenThrow(new RuntimeException("startup failed"));
+                .thenAnswer(inv -> {
+                    credentialBroker.issue("111111111111", "c1", "analyst", List.of(), 900);
+                    throw new RuntimeException("startup failed");
+                });
 
         assertThrows(AwsException.class, () ->
                 service.createCluster("c1", "dc2.large", "admin", "password123"));
 
         verify(clusterBackend).delete("c1");
         verify(clusterBackend, atLeastOnce()).flush();
+        // The rollback that removes the cluster row must also drop that credential.
+        assertTrue(credentialBroker.resolve("111111111111", "c1", "analyst").isEmpty());
     }
 
     @Test
@@ -345,6 +357,18 @@ class RedshiftServiceTest {
         assertEquals("deleting", deleted.getClusterStatus());
         verify(cm).stop("111111111111", "test-c");
         verify(clusterBackend).delete("test-c");
+    }
+
+    @Test
+    void deleteClusterRevokesItsGetClusterCredentialsCredentials() {
+        Cluster c = new Cluster();
+        c.setClusterIdentifier("test-c");
+        when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
+        credentialBroker.issue("111111111111", "test-c", "analyst", List.of(), 900);
+
+        service.deleteCluster("test-c");
+
+        assertTrue(credentialBroker.resolve("111111111111", "test-c", "analyst").isEmpty());
     }
 
     @Test
@@ -1100,5 +1124,78 @@ class RedshiftServiceTest {
     private static String extractResourceId(String arn) {
         String resource = arn.substring(arn.lastIndexOf(':') + 1);
         return resource.contains("/") ? resource.substring(resource.lastIndexOf('/') + 1) : resource;
+    }
+
+    // ── passwordValidatorFor / GetClusterCredentials broker wiring ─────────────
+
+    private void seedCluster(String accountId, String clusterId) {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier(clusterId);
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("SecretPass1");
+        when(clusterBackend.getForAccount(accountId, clusterId)).thenReturn(Optional.of(cluster));
+    }
+
+    @Test
+    void passwordValidatorAcceptsMasterPair() {
+        seedCluster("acc", "c1");
+
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                validator.validate("admin", "SecretPass1"));
+    }
+
+    @Test
+    void passwordValidatorRejectsEverythingWhenClusterRowIsAbsent() {
+        when(clusterBackend.getForAccount("acc", "gone")).thenReturn(Optional.empty());
+
+        PasswordValidator validator = service.passwordValidatorForTesting("acc", "gone");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT, validator.validate("admin", "SecretPass1"));
+        assertEquals(PasswordValidator.AuthResult.REJECT, validator.validate("analyst", "anything"));
+    }
+
+    @Test
+    void passwordValidatorRejectsMasterUserWithWrongPassword() {
+        seedCluster("acc", "c1");
+
+        PasswordValidator validator = service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT,
+                validator.validate("admin", "not-the-master-password"));
+    }
+
+    @Test
+    void passwordValidatorAcceptsLiveBrokerCredentialAsMasterEquivalent() {
+        seedCluster("acc", "c1");
+        TempCredential cred = credentialBroker.issue("acc", "c1", "analyst", List.of(), 900);
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                validator.validate("analyst", cred.password()));
+    }
+
+    @Test
+    void passwordValidatorRejectsKnownBrokerUserWithWrongPassword() {
+        seedCluster("acc", "c1");
+        credentialBroker.issue("acc", "c1", "analyst", List.of(), 900);
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT,
+                validator.validate("analyst", "nope"));
+    }
+
+    @Test
+    void passwordValidatorPassesThroughUnknownUser() {
+        seedCluster("acc", "c1");
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.PASSTHROUGH,
+                validator.validate("someone-else", "whatever"));
     }
 }

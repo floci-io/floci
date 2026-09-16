@@ -60,6 +60,8 @@ public class CloudWatchLogsService implements ResourceProvider {
     private final StorageBackend<String, ResourcePolicy> resourcePolicyStore;
     private final RegionResolver regionResolver;
     private final int maxEventsPerQuery;
+    /** Ceiling on stored events across every group in an account; the oldest are evicted first once exceeded. */
+    private final int maxStoredEvents;
     /**
      * Monotonic counter assigning an ingestion sequence to each stored event. Seeded from
      * the highest sequence already in the store so ordering survives persistence reloads.
@@ -105,6 +107,7 @@ public class CloudWatchLogsService implements ResourceProvider {
                 storageFactory.create("cloudwatchlogs", "cwlogs-resource-policies.json",
                         new TypeReference<>() {}),
                 config.services().cloudwatchlogs().maxEventsPerQuery(),
+                config.services().cloudwatchlogs().maxStoredEvents(),
                 regionResolver,
                 config.services().cloudwatchlogs().queryCompletionDelayMs(),
                 System::currentTimeMillis
@@ -118,7 +121,18 @@ public class CloudWatchLogsService implements ResourceProvider {
                            int maxEventsPerQuery,
                            RegionResolver regionResolver) {
         this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
-                maxEventsPerQuery, regionResolver, 0L, System::currentTimeMillis);
+                maxEventsPerQuery, Integer.MAX_VALUE, regionResolver, 0L, System::currentTimeMillis);
+    }
+
+    CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
+                           StorageBackend<String, LogStream> streamStore,
+                           StorageBackend<String, LogEvent> eventStore,
+                           StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           int maxEventsPerQuery,
+                           int maxStoredEvents,
+                           RegionResolver regionResolver) {
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
+                maxEventsPerQuery, maxStoredEvents, regionResolver, 0L, System::currentTimeMillis);
     }
 
     CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
@@ -130,7 +144,7 @@ public class CloudWatchLogsService implements ResourceProvider {
                            long queryCompletionDelayMs,
                            LongSupplier clock) {
         this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
-                maxEventsPerQuery, regionResolver, queryCompletionDelayMs, clock);
+                maxEventsPerQuery, Integer.MAX_VALUE, regionResolver, queryCompletionDelayMs, clock);
     }
 
     CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
@@ -139,6 +153,7 @@ public class CloudWatchLogsService implements ResourceProvider {
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
                            StorageBackend<String, ResourcePolicy> resourcePolicyStore,
                            int maxEventsPerQuery,
+                           int maxStoredEvents,
                            RegionResolver regionResolver,
                            long queryCompletionDelayMs,
                            LongSupplier clock) {
@@ -148,6 +163,7 @@ public class CloudWatchLogsService implements ResourceProvider {
         this.subscriptionFilterStore = subscriptionFilterStore;
         this.resourcePolicyStore = resourcePolicyStore;
         this.maxEventsPerQuery = maxEventsPerQuery;
+        this.maxStoredEvents = maxStoredEvents;
         this.regionResolver = regionResolver;
         long maxSequence = eventStore.scan(k -> true).stream()
                 .mapToLong(LogEvent::getSequence)
@@ -560,6 +576,9 @@ public class CloudWatchLogsService implements ResourceProvider {
             if (maxTs == null || ts > maxTs) { maxTs = ts; }
         }
 
+        evictEventsPastRetention(accountId, region, groupName, now);
+        evictEventsBeyondCapacity(accountId);
+
         // Update stream metadata
         if (minTs != null) {
             if (stream.getFirstEventTimestamp() == null || minTs < stream.getFirstEventTimestamp()) {
@@ -576,6 +595,60 @@ public class CloudWatchLogsService implements ResourceProvider {
         putForAccount(streamStore, accountId, streamKey, stream);
 
         return nextToken;
+    }
+
+    /**
+     * Drops this group's events older than its retention policy. AWS expires them lazily in the
+     * background; doing it on ingest keeps the on-disk store from growing past what a
+     * {@code PutRetentionPolicy} promised.
+     */
+    private void evictEventsPastRetention(String accountId, String region, String groupName, long now) {
+        Integer retentionInDays = getForAccount(groupStore, accountId, groupKey(region, groupName))
+                .map(LogGroup::getRetentionInDays)
+                .orElse(null);
+        if (retentionInDays == null) {
+            return;
+        }
+        long cutoff = now - retentionInDays * 86_400_000L;
+        String groupPrefix = region + "::" + groupName + "::";
+        for (String key : List.copyOf(keysForAccount(eventStore, accountId))) {
+            if (!key.startsWith(groupPrefix)) {
+                continue;
+            }
+            boolean expired = getForAccount(eventStore, accountId, key)
+                    .map(event -> event.getTimestamp() < cutoff).orElse(false);
+            if (expired) {
+                deleteForAccount(eventStore, accountId, key);
+            }
+        }
+    }
+
+    /**
+     * Keeps an account's event store under {@link #maxStoredEvents} by dropping the oldest events.
+     * The store is persisted as a single document rewritten in full on each flush, so its size
+     * is the cost of every flush; without a ceiling a chatty function turns log ingestion into a
+     * sustained disk writer.
+     * <p>
+     * The ceiling is best-effort rather than atomic: this method is not synchronized, so two
+     * concurrent PutLogEvents calls for the same account can each scan and evict independently and
+     * briefly overshoot the cap. The next ingest corrects the drift, which mirrors how CloudWatch
+     * Logs itself deletes expired events lazily rather than at an exact boundary.
+     */
+    private void evictEventsBeyondCapacity(String accountId) {
+        List<String> keys = List.copyOf(keysForAccount(eventStore, accountId));
+        int excess = keys.size() - maxStoredEvents;
+        if (excess <= 0) {
+            return;
+        }
+        List<Map.Entry<String, LogEvent>> oldestFirst = new ArrayList<>(keys.size());
+        for (String key : keys) {
+            getForAccount(eventStore, accountId, key).ifPresent(event -> oldestFirst.add(Map.entry(key, event)));
+        }
+        oldestFirst.sort(Map.Entry.comparingByValue(EVENT_ORDER));
+        for (Map.Entry<String, LogEvent> entry : oldestFirst.subList(0, Math.min(excess, oldestFirst.size()))) {
+            deleteForAccount(eventStore, accountId, entry.getKey());
+        }
+        LOG.debugv("Evicted {0} oldest log event(s) to stay within the {1}-event store ceiling", excess, maxStoredEvents);
     }
 
     private <V> Optional<V> getForAccount(
@@ -597,6 +670,25 @@ public class CloudWatchLogsService implements ResourceProvider {
             return;
         }
         store.put(key, value);
+    }
+
+    private <V> Set<String> keysForAccount(StorageBackend<String, V> store, String accountId) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> aware = (AccountAwareStorageBackend<V>) rawAware;
+            return aware.keysForAccount(accountId);
+        }
+        return store.keys();
+    }
+
+    private <V> void deleteForAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> aware = (AccountAwareStorageBackend<V>) rawAware;
+            aware.deleteForAccount(accountId, key);
+            return;
+        }
+        store.delete(key);
     }
 
     public record LogEventsResult(List<LogEvent> events, String nextForwardToken, String nextBackwardToken) {}

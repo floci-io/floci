@@ -71,6 +71,7 @@ public final class CognitoMessageDispatcher {
                     DEFAULT_FROM,
                     List.of(email),
                     List.of(), List.of(), List.of(),
+                    null,          // returnPath
                     subject,
                     body,
                     null,          // bodyHtml

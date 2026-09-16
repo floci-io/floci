@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
 import io.github.hectorvent.floci.services.wafv2.model.WebAcl;
@@ -35,6 +36,9 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         JsonNode resolved = ctx.engine().resolveNode(props);
+        String scope = required(text(resolved, "Scope"), "Scope");
+        required(raw(resolved, "DefaultAction"), "DefaultAction");
+        required(raw(resolved, "VisibilityConfig"), "VisibilityConfig");
         String name = text(resolved, "Name");
         WebAcl existing = findExisting(resource.getPhysicalId());
         if (name == null || name.isBlank()) {
@@ -42,7 +46,6 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
                     ? ctx.generatePhysicalName(resource.getLogicalId(), 128, false)
                     : existing.getName();
         }
-        String scope = text(resolved, "Scope");
         WebAcl desired = fromProperties(resolved);
         WebAcl acl;
         if (existing != null && existing.getName().equals(name) && existing.getScope().equals(scope)) {
@@ -107,8 +110,15 @@ public class WafV2CfnProvisioner implements CfnResourceProvisioner {
         return acl;
     }
 
+    private static String required(String value, String property) {
+        if (value == null || value.isBlank()) {
+            throw new AwsException("ValidationError", WEB_ACL + " requires " + property, 400);
+        }
+        return value;
+    }
+
     private void reconcileTags(WebAcl existing, Map<String, String> desired) {
-        List<String> removed = existing.getTags().keySet().stream()
+        List<String> removed = wafV2Service.listTagsForResource(existing.getArn()).keySet().stream()
                 .filter(key -> !desired.containsKey(key)).toList();
         if (!removed.isEmpty()) {
             wafV2Service.untagResource(existing.getArn(), removed);

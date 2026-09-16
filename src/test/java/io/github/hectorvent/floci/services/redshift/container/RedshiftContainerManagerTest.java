@@ -36,14 +36,17 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -490,5 +493,53 @@ class RedshiftContainerManagerTest {
                 manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "NewSecret1"));
         assertEquals("InternalFailure", ex.getErrorCode());
         assertEquals(500, ex.getHttpStatus());
+    }
+
+    @Test
+    void testStartAttachesLogStreamerAndToleratesFailure() throws Exception {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo info = new ContainerInfo("cont-stream", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+        Closeable stream = mock(Closeable.class);
+        when(logStreamer.attach("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
+                .thenReturn(stream);
+
+        RedshiftContainerHandle handle = manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+        assertNotNull(handle);
+        assertEquals(stream, handle.getLogStream());
+        verify(logStreamer).attach("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
+
+        // When logStreamer throws, start still completes successfully
+        doThrow(new RuntimeException("stream error"))
+                .when(logStreamer).attach(anyString(), anyString(), anyString(), anyString(), anyString());
+        RedshiftContainerHandle handleTolerated = manager.start(ACCOUNT_ID, "test-cluster-2", "admin", "pass");
+        assertNotNull(handleTolerated);
+        assertNull(handleTolerated.getLogStream());
+    }
+
+    @Test
+    void testAdoptOrStartAttachesLogStreamerAndToleratesFailure() throws Exception {
+        String containerName = "floci-redshift-" + ACCOUNT_ID + "-test-cluster";
+        Container existing = mock(Container.class);
+        when(existing.getId()).thenReturn("cont-adopt-stream");
+        when(lifecycleManager.findByName(containerName)).thenReturn(Optional.of(existing));
+        ContainerInfo adopted = new ContainerInfo("cont-adopt-stream", Map.of(5432, new EndpointInfo("localhost", 6000)));
+        when(lifecycleManager.adopt(eq("cont-adopt-stream"), any())).thenReturn(adopted);
+        Closeable stream = mock(Closeable.class);
+        when(logStreamer.attach("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
+                .thenReturn(stream);
+
+        RedshiftContainerHandle handle = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
+        assertNotNull(handle);
+        assertEquals(stream, handle.getLogStream());
+        verify(logStreamer).attach("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
+
+        // When logStreamer throws, adoptOrStart still completes successfully
+        doThrow(new RuntimeException("stream error"))
+                .when(logStreamer).attach(anyString(), anyString(), anyString(), anyString(), anyString());
+        RedshiftContainerHandle handleTolerated = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
+        assertNotNull(handleTolerated);
+        assertNull(handleTolerated.getLogStream());
     }
 }

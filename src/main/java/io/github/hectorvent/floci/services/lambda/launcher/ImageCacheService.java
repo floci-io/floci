@@ -63,7 +63,7 @@ public class ImageCacheService {
             }
             InspectImageResponse localImage = inspectLocalImage(imageUri);
             if (matchesPlatform(localImage, requestedPlatform)) {
-                resolvedImage = resolvedImageReference(imageUri, requestedPlatform, localImage);
+                resolvedImage = resolvedImageReference(imageUri, localImage);
                 resolvedImages.put(imageKey, resolvedImage);
                 LOG.infov("Image already present locally, skipping pull: {0}", imageUri);
                 return resolvedImage;
@@ -79,8 +79,7 @@ public class ImageCacheService {
                     pullImage.exec(new PullImageResultCallback())
                             .awaitCompletion(5, TimeUnit.MINUTES);
                 });
-                resolvedImage = resolvedImageReference(imageUri, requestedPlatform,
-                        inspectLocalImage(imageUri));
+                resolvedImage = resolvedImageReference(imageUri, inspectLocalImage(imageUri));
                 resolvedImages.put(imageKey, resolvedImage);
                 LOG.infov("Image pulled successfully: {0}", imageUri);
                 return resolvedImage;
@@ -198,11 +197,19 @@ public class ImageCacheService {
                 && parts[1].equals(image.getArch());
     }
 
-    private static String resolvedImageReference(String imageUri, String platform,
-                                                  InspectImageResponse image) {
-        if (!matchesPlatform(image, platform)) {
-            throw new DockerClientException(
-                    "Docker image does not match requested platform " + platform + ": " + imageUri);
+    /**
+     * Resolves the reference the container is created from. Inspecting the image cannot confirm
+     * the platform on Docker 29, whose containerd image store is the default: for an image whose
+     * platform is not the host's it answers with an empty Os and Architecture until another
+     * variant of the same tag is present, and with the host's variant once one is, because the
+     * tag and its id both name the index rather than the variant that will run. Neither answer
+     * says anything about the variant the daemon selected. The platform is enforced by the daemon
+     * itself at both points that matter, choosing the variant to pull and choosing the variant to
+     * create the container from, so this only has to hand back an id.
+     */
+    private static String resolvedImageReference(String imageUri, InspectImageResponse image) {
+        if (image == null) {
+            throw new DockerClientException("Docker did not report the image: " + imageUri);
         }
         String imageId = image.getId();
         if (imageId == null || imageId.isBlank()) {

@@ -261,13 +261,42 @@ public class LambdaService implements ResourceProvider {
     // content mounted, which is correct AWS-parity behavior for a layer deleted *after* being
     // attached (AWS doesn't re-validate on every invoke either), but was previously the only
     // signal at all for a bad ARN, even a typo caught at attach time on real AWS.
+    //
+    // An ARN naming another account or another partition is answered on the live service by the
+    // layer's resource policy: a public layer resolves, and everything else is
+    // AccessDeniedException. Measured on CreateFunction in ap-southeast-1, a foreign-account ARN
+    // and a cross-partition ARN return the same AccessDeniedException, so Floci returns that for
+    // both rather than inventing a distinction the API does not make.
+    //
+    // Floci implements no layer permissions, so it cannot tell a public layer from a private one
+    // and cannot fetch either one's content. Refusing is the faithful default: it is the answer
+    // AWS gives to every foreign ARN except a public layer. floci.services.lambda
+    // .accept-external-layer-arns records a same-partition foreign ARN unresolved instead, which
+    // is what a stack attaching Powertools or the AppConfig extension needs. Cross-partition
+    // stays refused even then, because partitions are isolated and no policy can reach across
+    // one, and because GetLayerVersionByArn already calls such an ARN invalid.
     private void validateLayersResolvable(List<String> layerArns) {
         if (layerArns == null || layerService == null) return;
         for (String arn : layerArns) {
-            if (layerService.resolveLayerByArn(arn) == null) {
-                throw new AwsException("InvalidParameterValueException",
-                        "Layer version " + arn + " does not exist.", 400);
+            if (layerService.resolveLayerByArn(arn) != null) {
+                continue;
             }
+            if (layerService.isForeignLayerArn(arn)) {
+                boolean acceptable = !layerService.isForeignPartitionLayerArn(arn)
+                        && config != null
+                        && config.services().lambda().acceptExternalLayerArns();
+                if (!acceptable) {
+                    throw new AwsException("AccessDeniedException",
+                            "User is not authorized to perform: lambda:GetLayerVersion on resource: "
+                                    + arn + " because no resource-based policy allows the"
+                                    + " lambda:GetLayerVersion action", 403);
+                }
+                LOG.warnv("Layer {0} belongs to another account; recorded on the function but its"
+                        + " content will not be mounted at /opt", arn);
+                continue;
+            }
+            throw new AwsException("InvalidParameterValueException",
+                    "Layer version " + arn + " does not exist.", 400);
         }
     }
 
@@ -945,7 +974,7 @@ public class LambdaService implements ResourceProvider {
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             warmPool.drainEnvironment(version.get());
             functionStore.deleteVersion(region, name, qualifier);
-            reclaimVersionCodeDirectory(fn, qualifier, version.get());
+            reclaimVersionCodeDirectory(region, fn, qualifier, version.get());
             // The snapshot may still share $LATEST's code directory, so this only reclaims once no
             // remaining version references it.
             reclaimLegacyCodeDirectoryIfUnused(name);
@@ -969,7 +998,7 @@ public class LambdaService implements ResourceProvider {
             if (concurrencyLimiter != null) {
                 concurrencyLimiter.reset(arn);
             }
-            codeStore.delete(ownerAccount(fn), functionName);
+            codeStore.delete(ownerAccount(fn), region, functionName);
             functionStore.delete(region, functionName);
             reclaimLegacyCodeDirectoryIfUnused(functionName);
             versionCounters.remove(versionCounterKey(region, fn));
@@ -1002,15 +1031,15 @@ public class LambdaService implements ResourceProvider {
      * and hot-reload versions never had a copy at all: for those the recorded path is the live
      * function's own directory, and removing it would delete the code {@code $LATEST} still runs.
      */
-    private void reclaimVersionCodeDirectory(LambdaFunction fn, String version, LambdaFunction snapshot) {
+    private void reclaimVersionCodeDirectory(String region, LambdaFunction fn, String version, LambdaFunction snapshot) {
         String recorded = snapshot.getCodeLocalPath();
         if (recorded == null) {
             return;
         }
-        String owned = codeStore.getVersionCodePath(ownerAccount(fn), fn.getFunctionName(), version)
+        String owned = codeStore.getVersionCodePath(ownerAccount(fn), region, fn.getFunctionName(), version)
                 .toAbsolutePath().normalize().toString();
         if (owned.equals(Path.of(recorded).toAbsolutePath().normalize().toString())) {
-            codeStore.deleteVersion(ownerAccount(fn), fn.getFunctionName(), version);
+            codeStore.deleteVersion(ownerAccount(fn), region, fn.getFunctionName(), version);
         }
     }
 
@@ -1331,6 +1360,9 @@ public class LambdaService implements ResourceProvider {
                 ? b
                 : null;
 
+        Integer maximumRetryAttempts = parseMaximumRetryAttempts(request);
+        Integer maximumRecordAgeInSeconds = parseMaximumRecordAgeInSeconds(request);
+
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
         EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
@@ -1356,6 +1388,8 @@ public class LambdaService implements ResourceProvider {
         esm.setScalingConfig(scalingConfig);
         esm.setFunctionResponseTypes(functionResponseTypes);
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
+        esm.setMaximumRetryAttempts(maximumRetryAttempts);
+        esm.setMaximumRecordAgeInSeconds(maximumRecordAgeInSeconds);
         esm.setDestinationConfig(destinationConfig);
         esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
@@ -1739,6 +1773,50 @@ public class LambdaService implements ResourceProvider {
         return (int) value;
     }
 
+    private Integer parseMaximumRetryAttempts(Map<String, Object> request) {
+        Object raw = request.get("MaximumRetryAttempts");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Number)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be a numeric value", 400);
+        }
+        double d = ((Number) raw).doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be an integer", 400);
+        }
+        long value = ((Number) raw).longValue();
+        if (value < -1 || value > 10000) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRetryAttempts must be between -1 and 10000 (got " + value + ")", 400);
+        }
+        return (int) value;
+    }
+
+    private Integer parseMaximumRecordAgeInSeconds(Map<String, Object> request) {
+        Object raw = request.get("MaximumRecordAgeInSeconds");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Number)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRecordAgeInSeconds must be a numeric value", 400);
+        }
+        double d = ((Number) raw).doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRecordAgeInSeconds must be an integer", 400);
+        }
+        long value = ((Number) raw).longValue();
+        if (value != -1 && (value < 60 || value > 604800)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRecordAgeInSeconds must be -1 or between 60 and 604800 (got " + value + ")", 400);
+        }
+        return (int) value;
+    }
+
     private void startPollingHelper(EventSourceMapping esm) {
         if (esm.getEventSourceArn() == null) {
             return;
@@ -1822,6 +1900,13 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("BisectBatchOnFunctionError")) {
             Object raw = request.get("BisectBatchOnFunctionError");
             esm.setBisectBatchOnFunctionError(raw instanceof Boolean b ? b : null);
+        }
+
+        if (request.containsKey("MaximumRetryAttempts")) {
+            esm.setMaximumRetryAttempts(parseMaximumRetryAttempts(request));
+        }
+        if (request.containsKey("MaximumRecordAgeInSeconds")) {
+            esm.setMaximumRecordAgeInSeconds(parseMaximumRecordAgeInSeconds(request));
         }
 
         if (request.containsKey("DestinationConfig")) {
@@ -1976,14 +2061,14 @@ public class LambdaService implements ResourceProvider {
      * configuration, and falling back leaves it exactly as good as every version published before
      * this existed, rather than turning a working call into an error.
      */
-    private String versionCodePath(LambdaFunction fn, String version) {
+    private String versionCodePath(String region, LambdaFunction fn, String version) {
         String current = fn.getCodeLocalPath();
         if (current == null || fn.getHotReloadHostPath() != null) {
             return current;
         }
         try {
             Path copied = codeStore.copyForVersion(
-                    ownerAccount(fn), fn.getFunctionName(), version, Path.of(current));
+                    ownerAccount(fn), region, fn.getFunctionName(), version, Path.of(current));
             return copied == null ? current : copied.toAbsolutePath().normalize().toString();
         } catch (IOException e) {
             LOG.warnv("Could not give version {0} of {1} its own code directory, "
@@ -2116,7 +2201,7 @@ public class LambdaService implements ResourceProvider {
             // Nothing to copy for image-backed or hot-reload functions, which keep the reference
             // they had: an image is already immutable by digest, and a hot-reload function's whole
             // point is that its bind-mounted directory tracks the developer's working tree.
-            snapshot.setCodeLocalPath(versionCodePath(fn, String.valueOf(version)));
+            snapshot.setCodeLocalPath(versionCodePath(region, fn, String.valueOf(version)));
             snapshot.setCodeSha256(fn.getCodeSha256());
             snapshot.setS3Bucket(fn.getS3Bucket());
             snapshot.setS3Key(fn.getS3Key());
@@ -2382,6 +2467,16 @@ public class LambdaService implements ResourceProvider {
     /**
      * LogGroup is the one LoggingConfig member with a documented length and character
      * constraint rather than an enum: 1-512 characters, {@code [.\-_/#A-Za-z0-9]+}.
+     *
+     * <p>A blank LogGroup (empty or whitespace-only) is deliberately read as "not supplied"
+     * rather than as a violation of that 1-character minimum, so {@link #applyLoggingConfig}
+     * falls back to the {@code /aws/lambda/} default exactly as it does for an absent member.
+     * The minimum is real in the service model, but botocore enforces it client side, so an
+     * empty LogGroup never reaches the wire from an SDK caller and nobody has observed what
+     * the service itself answers to one. Rejecting it here would be a 400 we inferred rather
+     * than measured; accepting it costs a caller nothing. That leniency is pinned by
+     * {@code LambdaVpcSnapStartLoggingIntegrationTest}, so a later reader who wants the
+     * minimum enforced has to change the decision, not just the guard.
      */
     private static void validateLogGroup(Object value) {
         if (!(value instanceof String group) || group.isBlank()) {
@@ -2868,7 +2963,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes, String region) {
-        Path codePath = codeStore.getCodePath(ownerAccount(fn), fn.getFunctionName());
+        Path codePath = codeStore.getCodePath(ownerAccount(fn), region, fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath, configuredZipMaxEntries());
             // Publish the new code identity under the same per-function lock publishVersion holds.
@@ -2887,30 +2982,6 @@ public class LambdaService implements ResourceProvider {
                 fn.setCodeSizeBytes(zipBytes.length);
                 if (newSha256 != null) {
                     fn.setCodeSha256(newSha256);
-                }
-            }
-
-            // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
-            if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {
-                String handlerFile = resolveHandlerFilePath(fn);
-                boolean pythonRuntime = fn.getRuntime().startsWith("python");
-                boolean found;
-                try (var walk = Files.walk(codePath)) {
-                    found = walk
-                            .filter(Files::isRegularFile)
-                            .anyMatch(p -> {
-                                String relative = codePath.relativize(p).toString();
-                                String withoutExt = relative.contains(".")
-                                        ? relative.substring(0, relative.lastIndexOf('.'))
-                                        : relative;
-                                String normalized = withoutExt.replace('\\', '/');
-                                return normalized.equals(handlerFile)
-                                        || (pythonRuntime && normalized.equals(handlerFile + "/__init__"));
-                            });
-                }
-                if (!found) {
-                    throw new AwsException("InvalidParameterValueException",
-                            "Handler file '" + handlerFile + "' not found in deployment package", 400);
                 }
             }
 
@@ -3010,22 +3081,6 @@ public class LambdaService implements ResourceProvider {
                     "Unable to fetch code from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
         }
         extractZipCodeBytes(fn, obj.getData(), region);
-    }
-
-    private String resolveHandlerFilePath(LambdaFunction fn) {
-        String handler = fn.getHandler();
-        int lastDot = handler.lastIndexOf('.');
-        String modulePath = lastDot >= 0 ? handler.substring(0, lastDot) : handler;
-        if (fn.getRuntime().startsWith("python")) {
-            return modulePath.replace('.', '/');
-        }
-        // A file-based handler may be given with a leading "./" (e.g.
-        // "./v1/lambda-handlers/entry.handler"); deployment-package entries are stored without
-        // it, so normalize the prefix away before matching.
-        if (modulePath.startsWith("./")) {
-            modulePath = modulePath.substring(2);
-        }
-        return modulePath;
     }
 
     private void applyHotReload(LambdaFunction fn, String hostPath) {

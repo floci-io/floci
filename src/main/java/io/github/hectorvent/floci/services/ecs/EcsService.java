@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
@@ -40,6 +42,7 @@ import java.time.Instant;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -87,6 +90,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     private final Map<String, EcsTaskHandle> taskHandles = new ConcurrentHashMap<>();
     // region::clusterName/serviceName → EcsServiceModel
     private Map<String, EcsServiceModel> services = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<EcsServiceModel> servicesStore;
 
     public static final String DEFAULT_SCHEDULING_STRATEGY = "REPLICA";
     public static final String SCHEDULING_DAEMON = "DAEMON";
@@ -141,8 +145,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 new TypeReference<Map<String, TaskDefinition>>() {});
         this.latestRevisions = storageBacked("ecs-latest-revisions.json",
                 new TypeReference<Map<String, Integer>>() {});
-        this.services = storageBacked("ecs-services.json",
+        this.servicesStore = storageFactory.create("ecs", "ecs-services.json",
                 new TypeReference<Map<String, EcsServiceModel>>() {});
+        this.services = new StorageBackedMap<>(this.servicesStore);
         this.capacityProviders = storageBacked("ecs-capacity-providers.json",
                 new TypeReference<Map<String, CapacityProvider>>() {});
         this.attributes = storageBacked("ecs-attributes.json",
@@ -803,6 +808,25 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                                           Map<String, String> tags, String schedulingStrategy,
                                           String deploymentControllerType, String availabilityZoneRebalancing,
                                           String region) {
+        return createService(clusterRef, serviceName, taskDefinition, desiredCount, launchType,
+                loadBalancers, networkConfiguration, tags, schedulingStrategy, deploymentControllerType,
+                availabilityZoneRebalancing, null, region);
+    }
+
+    /**
+     * @param schedulingStrategy            {@code REPLICA} (default) or {@code DAEMON}
+     * @param deploymentControllerType      {@code ECS} (default), {@code CODE_DEPLOY} or {@code EXTERNAL}
+     * @param availabilityZoneRebalancing   {@code ENABLED} or {@code DISABLED} (default)
+     * @param serviceConnectConfiguration   reported back on each {@code deployments[]} entry
+     */
+    public EcsServiceModel createService(String clusterRef, String serviceName, String taskDefinition,
+                                          int desiredCount, LaunchType launchType,
+                                          List<EcsLoadBalancer> loadBalancers,
+                                          NetworkConfiguration networkConfiguration,
+                                          Map<String, String> tags, String schedulingStrategy,
+                                          String deploymentControllerType, String availabilityZoneRebalancing,
+                                          Map<String, Object> serviceConnectConfiguration,
+                                          String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         // AWS resolves family / family:revision at create time and stores the ARN; the
         // reconciler compares it with each task's taskDefinitionArn, so pin it here.
@@ -847,6 +871,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         svc.setDeploymentController(controller);
         svc.setAvailabilityZoneRebalancing(availabilityZoneRebalancing != null
                 ? availabilityZoneRebalancing : DEFAULT_AZ_REBALANCING_ON_CREATE);
+        svc.setServiceConnectConfiguration(serviceConnectConfiguration);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
         svc.setLastDeploymentAt(svc.getCreatedAt());
@@ -885,6 +910,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                                           Integer desiredCount, NetworkConfiguration networkConfiguration,
                                           String availabilityZoneRebalancing, boolean forceNewDeployment,
                                           String region) {
+        return updateService(clusterRef, serviceName, taskDefinition, desiredCount, networkConfiguration,
+                availabilityZoneRebalancing, forceNewDeployment, null, region);
+    }
+
+    public EcsServiceModel updateService(String clusterRef, String serviceName, String taskDefinition,
+                                          Integer desiredCount, NetworkConfiguration networkConfiguration,
+                                          String availabilityZoneRebalancing, boolean forceNewDeployment,
+                                          Map<String, Object> serviceConnectConfiguration,
+                                          String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
 
         serviceName = extractServiceName(serviceName);
@@ -910,13 +944,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         if (availabilityZoneRebalancing != null) {
             svc.setAvailabilityZoneRebalancing(availabilityZoneRebalancing);
         }
+        // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
+        // triggers a new service deployment", so a real change rolls the deployment the way a
+        // task-definition change does. An omitted parameter is not a change and rolls nothing.
+        boolean serviceConnectChanged = serviceConnectConfiguration != null
+                && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
+        if (serviceConnectConfiguration != null) {
+            svc.setServiceConnectConfiguration(serviceConnectConfiguration);
+        }
         boolean taskDefChanged = false;
         if (taskDefinition != null) {
             String resolvedArn = resolveTaskDefinitionOrThrow(taskDefinition, region).getTaskDefinitionArn();
             taskDefChanged = !resolvedArn.equals(svc.getTaskDefinition());
             svc.setTaskDefinition(resolvedArn);
         }
-        if (taskDefChanged || forceNewDeployment) {
+        if (taskDefChanged || forceNewDeployment || serviceConnectChanged) {
             svc.setDeploymentId(newDeploymentId());
             svc.setLastDeploymentAt(Instant.now());
             recordServiceDeployment(svc, svc.getTaskDefinition(), region);
@@ -1491,6 +1533,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         d.setRolloutStateReason("ECS deployment " + deploymentId
                 + (converged ? " completed." : " in progress."));
         d.setLaunchType(svc.getLaunchType());
+        d.setServiceConnectConfiguration(svc.getServiceConnectConfiguration());
         // The deployment's own start time, not the service's: a task-definition change mints a
         // new deployment id, so reporting service creation here would contradict it. Older
         // persisted services predate the field and fall back to the service creation time.
@@ -1576,18 +1619,62 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     // ── Service Reconciliation ────────────────────────────────────────────────
 
     void reconcile() {
-        reconcileTasks();
-        reconcileServices();
+        try {
+            reconcileTasks();
+        } catch (Exception e) {
+            LOG.warnv(e, "ECS task reconciliation tick failed: {0}", e.getMessage());
+        }
+        for (String accountId : reconcilableAccountIds()) {
+            RequestScopes.runAs(accountId, () -> {
+                try {
+                    reconcileServices();
+                } catch (Exception e) {
+                    LOG.warnv(e, "ECS service reconciliation tick failed for account {0}: {1}",
+                            accountId, e.getMessage());
+                }
+            });
+        }
+    }
+
+    private Set<String> reconcilableAccountIds() {
+        Set<String> accountIds = new LinkedHashSet<>();
+        accountIds.add(regionResolver.getAccountId());
+        if (servicesStore != null) {
+            try {
+                for (AccountAwareStorageBackend.AccountEntry<EcsServiceModel> entry
+                        : servicesStore.scanAllAccountEntries(key -> true)) {
+                    accountIds.add(entry.accountId());
+                }
+            } catch (Exception e) {
+                LOG.warnv(e, "Could not enumerate ECS service accounts: {0}", e.getMessage());
+            }
+        }
+        return accountIds;
     }
 
     private void reconcileTasks() {
         for (String taskArn : taskHandles.keySet()) {
-            try {
-                reconcileTask(taskArn);
-            } catch (Exception e) {
-                LOG.debugv("Error reconciling ECS task {0}: {1}", taskArn, e.getMessage());
-            }
+            RequestScopes.runAs(taskAccountId(taskArn), () -> {
+                try {
+                    reconcileTask(taskArn);
+                } catch (Exception e) {
+                    LOG.debugv("Error reconciling ECS task {0}: {1}", taskArn, e.getMessage());
+                }
+            });
         }
+    }
+
+    private String taskAccountId(String taskArn) {
+        try {
+            String accountId = AwsArnUtils.parse(taskArn).accountId();
+            if (accountId != null && !accountId.isBlank()) {
+                return accountId;
+            }
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Could not parse an account from ECS task ARN {0}, reconciling it in the default account: {1}",
+                    taskArn, e.getMessage());
+        }
+        return regionResolver.getAccountId();
     }
 
     private void reconcileTask(String taskArn) {

@@ -34,6 +34,9 @@ class LambdaLayerIntegrationTest {
             zos.putNextEntry(new ZipEntry("nodejs/node_modules/my-lib/index.js"));
             zos.write("module.exports = { hello: () => 'world' };".getBytes());
             zos.closeEntry();
+            zos.putNextEntry(new ZipEntry("python/entrypoint.py"));
+            zos.write("def lambda_handler(event, context): return {'from': 'layer'}".getBytes());
+            zos.closeEntry();
         }
         return Base64.getEncoder().encodeToString(baos.toByteArray());
     }
@@ -58,7 +61,7 @@ class LambdaLayerIntegrationTest {
             .body("""
                 {
                     "Content": { "ZipFile": "%s" },
-                    "CompatibleRuntimes": ["nodejs20.x", "nodejs22.x"],
+                    "CompatibleRuntimes": ["nodejs20.x", "nodejs22.x", "python3.12"],
                     "CompatibleArchitectures": ["x86_64"],
                     "Description": "Shared utilities v1",
                     "LicenseInfo": "MIT"
@@ -73,7 +76,7 @@ class LambdaLayerIntegrationTest {
             .body("LayerVersionArn", containsString(":layer:" + LAYER_NAME + ":1"))
             .body("Description", equalTo("Shared utilities v1"))
             .body("LicenseInfo", equalTo("MIT"))
-            .body("CompatibleRuntimes", hasItems("nodejs20.x", "nodejs22.x"))
+            .body("CompatibleRuntimes", hasItems("nodejs20.x", "nodejs22.x", "python3.12"))
             .body("CompatibleArchitectures", hasItem("x86_64"))
             .body("Content.CodeSize", greaterThan(0))
             .body("Content.CodeSha256", not(emptyString()))
@@ -188,15 +191,15 @@ class LambdaLayerIntegrationTest {
 
     @Test
     @Order(9)
-    void createFunction_withLayers_storesLayerArns() throws Exception {
+    void createFunction_acceptsHandlerProvidedByLayer() throws Exception {
         given()
             .contentType("application/json")
             .body("""
                 {
                     "FunctionName": "%s",
-                    "Runtime": "nodejs20.x",
+                    "Runtime": "python3.12",
                     "Role": "arn:aws:iam::000000000000:role/lambda-role",
-                    "Handler": "index.handler",
+                    "Handler": "entrypoint.lambda_handler",
                     "Code": { "ZipFile": "%s" },
                     "Layers": ["arn:aws:lambda:us-east-1:000000000000:layer:%s:1"]
                 }

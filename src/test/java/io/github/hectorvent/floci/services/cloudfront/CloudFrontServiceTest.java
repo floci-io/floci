@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
+import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
@@ -874,6 +876,99 @@ class CloudFrontServiceTest {
         assertDoesNotThrow(() -> service.updateDistribution(
                 existing.getId(), existing.getEtag(),
                 distributionWithPolicy(policy.getId())));
+    }
+
+    @Test
+    void preventsDeletingACachePolicyAttachedToTheDefaultCacheBehavior() {
+        // DeleteCachePolicy declares CachePolicyInUse and documents "You cannot delete a cache
+        // policy if it's attached to a cache behavior"; without the check the distribution was
+        // left pointing at a policy that no longer existed.
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CachePolicy policy = service.createCachePolicy(namedCachePolicy("in-use-cache-policy"));
+        Distribution distribution = service.createDistribution(
+                distributionWithCachePolicy(policy.getId(), null), Map.of());
+
+        assertAws("CachePolicyInUse", () -> service.deleteCachePolicy(policy.getId(), policy.getEtag()));
+
+        Distribution detached = distributionWithCachePolicy(null, null);
+        service.updateDistribution(distribution.getId(), distribution.getEtag(), detached);
+        service.deleteCachePolicy(policy.getId(), policy.getEtag());
+        assertAws("NoSuchCachePolicy", () -> service.getCachePolicy(policy.getId()));
+    }
+
+    @Test
+    void preventsDeletingACachePolicyAttachedToAnOrderedCacheBehavior() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CachePolicy policy = service.createCachePolicy(namedCachePolicy("ordered-cache-policy"));
+        service.createDistribution(distributionWithCachePolicy(null, policy.getId()), Map.of());
+
+        assertAws("CachePolicyInUse", () -> service.deleteCachePolicy(policy.getId(), policy.getEtag()));
+    }
+
+    @Test
+    void preventsDeletingAnOriginRequestPolicyInUse() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        OriginRequestPolicy policy =
+                service.createOriginRequestPolicy(namedOriginRequestPolicy("in-use-orp"));
+        Distribution distribution = service.createDistribution(
+                distributionWithOriginRequestPolicy(policy.getId()), Map.of());
+
+        assertAws("OriginRequestPolicyInUse",
+                () -> service.deleteOriginRequestPolicy(policy.getId(), policy.getEtag()));
+
+        Distribution detached = distributionWithOriginRequestPolicy(null);
+        service.updateDistribution(distribution.getId(), distribution.getEtag(), detached);
+        service.deleteOriginRequestPolicy(policy.getId(), policy.getEtag());
+        assertAws("NoSuchOriginRequestPolicy", () -> service.getOriginRequestPolicy(policy.getId()));
+    }
+
+    @Test
+    void deletesAnUnattachedCachePolicy() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CachePolicy policy = service.createCachePolicy(namedCachePolicy("free-cache-policy"));
+
+        service.deleteCachePolicy(policy.getId(), policy.getEtag());
+
+        assertAws("NoSuchCachePolicy", () -> service.getCachePolicy(policy.getId()));
+    }
+
+    private static CachePolicy namedCachePolicy(String name) {
+        CachePolicy policy = new CachePolicy();
+        policy.setName(name);
+        policy.setConfig(Map.of());
+        return policy;
+    }
+
+    private static OriginRequestPolicy namedOriginRequestPolicy(String name) {
+        OriginRequestPolicy policy = new OriginRequestPolicy();
+        policy.setName(name);
+        policy.setConfig(Map.of());
+        return policy;
+    }
+
+    private static Distribution distributionWithCachePolicy(String defaultPolicyId, String orderedPolicyId) {
+        DefaultCacheBehavior behavior = new DefaultCacheBehavior();
+        behavior.setCachePolicyId(defaultPolicyId);
+        DistributionConfig config = new DistributionConfig();
+        config.setDefaultCacheBehavior(behavior);
+        if (orderedPolicyId != null) {
+            CacheBehavior ordered = new CacheBehavior();
+            ordered.setCachePolicyId(orderedPolicyId);
+            config.setCacheBehaviors(List.of(ordered));
+        }
+        Distribution distribution = new Distribution();
+        distribution.setConfig(config);
+        return distribution;
+    }
+
+    private static Distribution distributionWithOriginRequestPolicy(String policyId) {
+        DefaultCacheBehavior behavior = new DefaultCacheBehavior();
+        behavior.setOriginRequestPolicyId(policyId);
+        DistributionConfig config = new DistributionConfig();
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = new Distribution();
+        distribution.setConfig(config);
+        return distribution;
     }
 
     private static Distribution distributionWithPolicy(String policyId) {

@@ -10,13 +10,13 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.services.elasticache.container.RespLineReader;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -121,7 +121,7 @@ public class MemoryDbContainerManager {
                 .withDockerNetwork(config.services().memorydb().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "memorydb", clusterName, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+                        "memorydb", clusterName, regionResolver.getAccountId(), resolvedRegion()));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
@@ -145,7 +145,7 @@ public class MemoryDbContainerManager {
                 : info.containerId();
         String logGroup = "/aws/memorydb/cluster/" + clusterName + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = regionResolver.getDefaultRegion();
+        String region = resolvedRegion();
 
         Closeable logHandle = logStreamer.attach(
                 info.containerId(), logGroup, logStream, region, "memorydb:" + clusterName);
@@ -168,7 +168,7 @@ public class MemoryDbContainerManager {
                 OutputStream out = s.getOutputStream();
                 out.write(RESP_PING);
                 out.flush();
-                String line = readAsciiLineCrLf(s.getInputStream());
+                String line = RespLineReader.readAsciiLineCrLf(s.getInputStream());
                 if (line.startsWith("+PONG")) {
                     if (attempt > 1) {
                         LOG.infov("MemoryDB backend ready for cluster {0} after {1} probe attempt(s)", clusterName, attempt);
@@ -193,22 +193,6 @@ public class MemoryDbContainerManager {
         throw new RuntimeException(
                 "MemoryDB backend for cluster " + clusterName + " did not become ready on " + host + ":" + port
                         + " within " + BACKEND_READY_DEADLINE_MS + "ms");
-    }
-
-    private static String readAsciiLineCrLf(InputStream in) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        int b;
-        while ((b = in.read()) != -1) {
-            if (b == '\r') {
-                int next = in.read();
-                if (next != '\n') {
-                    throw new IOException("Expected \\n after \\r in RESP line");
-                }
-                break;
-            }
-            sb.append((char) b);
-        }
-        return sb.toString();
     }
 
     public void stop(MemoryDbContainerHandle handle) {
@@ -239,6 +223,11 @@ public class MemoryDbContainerManager {
 
     private String containerName(String clusterName) {
         return ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
+    }
+
+    private String resolvedRegion() {
+        String region = regionResolver.getRegion();
+        return region != null ? region : regionResolver.getDefaultRegion();
     }
 
     public void stopAll() {

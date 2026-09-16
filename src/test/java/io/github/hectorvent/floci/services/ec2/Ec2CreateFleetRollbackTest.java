@@ -40,7 +40,8 @@ class Ec2CreateFleetRollbackTest {
         when(service.runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), nullable(String.class),
                 anyList(), nullable(String.class), nullable(String.class), anyList(), nullable(String.class),
                 nullable(String.class), nullable(Boolean.class), nullable(String.class), anyInt(),
-                nullable(String.class)))
+                nullable(String.class), nullable(LaunchTemplateData.MetadataOptions.class),
+                nullable(String.class), nullable(String.class)))
                 .thenReturn(reservation("i-first"))
                 .thenReturn(reservation("i-second"))
                 .thenThrow(new AwsException("InvalidSubnetID.NotFound", "launch failed", 400));
@@ -49,7 +50,8 @@ class Ec2CreateFleetRollbackTest {
         when(service.terminateInstances(REGION, List.of("i-second"))).thenReturn(List.of());
 
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
-                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class), mock(Ec2IpamService.class));
+                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class));
         Response response = handler.handle("CreateFleet", params(), REGION);
 
         assertEquals(400, response.getStatus());

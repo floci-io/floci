@@ -36,6 +36,10 @@ container.
 | `FLOCI_SERVICES_AMAZONMQ_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_AMAZONMQ_MOCK` | `false` | `true` = metadata-only CRUD, no Docker containers |
 | `FLOCI_SERVICES_AMAZONMQ_DEFAULT_IMAGE` | `rabbitmq:3-management` | Docker image for RabbitMQ broker containers |
+| `FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_BASE` | `5672` | First host port in the range the AMQP listener (5672) is published on |
+| `FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_MAX` | `5699` | Last host port in the AMQP range |
+| `FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_BASE` | `15672` | First host port in the range the management console (15672) is published on |
+| `FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_MAX` | `15699` | Last host port in the console range |
 
 ## How it works
 
@@ -43,9 +47,17 @@ When `mock` is set to `false` (default), Floci uses the Docker API to start a Ra
 container for each created broker. For Docker socket setup, private registry
 authentication, and other Docker settings see [Docker Configuration](../configuration/docker.md).
 
-- **Port Mapping**: The AMQP port (5672) and the management UI (15672) are each mapped to
-  a dynamic host port. Use the endpoints returned by `DescribeBroker` rather than a fixed
-  port.
+- **Port Mapping**: The AMQP port (5672) and the management UI (15672) are each bound
+  directly on the Docker host to the next free port in their configured ranges
+  (`5672–5699` and `15672–15699` by default), so the first broker is normally reachable
+  at `amqp://localhost:5672` and `http://localhost:15672`. This binding is made whether
+  Floci runs natively or inside Docker: no Floci-internal proxy fronts the broker, so it is
+  the only way a client on the host can reach a broker started by a containerized Floci
+  (no `ports:` entry on the `floci` service is needed, or should be added, for these ranges).
+  `DescribeBroker` reports the address Floci itself uses: `localhost:<hostPort>` when Floci
+  runs natively, or the broker container's Docker-network IP when Floci runs inside Docker.
+  In that second case, use `docker ps` to see the host port a given broker container is
+  published on.
 - **Admin user**: The `CreateBroker` user is seeded via `RABBITMQ_DEFAULT_USER` /
   `RABBITMQ_DEFAULT_PASS`. Unlike the built-in `guest` user (which RabbitMQ restricts to
   loopback connections), this user can authenticate over the mapped port.

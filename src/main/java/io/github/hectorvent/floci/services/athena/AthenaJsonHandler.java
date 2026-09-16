@@ -8,10 +8,15 @@ import io.github.hectorvent.floci.services.athena.model.QueryExecution;
 import io.github.hectorvent.floci.services.athena.model.QueryExecutionContext;
 import io.github.hectorvent.floci.services.athena.model.ResultConfiguration;
 import io.github.hectorvent.floci.services.athena.model.ResultSet;
+import io.github.hectorvent.floci.services.athena.model.UpdateWorkGroupRequest;
+import io.github.hectorvent.floci.services.athena.model.WorkGroupTag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @ApplicationScoped
@@ -74,10 +79,43 @@ public class AthenaJsonHandler {
                 athenaService.createWorkGroup(createRequest, region);
                 yield Response.ok(Map.of()).build();
             }
-            case "ListDataCatalogs" -> Response.ok(Map.of("DataCatalogsSummary", athenaService.listDataCatalogs())).build();
+            case "UpdateWorkGroup" -> {
+                UpdateWorkGroupRequest updateRequest = mapper.treeToValue(request, UpdateWorkGroupRequest.class);
+                athenaService.updateWorkGroup(updateRequest, region);
+                yield Response.ok(Map.of()).build();
+            }
+            case "ListDataCatalogs" ->
+                    Response.ok(Map.of("DataCatalogsSummary", athenaService.listDataCatalogs(region))).build();
             case "GetDataCatalog" -> {
                 String name = request.has("Name") ? request.get("Name").asText() : AthenaService.DEFAULT_CATALOG;
-                yield Response.ok(Map.of("DataCatalog", athenaService.getDataCatalog(name))).build();
+                yield Response.ok(Map.of("DataCatalog", athenaService.getDataCatalog(region, name))).build();
+            }
+            case "CreateDataCatalog" -> {
+                Map<String, Object> catalog = athenaService.createDataCatalog(region,
+                        text(request, "Name"),
+                        text(request, "Type"),
+                        text(request, "Description"),
+                        parameters(request),
+                        tags(request));
+                yield Response.ok(Map.of("DataCatalog", catalog)).build();
+            }
+            case "UpdateDataCatalog" -> {
+                athenaService.updateDataCatalog(region,
+                        text(request, "Name"),
+                        text(request, "Type"),
+                        text(request, "Description"),
+                        parameters(request));
+                yield Response.ok(Map.of()).build();
+            }
+            case "DeleteDataCatalog" -> Response.ok(
+                    Map.of("DataCatalog", athenaService.deleteDataCatalog(region, text(request, "Name")))).build();
+            case "TagResource" -> {
+                athenaService.tagResource(text(request, "ResourceARN"), tags(request));
+                yield Response.ok(Map.of()).build();
+            }
+            case "UntagResource" -> {
+                athenaService.untagResource(text(request, "ResourceARN"), tagKeys(request));
+                yield Response.ok(Map.of()).build();
             }
             case "ListDatabases" -> {
                 String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
@@ -94,6 +132,10 @@ public class AthenaJsonHandler {
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
             }
+            case "ListTagsForResource" -> {
+                String resourceArn = request.path("ResourceARN").asText(null);
+                yield Response.ok(Map.of("Tags", athenaService.listTagsForResource(resourceArn))).build();
+            }
             case "DeleteWorkGroup" -> {
                 String wg = request.path("WorkGroup").asText(null);
                 if (wg == null || !wg.matches("[a-zA-Z0-9._-]{1,128}")) {
@@ -107,5 +149,44 @@ public class AthenaJsonHandler {
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    private static String text(JsonNode request, String field) {
+        JsonNode node = request.get(field);
+        return node == null || node.isNull() ? null : node.asText();
+    }
+
+    private static Map<String, String> parameters(JsonNode request) {
+        JsonNode node = request.get("Parameters");
+        if (node == null || !node.isObject()) {
+            return Map.of();
+        }
+        Map<String, String> parameters = new LinkedHashMap<>();
+        node.fields().forEachRemaining(entry -> parameters.put(entry.getKey(), entry.getValue().asText()));
+        return parameters;
+    }
+
+    private static List<WorkGroupTag> tags(JsonNode request) {
+        JsonNode node = request.get("Tags");
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<WorkGroupTag> tags = new ArrayList<>();
+        for (JsonNode tag : node) {
+            tags.add(new WorkGroupTag(text(tag, "Key"), text(tag, "Value")));
+        }
+        return tags;
+    }
+
+    private static List<String> tagKeys(JsonNode request) {
+        JsonNode node = request.get("TagKeys");
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<String> keys = new ArrayList<>();
+        for (JsonNode key : node) {
+            keys.add(key.asText());
+        }
+        return keys;
     }
 }

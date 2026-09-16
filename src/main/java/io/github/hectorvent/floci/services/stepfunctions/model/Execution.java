@@ -3,11 +3,16 @@ package io.github.hectorvent.floci.services.stepfunctions.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Execution {
     private String executionArn;
     private String stateMachineArn;
+    private String stateMachineVersionArn;
+    private String stateMachineAliasArn;
     private String name;
     private String status = "RUNNING"; // RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED
     private String input;
@@ -16,6 +21,7 @@ public class Execution {
     private Double stopDate;
     private String error;
     private String cause;
+    private List<HistoryEvent> history = new ArrayList<>();
 
     public Execution() {
         this.startDate = System.currentTimeMillis() / 1000.0;
@@ -26,6 +32,16 @@ public class Execution {
 
     public String getStateMachineArn() { return stateMachineArn; }
     public void setStateMachineArn(String stateMachineArn) { this.stateMachineArn = stateMachineArn; }
+
+    public String getStateMachineVersionArn() { return stateMachineVersionArn; }
+    public void setStateMachineVersionArn(String stateMachineVersionArn) {
+        this.stateMachineVersionArn = stateMachineVersionArn;
+    }
+
+    public String getStateMachineAliasArn() { return stateMachineAliasArn; }
+    public void setStateMachineAliasArn(String stateMachineAliasArn) {
+        this.stateMachineAliasArn = stateMachineAliasArn;
+    }
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -50,4 +66,9 @@ public class Execution {
 
     public String getCause() { return cause; }
     public void setCause(String cause) { this.cause = cause; }
+
+    public List<HistoryEvent> getHistory() { return history; }
+    public void setHistory(List<HistoryEvent> history) {
+        this.history = history != null ? history : new ArrayList<>();
+    }
 }

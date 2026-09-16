@@ -3,10 +3,8 @@
 # Run directly: sh docker/test-entrypoint.sh
 # Exit 0 on success, non-zero on first failure summary.
 #
-# These tests run the entrypoint as an unprivileged user with
-# LOCALSTACK_PARITY=false, so the root-only chroot block and the parity
-# script (installed at an absolute path inside the image) stay out of
-# the way. The root/chroot path is covered by the Docker image tests.
+# These tests run as an unprivileged user with LOCALSTACK_PARITY=false.
+# Stub id and chroot to check the root path without changing privileges.
 
 set -eu
 
@@ -40,6 +38,41 @@ cat > "${WORK}/bin/java" <<'EOF'
 printf '%s\n' "java $*"
 EOF
 chmod +x "${WORK}/bin/java"
+
+mkdir -p "${WORK}/root-bin"
+cat > "${WORK}/root-bin/id" <<'EOF'
+#!/bin/sh
+if [ "$1" = '-u' ]; then
+    printf '0\n'
+else
+    /usr/bin/id "$@"
+fi
+EOF
+cat > "${WORK}/root-bin/chroot" <<'EOF'
+#!/bin/sh
+printf 'dropped privileges\n'
+EOF
+chmod +x "${WORK}/root-bin/id" "${WORK}/root-bin/chroot"
+
+assert_eq "root drops privileges by default" \
+    "dropped privileges" \
+    "$(PATH="${WORK}/root-bin:${PATH}" FLOCI_STORAGE_PERSISTENT_PATH="${WORK}/absent" LOCALSTACK_PARITY=false sh "${SCRIPT}" echo preserved)"
+
+assert_eq "false keeps the unprivileged default" \
+    "dropped privileges" \
+    "$(PATH="${WORK}/root-bin:${PATH}" FLOCI_RUN_AS_ROOT=false FLOCI_STORAGE_PERSISTENT_PATH="${WORK}/absent" LOCALSTACK_PARITY=false sh "${SCRIPT}" echo preserved)"
+
+assert_eq "other values keep the unprivileged default" \
+    "dropped privileges" \
+    "$(PATH="${WORK}/root-bin:${PATH}" FLOCI_RUN_AS_ROOT=TRUE FLOCI_STORAGE_PERSISTENT_PATH="${WORK}/absent" LOCALSTACK_PARITY=false sh "${SCRIPT}" echo preserved)"
+
+assert_eq "explicit root option preserves command arguments" \
+    "one two|three" \
+    "$(PATH="${WORK}/root-bin:${PATH}" FLOCI_RUN_AS_ROOT=true FLOCI_STORAGE_PERSISTENT_PATH="${WORK}/absent" LOCALSTACK_PARITY=false sh "${SCRIPT}" sh -c 'printf "%s|%s\n" "$1" "$2"' _ "one two" three)"
+
+assert_eq "non-root process cannot elevate with root option" \
+    "one two" \
+    "$(FLOCI_RUN_AS_ROOT=true LOCALSTACK_PARITY=false sh "${SCRIPT}" echo one two)"
 
 # --- explicit arguments are exec'd unchanged ---
 assert_eq "explicit command is exec'd unchanged" \

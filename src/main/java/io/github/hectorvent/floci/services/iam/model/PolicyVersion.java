@@ -17,10 +17,14 @@ public class PolicyVersion {
     public PolicyVersion() {}
 
     public PolicyVersion(String versionId, String document, boolean defaultVersion) {
+        this(versionId, document, defaultVersion, Instant.now());
+    }
+
+    public PolicyVersion(String versionId, String document, boolean defaultVersion, Instant createDate) {
         this.versionId = versionId;
         this.document = document;
         this.defaultVersion = defaultVersion;
-        this.createDate = Instant.now();
+        this.createDate = createDate;
     }
 
     public String getVersionId() { return versionId; }

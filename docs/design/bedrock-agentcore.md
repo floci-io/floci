@@ -1,6 +1,6 @@
 # Design: Amazon Bedrock AgentCore emulation
 
-Status: proposed. Tracked by the AgentCore epic and phase issues on this fork.
+Status: implemented and actively expanded. Tracked by the AgentCore epic and follow-up coverage work on this fork.
 
 ## Goal
 
@@ -18,18 +18,22 @@ Two AWS services are involved:
 | `bedrock-agentcore-control` | 2023-06-05 | `bedrock-agentcore` | REST JSON (restJson1) | stateful CRUD registry |
 | `bedrock-agentcore` | 2024-02-28 | `bedrock-agentcore` | REST JSON (binary payload) | `InvokeAgentRuntime` canned-response stub |
 
-## Scope (MVP)
+## Implemented scope
 
-- Phase 1 — Agent Runtime CRUD (`bedrock-agentcore-control`)
-- Phase 2 — Agent Runtime Endpoints
-- Phase 3 — `InvokeAgentRuntime` data-plane stub (`bedrock-agentcore`)
-- Phase 4 — Tagging + Workload Identity
-- Phase 5 (optional) — Gateway + Memory primitives
+- Agent Runtime CRUD and versioning (`bedrock-agentcore-control`)
+- Agent Runtime Endpoints
+- `InvokeAgentRuntime` data-plane canned-response stub (`bedrock-agentcore`)
+- Tagging + Workload Identity
+- Gateway + Gateway Target + Gateway Rule primitives
+- Memory primitives
+- Browser + Browser Profile primitives
+- Code Interpreter primitives
+- API key + OAuth2 credential providers
+- Resource policies
 
-Out of scope for the MVP: real inference, streaming invoke semantics, gateway
-rules, policy engine, registry, payment, browser, code interpreter, dataset,
-evaluator, harness, token vault, credential providers, IAM enforcement. All are
-reachable via the upgrade path below.
+Still out of scope: real inference, streaming invoke semantics, policy engine,
+registry, payment, dataset, evaluator, harness, the broader token-vault data plane,
+and IAM enforcement. These remain candidates for future coverage expansion.
 
 ## Floci integration conventions
 
@@ -161,10 +165,10 @@ parent `gatewayArn`). Mutations return 202. `protocolType`: gateway `MCP`, targe
 → return `ACTIVE`. `clientToken` is a body field on Create/Update but a query param on Delete.
 The Memory response shape has no `tags` field — tags surface only through `ListTagsForResource`.
 
-## Upgrade path — extending beyond the MVP
+## Upgrade path: extending coverage
 
-`bedrock-agentcore-control` has ~140 operations; the MVP covers the runtime-centric subset. The rest
-add incrementally without rework, because every operation reduces to the same Floci recipe.
+The AgentCore control plane is much broader than the currently implemented subset. Additional
+operations can be added incrementally without rework because they follow the same Floci recipe.
 
 ### Three wire-protocol styles coexist in this one service
 Classify each new operation before writing the controller:
@@ -187,20 +191,24 @@ Always confirm the exact `Method + Path` on each operation's `API_<Op>.html` pag
 4. Add unit + RestAssured integration tests; run `make docs-sync`.
 
 ### Full operation catalog & status
-"Planned" = MVP issue set; "Future" = same recipe, not yet scheduled.
+
+"Implemented" means the operation family has working Floci coverage. "Future" identifies remaining
+families that can use the same protocol-first implementation recipe.
 
 | Resource family | Operations | Style | Status |
 |---|---|---|---|
-| Agent Runtime | Create/Get/Update/Delete/List + ListVersions | A | Planned |
-| Agent Runtime Endpoint | Create/Get/Update/Delete/List | A | Planned |
-| InvokeAgentRuntime (data plane) | Invoke | A (binary) | Planned |
-| Tagging | Tag/Untag/ListTagsForResource | A (`/tags/{arn}`) | Planned |
-| Workload Identity | Create/Get/Update/Delete/List | B | Planned |
-| Gateway + Gateway Target | Create/Get/Update/Delete/List (×2) | A | Planned |
-| Memory | Create/Get/Update/Delete/List | C | Planned |
-| Gateway Rule | Create/Get/Update/Delete/List | A | Future |
-| Credential Providers (ApiKey/OAuth2/Payment) | Create/Get/Update/Delete/List | B | Future |
-| Browser / Browser Profile / Code Interpreter | Create/Get/Delete/List | A | Future |
+| Agent Runtime | Create/Get/Update/Delete/List + ListVersions | A | Implemented |
+| Agent Runtime Endpoint | Create/Get/Update/Delete/List | A | Implemented |
+| InvokeAgentRuntime (data plane) | Invoke | A (binary) | Implemented (canned-response stub) |
+| Tagging | Tag/Untag/ListTagsForResource | A (`/tags/{arn}`) | Implemented |
+| Workload Identity | Create/Get/Update/Delete/List | B | Implemented |
+| Gateway + Gateway Target | Create/Get/Update/Delete/List (x2) | A | Implemented |
+| Memory | Create/Get/Update/Delete/List | C | Implemented |
+| Gateway Rule | Create/Get/Update/Delete/List | A | Implemented |
+| API Key + OAuth2 Credential Providers | Create/Get/Update/Delete/List | B | Implemented |
+| Browser / Browser Profile / Code Interpreter | Create/Get/Delete/List | A | Implemented |
+| Resource Policy | Get/Put/Delete | A | Implemented |
+| Payment Credential Providers | Create/Get/Update/Delete/List | B | Future |
 | Policy / Policy Engine / Policy Generation | Create/Get/Update/Delete/List + Start/Summary | mixed | Future |
 | Registry / Registry Record | Create/Get/Update/Delete/List + Submit | mixed | Future |
 | Dataset / Dataset Version / Examples | Create/Get/Update/Delete/List + Add/Delete examples | mixed | Future |
@@ -208,6 +216,7 @@ Always confirm the exact `Method + Path` on each operation's `API_<Op>.html` pag
 | Harness / Harness Endpoint | Create/Get/Update/Delete/List | A | Future |
 | Configuration Bundle | Create/Get/Update/Delete/List (+ versions) | A | Future |
 | Payment Manager / Connector | Create/Get/Update/Delete/List | mixed | Future |
-| Token Vault / Resource Policy | Get/Put/Delete/SetCMK | B | Future |
+| Broader Token Vault operations | Additional token/secret management operations | mixed | Future |
 
-A future contributor picks any "Future" row, applies the recipe, and files a follow-up referencing the epic.
+Future rows are candidates for follow-up coverage work using the same investigate, implement,
+validate, review, and commit cycle.

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.athena;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.glue.GlueService;
+import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
@@ -48,6 +49,82 @@ class GlueViewDdlBuilderTest {
             table.setStorageDescriptor(sd);
         }
         return table;
+    }
+
+    private static Column column(String name) {
+        Column c = new Column();
+        c.setName(name);
+        c.setType("string");
+        return c;
+    }
+
+    private Table tableWithColumns(String name, String location, List<Column> columns, List<Column> partitionKeys) {
+        Table table = createTable(name, location, "org.openx.data.jsonserde.JsonSerDe", null);
+        table.getStorageDescriptor().setColumns(columns);
+        table.setPartitionKeys(partitionKeys);
+        return table;
+    }
+
+    private String ddlFor(Table table) {
+        Database db = createDatabase("audit");
+        when(glueService.getDatabases()).thenReturn(List.of(db));
+        when(glueService.getTables("audit")).thenReturn(List.of(table));
+        return builder.build(null);
+    }
+
+    /**
+     * Athena reports the column names the catalog declares. The files here spell them camelCase, so a
+     * view built by inference alone would expose the file's spelling and a client reading the declared
+     * name would find nothing.
+     */
+    @Test
+    void testDeclaredColumnsAreProjectedInsteadOfStar() {
+        String ddl = ddlFor(tableWithColumns("audit_events", "s3://audit/",
+                List.of(column("eventid"), column("tenantid")),
+                List.of(column("tenant"), column("year"))));
+
+        assertTrue(ddl.contains("\"eventid\" AS \"eventid\""), ddl);
+        assertTrue(ddl.contains("\"tenantid\" AS \"tenantid\""), ddl);
+        assertFalse(ddl.contains("SELECT * FROM"), ddl);
+    }
+
+    /** Partition keys are part of the schema and are what partition predicates filter on. */
+    @Test
+    void testPartitionKeysAreProjectedAlongsideDataColumns() {
+        String ddl = ddlFor(tableWithColumns("audit_events", "s3://audit/",
+                List.of(column("eventid")),
+                List.of(column("tenant"), column("year"), column("month"), column("day"))));
+
+        for (String name : List.of("eventid", "tenant", "year", "month", "day")) {
+            assertTrue(ddl.contains("\"" + name + "\" AS \"" + name + "\""), name + " missing from: " + ddl);
+        }
+    }
+
+    /** A partition key repeating a data column would bind twice and make the view ambiguous. */
+    @Test
+    void testDuplicateColumnAndPartitionKeyIsProjectedOnce() {
+        String ddl = ddlFor(tableWithColumns("t", "s3://b/",
+                List.of(column("tenant")), List.of(column("TENANT"))));
+
+        int first = ddl.indexOf("AS \"tenant\"");
+        assertTrue(first >= 0, ddl);
+        assertEquals(-1, ddl.indexOf("AS \"tenant\"", first + 1), "projected twice: " + ddl);
+    }
+
+    /** A table that declares no columns leaves inference in charge, as before. */
+    @Test
+    void testTableWithoutDeclaredColumnsStillUsesStar() {
+        String ddl = ddlFor(tableWithColumns("t", "s3://b/", null, null));
+
+        assertTrue(ddl.contains("SELECT * FROM"), ddl);
+    }
+
+    /** Column identifiers go through the same quoting as table and schema names. */
+    @Test
+    void testColumnIdentifierQuotingEscapesDoubleQuotes() {
+        String ddl = ddlFor(tableWithColumns("t", "s3://b/", List.of(column("we\"ird")), null));
+
+        assertTrue(ddl.contains("\"we\"\"ird\" AS \"we\"\"ird\""), ddl);
     }
 
     @Test
