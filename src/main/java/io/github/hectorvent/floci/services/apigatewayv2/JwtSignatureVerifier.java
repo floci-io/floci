@@ -20,6 +20,7 @@ import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
 import org.apache.hc.core5.util.Timeout;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.URI;
@@ -34,6 +35,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -332,13 +334,13 @@ public class JwtSignatureVerifier implements AutoCloseable {
         }
     }
 
-    private java.util.Optional<JsonNode> decodeJson(String base64UrlSegment) {
+    private Optional<JsonNode> decodeJson(String base64UrlSegment) {
         try {
             byte[] decoded = Base64.getUrlDecoder().decode(padBase64(base64UrlSegment));
             JsonNode node = objectMapper.readTree(decoded);
-            return node != null && node.isObject() ? java.util.Optional.of(node) : java.util.Optional.empty();
-        } catch (IllegalArgumentException | java.io.IOException e) {
-            return java.util.Optional.empty();
+            return node != null && node.isObject() ? Optional.of(node) : Optional.empty();
+        } catch (IllegalArgumentException | IOException e) {
+            return Optional.empty();
         }
     }
 
