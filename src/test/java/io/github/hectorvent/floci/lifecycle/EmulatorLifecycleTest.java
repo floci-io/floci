@@ -39,6 +39,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -585,7 +586,7 @@ class EmulatorLifecycleTest {
         when(eksServiceConfig.enabled()).thenReturn(true);
         when(eksServiceConfig.mock()).thenReturn(false);
         when(eksServiceConfig.imds()).thenReturn(true);
-        when(ec2MetadataServer.start()).thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+        when(ec2MetadataServer.start()).thenReturn(CompletableFuture.completedFuture(null));
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
 

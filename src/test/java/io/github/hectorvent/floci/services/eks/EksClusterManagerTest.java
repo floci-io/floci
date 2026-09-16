@@ -717,7 +717,8 @@ class EksClusterManagerTest {
             assertEquals("us-west-2", instance.getRegion());
             assertEquals("172.17.0.2", instance.getPrivateIpAddress());
             assertEquals("ip-172-17-0-2.us-west-2.compute.internal", instance.getPrivateDnsName());
-            assertEquals("arn:aws:iam::123456789012:role/eks-node-role", instance.getIamInstanceProfileArn());
+            assertEquals("arn:aws:iam::123456789012:instance-profile/prod-cluster-node-profile", instance.getIamInstanceProfileArn());
+            assertNotEquals(cluster.getRoleArn(), instance.getIamInstanceProfileArn());
             assertEquals("running", instance.getState().getName());
         }
 

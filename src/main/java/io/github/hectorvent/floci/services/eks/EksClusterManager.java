@@ -806,12 +806,11 @@ public class EksClusterManager {
         inst.setPrivateIpAddress(ip);
         inst.setPrivateDnsName("ip-" + ip.replace('.', '-') + "." + safeRegion + ".compute.internal");
 
-        String roleArn = cluster.getRoleArn();
-        if (roleArn != null && !roleArn.isBlank()) {
-            inst.setIamInstanceProfileArn(roleArn);
-        } else {
-            inst.setIamInstanceProfileArn("arn:aws:iam::" + safeAccountId + ":instance-profile/" + safeClusterName + "-node-profile");
-        }
+        // AWS EKS nodes receive credentials from a node IAM role through an EC2 instance profile,
+        // never from the cluster control-plane role (cluster.getRoleArn()). Synthesize a distinct
+        // node instance profile identity so /latest/meta-data/iam/info returns a valid profile ARN.
+        String nodeProfileName = safeClusterName + "-node-profile";
+        inst.setIamInstanceProfileArn("arn:aws:iam::" + safeAccountId + ":instance-profile/" + nodeProfileName);
         return inst;
     }
 
