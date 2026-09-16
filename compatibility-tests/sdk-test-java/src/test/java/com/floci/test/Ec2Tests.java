@@ -489,6 +489,19 @@ class Ec2Tests {
     }
 
     @Test
+    @Order(18)
+    @DisplayName("CreateKeyPair - missing KeyName returns MissingParameter")
+    void createKeyPairWithoutNameIsRejected() {
+        assertThatThrownBy(() -> ec2.createKeyPair(CreateKeyPairRequest.builder().build()))
+                .isInstanceOf(Ec2Exception.class)
+                .satisfies(e -> {
+                    Ec2Exception ec2Ex = (Ec2Exception) e;
+                    assertThat(ec2Ex.awsErrorDetails().errorCode()).isEqualTo("MissingParameter");
+                    assertThat(ec2Ex.statusCode()).isEqualTo(400);
+                });
+    }
+
+    @Test
     @Order(19)
     @DisplayName("CreateInternetGateway - create IGW")
     void createInternetGateway() {
@@ -812,7 +825,9 @@ class Ec2Tests {
     @Order(46)
     @DisplayName("DeleteKeyPair - delete key pair")
     void deleteKeyPair() {
-        ec2.deleteKeyPair(DeleteKeyPairRequest.builder().keyName(keyName).build());
+        DeleteKeyPairResponse resp = ec2.deleteKeyPair(DeleteKeyPairRequest.builder().keyName(keyName).build());
+        assertThat(resp.returnValue()).isTrue();
+        assertThat(resp.keyPairId()).isNotNull().startsWith("key-");
     }
 
     @Test
