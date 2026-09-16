@@ -19,6 +19,21 @@ public class GlueViewDdlBuilder {
 
     private static final Logger LOG = Logger.getLogger(GlueViewDdlBuilder.class);
 
+    /**
+     * Iceberg tables are read through the {@code iceberg} extension rather than one of the
+     * Hive-format-sniffed {@code read_*} functions, so it is installed and loaded once, up
+     * front, only when the batch actually contains an Iceberg table.
+     */
+    private static final String ICEBERG_EXTENSION_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
+
+    /** Glue table property AWS/pyiceberg set to mark a table as Iceberg-format. */
+    private static final String PARAM_TABLE_TYPE = "table_type";
+
+    /** Glue table property holding the path to the table's current Iceberg metadata JSON. */
+    private static final String PARAM_METADATA_LOCATION = "metadata_location";
+
+    private static final String ICEBERG_TABLE_TYPE = "ICEBERG";
+
     private final GlueService glueService;
 
     @Inject
@@ -28,6 +43,7 @@ public class GlueViewDdlBuilder {
 
     public String build(String contextDatabase) {
         StringBuilder sb = new StringBuilder();
+        boolean usesIceberg = false;
         boolean contextDbHandled = false;
         List<Database> databases = glueService.getDatabases();
         if (databases != null) {
@@ -42,9 +58,9 @@ public class GlueViewDdlBuilder {
                 sb.append("CREATE SCHEMA IF NOT EXISTS ").append(quote(schema)).append(";\n");
                 try {
                     List<Table> tables = glueService.getTables(schema);
-                    appendViews(sb, schema, tables, true);
+                    usesIceberg |= appendViews(sb, schema, tables, true);
                     if (schema.equals(contextDatabase)) {
-                        appendViews(sb, schema, tables, false);
+                        usesIceberg |= appendViews(sb, schema, tables, false);
                         contextDbHandled = true;
                     }
                 } catch (Exception e) {
@@ -56,19 +72,25 @@ public class GlueViewDdlBuilder {
         if (!contextDbHandled && contextDatabase != null && !contextDatabase.isBlank()) {
             try {
                 List<Table> tables = glueService.getTables(contextDatabase);
-                appendViews(sb, contextDatabase, tables, false);
+                usesIceberg |= appendViews(sb, contextDatabase, tables, false);
             } catch (Exception e) {
                 LOG.debugv("Could not fetch tables for context database {0}: {1}", contextDatabase, e.getMessage());
             }
         }
 
+        if (usesIceberg) {
+            sb.insert(0, ICEBERG_EXTENSION_SETUP);
+        }
+
         return sb.toString();
     }
 
-    private void appendViews(StringBuilder sb, String schemaOrNull, List<Table> tables, boolean qualified) {
+    /** @return true if at least one of the appended views reads an Iceberg table. */
+    private boolean appendViews(StringBuilder sb, String schemaOrNull, List<Table> tables, boolean qualified) {
         if (tables == null) {
-            return;
+            return false;
         }
+        boolean usesIceberg = false;
         for (Table t : tables) {
             try {
                 if (t == null) {
@@ -86,22 +108,30 @@ public class GlueViewDdlBuilder {
                 String normalizedLocation = location.endsWith("/")
                         ? location.substring(0, location.length() - 1)
                         : location;
-                String readFn = inferReadFunction(t);
-                String readPath = PartitionProjection.readPath(t, normalizedLocation);
                 String target = qualified
                         ? quote(schemaOrNull) + "." + quote(t.getName())
                         : quote(t.getName());
+                String fromClause;
+                if (isIcebergTable(t) && icebergMetadataLocation(t) != null && !icebergMetadataLocation(t).isBlank()) {
+                    fromClause = icebergReadExpression(icebergMetadataLocation(t));
+                    usesIceberg = true;
+                } else {
+                    String readFn = inferReadFunction(t);
+                    String readPath = PartitionProjection.readPath(t, normalizedLocation);
+                    fromClause = readExpression(readFn, readPath);
+                }
                 sb.append("CREATE OR REPLACE VIEW ")
                   .append(target)
                   .append(" AS SELECT ")
                   .append(buildProjection(t))
                   .append(" FROM ")
-                  .append(readExpression(readFn, readPath))
+                  .append(fromClause)
                   .append(";\n");
             } catch (Exception e) {
                 LOG.debugv("skip Glue table {0}.{1}: {2}", schemaOrNull, t != null ? t.getName() : "unknown", e.getMessage());
             }
         }
+        return usesIceberg;
     }
 
     /**
@@ -181,6 +211,29 @@ public class GlueViewDdlBuilder {
             return "read_parquet('" + glob + "', union_by_name = true)";
         }
         return readFn + "('" + glob + "')";
+    }
+
+    /**
+     * Iceberg tables are not read via a Hive {@code InputFormat}/{@code SerializationLibrary}
+     * pair at all — pyiceberg and the AWS Glue-Iceberg integration leave those unset — so
+     * {@link #inferReadFunction} would otherwise fall through to {@code read_csv_auto} and fail
+     * on the table's binary Parquet data files, or a forced {@code read_parquet} would silently
+     * glob every data file ever written under the table's location, including ones no longer
+     * referenced by the current snapshot. Following the catalog's own {@code metadata_location}
+     * into {@code iceberg_scan} instead resolves the table through its real manifest list.
+     */
+    static boolean isIcebergTable(Table table) {
+        return table != null
+                && table.getParameters() != null
+                && ICEBERG_TABLE_TYPE.equalsIgnoreCase(table.getParameters().get(PARAM_TABLE_TYPE));
+    }
+
+    static String icebergMetadataLocation(Table table) {
+        return table.getParameters().get(PARAM_METADATA_LOCATION);
+    }
+
+    static String icebergReadExpression(String metadataLocation) {
+        return "iceberg_scan('" + metadataLocation.replace("'", "''") + "')";
     }
 
     static boolean containsIgnoreCase(String str, String sub) {

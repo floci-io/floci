@@ -42,7 +42,9 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 
 ## Format inference
 
-The DuckDB read function is chosen from the Glue table's `StorageDescriptor`:
+**Iceberg tables are checked first**, ahead of the `StorageDescriptor` heuristic below: a table whose `Parameters.table_type` is `ICEBERG` (case-insensitive) — as set by `pyiceberg`'s `GlueCatalog` and AWS's own Glue-Iceberg integration — is read via `iceberg_scan('<metadata_location>')`, using `Parameters.metadata_location` from the same Glue table. Iceberg tables never populate `InputFormat`/`SerializationLibrary` (they aren't read via a Hive input format), so without this check they always fell through to `read_csv_auto` and failed on the table's binary Parquet data files. `iceberg_scan` resolves the table through its real manifest list, so multi-snapshot tables (after updates, deletes, or repeated appends) read correctly instead of a naive glob picking up every data file ever written under the table's location. The `iceberg` DuckDB extension is installed and loaded once, only when the query touches at least one Iceberg table. A table flagged `ICEBERG` but missing `metadata_location` falls back to the format-sniffed heuristic below instead of emitting an unusable `iceberg_scan('')`.
+
+For every other table, the DuckDB read function is chosen from the Glue table's `StorageDescriptor`:
 
 | Condition | Read function |
 |---|---|
