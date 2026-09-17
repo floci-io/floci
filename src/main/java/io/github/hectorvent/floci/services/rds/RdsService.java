@@ -596,6 +596,10 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         DatabaseEngine engine = resolveEngine(engineParam);
+        if (engine == DatabaseEngine.SQLSERVER && dbName != null && !dbName.isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "DBName must be null for SQL Server.", 400);
+        }
         if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank() && !"default".equalsIgnoreCase(dbSubnetGroupName)) {
             getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
         }

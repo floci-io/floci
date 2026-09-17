@@ -180,13 +180,25 @@ class RdsServiceTest {
     @Test
     void createDbInstanceSupportsSqlServerEngineIdentifiers() {
         DbInstance instance = rdsService.createDbInstance("sqlserver-db", "sqlserver-se", "15.00",
-                "sa", "Password123!", "app", "db.t3.micro",
+                "sa", "Password123!", null, "db.t3.micro",
                 20, false, null, null, null, null, false);
 
         assertEquals(DatabaseEngine.SQLSERVER, instance.getEngine());
         assertEquals("sqlserver-se", instance.getEngineIdentifier());
         verify(containerManager).tryStart(any(), any(), any(), any(), eq(DatabaseEngine.SQLSERVER),
-                eq("mcr.microsoft.com/mssql/server:2022-latest"), eq("sa"), eq("Password123!"), eq("app"));
+                eq("mcr.microsoft.com/mssql/server:2022-latest"), eq("sa"), eq("Password123!"), isNull());
+    }
+
+    @Test
+    void createDbInstanceRejectsDbNameForSqlServer() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("sqlserver-db", "sqlserver-se", "15.00",
+                        "sa", "Password123!", "app", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals("DBName must be null for SQL Server.", exception.getMessage());
+        verifyNoInteractions(containerManager);
     }
 
     @Test
