@@ -141,7 +141,12 @@ public class ContainerLogStreamer {
      */
     public ResultCallback.Adapter<Frame> execLogCallback(String logGroup, String logStream,
                                                         String region, String logPrefix) {
-        return frameCallback(null, logGroup, logStream, region, logPrefix);
+        return execLogCallbackForAccount(null, logGroup, logStream, region, logPrefix);
+    }
+
+    public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
+            String accountId, String logGroup, String logStream, String region, String logPrefix) {
+        return frameCallback(accountId, logGroup, logStream, region, logPrefix);
     }
 
     /**
@@ -207,6 +212,11 @@ public class ContainerLogStreamer {
 
     public void streamToCloudWatchLogs(String logGroup, String logStream, String region, String line) {
         forwardToCloudWatchLogs(null, logGroup, logStream, region, line);
+    }
+
+    public void streamToCloudWatchLogsForAccount(
+            String accountId, String logGroup, String logStream, String region, String line) {
+        forwardToCloudWatchLogs(accountId, logGroup, logStream, region, line);
     }
 
     private void forwardToCloudWatchLogs(

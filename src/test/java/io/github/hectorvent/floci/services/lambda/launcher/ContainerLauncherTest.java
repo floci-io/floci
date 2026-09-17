@@ -65,7 +65,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -628,8 +627,9 @@ class ContainerLauncherTest {
         List<String> env = captureRealContainerSpec().env();
         assertTrue(env.contains("AWS_DEFAULT_REGION=eu-west-2"));
         assertTrue(env.contains("AWS_REGION=eu-west-2"));
-        verify(logStreamer).attach(
-                eq("container-123"), any(), any(), eq("eu-west-2"), eq("lambda:region-arn-fn"));
+        verify(logStreamer).attachForAccount(
+                eq("000000000000"), eq("container-123"), any(), any(),
+                eq("eu-west-2"), eq("lambda:region-arn-fn"));
     }
 
     @Test
@@ -1620,16 +1620,17 @@ class ContainerLauncherTest {
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("observability-fn");
         fn.setPackageType("Image");
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:555555555555:function:observability-fn");
         fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
 
         launcherWithRealStreamer.launch(fn);
 
-        // The frame became a CloudWatch log event in the function's own log group. Forwarding goes
-        // through the account-aware overload with a null account id: exec streams have no owning
-        // account of their own, so they land in the default account's copy of the log group.
+        // The frame became a CloudWatch log event in the function owner's log group even though
+        // the launcher is not running inside an HTTP request scope.
         ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
         verify(cloudWatchLogs, atLeastOnce()).putLogEventsForAccount(
-                isNull(), eq("/aws/lambda/observability-fn"), anyString(), events.capture(), anyString());
+                eq("555555555555"), eq("/aws/lambda/observability-fn"), anyString(),
+                events.capture(), anyString());
         assertTrue(events.getAllValues().stream()
                         .flatMap(List::stream)
                         .anyMatch(e -> "extension started on :8080".equals(e.get("message"))),
@@ -1653,8 +1654,8 @@ class ContainerLauncherTest {
         launcher.launch(fn);
 
         InOrder inOrder = inOrder(logStreamer, dockerClient);
-        inOrder.verify(logStreamer).ensureLogGroupAndStream(
-                eq("/aws/lambda/ordering-fn"), anyString(), anyString());
+        inOrder.verify(logStreamer).ensureLogGroupAndStreamForAccount(
+                eq("000000000000"), eq("/aws/lambda/ordering-fn"), anyString(), anyString());
         inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
     }
 

@@ -414,8 +414,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // Extensions can log as soon as they start, which is before the container's own log stream
         // is attached below. Create the group/stream up front so those early lines are not dropped
         // by CloudWatch; the call is idempotent, so attach() repeating it is harmless.
-        LogDestination logDestination = new LogDestination(cwLogGroup, cwLogStream, lambdaRegion);
-        logStreamer.ensureLogGroupAndStream(cwLogGroup, cwLogStream, lambdaRegion);
+        LogDestination logDestination = new LogDestination(
+                lambdaAccountId, cwLogGroup, cwLogStream, lambdaRegion);
+        logStreamer.ensureLogGroupAndStreamForAccount(
+                lambdaAccountId, cwLogGroup, cwLogStream, lambdaRegion);
 
         // Real AWS's runtime interface client discovers and launches every binary under
         // /opt/extensions/ as a sibling process to the main entrypoint before the runtime is
@@ -440,8 +442,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 LambdaExecutionRoleCredentials.sessionAccountId(fn));
 
         // Attach log streaming
-        Closeable logHandle = logStreamer.attach(
-                containerId, cwLogGroup, cwLogStream, lambdaRegion, "lambda:" + fn.getFunctionName());
+        Closeable logHandle = logStreamer.attachForAccount(
+                lambdaAccountId, containerId, cwLogGroup, cwLogStream,
+                lambdaRegion, "lambda:" + fn.getFunctionName());
         handle.setLogStream(logHandle);
 
         return handle;
@@ -1304,7 +1307,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * (or other extensions) from running.
      */
     /** Where a container's output is sent: the CloudWatch log group/stream and its region. */
-    private record LogDestination(String logGroup, String logStream, String region) { }
+    private record LogDestination(String accountId, String logGroup, String logStream, String region) { }
 
     /**
      * Arms an async watch (via Docker's own wait-for-exit API, not polling) that notices when
@@ -1360,8 +1363,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 // the container log and an observability extension's output would vanish entirely.
                 // Draining is also required in its own right — an unread exec pipe fills up and
                 // stalls the extension process.
-                dockerClient.execStartCmd(execId).exec(logStreamer.execLogCallback(
-                        logDestination.logGroup(), logDestination.logStream(), logDestination.region(),
+                dockerClient.execStartCmd(execId).exec(logStreamer.execLogCallbackForAccount(
+                        logDestination.accountId(), logDestination.logGroup(), logDestination.logStream(),
+                        logDestination.region(),
                         "lambda:" + functionName + ":" + name));
                 LOG.infov("Launched extension {0} for function {1} (container {2})",
                         name, functionName, containerId);
