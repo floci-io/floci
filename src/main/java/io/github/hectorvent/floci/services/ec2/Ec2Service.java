@@ -4632,6 +4632,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return kp;
     }
 
+    public Optional<Instance> findInstanceForAccount(String accountId, String region, String instanceId) {
+        return instances instanceof AccountAwareStorageBackend<Instance> aware
+                ? aware.getForAccount(accountId, key(region, instanceId)) : instances.get(key(region, instanceId));
+    }
+
     public Instance findInstanceById(String instanceId) {
         return instances.scan(k -> true).stream()
                 .filter(i -> instanceId.equals(i.getInstanceId()))

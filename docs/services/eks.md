@@ -37,8 +37,22 @@ The four access-entry management operations support `STANDARD` (the default) and
 
 Access entries use EKS storage and retain the IAM principal's stable ID internally. Cluster deletion removes its entries, and a cluster recreated with the same name does not inherit previous entries or pagination tokens.
 
-!!! note "Management API scope"
-    These operations currently manage metadata only. They do not change the k3s token webhook's authorization behavior, create cluster-creator or managed-node entries automatically, or make native workers register. Authentication mode and the bootstrap flag are recorded; they are not yet enforced by the Kubernetes API server. Updating authentication mode, UpdateAccessEntry, access-policy association, and entry tag updates are not implemented. Worker authentication is a separate follow-up.
+### EC2 Linux worker authentication
+
+IMDS instance-profile credentials authenticate through a matching `EC2_LINUX` entry as
+`system:node:<private-DNS-name>` with `system:bootstrappers` and `system:nodes` groups.
+The webhook verifies the signed token, cluster account/region/incarnation, stored role ID,
+running EC2 instance, and attached instance profile. Missing/deleted entries, recreated roles,
+revoked sessions and terminated instances are rejected without falling back to administrator access.
+The existing k3s webhook cache can retain a successful authentication for up to 30 seconds.
+
+New cluster webhook configurations carry the target account, region and creation timestamp.
+Recreate older local clusters before using worker authentication; a legacy unscoped webhook
+rejects instance credentials. Obtain fresh IMDS credentials after upgrading so the session
+includes the stable role ID.
+
+!!! note "Authentication scope"
+    Non-worker IAM users and ordinary STS sessions retain the existing cluster-admin compatibility behavior. STANDARD entries, access policies, aws-auth ConfigMap, the cluster-creator bootstrap flag and automatic managed-node entries are not enforced by this change. Updating authentication mode, UpdateAccessEntry, access-policy association, and entry tag updates remain unimplemented. Native AL2023 images, bootstrap RBAC/CSR approval, CNI and worker networking are separate requirements for registration and Ready.
 
 ```bash
 aws --endpoint-url http://localhost:4566 eks create-cluster \
@@ -72,7 +86,7 @@ aws eks update-kubeconfig --name my-cluster
 kubectl get nodes
 ```
 
-`aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 60-second presign expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before mapping the caller to the `system:masters` group (bound to `cluster-admin`). No `aws-iam-authenticator` is required.
+`aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 60-second presign expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before resolving the caller identity. Instance-profile sessions require an EC2_LINUX access entry as described above; non-worker callers retain the `system:masters` mapping (bound to `cluster-admin`). No `aws-iam-authenticator` is required.
 
 Create an IAM access key before using EKS authentication. The public local-development pairs `test`/`test` and `floci`/`floci` are deliberately rejected because the webhook grants cluster-admin access.
 

@@ -32,6 +32,7 @@ class Ec2InstanceCredentialsTest {
         assertEquals(40, first.getSecretAccessKey().length());
         assertEquals(ACCOUNT, first.getOriginAccountId());
         assertEquals("i-first", first.getEc2InstanceId());
+        assertEquals(fixture.role.getRoleId(), first.getEc2RoleId());
         assertEquals(NOW.plusSeconds(3600), first.getExpiration());
         verify(fixture.iam).registerEc2InstanceSession(first);
         assertSame(first, fixture.get(NOW.plusSeconds(3299)));

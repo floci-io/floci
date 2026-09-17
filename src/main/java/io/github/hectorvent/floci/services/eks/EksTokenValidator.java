@@ -54,32 +54,38 @@ class EksTokenValidator {
         this.clock = clock;
     }
 
+    record VerifiedToken(String accessKeyId, String region) {}
+
     boolean validate(String token, String clusterName) {
+        return verify(token, clusterName).isPresent();
+    }
+
+    Optional<VerifiedToken> verify(String token, String clusterName) {
         if (token == null || clusterName == null || clusterName.isBlank() || token.length() > MAX_TOKEN_LENGTH) {
-            return false;
+            return Optional.empty();
         }
 
         try {
             URI request = parseToken(token);
             if (request == null) {
-                return false;
+                return Optional.empty();
             }
 
             Map<String, String> parameters = parseQuery(request.getRawQuery());
             if (!hasExpectedRequestShape(request, parameters)) {
-                return false;
+                return Optional.empty();
             }
 
             CredentialScope scope = parseCredentialScope(parameters.get("X-Amz-Credential"));
             Instant signedAt = Instant.from(DATETIME_FORMAT.parse(parameters.get("X-Amz-Date")));
             if (!isCurrent(signedAt, parameters.get("X-Amz-Expires"))
                     || !scope.date().equals(parameters.get("X-Amz-Date").substring(0, 8))) {
-                return false;
+                return Optional.empty();
             }
 
             String secretKey = secretKey(scope.accessKeyId(), parameters.get("X-Amz-Security-Token"));
             if (secretKey == null) {
-                return false;
+                return Optional.empty();
             }
 
             String canonicalRequest = canonicalRequest(request, parameters, clusterName);
@@ -89,12 +95,13 @@ class EksTokenValidator {
                     + sha256Hex(canonicalRequest);
             String expectedSignature = hexEncode(hmacSha256(
                     deriveSigningKey(secretKey, scope.date(), scope.region(), scope.service()), stringToSign));
-            return MessageDigest.isEqual(
+            boolean valid = MessageDigest.isEqual(
                     expectedSignature.getBytes(StandardCharsets.UTF_8),
                     parameters.get("X-Amz-Signature").getBytes(StandardCharsets.UTF_8));
+            return valid ? Optional.of(new VerifiedToken(scope.accessKeyId(), scope.region())) : Optional.empty();
         } catch (Exception exception) {
             LOG.debugv("EKS IAM token validation rejected a malformed token: {0}", exception.getMessage());
-            return false;
+            return Optional.empty();
         }
     }
 

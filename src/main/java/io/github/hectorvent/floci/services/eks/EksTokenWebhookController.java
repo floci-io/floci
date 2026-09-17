@@ -7,12 +7,13 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Kubernetes token-authentication webhook for k3s-backed EKS clusters.
@@ -20,8 +21,8 @@ import java.util.Map;
  * <p>The k3s API server is configured (see {@code EksClusterManager}) to POST a
  * {@code TokenReview} here whenever it receives a bearer token it does not recognise, notably the
  * {@code k8s-aws-v1.<presigned-sts-url>} token produced by {@code aws eks get-token}. Floci validates
- * the request signature, expiration, and signed cluster ID before mapping the token to the
- * {@code system:masters} group, which is bound to {@code cluster-admin} by default.
+ * the request signature, expiration, and signed cluster ID before resolving worker access entries.
+ * Non-worker credentials retain the legacy cluster-admin compatibility behavior.
  *
  * <p>This is Floci plumbing under the {@code _floci/...} namespace, not an AWS API.
  */
@@ -33,34 +34,36 @@ public class EksTokenWebhookController {
 
     private static final Logger LOG = Logger.getLogger(EksTokenWebhookController.class);
     private final EksTokenValidator tokenValidator;
+    private final EksWorkerAuthentication authentication;
 
     @Inject
-    public EksTokenWebhookController(EksTokenValidator tokenValidator) {
+    public EksTokenWebhookController(EksTokenValidator tokenValidator, EksWorkerAuthentication authentication) {
         this.tokenValidator = tokenValidator;
+        this.authentication = authentication;
     }
 
     @POST
-    public Response review(@PathParam("clusterName") String clusterName, Map<String, Object> tokenReview) {
+    public Response review(@PathParam("clusterName") String clusterName, @QueryParam("accountId") String accountId,
+                           @QueryParam("region") String region, @QueryParam("createdAt") String createdAt,
+                           Map<String, Object> tokenReview) {
         // The response apiVersion MUST match the request's (the kube-apiserver sends v1beta1 by
         // default and cannot convert a v1 response back). Echo whatever the apiserver sent.
         String apiVersion = tokenReview != null && tokenReview.get("apiVersion") instanceof String v
                 ? v : "authentication.k8s.io/v1";
 
         String token = extractToken(tokenReview);
-        boolean authenticated = tokenValidator.validate(token, clusterName);
+        Optional<Map<String, Object>> user = tokenValidator.verify(token, clusterName)
+                .flatMap(verified -> authentication.authenticate(verified, clusterName, accountId, region, createdAt));
 
-        if (authenticated) {
-            LOG.debugv("EKS token-webhook: authenticated aws-iam token for cluster {0} as cluster-admin",
+        if (user.isPresent()) {
+            LOG.debugv("EKS token-webhook: authenticated aws-iam token for cluster {0}",
                     clusterName);
             return Response.ok(Map.of(
                     "apiVersion", apiVersion,
                     "kind", "TokenReview",
                     "status", Map.of(
                             "authenticated", true,
-                            "user", Map.of(
-                                    "username", "floci:aws-iam",
-                                    "uid", "floci-aws-iam",
-                                    "groups", List.of("system:masters"))))).build();
+                            "user", user.get()))).build();
         }
 
         LOG.debugv("EKS token-webhook: rejected aws-iam token for cluster {0}", clusterName);

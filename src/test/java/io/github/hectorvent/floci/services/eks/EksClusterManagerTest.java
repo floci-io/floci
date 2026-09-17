@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
 
+import java.time.Instant;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -58,6 +59,17 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class EksClusterManagerTest {
+
+    @Test
+    void workerWebhookBindsAccountRegionAndClusterIncarnation() {
+        Cluster cluster = new Cluster();
+        cluster.setName("demo");
+        cluster.setAccountId("123456789012");
+        cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/demo");
+        cluster.setCreatedAt(Instant.parse("2026-09-17T00:00:00Z"));
+        assertEquals("/_floci/eks/clusters/demo/token-webhook?accountId=123456789012"
+                + "&region=us-west-2&createdAt=2026-09-17T00:00:00Z", EksClusterManager.webhookPath(cluster));
+    }
 
     @Test
     void webhookPathBindsAuthenticationToOneCluster() {

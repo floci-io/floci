@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eks.model.AccessEntry;
@@ -22,6 +23,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /** Access-entry management metadata; Kubernetes authorization is handled separately. */
@@ -130,6 +132,15 @@ public class EksAccessEntryService {
                 type, username, List.copyOf(groups), Map.copyOf(tags), now, now);
         entries.put(key, new StoredEntry(entry, principalId, token));
         return entry;
+    }
+
+    synchronized Optional<AccessEntry> workerEntry(Cluster cluster, String accountId, String principal, String roleId) {
+        requireApiAccess(cluster);
+        String key = prefix(cluster) + principal;
+        Optional<StoredEntry> stored = entries instanceof AccountAwareStorageBackend<StoredEntry> aware
+                ? aware.getForAccount(accountId, key) : entries.get(key);
+        return stored.filter(value -> roleId != null && roleId.equals(value.principalId()))
+                .map(StoredEntry::entry).filter(entry -> "EC2_LINUX".equals(entry.type()));
     }
 
     public synchronized AccessEntry describe(Cluster cluster, String principal) {
