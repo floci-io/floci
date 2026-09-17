@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.jboss.logging.Logger;
 
@@ -437,6 +438,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         for (String key : instances.keys()) {
             Instance instance = instances.get(key).orElse(null);
             if (!needsMetadataRegistration(instance)) {
+                continue;
+            }
+            try {
+                restoreInstanceFirewall(instance);
+            } catch (Exception e) {
+                LOG.warnv("Could not restore EC2 firewall for {0}: {1}", instance.getInstanceId(), e.getMessage());
+                containerManager.stopForShutdown(instance);
+                instance.setState(InstanceState.stopped());
+                instances.put(key, instance);
                 continue;
             }
             if (containerManager.restoreMetadataRegistration(instance)) {
@@ -1053,6 +1063,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             list.setState("modify-complete");
             managedPrefixLists.put(key(region, prefixListId), list);
+            reconcileFirewallPolicies(region);
             return list;
         }
     }
@@ -1063,6 +1074,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             requireCustomerManaged(list, "deleted");
             managedPrefixLists.delete(key(region, prefixListId));
             tags.delete(prefixListId);
+            reconcileFirewallPolicies(region);
             // AWS reports delete-complete on the returned object even though it is now gone.
             list.setState("delete-complete");
             return list;
@@ -2470,6 +2482,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                     int networkInterfaceDeviceIndex, String availabilityZone,
                                     LaunchTemplateData.MetadataOptions metadataOptions,
                                     String creditSpecificationCpuCredits) {
+        String encodedUserData = userData == null ? null
+                : Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8));
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData);
+    }
+
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, false);
+    }
+
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun) {
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -2580,6 +2624,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                             dockerImage.cloudInit(), dockerImage.dockerPlatform());
                 }
             }
+            if (dryRun) {
+                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            }
             for (int i = 0; i < count; i++) {
                 String instanceId = "i-" + randomHex(17);
                 String privateIp = suppliedEni != null
@@ -2610,6 +2657,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 inst.setClientToken(clientToken);
                 inst.setRegion(region);
                 inst.setUserData(userData);
+                inst.setEncodedUserData(encodedUserData);
                 inst.setIamInstanceProfileArn(iamInstanceProfileArn);
                 inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
                 inst.setCreditSpecificationCpuCredits(
@@ -2695,7 +2743,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 }
             }
             for (Instance inst : launched) {
-                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst));
+                List<SecurityGroup> policyGroups = inst.getSecurityGroups().stream()
+                        .map(group -> securityGroups.get(key(region, group.getGroupId()))
+                                .orElseThrow(() -> new IllegalStateException("Missing security group " + group.getGroupId())))
+                        .toList();
+                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst),
+                        policyGroups, policyPrefixLists(region, policyGroups));
             }
         }
 
@@ -2768,12 +2821,52 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 sgs, config.services().ec2().maxPublishedPortsPerInstance());
     }
 
+    private Map<String, List<String>> policyPrefixLists(String region, List<SecurityGroup> groups) {
+        Map<String, List<String>> resolved = new LinkedHashMap<>();
+        for (SecurityGroup group : groups) {
+            Stream.concat(group.getIpPermissions().stream(),
+                            group.getIpPermissionsEgress().stream())
+                    .flatMap(permission -> permission.getPrefixListIds().stream())
+                    .map(PrefixListId::getPrefixListId).distinct()
+                    .forEach(id -> resolved.put(id, managedPrefixLists.get(key(region, id)).isEmpty()
+                            ? List.of() : getManagedPrefixListEntries(region, id, null).stream()
+                            .map(PrefixListEntry::getCidr).toList()));
+        }
+        return resolved;
+    }
+
+    private boolean securityGroupEnforcementEnabled() {
+        return config.network() != null && config.network().securityGroupEnforcement() != null
+                && config.network().securityGroupEnforcement().enabled();
+    }
+
+    private void reconcileFirewallPolicies(String region) {
+        if (!securityGroupEnforcementEnabled() || config.services().ec2().mock()) {
+            return;
+        }
+        List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
+        Map<String, SecurityGroup> byId = current.stream()
+                .collect(Collectors.toMap(SecurityGroup::getGroupId, Function.identity()));
+        containerManager.refreshSecurityGroups(region, byId, policyPrefixLists(region, current));
+    }
+
+    private void restoreInstanceFirewall(Instance instance) {
+        if (!securityGroupEnforcementEnabled()) {
+            return;
+        }
+        String region = instance.getRegion();
+        List<SecurityGroup> attached = instance.getSecurityGroups().stream()
+                .map(group -> getRequiredSecurityGroup(region, group.getGroupId())).toList();
+        containerManager.restoreSecurityGroups(instance, region, attached, policyPrefixLists(region, attached));
+    }
+
     /**
      * Re-publishes host forwards for every running instance attached to the given security group,
      * so ports opened or closed via authorize/revoke ingress take effect on already-running
      * instances. No-op in mock mode or when publishing is disabled.
      */
     private void reconcilePublishedPortsForGroup(String region, String groupId) {
+        reconcileFirewallPolicies(region);
         if (!config.services().ec2().publishSecurityGroupPorts() || config.services().ec2().mock()) {
             return;
         }
@@ -3048,6 +3141,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if (config.services().ec2().mock()) {
                 inst.setState(InstanceState.running());
             } else {
+                restoreInstanceFirewall(inst);
                 containerManager.start(inst);
             }
             instances.put(key(region, id), inst);
@@ -3261,7 +3355,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<GroupIdentifier> identifiers = new ArrayList<>();
         for (String groupId : groupIds) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            if (!Objects.equals(inst.getVpcId(), sg.getVpcId())) {
+                throw new AwsException("InvalidGroup.NotFound", "Security group is not in the instance VPC", 400);
+            }
             identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
+        }
+
+        if (securityGroupEnforcementEnabled() && !config.services().ec2().mock()
+                && inst.getState() != null && "running".equals(inst.getState().getName())
+                && inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {
+            List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
+            Map<String, SecurityGroup> byId = current.stream().collect(Collectors.toMap(
+                    SecurityGroup::getGroupId, Function.identity()));
+            containerManager.updateSecurityGroups(inst.getNetworkInterfaces().getFirst().getNetworkInterfaceId(),
+                    new HashSet<>(groupIds), byId, policyPrefixLists(region, current));
         }
 
         inst.setSecurityGroups(new ArrayList<>(identifiers));
@@ -3454,6 +3561,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private VpcIpv6CidrBlockAssociation amazonProvidedIpv6Association(String region) {
         String block = "2600:1f18:" + randomHex(4) + ":" + randomHex(2) + "00::/56";
         return new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), block, region);
+    }
+
+    private boolean vpcHasAssociatedIpv6CidrBlock(Vpc vpc) {
+        return vpc.getIpv6CidrBlockAssociationSet().stream()
+                .anyMatch(assoc -> "associated".equalsIgnoreCase(assoc.getIpv6CidrBlockState()));
     }
 
     public void disassociateVpcCidrBlock(String region, String associationId) {
@@ -3852,11 +3964,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone,
                                String availabilityZoneId) {
+        return createSubnet(region, vpcId, cidrBlock, availabilityZone, availabilityZoneId, null);
+    }
+
+    public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone,
+                               String availabilityZoneId, String ipv6CidrBlock) {
         if (vpcId == null || vpcId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter VpcId", 400);
         }
         ensureDefaultResources(region);
-        getRequiredVpc(region, vpcId);
+        Vpc vpc = getRequiredVpc(region, vpcId);
+        if (ipv6CidrBlock != null && !ipv6CidrBlock.isBlank() && !vpcHasAssociatedIpv6CidrBlock(vpc)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Ipv6CidrBlock can only be specified for a subnet in a VPC with an associated "
+                            + "IPv6 CIDR block. VPC " + vpcId + " has none.", 400);
+        }
 
         String zoneName = resolveSubnetZoneName(region, availabilityZone, availabilityZoneId);
 
@@ -3872,6 +3994,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         subnet.setOwnerId(accountId);
         subnet.setRegion(region);
         subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetId).toString());
+        if (ipv6CidrBlock != null && !ipv6CidrBlock.isBlank()) {
+            subnet.getIpv6CidrBlockAssociationSet().add(new VpcIpv6CidrBlockAssociation(
+                    "subnet-cidr-assoc-" + randomHex(17), ipv6CidrBlock, null));
+        }
         // The conflict scan and the store must be one step under the VPC's lock, or two
         // overlapping creates in flight together both pass the scan before either is stored.
         synchronized (lockFor(key(region, vpcId))) {
@@ -4067,6 +4193,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
         }
+        reconcileFirewallPolicies(region);
         return rules;
     }
 
@@ -4211,6 +4338,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
         }
+        reconcileFirewallPolicies(region);
     }
 
     /**
@@ -4247,6 +4375,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         if (!rule.isEgress()) {
             reconcilePublishedPortsForGroup(region, groupId);
+        } else {
+            reconcileFirewallPolicies(region);
         }
         return true;
     }
@@ -4416,11 +4546,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public KeyPair createKeyPair(String region, String keyName) {
         ensureDefaultResources(region);
-        boolean exists = keyPairs.scan(k -> true).stream()
-                .anyMatch(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
-        if (exists) {
-            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
-        }
+        requireKeyName(keyName);
+        rejectDuplicateKeyName(region, keyName);
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
@@ -4464,28 +4591,30 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
-    public void deleteKeyPair(String region, String keyName, String keyPairId) {
+    /**
+     * Deletes by id when one is given, otherwise by name, and returns the deleted key pair so
+     * the response can carry its id. Null when nothing matched: AWS answers a delete of an
+     * unknown key pair with plain success.
+     */
+    public KeyPair deleteKeyPair(String region, String keyName, String keyPairId) {
         ensureDefaultResources(region);
-        if (keyPairId != null && !keyPairId.isEmpty()) {
-            keyPairs.delete(key(region, keyPairId));
-        } else {
-            // scan() returns a detached copy, so the key pair has to be resolved to its
-            // store key and deleted through the backend — mutating the scan result does
-            // not touch the store.
-            keyPairs.scan(k -> true).stream()
-                    .filter(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName))
-                    .map(KeyPair::getKeyPairId)
-                    .forEach(id -> keyPairs.delete(key(region, id)));
+        boolean byId = keyPairId != null && !keyPairId.isEmpty();
+        // scan() returns detached copies, so each match is resolved to its store key and deleted
+        // through the backend; mutating the scan result does not touch the store.
+        List<KeyPair> matches = keyPairs.scan(k -> true).stream()
+                .filter(k -> region.equals(k.getRegion()))
+                .filter(k -> byId ? keyPairId.equals(k.getKeyPairId()) : keyName != null && keyName.equals(k.getKeyName()))
+                .toList();
+        for (KeyPair match : matches) {
+            keyPairs.delete(key(region, match.getKeyPairId()));
         }
+        return matches.isEmpty() ? null : matches.getFirst();
     }
 
     public KeyPair importKeyPair(String region, String keyName, String publicKeyMaterial) {
         ensureDefaultResources(region);
-        boolean exists = keyPairs.scan(k -> true).stream()
-                .anyMatch(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
-        if (exists) {
-            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
-        }
+        requireKeyName(keyName);
+        rejectDuplicateKeyName(region, keyName);
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
@@ -4524,6 +4653,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     || (!"shutting-down".equals(state) && !"terminated".equals(state) && !"stopping".equals(state));
         }
         return containerManager.isContainerRunning(instance.getDockerContainerId());
+    }
+
+    private static void requireKeyName(String keyName) {
+        if (keyName == null || keyName.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
+        }
+    }
+
+    // Compared name-first so a nameless record can never throw here. One such record, stored
+    // before KeyName was validated, used to fail every later CreateKeyPair in the account (#3356).
+    private void rejectDuplicateKeyName(String region, String keyName) {
+        boolean exists = keyPairs.scan(k -> true).stream()
+                .anyMatch(k -> region.equals(k.getRegion()) && keyName.equals(k.getKeyName()));
+        if (exists) {
+            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
+        }
     }
 
     public KeyPair findKeyPair(String region, String keyName) {
@@ -7735,10 +7880,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             for (String sgId : securityGroupIds) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, sgId);
+                if (!subnet.getVpcId().equals(sg.getVpcId())) {
+                    throw new AwsException("InvalidGroup.NotFound",
+                            "Security group " + sgId + " does not belong to the subnet VPC", 400);
+                }
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
             }
         } else {
-            SecurityGroup defaultSg = securityGroups.get(key(region, resolveDefaultSecurityGroupId(region))).orElse(null);
+            SecurityGroup defaultSg = securityGroups.scan(k -> k.startsWith(region + "::")).stream()
+                    .filter(group -> subnet.getVpcId().equals(group.getVpcId())
+                            && "default".equals(group.getGroupName()))
+                    .findFirst().orElse(null);
             if (defaultSg != null) {
                 sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
             }

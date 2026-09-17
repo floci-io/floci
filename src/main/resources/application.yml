@@ -12,18 +12,21 @@ quarkus:
 
   http:
     port: ${floci.port}
-    host: 0.0.0.0
+    # Loopback by default. Any other address (0.0.0.0, a LAN IP) also needs
+    # floci.security.allow-unsafe-network-exposure, or Floci refuses to start.
+    # Env var: QUARKUS_HTTP_HOST=0.0.0.0
+    host: 127.0.0.1
     # Quarkus 3.38 added a Host-header validation filter (DNS-rebinding protection for a dev server)
-    # that it switches on by itself whenever the server is bound to loopback, which Floci does in
-    # TLS mode: Quarkus listens on 127.0.0.1:4510/4511 behind the TCP proxy on 4566, and the proxy
-    # passes the client's Host header through untouched. The filter is an exact-match set with no
+    # that it switches on by itself whenever the server is bound to loopback, which Floci is by
+    # default. In TLS mode Quarkus listens on 127.0.0.1:4510/4511 behind the TCP proxy on 4566, and
+    # the proxy passes the client's Host header through untouched. The filter is an exact-match set with no
     # wildcard support, and with require-localhost it admits only localhost, 127.0.0.1 and [::1].
     # An emulator has to answer under the names it documents and puts in its certificate
     # (localhost.floci.io, *.localhost.floci.io, *.execute-api.localhost.floci.io,
     # host.docker.internal) and under whatever a compose file calls it (FLOCI_HOSTNAME), none of
     # which an exact-match allow-list can express. Disabling the check restores the behaviour of
-    # every release before Quarkus 3.39 and of the non-TLS mode, where Quarkus never enables it;
-    # the access boundary of a local emulator is the IAM and signature enforcement configuration.
+    # every release before Quarkus 3.39; the access boundary of a local emulator is the IAM and
+    # signature enforcement configuration.
     host-validation:
       require-localhost: false
     limits:
@@ -116,6 +119,10 @@ quarkus:
 floci:
   port: 4566
   base-url: "http://localhost:4566"
+  network:
+    security-group-enforcement:
+      enabled: false
+      helper-image: floci/network-helper:local
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
   default-region: us-east-1
@@ -152,7 +159,7 @@ floci:
       lambda:
         flush-interval-ms: 5000
       cloudwatchlogs:
-        flush-interval-ms: 5000
+        flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
       secretsmanager:
@@ -160,6 +167,8 @@ floci:
       acm:
         flush-interval-ms: 5000
       opensearch:
+        flush-interval-ms: 5000
+      sagemaker:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
@@ -240,6 +249,12 @@ floci:
     # Grant Private Network Access preflights (Access-Control-Allow-Private-Network)
     # so a page on a public/secure origin can reach this loopback backend.
     cors-allow-private-network: false
+    # Allow quarkus.http.host, and the TLS proxy that uses it, to listen outside loopback
+    # (127.0.0.0/8, ::1, localhost). Anyone who can reach that address can call Floci's APIs.
+    # The Docker images set it, since they listen on 0.0.0.0 inside the container.
+    # Env var: FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE=true
+    allow-unsafe-network-exposure: false
+    allow-private-jwt-targets: false
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
@@ -319,6 +334,9 @@ floci:
         enabled: false
     apigateway:
       enabled: true
+      vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL mapping template may execute (truncates the loop, does not fail the template)
+      vtl-max-output-chars: 1048576        # Maximum characters a VTL mapping template may render before it fails
+      vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL mapping template may spend evaluating before it fails
     apigatewayv2:
       enabled: true
     iam:
@@ -412,11 +430,14 @@ floci:
     cloudwatchlogs:
       enabled: true
       max-events-per-query: 10000
+      max-stored-events: 20000
     cloudwatchmetrics:
       enabled: true
     secretsmanager:
       enabled: true
       default-recovery-window-days: 30
+      scheduled-rotation-enabled: true
+      rotation-tick-seconds: 60
     kinesis:
       enabled: true
     firehose:
@@ -535,6 +556,18 @@ floci:
       # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
       # Set an absolute http:// or https:// URL here only to override that derivation.
       insecure-skip-tls-verify: false
+      # The console-contract keys below are deliberately unset. Floci reads the console's own
+      # io.floci.console.* image labels first, then a built-in profile, then the contract defaults
+      # (/api/health, port 4500, status: ok). Setting a value here overrides all of that, so only
+      # do it for a console that describes itself neither way. See docs/ui/console-contract.md.
+      # internal-port: 4500
+      # endpoint-env: AWS_ENDPOINT_URL
+      # status-path: /api/health
+      # status-ready-field: status      # "none" means any 200 counts as ready
+      # status-ready-value: ok
+      # status-unavailable-value: unavailable
+      # extra-env:                     # PORT and AWS_ENDPOINT_URL are ignored here: use
+      #   - MY_CONSOLE_FLAG=true       # internal-port and endpoint above instead
     bedrock:
       enabled: true
     bedrock-runtime:
@@ -559,6 +592,7 @@ floci:
       iam-auth-webhook: true       # validate `aws eks get-token` SigV4 tokens through a k3s webhook
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
+      imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
     mwaa:
       enabled: true
       mock: false
@@ -578,6 +612,9 @@ floci:
       enabled: true
       mock: false
     codebuild:
+      enabled: true
+      # docker-network: floci-network
+    sagemaker:
       enabled: true
       # docker-network: floci-network
     batch:
@@ -645,6 +682,9 @@ floci:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
+      vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL resolver template may execute (truncates the loop, does not fail the template)
+      vtl-max-output-chars: 1048576        # Maximum characters a VTL resolver template may render before it fails
+      vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL resolver template may spend evaluating before it fails
     s3vectors:
       enabled: true
     s3tables:
@@ -739,6 +779,8 @@ floci:
       enabled: true
       # invoke-response: '{"output":"yes"}'   # Body returned by InvokeAgentRuntime
       # validate-runtime-exists: false        # true = reject unknown runtime ARNs
+      # harness-echo-prefix: 'You said: '      # Prefix on the reply InvokeHarness streams back
+      # harness-empty-reply: 'No user message was supplied.'
     bedrock-agent-core-control:
       enabled: true
     servicequotas:
@@ -750,6 +792,8 @@ floci:
     ram:
       enabled: true
     codegurureviewer:
+      enabled: true
+    codeartifact:
       enabled: true
     marketplace:
       enabled: true

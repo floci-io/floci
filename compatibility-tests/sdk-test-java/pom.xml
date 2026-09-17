@@ -376,6 +376,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>guardduty</artifactId>
         </dependency>
+        <!-- CodeArtifact client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>codeartifact</artifactId>
+        </dependency>
         <!-- AWS Resource Access Manager client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -491,6 +496,16 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>codebuild</artifactId>
+        </dependency>
+        <!-- SageMaker client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sagemaker</artifactId>
+        </dependency>
+        <!-- SageMaker Runtime client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sagemakerruntime</artifactId>
         </dependency>
         <!-- CodeDeploy client -->
         <dependency>

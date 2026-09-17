@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2ImageCatalog;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
+import io.github.hectorvent.floci.services.ssm.model.ParameterStringFilter;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmAssociation;
@@ -33,6 +34,10 @@ public class SsmService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
     private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
+    // Label is a ParameterStringFilter key too, but only GetParametersByPath accepts it.
+    private static final Set<String> DESCRIBE_PARAMETERS_FILTER_KEYS =
+            Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");
+    private static final String DEFAULT_SSM_KEY_ID = "alias/aws/ssm";
 
     /**
      * Account-default values for the service settings floci models. AWS rejects
@@ -329,13 +334,77 @@ public class SsmService implements ResourceProvider {
         return describeParameters(List.of(), region);
     }
 
-    public List<Parameter> describeParameters(List<String> nameFilters, String region) {
+    /**
+     * Lists the region's own parameters that pass every filter: filters combine with AND, the
+     * values of one filter with OR. A key or option AWS rejects is an error rather than being
+     * skipped, because dropping a filter silently widens the result.
+     */
+    public List<Parameter> describeParameters(List<ParameterStringFilter> filters, String region) {
+        filters.forEach(SsmService::validateDescribeParametersFilter);
         String prefix = region + "::";
-        return parameterStore.scan(key -> {
-            if (!key.startsWith(prefix)) return false;
-            if (nameFilters.isEmpty()) return true;
-            String name = key.substring(prefix.length());
-            return nameFilters.contains(name);
+        return parameterStore.scan(key -> key.startsWith(prefix)).stream()
+                .filter(p -> filters.stream().allMatch(f -> matchesParameterFilter(p, f)))
+                .toList();
+    }
+
+    private static void validateDescribeParametersFilter(ParameterStringFilter filter) {
+        String key = filter.key();
+        boolean tag = key != null && key.startsWith("tag:") && key.length() > "tag:".length();
+        // Set.of rejects a null lookup, so an absent key is checked before the membership test.
+        if (!tag && (key == null || !DESCRIBE_PARAMETERS_FILTER_KEYS.contains(key))) {
+            throw new AwsException("InvalidFilterKey", "The specified key isn't valid.", 400);
+        }
+        if (filter.option() != null) {
+            Set<String> options = "Path".equals(key) ? Set.of("Recursive", "OneLevel")
+                    : "Name".equals(key) ? Set.of("Equals", "BeginsWith", "Contains")
+                    : Set.of("Equals", "BeginsWith");
+            if (!options.contains(filter.option())) {
+                throw new AwsException("InvalidFilterOption",
+                        "The specified filter option isn't valid. Valid options are Equals and BeginsWith. "
+                                + "For Path filter, valid options are Recursive and OneLevel.", 400);
+            }
+        }
+        // Every key but a tag needs at least one value, and a path value must be absolute.
+        boolean invalidValues = !tag && filter.values().isEmpty()
+                || "Path".equals(key) && filter.values().stream().anyMatch(v -> !v.startsWith("/"));
+        if (invalidValues) {
+            throw new AwsException("InvalidFilterValue",
+                    "The filter value isn't valid. Verify the value and try again.", 400);
+        }
+    }
+
+    private static boolean matchesParameterFilter(Parameter parameter, ParameterStringFilter filter) {
+        String key = filter.key();
+        if (key.startsWith("tag:")) {
+            String tagValue = parameter.getTags() == null ? null
+                    : parameter.getTags().get(key.substring("tag:".length()));
+            // A tag filter without values matches any parameter carrying the tag key.
+            return tagValue != null && (filter.values().isEmpty() || matchesAny(tagValue, filter));
+        }
+        if ("Path".equals(key)) {
+            boolean recursive = "Recursive".equals(filter.option());
+            return filter.values().stream().anyMatch(path ->
+                    underPath(parameter.getName(), path.endsWith("/") ? path : path + "/", recursive));
+        }
+        String actual = switch (key) {
+            case "Name" -> parameter.getName();
+            case "Type" -> parameter.getType();
+            case "DataType" -> parameter.getDataType();
+            // Floci stores neither a tier nor a customer key, so every parameter is Standard and
+            // a SecureString is encrypted with the AWS managed key, as AWS defaults them.
+            case "Tier" -> "Standard";
+            case "KeyId" -> "SecureString".equals(parameter.getType()) ? DEFAULT_SSM_KEY_ID : null;
+            default -> null;
+        };
+        return actual != null && matchesAny(actual, filter);
+    }
+
+    private static boolean matchesAny(String actual, ParameterStringFilter filter) {
+        String option = filter.option() == null ? "Equals" : filter.option();
+        return filter.values().stream().anyMatch(value -> switch (option) {
+            case "BeginsWith" -> actual.startsWith(value);
+            case "Contains" -> actual.contains(value);
+            default -> actual.equals(value);
         });
     }
 

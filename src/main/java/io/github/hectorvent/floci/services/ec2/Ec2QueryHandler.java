@@ -674,8 +674,11 @@ public class Ec2QueryHandler {
     private Response handleRunInstances(MultivaluedMap<String, String> p, String region) {
         String imageId = p.getFirst("ImageId");
         String instanceType = p.getFirst("InstanceType");
-        int minCount = Integer.parseInt(p.getOrDefault("MinCount", List.of("1")).get(0));
-        int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
+        int minCount = parseRunInstancesCount(p, "MinCount");
+        int maxCount = parseRunInstancesCount(p, "MaxCount");
+        if (maxCount < minCount) {
+            throw new AwsException("InvalidParameterValue", "MaxCount must be greater than or equal to MinCount", 400);
+        }
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
         // The launch-time public-IP override arrives either on the primary
@@ -747,7 +750,10 @@ public class Ec2QueryHandler {
             imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
             instanceType = firstNonBlank(instanceType, launchTemplateData.getInstanceType());
             keyName = firstNonBlank(keyName, launchTemplateData.getKeyName());
-            userData = firstNonBlank(userData, launchTemplateData.getUserData());
+            if (userDataEncoded == null || userDataEncoded.isBlank()) {
+                userData = launchTemplateData.getUserData();
+                userDataEncoded = launchTemplateData.getEncodedUserData();
+            }
             iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn,
                     service.iamInstanceProfileArn(launchTemplateData));
             if (sgIds.isEmpty()) {
@@ -764,7 +770,7 @@ public class Ec2QueryHandler {
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
-                creditSpecificationCpuCredits);
+                creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")));
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -789,6 +795,22 @@ public class Ec2QueryHandler {
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
         return xmlResponse(xml.build());
+    }
+
+    private int parseRunInstancesCount(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return 1;
+        }
+        try {
+            int count = Integer.parseInt(value);
+            if (count > 0) {
+                return count;
+            }
+        } catch (NumberFormatException ignored) {
+            // Malformed and non-positive counts share the same EC2 validation error.
+        }
+        throw new AwsException("InvalidParameterValue", name + " must be a positive integer", 400);
     }
 
     private LaunchTemplateData resolveRunInstancesLaunchTemplateData(MultivaluedMap<String, String> p, String region) {
@@ -871,7 +893,7 @@ public class Ec2QueryHandler {
                         null,
                         null,
                         0,
-                        launch.availabilityZone());
+                        launch.availabilityZone(), null, null, launch.encodedUserData());
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
                 results.add(new FleetLaunchResult(instance, launch));
@@ -1026,6 +1048,7 @@ public class Ec2QueryHandler {
                 availabilityZone,
                 template.getKeyName(),
                 template.getUserData(),
+                template.getEncodedUserData(),
                 service.iamInstanceProfileArn(template),
                 template.effectiveSecurityGroupIds(),
                 new ArrayList<>(tags.values()));
@@ -1072,7 +1095,7 @@ public class Ec2QueryHandler {
 
     private record FleetLaunch(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                String instanceType, String imageId, String subnetId, String availabilityZone,
-                               String keyName, String userData, String iamInstanceProfileArn,
+                               String keyName, String userData, String encodedUserData, String iamInstanceProfileArn,
                                List<String> securityGroupIds, List<Tag> instanceTags) {}
 
     private record FleetLaunchKey(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
@@ -1182,8 +1205,17 @@ public class Ec2QueryHandler {
     private Response handleTerminateInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.terminateInstances(region, ids);
+        return xmlResponse(buildInstanceStateChangeXml("TerminateInstancesResponse", changes));
+    }
+
+    /**
+     * The shared {@code instancesSet}/{@code item}/{@code currentState}/{@code previousState}
+     * shape that {@code TerminateInstances}, {@code StartInstances}, and {@code StopInstances}
+     * each return, keyed only by the top-level response element name.
+     */
+    private String buildInstanceStateChangeXml(String responseElementName, List<Map<String, String>> changes) {
         XmlBuilder xml = new XmlBuilder()
-                .start("TerminateInstancesResponse", AwsNamespaces.EC2)
+                .start(responseElementName, AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("instancesSet");
         for (Map<String, String> c : changes) {
@@ -1199,8 +1231,8 @@ public class Ec2QueryHandler {
                     .end("previousState")
                     .end("item");
         }
-        xml.end("instancesSet").end("TerminateInstancesResponse");
-        return xmlResponse(xml.build());
+        xml.end("instancesSet").end(responseElementName);
+        return xml.build();
     }
 
     /**
@@ -1233,49 +1265,13 @@ public class Ec2QueryHandler {
     private Response handleStartInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.startInstances(region, ids);
-        XmlBuilder xml = new XmlBuilder()
-                .start("StartInstancesResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("instancesSet");
-        for (Map<String, String> c : changes) {
-            xml.start("item")
-                    .elem("instanceId", c.get("instanceId"))
-                    .start("currentState")
-                    .elem("code", c.get("currentCode"))
-                    .elem("name", c.get("currentState"))
-                    .end("currentState")
-                    .start("previousState")
-                    .elem("code", c.get("previousCode"))
-                    .elem("name", c.get("previousState"))
-                    .end("previousState")
-                    .end("item");
-        }
-        xml.end("instancesSet").end("StartInstancesResponse");
-        return xmlResponse(xml.build());
+        return xmlResponse(buildInstanceStateChangeXml("StartInstancesResponse", changes));
     }
 
     private Response handleStopInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.stopInstances(region, ids);
-        XmlBuilder xml = new XmlBuilder()
-                .start("StopInstancesResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("instancesSet");
-        for (Map<String, String> c : changes) {
-            xml.start("item")
-                    .elem("instanceId", c.get("instanceId"))
-                    .start("currentState")
-                    .elem("code", c.get("currentCode"))
-                    .elem("name", c.get("currentState"))
-                    .end("currentState")
-                    .start("previousState")
-                    .elem("code", c.get("previousCode"))
-                    .elem("name", c.get("previousState"))
-                    .end("previousState")
-                    .end("item");
-        }
-        xml.end("instancesSet").end("StopInstancesResponse");
-        return xmlResponse(xml.build());
+        return xmlResponse(buildInstanceStateChangeXml("StopInstancesResponse", changes));
     }
 
     private Response handleRebootInstances(MultivaluedMap<String, String> p, String region) {
@@ -1363,7 +1359,9 @@ public class Ec2QueryHandler {
                 .start("DescribeInstanceAttributeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("instanceId", instanceId);
-        if ("instanceType".equals(attribute)) {
+        if ("userData".equals(attribute)) {
+            xml.start("userData").elem("value", inst.getEncodedUserData()).end("userData");
+        } else if ("instanceType".equals(attribute)) {
             xml.start("instanceType").elem("value", inst.getInstanceType()).end("instanceType");
         } else if ("sourceDestCheck".equals(attribute)) {
             xml.start("sourceDestCheck").elem("value", String.valueOf(inst.isSourceDestCheck())).end("sourceDestCheck");
@@ -2817,7 +2815,8 @@ public class Ec2QueryHandler {
         String cidrBlock = p.getFirst("CidrBlock");
         String az = p.getFirst("AvailabilityZone");
         String azId = p.getFirst("AvailabilityZoneId");
-        Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId);
+        String ipv6CidrBlock = p.getFirst("Ipv6CidrBlock");
+        Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId, ipv6CidrBlock);
         applyResourceTags(p, region, "subnet", subnet.getSubnetId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
@@ -3030,8 +3029,18 @@ public class Ec2QueryHandler {
 
     // ─── Key Pair handlers ────────────────────────────────────────────────────
 
-    private Response handleCreateKeyPair(MultivaluedMap<String, String> p, String region) {
+    // KeyName is required on CreateKeyPair and ImportKeyPair. Accepting its absence used to store
+    // a nameless key pair, and the first nameless record broke every later CreateKeyPair (#3356).
+    private static String requireKeyName(MultivaluedMap<String, String> p) {
         String keyName = p.getFirst("KeyName");
+        if (keyName == null || keyName.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
+        }
+        return keyName;
+    }
+
+    private Response handleCreateKeyPair(MultivaluedMap<String, String> p, String region) {
+        String keyName = requireKeyName(p);
         KeyPair kp = service.createKeyPair(region, keyName);
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateKeyPairResponse", AwsNamespaces.EC2)
@@ -3067,14 +3076,36 @@ public class Ec2QueryHandler {
     private Response handleDeleteKeyPair(MultivaluedMap<String, String> p, String region) {
         String keyName = p.getFirst("KeyName");
         String keyPairId = p.getFirst("KeyPairId");
-        service.deleteKeyPair(region, keyName, keyPairId);
-        return booleanResponse("DeleteKeyPair");
+        boolean noName = keyName == null || keyName.isBlank();
+        boolean noId = keyPairId == null || keyPairId.isBlank();
+        if (noName && noId) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
+        }
+        KeyPair deleted = service.deleteKeyPair(region, keyName, keyPairId);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteKeyPairResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("return", "true");
+        if (deleted != null) {
+            xml.elem("keyPairId", deleted.getKeyPairId());
+        }
+        xml.end("DeleteKeyPairResponse");
+        return xmlResponse(xml.build());
     }
 
     private Response handleImportKeyPair(MultivaluedMap<String, String> p, String region) {
-        String keyName = p.getFirst("KeyName");
+        String keyName = requireKeyName(p);
         String encoded = p.getFirst("PublicKeyMaterial");
-        String publicKeyMaterial = new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        if (encoded == null || encoded.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter PublicKeyMaterial", 400);
+        }
+        String publicKeyMaterial;
+        try {
+            publicKeyMaterial = new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidKey.Format", "Key is not in valid OpenSSH public key format", 400);
+        }
         KeyPair kp = service.importKeyPair(region, keyName, publicKeyMaterial);
         XmlBuilder xml = new XmlBuilder()
                 .start("ImportKeyPairResponse", AwsNamespaces.EC2)
@@ -4491,10 +4522,24 @@ public class Ec2QueryHandler {
                 .elem("assignIpv6AddressOnCreation", String.valueOf(s.isAssignIpv6AddressOnCreation()))
                 .elem("enableDns64", String.valueOf(s.isEnableDns64()))
                 .elem("mapCustomerOwnedIpOnLaunch", String.valueOf(s.isMapCustomerOwnedIpOnLaunch()))
-                .start("ipv6CidrBlockAssociationSet").end("ipv6CidrBlockAssociationSet")
+                .start("ipv6CidrBlockAssociationSet");
+        for (VpcIpv6CidrBlockAssociation assoc : s.getIpv6CidrBlockAssociationSet()) {
+            xml.start("item").raw(subnetIpv6AssociationXml(assoc)).end("item");
+        }
+        xml.end("ipv6CidrBlockAssociationSet")
                 .elem("ownerId", s.getOwnerId())
                 .raw(tagSetXml(s.getTags()));
         return xml.build();
+    }
+
+    // Subnet's ipv6CidrBlockAssociationSet item carries only ipv6CidrBlock/associationId/state on
+    // the wire, unlike the VPC's own association, which also carries ipv6Pool/networkBorderGroup.
+    private String subnetIpv6AssociationXml(VpcIpv6CidrBlockAssociation assoc) {
+        return new XmlBuilder()
+                .elem("ipv6CidrBlock", assoc.getIpv6CidrBlock())
+                .elem("associationId", assoc.getAssociationId())
+                .start("ipv6CidrBlockState").elem("state", assoc.getIpv6CidrBlockState()).end("ipv6CidrBlockState")
+                .build();
     }
 
     private String sgXml(SecurityGroup sg) {

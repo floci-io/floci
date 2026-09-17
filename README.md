@@ -130,6 +130,67 @@ The old `hectorvent/floci` repository no longer receives updates.
 
 </details>
 
+## Web Console
+
+Floci ships a browser console for inspecting the resources in your local emulator.
+
+**Open it at:** `http://localhost:4566/_floci/ui`
+
+Nothing runs at boot. The first request pulls the console image, starts it as a sidecar container on Floci's Docker network, hands it Floci's own reachable address plus the standard AWS environment, polls its health endpoint, and redirects the browser once it reports it can reach Floci. The sidecar's port is bound by Docker, so it needs no `ports:` entry of your own, and its logs are streamed into CloudWatch Logs under `/floci/ui`.
+
+Starting a container needs the Docker socket:
+
+```yaml
+services:
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_UI_ENABLED` | `true` | Enable the console sidecar |
+| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
+| `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
+| `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
+| `FLOCI_SERVICES_UI_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave the sidecar running when Floci stops |
+
+### Running a different console
+
+The console is not fixed to the one Floci ships. Any console implementing the [Floci console contract](https://floci.io/floci/ui/console-contract/) runs with nothing but an image name: listen on the port in `PORT`, serve `GET /api/health`, talk to Floci at `AWS_ENDPOINT_URL`.
+
+```yaml
+environment:
+  FLOCI_SERVICES_UI_IMAGE: acme/my-console:1.0
+```
+
+A console that differs from the contract's defaults says so in its own `io.floci.console.*` image labels, so its operators do not have to. [StackPort](https://github.com/DaviReisVieira/stackport), for example, listens on 8080 rather than 4500; on an image that predates the labels, say it by hand:
+
+```yaml
+environment:
+  FLOCI_SERVICES_UI_IMAGE: davireis/stackport:latest
+  FLOCI_SERVICES_UI_CONTAINER_NAME: floci-stackport
+  FLOCI_SERVICES_UI_PORT: "8080"
+  FLOCI_SERVICES_UI_INTERNAL_PORT: "8080"
+```
+
+[Floci Dash](https://github.com/ofsazib/floci-dash) is another. It honours `PORT`, so only the two things it does differ on need naming:
+
+```yaml
+environment:
+  FLOCI_SERVICES_UI_IMAGE: ghcr.io/ofsazib/floci-dash:latest
+  FLOCI_SERVICES_UI_CONTAINER_NAME: floci-dash
+  FLOCI_SERVICES_UI_ENDPOINT_ENV: FLOCI_URL
+  FLOCI_SERVICES_UI_STATUS_PATH: /api/healthz
+```
+
+The endpoint itself is never configured by hand: Floci resolves its own reachable address at start time and injects it as `AWS_ENDPOINT_URL`.
+
+Full reference: [Web Console](https://floci.io/floci/ui/) and [Console Contract v1](https://floci.io/floci/ui/console-contract/).
+
 ## Features
 
 <details open>
@@ -231,11 +292,11 @@ Floci supports local emulation for application services, data services, eventing
 
 | Category | Services |
 |---|---|
-| Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, KMS, Secrets Manager, SSM |
+| Core app services | S3, SQS, SNS, DynamoDB, Lambda, Lambda MicroVMs, IAM, STS, KMS, Secrets Manager, SSM |
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics, CloudWatch OAM, CloudWatch RUM, Managed Prometheus (AMP) |
-| API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Route 53 Resolver, Cloud Map, Global Accelerator |
-| Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, EFS, CodeBuild, CodeDeploy, CodePipeline, CodeGuru Reviewer, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2, ELB Classic |
-| Data, analytics, and AI | Athena, Glue, Lake Formation, EMR, EMR Serverless, Redshift, Redshift Data API, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Comprehend, Rekognition, Translate, Bedrock, Bedrock Runtime, Bedrock AgentCore |
+| API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, Cognito Identity, ACM, Route53, Route 53 Resolver, Cloud Map, Global Accelerator |
+| Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, EFS, CodeBuild, CodeDeploy, CodePipeline, CodeGuru Reviewer, CodeArtifact, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2, ELB Classic |
+| Data, analytics, and AI | Athena, Glue, Lake Formation, EMR, EMR Serverless, Redshift, Redshift Data API, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Comprehend, Rekognition, Translate, Bedrock, Bedrock Runtime, Bedrock AgentCore, Bedrock AgentCore Control, SageMaker |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, DataSync, IoT Core, Amazon Connect, Amazon AppIntegrations |
 | Security and governance | AWS Network Firewall, AWS RAM, Service Quotas, WAF v2, GuardDuty, Amazon Inspector, CloudTrail, CloudFront, Resource Groups Tagging API, Resource Explorer 2, CloudHSM v2, Organizations, AWS Account Management, IAM Access Analyzer, IAM Identity Center (SSO Admin, OIDC, Access Portal, SCIM), Identity Store, Amazon Macie, Amazon Detective, Security Hub, Amazon Verified Permissions, Control Catalog, Control Tower, Service Catalog, AWS Marketplace |
@@ -593,6 +654,7 @@ For Testcontainers 1.x, use the versions as indicated in the table below.
 | Java | `io.floci:testcontainers-floci` | `1.14.0` | [Maven Central](https://mvnrepository.com/artifact/io.floci/testcontainers-floci) | [GitHub](https://github.com/floci-io/testcontainers-floci) |
 | Node.js | `@floci/testcontainers` | `0.1.0` | [npm](https://www.npmjs.com/package/@floci/testcontainers) | [GitHub](https://github.com/floci-io/testcontainers-floci-node) |
 | Python | `testcontainers-floci` | `0.1.1` | [PyPI](https://pypi.org/project/testcontainers-floci/) | [GitHub](https://github.com/floci-io/testcontainers-floci-python) |
+| .NET | `Testcontainers.Floci` | see releases | [GitHub Packages](https://github.com/orgs/floci-io/packages?repo_name=testcontainers-floci-dotnet) | [GitHub](https://github.com/floci-io/testcontainers-floci-dotnet) |
 | Go | In progress | In progress | N/A | [GitHub](https://github.com/floci-io/testcontainers-floci-go) |
 
 <details>

@@ -181,8 +181,10 @@ nav:
     - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
+    - SageMaker: services/sagemaker.md
     - CodeDeploy: services/codedeploy.md
     - CodeGuru Reviewer: services/codegurureviewer.md
+    - CodeArtifact: services/codeartifact.md
     - CodePipeline: services/codepipeline.md
     - Service Quotas: services/servicequotas.md
     - AWS RAM: services/ram.md
@@ -212,10 +214,14 @@ nav:
     - Cost and Usage Reports: services/cur.md
     - BCM Pricing Calculator: services/bcm-pricing-calculator.md
     - BCM Data Exports: services/bcm-data-exports.md
+  - Web Console:
+    - Overview: ui/index.md
+    - Console Contract v1: ui/console-contract.md
   - Testcontainers:
     - Overview: testcontainers/index.md
     - Java: testcontainers/java.md
     - Node.js / TypeScript: testcontainers/nodejs.md
     - Python: testcontainers/python.md
+    - .NET: testcontainers/dotnet.md
     - Go: testcontainers/go.md
   - Contributing: contributing.md

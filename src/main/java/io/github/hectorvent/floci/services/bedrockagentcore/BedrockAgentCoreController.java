@@ -6,6 +6,16 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlService;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.smallrye.common.annotation.Blocking;
+import jakarta.ws.rs.core.GenericEntity;
+import jakarta.ws.rs.core.StreamingOutput;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.util.function.Consumer;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -36,18 +46,24 @@ public class BedrockAgentCoreController {
     private static final String SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id";
 
     private final BedrockAgentCoreService service;
+    private final BedrockAgentCoreHarnessService harnessService;
     private final BedrockAgentCoreControlService controlService;
     private final RegionResolver regionResolver;
+    private final ObjectMapper objectMapper;
     private final boolean validateRuntimeExists;
 
     @Inject
     public BedrockAgentCoreController(BedrockAgentCoreService service,
+                                      BedrockAgentCoreHarnessService harnessService,
                                       BedrockAgentCoreControlService controlService,
                                       RegionResolver regionResolver,
+                                      ObjectMapper objectMapper,
                                       EmulatorConfig config) {
         this.service = service;
+        this.harnessService = harnessService;
         this.controlService = controlService;
         this.regionResolver = regionResolver;
+        this.objectMapper = objectMapper;
         this.validateRuntimeExists = config.services().bedrockAgentCore().validateRuntimeExists();
     }
 
@@ -79,5 +95,56 @@ public class BedrockAgentCoreController {
             builder.header(SESSION_HEADER, sessionId);
         }
         return builder.build();
+    }
+
+    /**
+     * {@code InvokeHarness}. Answers with an {@code application/vnd.amazon.eventstream} response,
+     * the same framing ConverseStream uses, so an SDK client's stream iterator works unchanged.
+     *
+     * <p>{@code harnessArn} arrives as a query parameter and {@code runtimeSessionId} as a header,
+     * which is how the SDK binds them; only {@code messages}, {@code model} and {@code tools} are in
+     * the body.
+     *
+     * <p>Request validation happens before the first frame: once the stream is committed the status
+     * is already 200 and a problem could only be reported as an in-stream exception frame.
+     */
+    @POST
+    @Blocking
+    @Path("/harnesses/invoke")
+    @Consumes(MediaType.WILDCARD)
+    public Response invokeHarness(@Context HttpHeaders headers,
+                                 @QueryParam("harnessArn") String harnessArn,
+                                 @QueryParam("qualifier") String harnessQualifier,
+                                 String body) {
+        ObjectNode request;
+        try {
+            JsonNode parsed = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
+            request = parsed.isObject() ? (ObjectNode) parsed : objectMapper.createObjectNode();
+        } catch (IOException e) {
+            throw new AwsException("ValidationException", "Request body is not valid JSON", 400);
+        }
+
+        // runtimeSessionId and runtimeUserId are headers on the wire, not body fields. Only the
+        // session id is read: runtimeUserId reaches the harness on AWS but changes nothing here.
+        String runtimeSessionId = headers.getHeaderString(SESSION_HEADER);
+        Consumer<OutputStream> stream = harnessService.invokeHarness(harnessArn, runtimeSessionId, request);
+        LOG.debugv("InvokeHarness: arn={0}, qualifier={1}, session={2}",
+                harnessArn, harnessQualifier, runtimeSessionId);
+
+        Response.ResponseBuilder builder = Response.ok(streaming(stream))
+                .header("Content-Type", "application/vnd.amazon.eventstream");
+        if (runtimeSessionId != null) {
+            builder.header(SESSION_HEADER, runtimeSessionId);
+        }
+        return builder.build();
+    }
+
+    /**
+     * The explicit return type is what lets {@code GenericEntity} keep {@code StreamingOutput} as
+     * the entity type; inlining the constructor erases it to {@code Object}. Same helper as the
+     * bedrock-runtime controller.
+     */
+    private static GenericEntity<StreamingOutput> streaming(Consumer<OutputStream> stream) {
+        return new GenericEntity<>(stream::accept, StreamingOutput.class);
     }
 }

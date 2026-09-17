@@ -12,7 +12,6 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
-import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
@@ -368,6 +367,35 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "inventory")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutInventoryConfiguration", authorization);
                 return handlePutBucketInventoryConfiguration(bucket, uriInfo, body);
+            }
+
+            // Detect a PutObject request that reached this handler before virtual-host rewriting.
+            if (isMisplacedObjectPut(httpHeaders, body, bucket)) {
+                String actualBucket = resolveActualBucket(httpHeaders, uriInfo);
+                if (actualBucket != null && !actualBucket.equalsIgnoreCase(bucket)) {
+                    LOG.infov("Rerouting misplaced virtual-hosted PutObject to bucket {0}, key {1}", actualBucket, bucket);
+                    return putObject(actualBucket, bucket,
+                            httpHeaders.getHeaderString("Content-Type"),
+                            httpHeaders.getHeaderString("Content-Encoding"),
+                            httpHeaders.getHeaderString("x-amz-content-sha256"),
+                            httpHeaders.getHeaderString("x-amz-copy-source"),
+                            httpHeaders.getHeaderString("x-amz-tagging"),
+                            httpHeaders.getHeaderString("If-Match"),
+                            httpHeaders.getHeaderString("If-None-Match"),
+                            uriInfo.getQueryParameters().getFirst("uploadId"),
+                            uriInfo.getQueryParameters().getFirst("partNumber") != null
+                                    ? Integer.parseInt(uriInfo.getQueryParameters().getFirst("partNumber")) : null,
+                            uriInfo,
+                            httpHeaders,
+                            body);
+                }
+                if (bucket.length() > 63) {
+                    throw new AwsException("InvalidBucketName", "The specified bucket is not valid.", 400);
+                }
+                if (body != null && body.length > 0 && !isXmlCreateBucketConfiguration(body)) {
+                    throw new AwsException("MalformedXML",
+                            "The XML you provided was not well-formed or did not validate against our published schema", 400);
+                }
             }
 
             s3Service.authorizeCreateBucket(authorization);
@@ -744,7 +772,7 @@ public class S3Controller {
                               @Context HttpHeaders httpHeaders,
                               byte[] body) {
         try {
-            key = extractObjectKey(uriInfo, bucket);
+            key = extractObjectKey(uriInfo, bucket, key);
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
@@ -812,7 +840,7 @@ public class S3Controller {
                 return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, authorization);
             }
 
-            Map<String, String> inlineTags = parseInlineTaggingHeader(tagging);
+            Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
 
             String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
             String retainUntilStr = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
@@ -897,7 +925,7 @@ public class S3Controller {
                               @Context HttpHeaders httpHeaders) {
         S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
         try {
-            key = extractObjectKey(uriInfo, bucket);
+            key = extractObjectKey(uriInfo, bucket, key);
             authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
@@ -1140,7 +1168,7 @@ public class S3Controller {
                                @Context HttpHeaders httpHeaders) {
         S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
         try {
-            key = extractObjectKey(uriInfo, bucket);
+            key = extractObjectKey(uriInfo, bucket, key);
             authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (isWebsiteRequest(httpHeaders, uriInfo)) {
@@ -1287,7 +1315,7 @@ public class S3Controller {
                                  @Context UriInfo uriInfo,
                                  @Context HttpHeaders httpHeaders) {
         try {
-            key = extractObjectKey(uriInfo, bucket);
+            key = extractObjectKey(uriInfo, bucket, key);
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
@@ -1349,6 +1377,21 @@ public class S3Controller {
             if (contentType != null && contentType.startsWith("multipart/form-data")) {
                 return handlePresignedPost(bucket, contentType, body);
             }
+            if (hasQueryParam(uriInfo, "uploads") || hasQueryParam(uriInfo, "uploadId")) {
+                String actualBucket = resolveActualBucket(httpHeaders, uriInfo);
+                if (actualBucket != null && !actualBucket.equalsIgnoreCase(bucket)) {
+                    LOG.infov("Rerouting misplaced virtual-hosted multipart POST to bucket {0}, key {1}", actualBucket, bucket);
+                    return handleMultipartPost(actualBucket, bucket,
+                            uriInfo.getQueryParameters().getFirst("uploadId"),
+                            uriInfo.getQueryParameters().getFirst("versionId"),
+                            contentType,
+                            httpHeaders.getHeaderString("If-Match"),
+                            httpHeaders.getHeaderString("If-None-Match"),
+                            httpHeaders,
+                            uriInfo,
+                            body);
+                }
+            }
             return xmlErrorResponse(new AwsException("InvalidArgument",
                     "POST on bucket requires ?delete parameter.", 400));
         } catch (AwsException e) {
@@ -1370,7 +1413,7 @@ public class S3Controller {
                                          @Context UriInfo uriInfo,
                                          byte[] body) {
         try {
-            key = extractObjectKey(uriInfo, bucket);
+            key = extractObjectKey(uriInfo, bucket, key);
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
@@ -1388,7 +1431,8 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
                         getChecksumAlgorithm(httpHeaders),
                         httpHeaders.getHeaderString("x-amz-checksum-type"),
-                        parseInlineTaggingHeader(httpHeaders.getHeaderString("x-amz-tagging")));
+                        parseInlineTaggingHeader(
+                                resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo)));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -2661,6 +2705,9 @@ public class S3Controller {
         if (copy.getSseKmsKeyId() != null) {
             response.header("x-amz-server-side-encryption-aws-kms-key-id", copy.getSseKmsKeyId());
         }
+        if (copy.getVersionId() != null) {
+            response.header("x-amz-version-id", copy.getVersionId());
+        }
         appendSseCustomerHeaders(response, copy);
         return response.build();
     }
@@ -2897,7 +2944,8 @@ public class S3Controller {
         // HTTP/2 (RFC 9113) carries no Host header, so fall back to the request URI authority —
         // the same resolution S3VirtualHostFilter applies. Without this, a website bucket reached
         // over HTTP/2 would be served as an API (XML) response instead of website HTML.
-        String host = S3VirtualHostFilter.resolveHost(httpHeaders.getHeaderString("Host"), uriInfo.getRequestUri());
+        String host = S3VirtualHostFilter.resolveHost(httpHeaders.getHeaderString("Host"),
+                httpHeaders.getHeaderString("X-Forwarded-Host"), uriInfo.getRequestUri());
         return host != null && host.contains("s3-website");
     }
 
@@ -3051,6 +3099,10 @@ public class S3Controller {
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
         // surface which input was rejected. They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
+            Object resource = e.getExtendedData().get("Resource");
+            if (resource != null) {
+                xmlBuilder.elem("Resource", resource.toString());
+            }
             Object argumentName = e.getExtendedData().get("ArgumentName");
             Object argumentValue = e.getExtendedData().get("ArgumentValue");
             if (argumentName != null) {
@@ -3606,8 +3658,24 @@ public class S3Controller {
     private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;
 
     /**
-     * Parses an {@code x-amz-tagging} request-header value (URL-encoded
-     * {@code k=v&k=v}) into a tag map. Returns an empty map for null or blank input.
+     * Resolves the inline {@code x-amz-tagging} value for PutObject and CreateMultipartUpload.
+     * The signed request header wins; otherwise the value comes from the {@code x-amz-tagging}
+     * query parameter, where SDK presigners hoist the header while signing only {@code host}.
+     * JAX-RS decodes the query value once, which yields the same URL-encoded {@code k=v&k=v}
+     * string the header form carries, so both sources feed
+     * {@link #parseInlineTaggingHeader(String)} unchanged. Real S3 honors both forms.
+     */
+    private static String resolveInlineTaggingSource(String taggingHeader, UriInfo uriInfo) {
+        if (taggingHeader != null) {
+            return taggingHeader;
+        }
+        return uriInfo.getQueryParameters().getFirst("x-amz-tagging");
+    }
+
+    /**
+     * Parses an {@code x-amz-tagging} value (URL-encoded {@code k=v&k=v}), taken from the
+     * request header or the presigned-URL query parameter, into a tag map. Returns an empty
+     * map for null or blank input.
      *
      * <p>Note: the error codes thrown here ({@code InvalidArgument} for malformed input,
      * {@code BadRequest} for exceeding the 10-tag limit) match real-AWS S3 behavior
@@ -3656,6 +3724,10 @@ public class S3Controller {
      * that JAX-RS path normalization would otherwise strip.
      */
     private String extractObjectKey(UriInfo uriInfo, String bucket) {
+        return extractObjectKey(uriInfo, bucket, null);
+    }
+
+    private String extractObjectKey(UriInfo uriInfo, String bucket, String fallbackKey) {
         validateRawUri();
         String rawUri = currentVertxRequest.getCurrent().request().uri();
         int qIdx = rawUri.indexOf('?');
@@ -3663,8 +3735,12 @@ public class S3Controller {
         String bucketPrefix = "/" + bucket + "/";
         int prefixIndex = rawPath.indexOf(bucketPrefix);
         if (prefixIndex < 0) {
-            // Should not happen — route already matched /{bucket}/{key:.+}
-            return uriInfo.getPathParameters().getFirst("key");
+            // Should not happen on standard /{bucket}/{key:.+} routes, but can happen when
+            // requests are rerouted from a single-segment route (e.g. createBucket / handleBucketPost)
+            String pathKey = uriInfo.getPathParameters().getFirst("key");
+            String resolvedKey = pathKey != null ? pathKey : fallbackKey;
+            validateKeyNoTraversal(resolvedKey);
+            return resolvedKey;
         }
         String rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
         String key = URLDecoder.decode(rawKey.replace("+", "%2B"), StandardCharsets.UTF_8);
@@ -3784,12 +3860,12 @@ public class S3Controller {
                                          S3Service.RequestAuthorization authorization) {
         String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
         String resource = S3PublicAccessEvaluator.objectArn(source.bucket(), source.objectKey());
-        ResourcePolicyDecision resourcePolicyDecision =
+        S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
                 s3Service.signedPrincipalResourcePolicyDecision(
                         source.bucket(), action, resource, authorization);
         iamEnforcementFilter.authorizeAdditionalResource(
                 httpHeaders.getHeaderString("Authorization"), action, resource,
-                resourcePolicyDecision);
+                resourcePolicyEvaluation.decision(), resourcePolicyEvaluation.resourceOwnerAccountId());
         s3Service.authorizeGetObject(
                 source.bucket(), source.objectKey(), source.versionId(), authorization);
     }
@@ -3952,5 +4028,66 @@ public class S3Controller {
                     .replace("%7E", "~");
         }
         return val;
+    }
+
+    private String resolveActualBucket(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        String host = S3VirtualHostFilter.resolveHost(
+                httpHeaders.getHeaderString("Host"),
+                httpHeaders.getHeaderString("X-Forwarded-Host"),
+                uriInfo.getRequestUri());
+        if (host == null) {
+            return null;
+        }
+        String bucket = S3VirtualHostFilter.extractBucketFromExisting(host, s3Service);
+        if (bucket != null) {
+            return bucket;
+        }
+        return S3VirtualHostFilter.extractBucket(host, "localhost", Set.of("localhost"));
+    }
+
+    private static boolean isMisplacedObjectPut(HttpHeaders httpHeaders, byte[] body, String bucket) {
+        if (bucket != null && bucket.length() > 63) {
+            return true;
+        }
+        String contentSha256 = httpHeaders.getHeaderString("x-amz-content-sha256");
+        if (contentSha256 != null && contentSha256.startsWith("STREAMING-")) {
+            return true;
+        }
+        String contentEncoding = httpHeaders.getHeaderString("Content-Encoding");
+        if (contentEncoding != null && contentEncoding.toLowerCase(Locale.ROOT).contains("aws-chunked")) {
+            return true;
+        }
+        if (httpHeaders.getHeaderString("x-amz-decoded-content-length") != null
+                || httpHeaders.getHeaderString("x-amz-trailer") != null
+                || httpHeaders.getHeaderString("Content-Disposition") != null
+                || httpHeaders.getHeaderString("x-amz-storage-class") != null
+                || httpHeaders.getHeaderString("x-amz-copy-source") != null) {
+            return true;
+        }
+        MultivaluedMap<String, String> requestHeaders = httpHeaders.getRequestHeaders();
+        if (requestHeaders != null) {
+            for (String headerName : requestHeaders.keySet()) {
+                if (headerName.toLowerCase(Locale.ROOT).startsWith("x-amz-meta-")) {
+                    return true;
+                }
+            }
+        }
+        String contentType = httpHeaders.getHeaderString("Content-Type");
+        if (contentType != null && !contentType.isBlank()) {
+            String lowerType = contentType.toLowerCase(Locale.ROOT);
+            if (!lowerType.contains("xml") && !lowerType.contains("form-urlencoded")
+                    && (body != null && body.length > 0 || httpHeaders.getHeaderString("Content-Length") != null)) {
+                return true;
+            }
+        }
+        return body != null && body.length > 0 && !isXmlCreateBucketConfiguration(body);
+    }
+
+    private static boolean isXmlCreateBucketConfiguration(byte[] body) {
+        if (body == null || body.length == 0) {
+            return true;
+        }
+        String text = new String(body, StandardCharsets.UTF_8).trim();
+        return text.startsWith("<") && text.contains("CreateBucketConfiguration");
     }
 }

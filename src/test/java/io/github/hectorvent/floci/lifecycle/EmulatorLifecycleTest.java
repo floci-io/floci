@@ -39,6 +39,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -59,6 +60,7 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.StorageConfig storageConfig;
     @Mock private EmulatorConfig.ServicesConfig servicesConfig;
     @Mock private EmulatorConfig.Ec2ServiceConfig ec2ServiceConfig;
+    @Mock private EmulatorConfig.EksServiceConfig eksServiceConfig;
     @Mock private EmulatorConfig.ElbV2ServiceConfig elbv2ServiceConfig;
     @Mock private EmulatorConfig.ElbServiceConfig elbServiceConfig;
     @Mock private IamService iamService;
@@ -107,6 +109,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elastiCacheServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elb()).thenReturn(elbServiceConfig);
         Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.eks()).thenReturn(eksServiceConfig);
+        Mockito.lenient().when(eksServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.tls()).thenReturn(tlsConfig);
         Mockito.lenient().when(tlsConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(config.port()).thenReturn(4566);
@@ -147,6 +151,7 @@ class EmulatorLifecycleTest {
         inOrder.verify(initLifecycleState).markBootCompleted();
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(iamService).sweepOrphanedLambdaExecutionRoleSessions();
+        inOrder.verify(iamService).sweepOrphanedEc2InstanceSessions();
         inOrder.verify(rdsService).restorePersistedRuntime();
     }
 
@@ -573,5 +578,37 @@ class EmulatorLifecycleTest {
 
         assertEquals(1, messages.stream().filter("Ready."::equals).count(),
                 "Exactly one parity \"Ready.\" line must be emitted on the hook path");
+    }
+
+    @Test
+    @DisplayName("Should start and stop EC2 metadata server when EKS IMDS is enabled")
+    void shouldStartAndStopMetadataServerWhenEksImdsEnabled() {
+        stubStorageConfig();
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(false);
+        when(eksServiceConfig.imds()).thenReturn(true);
+        when(ec2MetadataServer.start()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+        verify(ec2MetadataServer).start();
+
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+        verify(ec2MetadataServer).stop();
+    }
+
+    @Test
+    @DisplayName("Should not start EC2 metadata server when EKS IMDS is disabled")
+    void shouldNotStartMetadataServerWhenEksImdsDisabled() {
+        stubStorageConfig();
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(false);
+        when(eksServiceConfig.imds()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+        verify(ec2MetadataServer, never()).start();
     }
 }

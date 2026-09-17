@@ -4,18 +4,13 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
-import io.github.hectorvent.floci.services.ses.model.AccountDetails;
-import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
-import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
@@ -24,7 +19,6 @@ import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.Topic;
-import io.github.hectorvent.floci.services.ses.model.TopicPreference;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
@@ -51,7 +45,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -67,10 +60,9 @@ public class SesService {
     // flows and send-path reads, reaching the store through its find/save.
     private final SesIdentityService identityService;
     // Sent-email records extracted to SesSentEmailService. The send path records finished emails via
-    // it; send-statistics and inspection read back through it.
+    // it; the account and v1 statistics reads go to the service directly, inspection still reads
+    // back through the facade.
     private final SesSentEmailService sentEmailService;
-    // Account-level settings, extracted to its own service. The facade delegates.
-    private final SesAccountService accountService;
     // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
     // reads via it, and ARN-dispatched tagging reads/writes via its find/save.
     private final SesTemplateService templateService;
@@ -81,16 +73,20 @@ public class SesService {
     // Account suppression attributes + the per-address suppression list (two stores) extracted to
     // SesSuppressionService. The facade delegates; its send filters read via it.
     private final SesSuppressionService suppressionService;
-    // Dedicated IP pools extracted to SesDedicatedIpService. The facade delegates.
+    // Dedicated IP pools and IPs live in SesDedicatedIpService, which the v2 controller calls
+    // directly; the facade only reaches it for the delivery-options pool probe and the
+    // ARN-dispatched tagging.
     private final SesDedicatedIpService dedicatedIpService;
-    // Contact lists and contacts (two stores) extracted to SesContactService. The
-    // facade delegates, and its send-path list-management orchestration calls into the service.
+    // Contact lists and contacts (two stores) live in SesContactService, which the v2 controller
+    // and the unsubscribe endpoint call directly; the facade only reaches it from the send-path
+    // list-management orchestration and the ARN-dispatched tagging.
     private final SesContactService contactService;
     // Identity (sending authorization) policy storage, extracted to SesPolicyService.
     // The facade keeps the identity-existence check and delegates the rest.
     private final SesPolicyService policyService;
-    // Custom verification email templates: storage extracted to SesCvetService. The
-    // facade keeps the identity-dependent validation and the send path; the service owns the store.
+    // Custom verification email templates: storage extracted to SesCvetService, which the v2
+    // controller and the v1 handler call directly for get/list/delete. The facade keeps create and
+    // update for the identity-dependent validation, plus the send path and the tag dispatch.
     private final SesCvetService cvetService;
     // Tenants (multi-tenancy) live in SesTenantService. The facade delegates.
     private final SesTenantService tenantService;
@@ -105,8 +101,7 @@ public class SesService {
     private final RegionResolver regionResolver;
 
     @Inject
-    public SesService(SesIdentityService identityService, SesAccountService accountService,
-                       SesCvetService cvetService,
+    public SesService(SesIdentityService identityService, SesCvetService cvetService,
                        SesPolicyService policyService, SesContactService contactService,
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
@@ -116,7 +111,6 @@ public class SesService {
                        RegionResolver regionResolver) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
-        this.accountService = accountService;
         this.templateService = templateService;
         this.configSetService = configSetService;
         this.suppressionService = suppressionService;
@@ -134,7 +128,6 @@ public class SesService {
 
     SesService(SesIdentityService identityService,
                SesSentEmailService sentEmailService,
-               SesAccountService accountService,
                SesTemplateService templateService,
                SesConfigurationSetService configSetService,
                SesSuppressionService suppressionService,
@@ -146,7 +139,6 @@ public class SesService {
                SmtpRelay smtpRelay) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
-        this.accountService = accountService;
         this.templateService = templateService;
         this.configSetService = configSetService;
         this.suppressionService = suppressionService;
@@ -545,10 +537,6 @@ public class SesService {
         return events;
     }
 
-    public long getSentEmailCount(String region) {
-        return sentEmailService.countInRegion(region);
-    }
-
     public void setIdentityNotificationTopic(String identityValue, String notificationType,
                                               String snsTopic, String region) {
         identityService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic, region);
@@ -673,61 +661,19 @@ public class SesService {
         sentEmailService.clear();
     }
 
-    public boolean isAccountSendingEnabled(String region) {
-        return accountService.isAccountSendingEnabled(region);
-    }
-
-    public void setAccountSendingEnabled(String region, boolean enabled) {
-        accountService.setAccountSendingEnabled(region, enabled);
-    }
-
-    public Optional<AccountDetails> findAccountDetails(String region) {
-        return accountService.findAccountDetails(region);
-    }
-
-    public AccountDetails putAccountDetails(String region, String mailType, String websiteUrl,
-                                            String contactLanguage, String useCaseDescription,
-                                            List<String> additionalContacts, boolean productionAccessEnabled) {
-        return accountService.putAccountDetails(region, mailType, websiteUrl, contactLanguage,
-                useCaseDescription, additionalContacts, productionAccessEnabled);
-    }
-
-    public Optional<AccountVdmAttributes> findAccountVdmAttributes(String region) {
-        return accountService.findAccountVdmAttributes(region);
-    }
-
-    public void putAccountVdmAttributes(String region, AccountVdmAttributes vdm) {
-        accountService.putAccountVdmAttributes(region, vdm);
-    }
-
     public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {
         configSetService.setSendingEnabled(configSetName, enabled, region);
     }
 
     // ──────────────────────────── Templates ────────────────────────────
 
-    // Email templates live in SesTemplateService; the facade forwards. The templated-send path below
-    // reads them back through getTemplate, and ARN-dispatched tagging through find/save.
-
-    public EmailTemplate createTemplate(EmailTemplate template, String region) {
-        return templateService.createTemplate(template, region);
-    }
-
-    public EmailTemplate getTemplate(String templateName, String region) {
-        return templateService.getTemplate(templateName, region);
-    }
-
-    public EmailTemplate updateTemplate(EmailTemplate template, String region) {
-        return templateService.updateTemplate(template, region);
-    }
+    // Email templates live in SesTemplateService, which the v2 controller and the v1 handler call
+    // directly; only the delete stays here for the tenant-association guard. The templated-send
+    // path below reads templates through the service, and ARN-dispatched tagging through find/save.
 
     public void deleteTemplate(String templateName, String region) {
         tenantService.deleteBackingResource(SesTenantService.RESOURCE_TYPE_TEMPLATE, templateName,
                 region, () -> templateService.deleteTemplate(templateName, region));
-    }
-
-    public List<EmailTemplate> listTemplates(String region) {
-        return templateService.listTemplates(region);
     }
 
     // ──────────── Custom verification email templates (v1 + v2 shared store) ────────────
@@ -742,23 +688,11 @@ public class SesService {
         cvetService.createCustomVerificationEmailTemplate(template, region);
     }
 
-    public CustomVerificationEmailTemplate getCustomVerificationEmailTemplate(String templateName, String region) {
-        return cvetService.getCustomVerificationEmailTemplate(templateName, region);
-    }
-
-    public List<CustomVerificationEmailTemplate> listCustomVerificationEmailTemplates(String region) {
-        return cvetService.listCustomVerificationEmailTemplates(region);
-    }
-
     public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
         // Validate (including the From-verified identity check and the required-field checks) before
         // delegating the storage update, matching createCustomVerificationEmailTemplate.
         validateCustomVerificationTemplate(template, region);
         cvetService.updateCustomVerificationEmailTemplate(template, region);
-    }
-
-    public void deleteCustomVerificationEmailTemplate(String templateName, String region) {
-        cvetService.deleteCustomVerificationEmailTemplate(templateName, region);
     }
 
     // AWS appends this exact disclaimer to the end of every custom verification email and it cannot
@@ -904,7 +838,7 @@ public class SesService {
     public ConfigurationSet createConfigurationSet(ConfigurationSet configSet, String region) {
         return configSetService.createConfigurationSet(configSet, region,
                 domain -> isVerifiedDomainIdentity(domain, region),
-                pool -> dedicatedIpPoolExists(pool, region));
+                pool -> dedicatedIpService.dedicatedIpPoolExists(pool, region));
     }
 
     // The option operations live in the service; the facade only supplies the cross-domain probes
@@ -917,7 +851,7 @@ public class SesService {
 
     public void setConfigurationSetDeliveryOptions(String configSetName, DeliveryOptions options, String region) {
         configSetService.setDeliveryOptions(configSetName, options, region,
-                pool -> dedicatedIpPoolExists(pool, region));
+                pool -> dedicatedIpService.dedicatedIpPoolExists(pool, region));
     }
 
     public void setConfigurationSetReputationOptions(String configSetName, boolean metricsEnabled, String region) {
@@ -1152,90 +1086,6 @@ public class SesService {
         throw new AwsException("NotFoundException", message, 404);
     }
 
-    // ──────────────────────── Dedicated IP Pools ────────────────────────
-
-    // Storage lives in SesDedicatedIpService; the facade forwards.
-
-    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, List<Tag> tags,
-                                                 String region) {
-        return dedicatedIpService.createDedicatedIpPool(poolName, scalingMode, tags, region);
-    }
-
-    public DedicatedIpPool getDedicatedIpPool(String poolName, String region) {
-        return dedicatedIpService.getDedicatedIpPool(poolName, region);
-    }
-
-    public boolean dedicatedIpPoolExists(String poolName, String region) {
-        return dedicatedIpService.dedicatedIpPoolExists(poolName, region);
-    }
-
-    public List<String> listDedicatedIpPools(String region) {
-        return dedicatedIpService.listDedicatedIpPools(region);
-    }
-
-    public void deleteDedicatedIpPool(String poolName, String region) {
-        dedicatedIpService.deleteDedicatedIpPool(poolName, region);
-    }
-
-
-    // Contact lists and contacts live in SesContactService; the facade forwards.
-    // Its send-path list-management (collectListManagementOptOuts) also calls into that service.
-
-    public ContactList createContactList(String name, String description, List<Topic> topics,
-                                         List<Tag> tags, String region) {
-        return contactService.createContactList(name, description, topics, tags, region);
-    }
-
-    public ContactList getContactList(String name, String region) {
-        return contactService.getContactList(name, region);
-    }
-
-    public List<ContactList> listContactLists(String region) {
-        return contactService.listContactLists(region);
-    }
-
-    public ContactList updateContactList(String name, String description, boolean descriptionPresent,
-                                         List<Topic> topics, String region) {
-        return contactService.updateContactList(name, description, descriptionPresent, topics, region);
-    }
-
-    public void deleteContactList(String name, String region) {
-        contactService.deleteContactList(name, region);
-    }
-
-    public Contact createContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
-                                 Boolean unsubscribeAll, String attributesData, String region) {
-        return contactService.createContact(listName, emailAddress, topicPreferences, unsubscribeAll,
-                attributesData, region);
-    }
-
-    public SesContactService.ContactWithList getContact(String listName, String emailAddress, String region) {
-        return contactService.getContact(listName, emailAddress, region);
-    }
-
-    public SesContactService.ContactsWithList listContacts(String listName, String region) {
-        return contactService.listContacts(listName, region);
-    }
-
-    public Contact updateContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
-                                 boolean topicPreferencesPresent, Boolean unsubscribeAll, String attributesData,
-                                 String region) {
-        return contactService.updateContact(listName, emailAddress, topicPreferences, topicPreferencesPresent,
-                unsubscribeAll, attributesData, region);
-    }
-
-    public void deleteContact(String listName, String emailAddress, String region) {
-        contactService.deleteContact(listName, emailAddress, region);
-    }
-
-    public List<TopicPreference> deriveTopicDefaultPreferences(Contact contact, ContactList list) {
-        return contactService.deriveTopicDefaultPreferences(contact, list);
-    }
-
-    public void unsubscribeContact(String listName, String emailAddress, String topicName, String region) {
-        contactService.unsubscribeContact(listName, emailAddress, topicName, region);
-    }
-
     // ──────────────── Identity (sending authorization) policies ────────────────
     // One shared store behind the v1 (PutIdentityPolicy/GetIdentityPolicies/ListIdentityPolicies/
     // DeleteIdentityPolicy) and v2 (Create/Get/Update/DeleteEmailIdentityPolicy) APIs. Verified
@@ -1288,36 +1138,6 @@ public class SesService {
         }
     }
 
-
-
-    // Dedicated IPs (IP-level) and pool scaling live in SesDedicatedIpService; the facade forwards.
-
-    public void getDedicatedIp(String ip, String region) {
-        dedicatedIpService.getDedicatedIp(ip, region);
-    }
-
-    public void putDedicatedIpInPool(String ip, String destinationPoolName, String region) {
-        dedicatedIpService.putDedicatedIpInPool(ip, destinationPoolName, region);
-    }
-
-    public void putDedicatedIpWarmupAttributes(String ip, Integer warmupPercentage, String region) {
-        dedicatedIpService.putDedicatedIpWarmupAttributes(ip, warmupPercentage, region);
-    }
-
-    public void putDedicatedIpPoolScalingAttributes(String poolName, String scalingMode, String region) {
-        dedicatedIpService.putDedicatedIpPoolScalingAttributes(poolName, scalingMode, region);
-    }
-
-    // Dedicated-IP auto-warmup is an account-level setting owned by SesAccountService.
-
-    public boolean isAccountDedicatedIpAutoWarmupEnabled(String region) {
-        return accountService.isDedicatedIpAutoWarmupEnabled(region);
-    }
-
-    public void setAccountDedicatedIpAutoWarmup(String region, boolean enabled) {
-        accountService.setDedicatedIpAutoWarmup(region, enabled);
-    }
-
     public void createConfigurationSetEventDestination(String configSetName, String eventDestinationName,
                                                        EventDestination dest, String region) {
         configSetService.createEventDestination(configSetName, eventDestinationName, dest, region);
@@ -1360,7 +1180,8 @@ public class SesService {
                 return List.copyOf(options.getSuppressedReasons());
             }
         }
-        return List.copyOf(getAccountSuppressionAttributes(region).getSuppressedReasons());
+        return List.copyOf(
+                suppressionService.getAccountSuppressionAttributes(region).getSuppressedReasons());
     }
 
 
@@ -1483,16 +1304,9 @@ public class SesService {
     }
 
     // ──────────────────── Suppression (account attributes + list) ────────────────────
-    // Storage lives in SesSuppressionService; the facade forwards, and its send
+    // Storage lives in SesSuppressionService; the account attributes are read and written by the v2
+    // controller directly, the list operations below keep the tenant routing here, and the send
     // filters (collectSuppressedReasons / resolveSuppressionReason) read entries back through it.
-
-    public AccountSuppressionAttributes getAccountSuppressionAttributes(String region) {
-        return suppressionService.getAccountSuppressionAttributes(region);
-    }
-
-    public void putAccountSuppressionAttributes(String region, List<String> suppressedReasons) {
-        suppressionService.putAccountSuppressionAttributes(region, suppressedReasons);
-    }
 
     // A TenantName routes each suppression-list operation to that tenant's own list (fully separate
     // from the account list on AWS); the reason/address validation still runs first, matching the
@@ -1736,15 +1550,11 @@ public class SesService {
                                      String configurationSetName, List<MessageTag> emailTags,
                                      List<MessageHeader> additionalHeaders,
                                      ListManagementOptions listManagement, String region) {
-        EmailTemplate template = getTemplate(templateName, region);
+        EmailTemplate template = templateService.getTemplate(templateName, region);
         return sendInlineTemplatedEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, returnPath, template.getSubject(), template.getTextPart(),
                 template.getHtmlPart(), templateData,
                 configurationSetName, emailTags, additionalHeaders, listManagement, region);
-    }
-
-    public String renderTestTemplate(String templateName, String templateDataRaw, String region) {
-        return templateService.renderTestTemplate(templateName, templateDataRaw, region);
     }
 
     /**

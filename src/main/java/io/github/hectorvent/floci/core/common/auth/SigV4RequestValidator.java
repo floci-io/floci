@@ -180,12 +180,45 @@ public final class SigV4RequestValidator {
      * Strips control characters (CR, LF, etc.) from an attacker-controlled value before it is
      * interpolated into a log line, preventing log injection / forged multi-line log entries.
      */
-    private static String sanitizeForLog(String value) {
+    public static String sanitizeForLog(String value) {
         return value == null ? null : value.replaceAll("\\p{Cntrl}", "");
     }
 
-    private static byte[] deriveSigningKey(String secretKey, String date, String region,
-                                           String service) throws Exception {
+    /** SigV4 canonical header value normalization: trim, then collapse whitespace runs to one space. */
+    public static String normalizeHeaderValue(String value) {
+        return value == null ? "" : value.trim().replaceAll("\\s+", " ");
+    }
+
+    /** Whether {@code name} appears among the semicolon-separated headers of {@code SignedHeaders}. */
+    public static boolean containsHeader(String signedHeaders, String name) {
+        for (String header : signedHeaders.split(";")) {
+            if (name.equals(header)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code value} looks like a SHA-256 hex digest: 64 hex characters. */
+    public static boolean isSha256Hex(String value) {
+        if (value.length() != 64) {
+            return false;
+        }
+        for (int index = 0; index < value.length(); index++) {
+            if (Character.digit(value.charAt(index), 16) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Public so other SigV4 verifiers with a different canonical-request shape (e.g. S3's real
+     * REST request signing in {@code PreSignedUrlFilter}) can reuse the crypto primitives below
+     * without their own copy, even where they can't reuse {@link #validate}'s query-token flow.
+     */
+    public static byte[] deriveSigningKey(String secretKey, String date, String region,
+                                          String service) throws Exception {
         byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
         byte[] kDate = hmacSha256(kSecret, date);
         byte[] kRegion = hmacSha256(kDate, region);
@@ -193,18 +226,23 @@ public final class SigV4RequestValidator {
         return hmacSha256(kService, "aws4_request");
     }
 
-    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
+    public static byte[] hmacSha256(byte[] key, String data) throws Exception {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static String sha256Hex(String input) throws Exception {
+    public static String sha256Hex(String input) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
     }
 
-    private static String hexEncode(byte[] bytes) {
+    public static String sha256Hex(byte[] input) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        return hexEncode(digest.digest(input));
+    }
+
+    public static String hexEncode(byte[] bytes) {
         StringBuilder sb = new StringBuilder(bytes.length * 2);
         for (byte b : bytes) {
             sb.append(String.format("%02x", b));

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -549,7 +550,7 @@ class S3VirtualHostFilterTest {
     @CsvSource({
             // ECR registry, as EcrRegistryManager emits it
             "123456789012.dkr.ecr.us-east-1.localhost,           localhost",
-            "123456789012.dkr.ecr.us-east-1.localhost:5100,      localhost",
+            "123456789012.dkr.ecr.us-east-1.localhost:4566,      localhost",
             "123456789012.dkr.ecr.eu-central-1.localhost.floci.io, localhost",
             // OpenSearch / Elasticsearch domain endpoints
             "search-mydomain-abc.us-east-1.es.localhost,         localhost",
@@ -757,5 +758,103 @@ class S3VirtualHostFilterTest {
                 "data.us-east-1.localhost", "localhost", DEFAULT_SUFFIXES));
         assertEquals("data.us-east-1", S3VirtualHostFilter.extractBucket(
                 "data.us-east-1.s3.localhost", "localhost", DEFAULT_SUFFIXES));
+    }
+
+    // --- Reverse Proxy & Custom Domain Resolution Tests ---
+
+    @Test
+    void resolveHostPrefersXForwardedHost() {
+        URI uri = URI.create("http://floci:4566/key");
+        assertEquals("my-bucket.localhost:4566",
+                S3VirtualHostFilter.resolveHost("floci:4566", "my-bucket.localhost:4566", uri));
+    }
+
+    @Test
+    void resolveHostExtractsFirstHostFromCommaSeparatedXForwardedHost() {
+        URI uri = URI.create("http://floci:4566/key");
+        assertEquals("client-bucket.localhost:4566",
+                S3VirtualHostFilter.resolveHost("floci:4566", "client-bucket.localhost:4566, proxy1:4566, proxy2", uri));
+    }
+
+    @Test
+    void resolveHostFallsBackToHostWhenXForwardedHostBlankOrNull() {
+        URI uri = URI.create("http://localhost:4566/key");
+        assertEquals("my-bucket.localhost:4566",
+                S3VirtualHostFilter.resolveHost("my-bucket.localhost:4566", null, uri));
+        assertEquals("my-bucket.localhost:4566",
+                S3VirtualHostFilter.resolveHost("my-bucket.localhost:4566", "   ", uri));
+    }
+
+    @Test
+    void bucketBeforeS3QualifierExtractsBucketOnCustomDomains() {
+        assertEquals("my-bucket",
+                S3VirtualHostFilter.bucketBeforeS3Qualifier("my-bucket.s3.us-east-1.floci.apps.mesirendon.com"));
+        assertEquals("my-bucket",
+                S3VirtualHostFilter.bucketBeforeS3Qualifier("my-bucket.s3-fips.dualstack.us-west-2.mycorp.internal"));
+        assertEquals("dotted.name.bucket",
+                S3VirtualHostFilter.bucketBeforeS3Qualifier("dotted.name.bucket.s3.eu-west-1.custom.org"));
+        assertNull(S3VirtualHostFilter.bucketBeforeS3Qualifier("s3.us-east-1.floci.apps.mesirendon.com"));
+    }
+
+    @Test
+    void filterRewritesVirtualHostWithXForwardedHost() {
+        URI requestUri = URI.create("http://floci:4566/30388849b0eaef3dfba3aa83849d28987be6fb7920bdbf3233bdc8e966f73870.json");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(requestUri);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getHeaderString("Host")).thenReturn("floci:4566");
+        when(ctx.getHeaderString("X-Forwarded-Host")).thenReturn("cdk-assets-bucket.localhost:4566");
+
+        new S3VirtualHostFilter().filter(ctx);
+
+        ArgumentCaptor<URI> rewritten = ArgumentCaptor.forClass(URI.class);
+        verify(ctx).setRequestUri(rewritten.capture());
+        assertEquals("/cdk-assets-bucket/30388849b0eaef3dfba3aa83849d28987be6fb7920bdbf3233bdc8e966f73870.json",
+                rewritten.getValue().getRawPath());
+    }
+
+    @Test
+    void filterRewritesVirtualHostWithCustomDomainS3Qualifier() {
+        URI requestUri = URI.create("http://floci:4566/archive.zip");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(requestUri);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getHeaderString("Host")).thenReturn("custom-bucket.s3.us-east-1.floci.apps.mesirendon.com");
+
+        new S3VirtualHostFilter().filter(ctx);
+
+        ArgumentCaptor<URI> rewritten = ArgumentCaptor.forClass(URI.class);
+        verify(ctx).setRequestUri(rewritten.capture());
+        assertEquals("/custom-bucket/archive.zip", rewritten.getValue().getRawPath());
+    }
+
+    @Test
+    void filterRewritesUsingExistingBucketFallbackWhenSignedForS3() {
+        S3Service s3Service = mock(S3Service.class);
+        when(s3Service.bucketExists("existing-cdk-bucket")).thenReturn(true);
+        @SuppressWarnings("unchecked")
+        Instance<S3Service> s3ServiceInstance = mock(Instance.class);
+        when(s3ServiceInstance.isResolvable()).thenReturn(true);
+        when(s3ServiceInstance.get()).thenReturn(s3Service);
+
+        URI requestUri = URI.create("http://floci:4566/template.json");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(requestUri);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getHeaderString("Host")).thenReturn("existing-cdk-bucket.floci.apps.mesirendon.com");
+        when(ctx.getHeaderString("Authorization")).thenReturn(
+                "AWS4-HMAC-SHA256 Credential=test/20260914/us-east-1/s3/aws4_request, Signature=fake");
+
+        new S3VirtualHostFilter(s3ServiceInstance).filter(ctx);
+
+        ArgumentCaptor<URI> rewritten = ArgumentCaptor.forClass(URI.class);
+        verify(ctx).setRequestUri(rewritten.capture());
+        assertEquals("/existing-cdk-bucket/template.json", rewritten.getValue().getRawPath());
     }
 }

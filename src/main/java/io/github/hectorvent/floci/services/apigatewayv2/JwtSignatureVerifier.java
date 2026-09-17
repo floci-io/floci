@@ -2,15 +2,29 @@ package io.github.hectorvent.floci.services.apigatewayv2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.SsrfProtection;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.hc.client5.http.DnsResolver;
+import org.apache.hc.client5.http.SystemDefaultDnsResolver;
+import org.apache.hc.client5.http.config.ConnectionConfig;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
+import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
+import org.apache.hc.core5.util.Timeout;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.math.BigInteger;
+import java.net.InetAddress;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
@@ -21,6 +35,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -40,7 +55,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * would reopen exactly the unauthenticated-claims gap this class exists to close.
  */
 @ApplicationScoped
-public class JwtSignatureVerifier {
+public class JwtSignatureVerifier implements AutoCloseable {
 
     private static final Logger LOG = Logger.getLogger(JwtSignatureVerifier.class);
 
@@ -48,26 +63,47 @@ public class JwtSignatureVerifier {
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(10);
 
     private final ObjectMapper objectMapper;
-    private final HttpClient httpClient;
+    private final CloseableHttpClient httpClient;
+    private final boolean allowPrivateNetworkTargets;
     private final Map<String, CachedJwks> jwksCache = new ConcurrentHashMap<>();
 
     @Inject
-    public JwtSignatureVerifier(ObjectMapper objectMapper) {
-        this(objectMapper, HttpClient.newBuilder()
-                .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(HTTP_TIMEOUT)
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build());
+    public JwtSignatureVerifier(ObjectMapper objectMapper, EmulatorConfig config) {
+        this(objectMapper, SystemDefaultDnsResolver.INSTANCE,
+                config.security().allowPrivateJwtTargets());
     }
 
     /**
-     * Injects a caller-supplied client, so tests (including {@code OidcAuthValidatorTest} in the
-     * AppSync auth package, which points it at a local fixture server) don't have to reach the
-     * real network to exercise verification.
+     * Injects the DNS boundary so tests can verify address policy without using external DNS.
      */
-    public JwtSignatureVerifier(ObjectMapper objectMapper, HttpClient httpClient) {
+    JwtSignatureVerifier(
+            ObjectMapper objectMapper,
+            DnsResolver dnsResolver,
+            boolean allowPrivateNetworkTargets
+    ) {
         this.objectMapper = objectMapper;
-        this.httpClient = httpClient;
+        this.allowPrivateNetworkTargets = allowPrivateNetworkTargets;
+
+        ConnectionConfig connectionConfig = ConnectionConfig.custom()
+                .setConnectTimeout(Timeout.of(HTTP_TIMEOUT))
+                .setSocketTimeout(Timeout.of(HTTP_TIMEOUT))
+                .build();
+        PoolingHttpClientConnectionManager connectionManager = PoolingHttpClientConnectionManagerBuilder.create()
+                .setDnsResolver(new JwtDnsResolver(dnsResolver, allowPrivateNetworkTargets))
+                .setDefaultConnectionConfig(connectionConfig)
+                .build();
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectionRequestTimeout(Timeout.of(HTTP_TIMEOUT))
+                .setResponseTimeout(Timeout.of(HTTP_TIMEOUT))
+                .setRedirectsEnabled(false)
+                .build();
+        this.httpClient = HttpClients.custom()
+                .setConnectionManager(connectionManager)
+                .setDefaultRequestConfig(requestConfig)
+                .disableRedirectHandling()
+                .disableAutomaticRetries()
+                .disableCookieManagement()
+                .build();
     }
 
     public static class JwtVerificationException extends Exception {
@@ -97,7 +133,6 @@ public class JwtSignatureVerifier {
         if (issuer == null || issuer.isBlank()) {
             throw new JwtVerificationException("JWT authorizer has no configured issuer");
         }
-
         String[] parts = token == null ? new String[0] : token.split("\\.", -1);
         if (parts.length != 3) {
             throw new JwtVerificationException("Token is not a well-formed JWT");
@@ -142,7 +177,7 @@ public class JwtSignatureVerifier {
         return fetched.get(kid);
     }
 
-    private Map<String, RSAPublicKey> fetchJwks(String issuer) throws JwtVerificationException {
+    Map<String, RSAPublicKey> fetchJwks(String issuer) throws JwtVerificationException {
         String jwksUri = fetchJwksUri(issuer);
         JsonNode jwks = httpGetJson(jwksUri, "JWKS document");
 
@@ -173,7 +208,7 @@ public class JwtSignatureVerifier {
         return result;
     }
 
-    private String fetchJwksUri(String issuer) throws JwtVerificationException {
+    String fetchJwksUri(String issuer) throws JwtVerificationException {
         String discoveryUrl = issuer.replaceAll("/+$", "") + "/.well-known/openid-configuration";
         JsonNode discovery = httpGetJson(discoveryUrl, "OIDC discovery document");
         String jwksUri = discovery.path("jwks_uri").asText(null);
@@ -185,19 +220,15 @@ public class JwtSignatureVerifier {
     }
 
     private JsonNode httpGetJson(String url, String description) throws JwtVerificationException {
-        HttpRequest request;
+        URI target = validateTarget(url, description);
         try {
-            request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(HTTP_TIMEOUT)
-                    .GET()
-                    .build();
-        } catch (IllegalArgumentException e) {
-            throw new JwtVerificationException("Invalid " + description + " URL: " + url, e);
-        }
-
-        try {
-            HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            FetchedDocument response = httpClient.execute(
+                    ClassicRequestBuilder.get(target).build(),
+                    apacheResponse -> new FetchedDocument(
+                            apacheResponse.getCode(),
+                            apacheResponse.getEntity() == null
+                                    ? new byte[0]
+                                    : EntityUtils.toByteArray(apacheResponse.getEntity())));
             if (response.statusCode() != 200) {
                 throw new JwtVerificationException(
                         "Fetching " + description + " from " + url + " returned HTTP " + response.statusCode());
@@ -207,6 +238,80 @@ public class JwtSignatureVerifier {
             throw e;
         } catch (Exception e) {
             throw new JwtVerificationException("Failed to fetch " + description + " from " + url, e);
+        }
+    }
+
+    private URI validateTarget(String url, String description) throws JwtVerificationException {
+        URI target;
+        try {
+            target = URI.create(url);
+        } catch (IllegalArgumentException e) {
+            throw new JwtVerificationException("Invalid " + description + " URL: " + url, e);
+        }
+        String scheme = target.getScheme();
+        if (target.getHost() == null || target.getHost().isBlank() || target.getUserInfo() != null) {
+            throw new JwtVerificationException("JWT " + description + " has an invalid host: " + url);
+        }
+        InetAddress literalAddress = literalAddress(target.getHost());
+        boolean privateLiteral = literalAddress != null && SsrfProtection.isBlockedAddress(literalAddress);
+        boolean privateHttp = allowPrivateNetworkTargets
+                && "http".equalsIgnoreCase(scheme)
+                && privateLiteral;
+        if (!"https".equalsIgnoreCase(scheme) && !privateHttp) {
+            throw new JwtVerificationException("JWT " + description + " must use HTTPS: " + url);
+        }
+        if (!allowPrivateNetworkTargets && privateLiteral) {
+            throw new JwtVerificationException(
+                    "JWT " + description + " resolves to a private or local address: " + target.getHost());
+        }
+        return target;
+    }
+
+    private static InetAddress literalAddress(String host) {
+        if (host.indexOf(':') < 0 && !host.matches("[0-9]{1,3}(?:\\.[0-9]{1,3}){3}")) {
+            return null;
+        }
+        try {
+            return InetAddress.ofLiteral(host);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    @PreDestroy
+    @Override
+    public void close() {
+        try {
+            httpClient.close();
+        } catch (Exception e) {
+            LOG.debugv("Could not close JWT document client: {0}", e.getMessage());
+        }
+    }
+
+    private record FetchedDocument(int statusCode, byte[] body) {
+    }
+
+    record JwtDnsResolver(DnsResolver delegate, boolean allowPrivateNetworkTargets) implements DnsResolver {
+        @Override
+        public InetAddress[] resolve(String host) throws UnknownHostException {
+            InetAddress[] addresses = delegate.resolve(host);
+            if (addresses == null || addresses.length == 0) {
+                throw new UnknownHostException("JWT target host has no addresses: " + host);
+            }
+            if (!allowPrivateNetworkTargets) {
+                for (InetAddress address : addresses) {
+                    if (SsrfProtection.isBlockedAddress(address)) {
+                        throw new UnknownHostException(
+                                "JWT target host resolves to a private or local address: " + host);
+                    }
+                }
+            }
+            return addresses.clone();
+        }
+
+        @Override
+        public String resolveCanonicalHostname(String host) {
+            return host;
         }
     }
 
@@ -229,13 +334,13 @@ public class JwtSignatureVerifier {
         }
     }
 
-    private java.util.Optional<JsonNode> decodeJson(String base64UrlSegment) {
+    private Optional<JsonNode> decodeJson(String base64UrlSegment) {
         try {
             byte[] decoded = Base64.getUrlDecoder().decode(padBase64(base64UrlSegment));
             JsonNode node = objectMapper.readTree(decoded);
-            return node != null && node.isObject() ? java.util.Optional.of(node) : java.util.Optional.empty();
-        } catch (IllegalArgumentException | java.io.IOException e) {
-            return java.util.Optional.empty();
+            return node != null && node.isObject() ? Optional.of(node) : Optional.empty();
+        } catch (IllegalArgumentException | IOException e) {
+            return Optional.empty();
         }
     }
 

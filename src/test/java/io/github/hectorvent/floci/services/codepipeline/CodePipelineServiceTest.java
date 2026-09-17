@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
+import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -39,6 +40,50 @@ class CodePipelineServiceTest {
             mock(CodeDeployService.class),
             mock(LambdaService.class),
             mock(S3Service.class));
+
+    @Test
+    void getPipelineTreatsMissingStoredVersionAsVersionOne() throws Exception {
+        CapturingStorageFactory storageFactory = new CapturingStorageFactory();
+        CodePipelineService legacyService = new CodePipelineService(
+                storageFactory,
+                mapper,
+                mock(CodeBuildService.class),
+                mock(CodeDeployService.class),
+                mock(LambdaService.class),
+                mock(S3Service.class));
+        CodePipelinePipeline pipeline = mapper.readValue("""
+                {
+                    "accountId": "000000000000",
+                    "region": "us-east-1",
+                    "name": "legacy-pipeline",
+                    "arn": "arn:aws:codepipeline:us-east-1:000000000000:legacy-pipeline",
+                    "created": 1.0,
+                    "updated": 1.0,
+                    "declaration": {
+                        "name": "legacy-pipeline",
+                        "version": 1
+                    }
+                }
+                """, CodePipelinePipeline.class);
+        storageFactory.pipelineStore().putForAccount(ACCOUNT, REGION + ":legacy-pipeline", pipeline);
+
+        try {
+            JsonNode current = legacyService.handle(
+                    "GetPipeline", mapper.readTree("{\"name\":\"legacy-pipeline\"}"), REGION, ACCOUNT);
+            JsonNode explicitVersion = legacyService.handle(
+                    "GetPipeline", mapper.readTree("{\"name\":\"legacy-pipeline\",\"version\":1}"), REGION, ACCOUNT);
+
+            assertEquals(1, current.path("pipeline").path("version").asInt());
+            assertEquals(1, explicitVersion.path("pipeline").path("version").asInt());
+            AwsException missing = assertThrows(AwsException.class,
+                    () -> legacyService.handle(
+                            "GetPipeline", mapper.readTree("{\"name\":\"legacy-pipeline\",\"version\":2}"),
+                            REGION, ACCOUNT));
+            assertEquals("PipelineVersionNotFoundException", missing.getErrorCode());
+        } finally {
+            legacyService.shutdown();
+        }
+    }
 
     @Test
     void sourcePollingAndPipelineUpdateSerializeBaselineChanges() throws Exception {
@@ -185,6 +230,29 @@ class CodePipelineServiceTest {
         public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
             return AccountAwareStorageBackend.inMemory(ACCOUNT);
+        }
+    }
+
+    private static final class CapturingStorageFactory extends StorageFactory {
+        private AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
+
+        private CapturingStorageFactory() {
+            super(null, null);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                                                         TypeReference<Map<String, V>> typeReference) {
+            AccountAwareStorageBackend<V> store = AccountAwareStorageBackend.inMemory(ACCOUNT);
+            if ("codepipeline-pipelines.json".equals(fileName)) {
+                pipelineStore = (AccountAwareStorageBackend<CodePipelinePipeline>) (AccountAwareStorageBackend<?>) store;
+            }
+            return store;
+        }
+
+        private AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore() {
+            return pipelineStore;
         }
     }
 }

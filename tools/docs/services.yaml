@@ -72,6 +72,17 @@ services:
     doc: docs/services/cloudtrail.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTrailJsonHandler.java, mode: switch }
+  - service: codeartifact
+    doc: docs/services/codeartifact.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/codeartifact/CodeArtifactController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/V1TagsController.java, mode: rest }
+    rename_actions:
+      ListTagsForResourceByQuery: ListTagsForResource
+    exclude_actions:
+      - ListTags
+      - TagResourcePost
+      - TagResourcePut
   - service: codegurureviewer
     doc: docs/services/codegurureviewer.md
     sources:
@@ -265,7 +276,7 @@ services:
     doc: docs/services/rds.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
-    exclude_actions: [SubnetIds, VpcSecurityGroupIds, OptionsToRemove]
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds, OptionsToRemove, ValuesToAdd, ValuesToRemove]
   - service: redshift
     doc: docs/services/redshift.md
     sources:
@@ -310,6 +321,10 @@ services:
     doc: docs/services/route53resolver.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/route53resolver/Route53ResolverJsonHandler.java, mode: switch }
+  - service: sagemaker
+    doc: docs/services/sagemaker.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/sagemaker/SageMakerJsonHandler.java, mode: switch }
   - service: securityhub
     doc: docs/services/securityhub.md
     sources:

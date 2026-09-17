@@ -1949,6 +1949,55 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(41)
+    void createKeyPairWithoutKeyNameReturnsMissingParameter() {
+        // #3356: a nameless key pair used to be stored, and its null name then broke every
+        // later CreateKeyPair with an InternalFailure.
+        given()
+            .formParam("Action", "CreateKeyPair")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+
+        given()
+            .formParam("Action", "ImportKeyPair")
+            .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFB")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+
+        given()
+            .formParam("Action", "DeleteKeyPair")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    @Test
+    @Order(41)
+    void importKeyPairWithInvalidBase64ReturnsInvalidKeyFormat() {
+        given()
+            .formParam("Action", "ImportKeyPair")
+            .formParam("KeyName", "bad-material-key")
+            .formParam("PublicKeyMaterial", "not base64!")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidKey.Format"));
+    }
+
+    @Test
     @Order(42)
     void createLaunchTemplateRejectsMalformedUserData() {
         given()
@@ -3798,10 +3847,12 @@ class Ec2IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .body("DeleteKeyPairResponse.return", equalTo("true"))
+            .body("DeleteKeyPairResponse.keyPairId", equalTo(keyPairId));
 
-        // DeleteKeyPair always answers 200, so the delete is only proven by a
-        // follow-up describe.
+        // DeleteKeyPair answers 200 for a known and an unknown key pair alike, so the
+        // delete is only proven by a follow-up describe.
         given()
             .formParam("Action", "DescribeKeyPairs")
             .formParam("KeyPairId.1", keyPairId)

@@ -66,6 +66,192 @@ class SqsServiceTest {
     }
 
     @Test
+    void getQueueAttributes_defaultsMatchAws() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("defaults-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("1048576", attrs.get("MaximumMessageSize"),
+                "MaximumMessageSize must default to the AWS value of 1048576 bytes");
+        assertEquals("true", attrs.get("SqsManagedSseEnabled"),
+                "A queue without a KMS key reports SSE-SQS enabled");
+        assertEquals("30", attrs.get("VisibilityTimeout"));
+        assertEquals("345600", attrs.get("MessageRetentionPeriod"));
+        assertEquals("0", attrs.get("DelaySeconds"));
+        assertEquals("0", attrs.get("ReceiveMessageWaitTimeSeconds"));
+        assertNotNull(attrs.get("QueueArn"));
+        assertNotNull(attrs.get("CreatedTimestamp"));
+        assertNotNull(attrs.get("LastModifiedTimestamp"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessages"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessagesDelayed"));
+        assertFalse(attrs.containsKey("Policy"), "Policy is only returned once set");
+        assertFalse(attrs.containsKey("RedrivePolicy"), "RedrivePolicy is only returned once set");
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseDisabledWhenKmsKeyIsSet() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-queue", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("false", attrs.get("SqsManagedSseEnabled"),
+                "A KMS master key takes over from SSE-SQS");
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseDisabledWhenQueueIsCreatedWithAKmsKey() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-at-create-queue",
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+
+        assertEquals("false",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region)
+                        .get("SqsManagedSseEnabled"));
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseReturnsToTheDefaultWhenTheKmsKeyIsCleared() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-cleared-queue",
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+        assertEquals("false",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region)
+                        .get("SqsManagedSseEnabled"));
+
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("KmsMasterKeyId", ""), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertFalse(attrs.containsKey("KmsMasterKeyId"), "An empty value clears the attribute");
+        assertEquals("true", attrs.get("SqsManagedSseEnabled"),
+                "Nothing derived from the KMS key may outlive it");
+    }
+
+    @Test
+    void getQueueAttributes_explicitSqsManagedSseFalseSurvivesAnUnrelatedUpdate() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sse-off-queue",
+                Map.of("SqsManagedSseEnabled", "false"), region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("DelaySeconds", "5"), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("false", attrs.get("SqsManagedSseEnabled"),
+                "A value the user set is intent, not derived state, and has to survive");
+        assertEquals("5", attrs.get("DelaySeconds"));
+    }
+
+    @Test
+    void getQueueAttributes_selectsSqsManagedSseEnabledByName() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sse-named-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("SqsManagedSseEnabled"), region);
+        assertEquals(Map.of("SqsManagedSseEnabled", "true"), attrs);
+    }
+
+    @Test
+    void createQueue_rejectsMaximumMessageSizeOutsideAwsRange() {
+        for (String invalid : List.of("1048577", "1023", "0", "-1", "abc")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> sqsService.createQueue("range-queue-" + invalid,
+                            Map.of("MaximumMessageSize", invalid), "eu-west-1"),
+                    "MaximumMessageSize " + invalid + " must be rejected");
+            assertEquals("InvalidAttributeValue", ex.getErrorCode());
+            assertTrue(ex.getMessage().contains("MaximumMessageSize"), ex.getMessage());
+        }
+    }
+
+    @Test
+    void createQueue_acceptsMaximumMessageSizeRangeBounds() {
+        String region = "eu-west-1";
+        for (String valid : List.of("1024", "1048576")) {
+            Queue queue = sqsService.createQueue("bounds-queue-" + valid,
+                    Map.of("MaximumMessageSize", valid), region);
+            assertEquals(valid,
+                    sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                            .get("MaximumMessageSize"));
+        }
+    }
+
+    @Test
+    void createQueue_acceptsTheAwsCeilingWhenTheConfiguredMaximumIsLower() {
+        String region = "eu-west-1";
+        var service = new SqsService(new InMemoryStorage<>(), 30, 131072, BASE_URL, clock);
+
+        Queue defaulted = service.createQueue("lowered-config-default-queue", null, region);
+        assertEquals("131072",
+                service.getQueueAttributes(defaulted.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "The configured maximum is what a new queue defaults to");
+
+        Queue raised = service.createQueue("lowered-config-raised-queue",
+                Map.of("MaximumMessageSize", "1048576"), region);
+        assertEquals("1048576",
+                service.getQueueAttributes(raised.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "Lowering the configured maximum moves the default, not the ceiling AWS accepts");
+        assertDoesNotThrow(
+                () -> service.sendMessage(raised.getQueueUrl(), "x".repeat(1_000_000), 0, region),
+                "The accepted ceiling and the enforced ceiling have to agree");
+    }
+
+    @Test
+    void getQueueAttributes_clampsAStoredMaximumMessageSizeAboveTheCeiling() {
+        String region = "us-east-1";
+        var store = new InMemoryStorage<String, Queue>();
+        var service = new SqsService(store, 30, 1048576, BASE_URL, clock);
+        Queue queue = service.createQueue("legacy-size-queue", null, region);
+
+        // A queue persisted by a build that allowed 2 MB, which no validation path can produce.
+        String storageKey = store.keys().iterator().next();
+        Queue stored = store.get(storageKey).orElseThrow();
+        stored.getAttributes().put("MaximumMessageSize", "2097152");
+        store.put(storageKey, stored);
+
+        assertEquals("1048576",
+                service.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "A stored value above the ceiling must be reported as the size actually enforced");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.sendMessage(queue.getQueueUrl(), "x".repeat(1_200_000), 0, region),
+                "The reported size and the enforced size have to agree");
+        assertTrue(ex.getMessage().contains("1048576"), ex.getMessage());
+    }
+
+    @Test
+    void setQueueAttributes_rejectsMaximumMessageSizeOutsideAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("set-range-queue", null, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.setQueueAttributes(queue.getQueueUrl(),
+                        Map.of("MaximumMessageSize", "1048577"), region));
+        assertEquals("InvalidAttributeValue", ex.getErrorCode());
+        assertEquals("1048576",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "A rejected SetQueueAttributes must leave the stored value untouched");
+    }
+
+    @Test
+    void setQueueAttributes_acceptsMaximumMessageSizeWithinAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("set-valid-range-queue", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("MaximumMessageSize", "2048"), region);
+
+        assertEquals("2048",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), "x".repeat(3000), 0, region));
+        assertTrue(ex.getMessage().contains("2048"), ex.getMessage());
+    }
+
+    @Test
     void createQueueWithTags_tagsReturnedByListQueueTags() {
         // Regression test for https://github.com/floci-io/floci/issues/699
         // Tags supplied at CreateQueue time must be visible via ListQueueTags.
@@ -1121,6 +1307,102 @@ class SqsServiceTest {
         assertEquals(1, sqsService.cancelMessageMoveTask(taskHandle, "us-east-1"));
 
         awaitMoveTaskStatus(dlqArn, taskHandle, "CANCELLED");
+    }
+
+    @Test
+    void cancelMessageMoveTask_takesEffectWithoutWaitingOutTheRateInterval() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-latency-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-latency-dlq");
+        sqsService.createQueue("cancel-latency-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-latency-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-latency-destination");
+        for (int i = 0; i < 50; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        // At one message per second the worker sleeps a full second between moves. AWS
+        // reflects a cancel immediately (CANCELLING, then CANCELLED once nothing is in
+        // flight); the worker must be woken, not left to sleep out its interval.
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+
+        String statusRightAfterCancel = moveTaskStatus(dlqArn, taskHandle);
+        assertTrue("CANCELLING".equals(statusRightAfterCancel) || "CANCELLED".equals(statusRightAfterCancel),
+                "expected CANCELLING or CANCELLED right after CancelMessageMoveTask returned, was " + statusRightAfterCancel);
+
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300);
+        while (!"CANCELLED".equals(moveTaskStatus(dlqArn, taskHandle))) {
+            assertTrue(System.nanoTime() < deadline,
+                    "move task still " + moveTaskStatus(dlqArn, taskHandle) + " 300 ms after the cancel");
+            Thread.sleep(5);
+        }
+        assertEquals(1, sqsService.listMessageMoveTasks(dlqArn, "us-east-1").size());
+    }
+
+    @Test
+    void cancelMessageMoveTask_statusNeverRegressesToRunningWhileTheWorkerRecordsProgress() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-stomp-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-stomp-dlq");
+        sqsService.createQueue("cancel-stomp-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-stomp-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-stomp-destination");
+        for (int i = 0; i < 3000; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        // Unthrottled, so the worker records its count after every message while the cancel
+        // lands: the two writers share the store's lock, and once the cancel has returned the
+        // task must only ever read CANCELLING or CANCELLED.
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        String status;
+        while (!"CANCELLED".equals(status = moveTaskStatus(dlqArn, taskHandle))) {
+            assertNotEquals("RUNNING", status, "a cancelled task reported RUNNING again");
+            assertTrue(System.nanoTime() < deadline, "move task never reached CANCELLED, last seen " + status);
+        }
+    }
+
+    @Test
+    void cancelMessageMoveTask_acceptedCancelIsNotOverwrittenByTheWorkersTerminalWrite() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-terminal-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-terminal-dlq");
+        sqsService.createQueue("cancel-terminal-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-terminal-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-terminal-destination");
+        for (int i = 0; i < 50; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        // The interleaving: the worker reads its own signal and concludes COMPLETED, the cancel is
+        // accepted (the task reads CANCELLING), and only then does the worker's terminal write
+        // land. Replaying that write with the stale decision must not turn CANCELLING back into
+        // COMPLETED.
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+        sqsService.finishMoveTask(taskHandle, 1, false);
+
+        assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
+        awaitMoveTaskStatus(dlqArn, taskHandle, "CANCELLED");
+        assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
+    }
+
+    private String moveTaskStatus(String sourceArn, String taskHandle) {
+        return sqsService.listMessageMoveTasks(sourceArn, "us-east-1").stream()
+                .filter(task -> task.taskHandle().equals(taskHandle))
+                .map(SqsService.MoveTask::status)
+                .findFirst()
+                .orElse("<absent>");
     }
 
     @Test

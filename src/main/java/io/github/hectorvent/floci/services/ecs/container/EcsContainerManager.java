@@ -13,6 +13,13 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.SecurityGroupFirewallManager;
+import io.github.hectorvent.floci.services.ec2.SecurityGroupNftCompiler;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
@@ -59,6 +66,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Manages Docker container lifecycle for ECS tasks.
@@ -81,8 +89,30 @@ public class EcsContainerManager {
     private final S3Service s3Service;
     private final EcrRegistryManager ecrRegistryManager;
     private final HostVolumePolicy hostVolumePolicy;
+    private Ec2Service ec2Service;
+    private SecurityGroupFirewallManager firewallManager;
 
     @Inject
+    public EcsContainerManager(ContainerBuilder containerBuilder,
+                               ContainerLifecycleManager lifecycleManager,
+                               ContainerLogStreamer logStreamer,
+                               ContainerDetector containerDetector,
+                               EmulatorConfig config,
+                               RegionResolver regionResolver,
+                               LaunchedContainerAwsEnv awsEnv,
+                               SsmService ssmService,
+                               SecretsManagerService secretsManagerService,
+                               S3Service s3Service,
+                               EcrRegistryManager ecrRegistryManager,
+                               HostVolumePolicy hostVolumePolicy,
+                               Ec2Service ec2Service,
+                               SecurityGroupFirewallManager firewallManager) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver,
+                awsEnv, ssmService, secretsManagerService, s3Service, ecrRegistryManager, hostVolumePolicy);
+        this.ec2Service = ec2Service;
+        this.firewallManager = firewallManager;
+    }
+
     public EcsContainerManager(ContainerBuilder containerBuilder,
                                ContainerLifecycleManager lifecycleManager,
                                ContainerLogStreamer logStreamer,
@@ -155,6 +185,8 @@ public class EcsContainerManager {
             throw new AwsException("ClientException",
                     "awsfirelens log driver requires a firelensConfiguration container", 400);
         }
+
+        PreparedNetwork protectedNetwork = prepareNetwork(task, taskDef, region, taskId);
 
         String firelensVolumeName = null;
         String firelensSocketAddress = null;
@@ -328,9 +360,16 @@ public class EcsContainerManager {
                     }
                 }
             }
-        } catch (RuntimeException e) {
+        } catch (Exception e) {
+            for (String dockerId : containerIds.values()) {
+                lifecycleManager.stopAndRemove(dockerId, null);
+            }
             if (firelensVolumeName != null) {
                 lifecycleManager.removeVolume(firelensVolumeName);
+            }
+            if (protectedNetwork != null) {
+                firewallManager.unregister(protectedNetwork.eni().getNetworkInterfaceId());
+                ec2Service.deleteNetworkInterface(region, protectedNetwork.eni().getNetworkInterfaceId());
             }
             throw e;
         }
@@ -340,8 +379,67 @@ public class EcsContainerManager {
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
-        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId, firelensVolumeName);
+        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
+                firelensVolumeName,
+                protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region);
     }
+
+    private PreparedNetwork prepareNetwork(EcsTask task, TaskDefinition definition, String region, String taskId) {
+        if (definition.getNetworkMode() != NetworkMode.awsvpc
+                || firewallManager == null || !firewallManager.enabled()) {
+            return null;
+        }
+        AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
+                : task.getNetworkConfiguration().getAwsvpcConfiguration();
+        if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
+            throw new AwsException("ClientException", "awsvpc tasks require a subnet", 400);
+        }
+        NetworkInterface eni = ec2Service.createNetworkInterface(region, awsvpc.getSubnets().getFirst(),
+                "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
+        String eniId = eni.getNetworkInterfaceId();
+        SecurityGroupFirewallManager.Namespace namespace = null;
+        try {
+            Map<Integer, Integer> bindings = new LinkedHashMap<>();
+            if (!containerDetector.isRunningInContainer()) {
+                for (ContainerDefinition container : definition.getContainerDefinitions()) {
+                    if (container.getPortMappings() != null) {
+                        container.getPortMappings().forEach(port -> bindings.put(port.containerPort(), 0));
+                    }
+                }
+            }
+            namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
+                    region, config.services().ecs().dockerNetwork(), bindings);
+            List<String> groupIds = eni.getGroups().stream().map(g -> g.getGroupId()).toList();
+            List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
+            if (groups.size() != groupIds.size()) {
+                throw new IllegalStateException("An ECS task security group could not be resolved");
+            }
+            Map<String, List<String>> prefixLists = new LinkedHashMap<>();
+            for (SecurityGroup group : groups) {
+                Stream.concat(group.getIpPermissions().stream(),
+                                group.getIpPermissionsEgress().stream())
+                        .flatMap(permission -> permission.getPrefixListIds().stream())
+                        .map(reference -> reference.getPrefixListId())
+                        .distinct()
+                        .forEach(id -> prefixLists.put(id, ec2Service.getManagedPrefixListEntries(region, id, null)
+                                .stream().map(PrefixListEntry::getCidr).toList()));
+            }
+            firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
+                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(),
+                    namespace.transportAddress(), Set.copyOf(groupIds), groups), namespace.helperId(), prefixLists);
+            task.setNetworkInterfaceId(eniId);
+            task.setPrivateIpAddress(eni.getPrivateIpAddress());
+            return new PreparedNetwork(eni, namespace);
+        } catch (Exception e) {
+            if (namespace != null) {
+                lifecycleManager.removeIfExists(namespace.helperId());
+            }
+            ec2Service.deleteNetworkInterface(region, eniId);
+            throw e;
+        }
+    }
+
+    private record PreparedNetwork(NetworkInterface eni, SecurityGroupFirewallManager.Namespace namespace) {}
 
     /**
      * Stops and removes all Docker containers for a task.
@@ -361,6 +459,7 @@ public class EcsContainerManager {
         for (String dockerId : handle.getContainerIds().values()) {
             lifecycleManager.stopAndRemove(dockerId, null);
         }
+        cleanupProtectedNetwork(handle);
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
         removeFirelensVolume(handle);
@@ -407,6 +506,7 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        cleanupProtectedNetwork(handle);
         removeFirelensVolume(handle);
         return exitCodes;
     }
@@ -648,6 +748,12 @@ public class EcsContainerManager {
             LOG.warnv("Could not resolve FireLens container IP for {0}: {1}", dockerId, e.getMessage());
         }
         return "127.0.0.1";
+    }
+    private void cleanupProtectedNetwork(EcsTaskHandle handle) {
+        if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
+            firewallManager.unregister(handle.getNetworkInterfaceId());
+            ec2Service.deleteNetworkInterface(handle.getRegion(), handle.getNetworkInterfaceId());
+        }
     }
 
     private void finalizeLogStream(EcsTaskHandle handle, String dockerId) {

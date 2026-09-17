@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
+import io.smallrye.config.WithDefault;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -40,6 +41,38 @@ class ApplicationDefaultsTest {
     }
 
     @Test
+    void productionConfigUsesTheAwsSqsMaximumMessageSize() throws IOException, NoSuchMethodException {
+        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+
+        assertEquals(1048576,
+                config.path("floci").path("services").path("sqs").path("max-message-size").asInt(),
+                "production application.yml should use the AWS SQS maximum of 1048576 bytes");
+
+        WithDefault fallback = EmulatorConfig.SqsServiceConfig.class
+                .getMethod("maxMessageSize")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "maxMessageSize should declare a fallback default");
+        assertEquals("1048576", fallback.value(),
+                "the EmulatorConfig fallback should match the AWS SQS maximum too");
+    }
+
+    @Test
+    void productionConfigListensOnLoopbackWithoutNetworkExposureConsent() throws IOException, NoSuchMethodException {
+        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+
+        assertEquals("127.0.0.1", config.path("quarkus").path("http").path("host").asText(),
+                "production application.yml should listen on loopback by default");
+        assertFalse(config.path("floci").path("security").path("allow-unsafe-network-exposure").asBoolean(true),
+                "production application.yml should not allow a non-loopback listener by default");
+
+        WithDefault fallback = EmulatorConfig.SecurityConfig.class
+                .getMethod("allowUnsafeNetworkExposure")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "allowUnsafeNetworkExposure should declare a fallback default");
+        assertEquals("false", fallback.value(), "the EmulatorConfig fallback should refuse exposure too");
+    }
+
+    @Test
     void productionConfigDoesNotSeedIamDeployerPrincipalByDefault() throws IOException {
         JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
 
@@ -49,5 +82,22 @@ class ApplicationDefaultsTest {
                         .path("seed-deployer-principal")
                         .asBoolean(true),
                 "production application.yml should not create default admin credentials unless enabled");
+    }
+
+    @Test
+    void productionConfigRejectsPrivateJwtTargetsByDefault() throws Exception {
+        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+
+        assertFalse(config.path("floci")
+                        .path("security")
+                        .path("allow-private-jwt-targets")
+                        .asBoolean(true),
+                "production application.yml should reject private JWT issuer and JWKS targets");
+
+        WithDefault fallback = EmulatorConfig.SecurityConfig.class
+                .getMethod("allowPrivateJwtTargets")
+                .getAnnotation(WithDefault.class);
+        assertNotNull(fallback, "allowPrivateJwtTargets should declare a fallback default");
+        assertEquals("false", fallback.value());
     }
 }

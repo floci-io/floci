@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -28,6 +29,9 @@ import java.util.regex.Pattern;
 public class RedshiftQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(RedshiftQueryHandler.class);
+
+    private static final Pattern FILTER_NAME =
+            Pattern.compile("Filters\\.DescribeIntegrationsFilter\\.(\\d+)\\.Name");
 
     // GetClusterCredentials DurationSeconds bounds, inclusive (AWS: 900 to 3600).
     private static final int MIN_CREDENTIAL_DURATION_SECONDS = 900;
@@ -348,6 +352,70 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "CreateIntegration" -> {
+            Integration integration = service.createIntegration(
+                    params.getFirst("IntegrationName"),
+                    params.getFirst("SourceArn"),
+                    params.getFirst("TargetArn"),
+                    params.getFirst("KMSKeyId"),
+                    params.getFirst("Description"),
+                    encryptionContextMap(params),
+                    tagMap(params),
+                    regionResolver.resolveRegionFromAuth(authorizationHeader));
+            String xml = new XmlBuilder()
+                    .start("CreateIntegrationResponse")
+                      .start("CreateIntegrationResult")
+                        .raw(buildIntegrationXml(integration, false))
+                      .end("CreateIntegrationResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CreateIntegrationResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DescribeIntegrations" -> {
+            RedshiftService.IntegrationPage found = service.describeIntegrations(
+                    params.getFirst("IntegrationArn"),
+                    intParam(params, "MaxRecords"),
+                    params.getFirst("Marker"),
+                    integrationFilters(params));
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeIntegrationsResponse")
+                      .start("DescribeIntegrationsResult")
+                        .start("Integrations");
+            for (Integration integration : found.integrations()) {
+                xmlBuilder.raw(buildIntegrationXml(integration, true));
+            }
+            xmlBuilder.end("Integrations");
+            // Marker only when a further page exists: real Redshift omits it on the terminal page,
+            // and an absent marker is what stops a caller's pagination loop.
+            if (found.marker() != null) {
+                xmlBuilder.elem("Marker", found.marker());
+            }
+            String xml = xmlBuilder
+                      .end("DescribeIntegrationsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeIntegrationsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DeleteIntegration" -> {
+            Integration integration = service.deleteIntegration(params.getFirst("IntegrationArn"));
+            String xml = new XmlBuilder()
+                    .start("DeleteIntegrationResponse")
+                      .start("DeleteIntegrationResult")
+                        .raw(buildIntegrationXml(integration, false))
+                      .end("DeleteIntegrationResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteIntegrationResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "DescribeClusterSubnetGroups" -> {
             String name = params.getFirst("ClusterSubnetGroupName");
             List<ClusterSubnetGroup> groups = service.describeClusterSubnetGroups(name);
@@ -647,6 +715,121 @@ public class RedshiftQueryHandler {
             builder.elem("DataType", param.getDataType());
         }
         return builder.end("Parameter").build();
+    }
+
+
+    /**
+     * Renders one integration. {@code Errors} is emitted even when empty, which is what a live
+     * integration returns, and {@code Status} stays lower case for the same reason.
+     */
+    private String buildIntegrationXml(Integration integration, boolean includeErrors) {
+        XmlBuilder builder = new XmlBuilder()
+                .start("Integration")
+                  .elem("IntegrationArn", integration.getIntegrationArn())
+                  .elem("IntegrationName", integration.getIntegrationName())
+                  .elem("SourceArn", integration.getSourceArn())
+                  .elem("TargetArn", integration.getTargetArn())
+                  .elem("Status", integration.getStatus())
+                  .elem("CreateTime", integration.getCreateTime());
+        if (integration.getDescription() != null) {
+            builder.elem("Description", integration.getDescription());
+        }
+        if (integration.getKmsKeyId() != null) {
+            builder.elem("KMSKeyId", integration.getKmsKeyId());
+        }
+        if (integration.getAdditionalEncryptionContext() != null
+                && !integration.getAdditionalEncryptionContext().isEmpty()) {
+            builder.start("AdditionalEncryptionContext");
+            for (Map.Entry<String, String> entry : integration.getAdditionalEncryptionContext().entrySet()) {
+                builder.start("entry")
+                    .elem("key", entry.getKey())
+                    .elem("value", entry.getValue())
+                  .end("entry");
+            }
+            builder.end("AdditionalEncryptionContext");
+        }
+        if (includeErrors) {
+            builder.start("Errors").end("Errors");
+        }
+        if (integration.getTags() != null && !integration.getTags().isEmpty()) {
+            builder.start("Tags");
+            for (Map.Entry<String, String> tag : integration.getTags().entrySet()) {
+                builder.start("Tag")
+                    .elem("Key", tag.getKey())
+                    .elem("Value", tag.getValue())
+                  .end("Tag");
+            }
+            builder.end("Tags");
+        }
+        return builder.end("Integration").build();
+    }
+
+    /**
+     * Reads the {@code TagList.Tag.N.Key} / {@code .Value} pairs of a Query request.
+     *
+     * <p>The member is {@code TagList}, not {@code Tags}: an SDK serialises the list under its own
+     * member name, so reading {@code Tags.Tag.N} silently drops every tag a real client sends.
+     */
+    private static Map<String, String> tagMap(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (String key : params.keySet()) {
+            if (key.matches("TagList\\.Tag\\.\\d+\\.Key")) {
+                String value = params.getFirst(key.replaceAll("\\.Key$", ".Value"));
+                String name = params.getFirst(key);
+                if (name != null && !name.isBlank()) {
+                    tags.put(name, value == null ? "" : value);
+                }
+            }
+        }
+        return tags;
+    }
+
+    /** Reads an {@code AdditionalEncryptionContext.entry.N.key} / {@code .value} map. */
+    private static Map<String, String> encryptionContextMap(MultivaluedMap<String, String> params) {
+        Map<String, String> context = new LinkedHashMap<>();
+        for (String key : params.keySet()) {
+            if (key.matches("AdditionalEncryptionContext\\.entry\\.\\d+\\.key")) {
+                String value = params.getFirst(key.replaceAll("\\.key$", ".value"));
+                String name = params.getFirst(key);
+                if (name != null && !name.isBlank()) {
+                    context.put(name, value == null ? "" : value);
+                }
+            }
+        }
+        return context;
+    }
+
+    /** Reads {@code Filters.DescribeIntegrationsFilter.N.Name} and its {@code Values.Value.M} list. */
+    private static List<RedshiftService.IntegrationFilter> integrationFilters(MultivaluedMap<String, String> params) {
+        Map<String, RedshiftService.IntegrationFilter> byIndex = new LinkedHashMap<>();
+        for (String key : params.keySet()) {
+            java.util.regex.Matcher matcher = FILTER_NAME.matcher(key);
+            if (!matcher.matches()) {
+                continue;
+            }
+            String index = matcher.group(1);
+            String name = params.getFirst(key);
+            List<String> values = params.keySet().stream()
+                    .filter(candidate -> candidate.matches(
+                            "Filters\\.DescribeIntegrationsFilter\\." + index + "\\.Values\\.Value\\.\\d+"))
+                    .sorted(Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
+                    .map(params::getFirst)
+                    .toList();
+            byIndex.put(index, new RedshiftService.IntegrationFilter(name, values));
+        }
+        return List.copyOf(byIndex.values());
+    }
+
+    private static Integer intParam(MultivaluedMap<String, String> params, String name) {
+        String raw = params.getFirst(name);
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(raw);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", name + " must be an integer.", 400);
+        }
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {

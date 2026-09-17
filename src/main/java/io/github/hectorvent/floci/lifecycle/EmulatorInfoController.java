@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.lifecycle;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.ContainerTeardowns;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import jakarta.inject.Inject;
@@ -11,6 +13,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -28,12 +31,15 @@ import java.util.Optional;
 @Produces(MediaType.APPLICATION_JSON)
 public class EmulatorInfoController {
 
+    private static final Logger LOG = Logger.getLogger(EmulatorInfoController.class);
+
     private final ServiceRegistry serviceRegistry;
     private final InitLifecycleState initLifecycleState;
     private final String version;
 
     private final StorageFactory storageFactory;
     private final Instance<Resettable> resettables;
+    private final Instance<ContainerTeardown> containerTeardowns;
     private final FlociCertificateAuthority certificateAuthority;
     private final EmulatorConfig config;
 
@@ -42,12 +48,14 @@ public class EmulatorInfoController {
                                   InitLifecycleState initLifecycleState,
                                   StorageFactory storageFactory,
                                   Instance<Resettable> resettables,
+                                  Instance<ContainerTeardown> containerTeardowns,
                                   FlociCertificateAuthority certificateAuthority,
                                   EmulatorConfig config) {
         this.serviceRegistry = serviceRegistry;
         this.initLifecycleState = initLifecycleState;
         this.storageFactory = storageFactory;
         this.resettables = resettables;
+        this.containerTeardowns = containerTeardowns;
         this.certificateAuthority = certificateAuthority;
         this.config = config;
         this.version = resolveVersion();
@@ -146,8 +154,13 @@ public class EmulatorInfoController {
     }
 
     private void performReset() {
-        // Storage first. Services re-create their bootstrap state in clear(), and a wipe
-        // afterwards would remove it again until the next restart.
+        // Containers first: they are tracked independently of StorageBackend, so this can run
+        // in any order relative to the storage wipe below, but stopping them here means a
+        // client's reset actually reflects a clean slate instead of leaving Batch, CodeBuild,
+        // or SageMaker containers running with no record of them left in the store.
+        ContainerTeardowns.stopAll(containerTeardowns, LOG);
+        // Storage before resettables: services re-create their bootstrap state in clear(), and
+        // a wipe afterwards would remove it again until the next restart.
         storageFactory.clearAll();
         for (Resettable r : resettables) {
             r.clear();

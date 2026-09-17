@@ -1127,6 +1127,75 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createKeyPairRejectsMissingKeyName() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        for (String missing : new String[] {null, "", "   "}) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.createKeyPair("us-east-1", missing));
+            assertEquals("MissingParameter", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void importKeyPairRejectsMissingKeyName() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.importKeyPair("us-east-1", null, "c3NoLXJzYSBBQUFB"));
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createKeyPairSurvivesANamelessRecordInTheStore() {
+        // Regression for #3356: a key pair stored without a name (accepted before KeyName was
+        // validated) made the duplicate check throw on every later CreateKeyPair.
+        AccountAwareStorageBackend<KeyPair> keyPairStore = AccountAwareStorageBackend.inMemory("000000000000");
+        KeyPair nameless = new KeyPair();
+        nameless.setKeyPairId("key-nameless");
+        nameless.setRegion("us-east-1");
+        keyPairStore.put("us-east-1:key-nameless", nameless);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+
+        KeyPair created = service.createKeyPair("us-east-1", "fresh");
+        KeyPair imported = service.importKeyPair("us-east-1", "fresh-imported",
+                Ec2KeyMaterial.generateRsa().openSshPublicKey());
+
+        assertEquals("fresh", created.getKeyName());
+        assertEquals("fresh-imported", imported.getKeyName());
+        assertNull(service.deleteKeyPair("us-east-1", "no-such-name", null));
+        assertEquals(3, service.describeKeyPairs("us-east-1", List.of(), List.of()).size());
+    }
+
+    @Test
+    void deleteKeyPairReturnsTheDeletedRecordOrNull() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        KeyPair byName = service.createKeyPair("us-east-1", "delete-by-name");
+        KeyPair byId = service.createKeyPair("us-east-1", "delete-by-id");
+
+        assertEquals(byName.getKeyPairId(), service.deleteKeyPair("us-east-1", "delete-by-name", null).getKeyPairId());
+        assertEquals(byId.getKeyPairId(), service.deleteKeyPair("us-east-1", null, byId.getKeyPairId()).getKeyPairId());
+        assertNull(service.deleteKeyPair("us-east-1", "delete-by-name", null));
+        assertNull(service.deleteKeyPair("us-east-1", null, byId.getKeyPairId()));
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
     void importKeyPairRejectsDuplicateKeyName() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -1375,6 +1444,60 @@ class Ec2ServiceTest {
         Reservation compatible = service.runInstances("us-east-1", createdAmi, "t4g.medium", 1, 1,
                 null, List.of(), null, null, List.of(), null, null);
         assertEquals("arm64", compatible.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void dryRunValidatesImagesBeforeReportingSuccess() {
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        when(resolver.resolveImage("ami-windows"))
+                .thenThrow(new AwsException("UnsupportedOperation", "Unsupported AMI", 400));
+        Ec2Service service = liveService(manager, resolver, new Ec2ImageCatalog());
+        String deregistered = service.registerImage("us-east-1", "dry-run-image", null, null, null,
+                List.of()).getImageId();
+        service.deregisterImage("us-east-1", deregistered, false);
+
+        for (boolean dryRun : List.of(true, false)) {
+            assertEquals("UnsupportedOperation", assertThrows(AwsException.class,
+                    () -> service.runInstances("us-east-1", "ami-windows", "t3.micro", 1, 1,
+                            null, List.of(), null, null, List.of(), null, null,
+                            null, null, 0, null, null, null, null, dryRun)).getErrorCode());
+            assertEquals("InvalidAMIID.Unavailable", assertThrows(AwsException.class,
+                    () -> service.runInstances("us-east-1", deregistered, "t3.micro", 1, 1,
+                            null, List.of(), null, null, List.of(), null, null,
+                            null, null, 0, null, null, null, null, dryRun)).getErrorCode());
+            assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                    () -> service.runInstances("us-east-1", "ami-ubuntu2404-amd64", "t4g.medium", 1, 1,
+                            null, List.of(), null, null, List.of(), null, null,
+                            null, null, 0, null, null, null, null, dryRun)).getErrorCode());
+        }
+        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        verifyNoInteractions(manager);
+    }
+
+    @Test
+    void dryRunValidatesSuppliedEniWithoutAttachingOrProvisioning() {
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = liveService(manager, mock(AmiImageResolver.class));
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null, null,
+                List.of(), List.of(), List.of());
+        for (boolean dryRun : List.of(true, false)) {
+            assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                    () -> service.runInstances("us-east-1", "ami-test", "t3.micro", 2, 2,
+                            null, List.of(), null, null, List.of(), null, null,
+                            null, eni.getNetworkInterfaceId(), 0, null, null, null, null, dryRun)).getErrorCode());
+        }
+        assertEquals("DryRunOperation", assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1,
+                        null, List.of(), null, null, List.of(), null, null,
+                        null, eni.getNetworkInterfaceId(), 0, null, null, null, null, true)).getErrorCode());
+        assertNull(eni.getAttachment());
+        assertEquals("available", eni.getStatus());
+        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        verifyNoInteractions(manager);
     }
 
     @Test

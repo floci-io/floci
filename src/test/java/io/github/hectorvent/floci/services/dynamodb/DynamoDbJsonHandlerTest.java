@@ -1347,6 +1347,19 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void transactWriteItemsRejectsANonTextConditionExpression() {
+        ObjectNode put = mapper.createObjectNode();
+        put.set("Item", item("userId", "u1"));
+        put.put("ConditionExpression", 1);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Put", put), "eu-west-1"));
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("Invalid ConditionExpression: Syntax error; token: \"1\", near: \"1\"",
+                exception.getMessage());
+    }
+
+    @Test
     void transactWriteItemsRejectsAnUpdateExpressionOver4096Bytes() {
         createUsersTable("eu-west-1");
         var update = mapper.createObjectNode();
@@ -1678,5 +1691,187 @@ class DynamoDbJsonHandlerTest {
         assertEquals("ValidationError", reasons.get(1).get("Code").asText());
         assertEquals("Nesting Levels have exceeded supported limits", reasons.get(1).get("Message").asText());
         assertNull(service.getItem("Users", item("userId", "u2"), "eu-west-1"));
+    }
+
+    private ObjectNode transactMember(String action, String tableName, String field, ObjectNode value) {
+        ObjectNode op = mapper.createObjectNode();
+        op.put("TableName", tableName);
+        op.set(field, value);
+        ObjectNode member = mapper.createObjectNode();
+        member.set(action, op);
+        return member;
+    }
+
+    private ObjectNode transactWriteOf(ObjectNode... members) {
+        ArrayNode items = mapper.createArrayNode();
+        for (ObjectNode member : members) {
+            items.add(member);
+        }
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", items);
+        return request;
+    }
+
+    private String onlyValidationErrorMessage(Response response) {
+        assertEquals(400, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("TransactionCanceledException", body.get("__type").asText());
+        assertEquals("Transaction cancelled, please refer cancellation reasons for specific reasons [ValidationError]",
+                body.get("message").asText());
+        JsonNode reason = body.get("CancellationReasons").get(0);
+        assertEquals("ValidationError", reason.get("Code").asText());
+        return reason.get("Message").asText();
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutKeyOfTheWrongType() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("N", "5"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Users", "Item", item)), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for key userId expected: S actual: N",
+                onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutItemMissingItsKey() throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Users", "Item", item("name", "x"))), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Missing the key userId in the item",
+                onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnADeleteKeyOfTheWrongTypeWithTheSchemaMessage() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("N", "5"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Delete", "Users", "Key", key)), "eu-west-1");
+
+        assertEquals("The provided key element does not match the schema", onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAConditionCheckKeyMissingItsAttribute() throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("ConditionCheck", "Users", "Key", mapper.createObjectNode())),
+                "eu-west-1");
+
+        assertEquals("The provided key element does not match the schema", onlyValidationErrorMessage(response));
+    }
+
+    // Checked against DynamoDB in eu-west-2: the failing condition and the duplicate pair report None.
+    @Test
+    void transactWriteItemsCancelsAtTheFirstKeyMismatchBeforeConditionsAndDuplicates() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode check = transactMember("ConditionCheck", "Users", "Key", item("userId", "u9"));
+        ((ObjectNode) check.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(userId)");
+        ObjectNode firstWrong = mapper.createObjectNode();
+        firstWrong.set("userId", attributeValue("N", "5"));
+        ObjectNode secondWrong = mapper.createObjectNode();
+        secondWrong.set("userId", attributeValue("N", "6"));
+
+        Response response = handler.handle("TransactWriteItems", transactWriteOf(check,
+                transactMember("Put", "Users", "Item", item("userId", "u1")),
+                transactMember("Put", "Users", "Item", item("userId", "u1")),
+                transactMember("Put", "Users", "Item", firstWrong),
+                transactMember("Put", "Users", "Item", secondWrong)), "eu-west-1");
+
+        assertEquals(400, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("Transaction cancelled, please refer cancellation reasons for specific reasons "
+                + "[None, None, None, ValidationError, None]", body.get("message").asText());
+        assertEquals("One or more parameter values were invalid: Type mismatch for key userId expected: S actual: N",
+                body.get("CancellationReasons").get(3).get("Message").asText());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    // Checked against DynamoDB in eu-west-2: a CREATING table is not found before any key is checked.
+    @Test
+    void transactWriteItemsAnswersResourceNotFoundForACreatingTableBeforeTheKeyCheck() {
+        createUsersTable("eu-west-1").setTableStatus("CREATING");
+        ObjectNode wrong = mapper.createObjectNode();
+        wrong.set("userId", attributeValue("N", "5"));
+        ObjectNode request = transactWriteOf(transactMember("Put", "Users", "Item", wrong));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("Requested resource not found", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsFailsTheRequestOnAnEmptyKeyAheadOfAKeyMismatch() {
+        createUsersTable("eu-west-1");
+        ObjectNode wrong = mapper.createObjectNode();
+        wrong.set("userId", attributeValue("N", "5"));
+        ObjectNode request = transactWriteOf(
+                transactMember("Put", "Users", "Item", item("userId", "")),
+                transactMember("Put", "Users", "Item", wrong));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key attribute "
+                + "cannot contain an empty string value. Key: userId", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode item = item("id", "m1");
+        item.set("title", attributeValue("N", "1"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Movies", "Item", item)), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAnUpdateSettingAnIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode update = transactMember("Update", "Movies", "Key", item("id", "m1"));
+        ((ObjectNode) update.get("Update")).put("UpdateExpression", "SET title = :t");
+        ((ObjectNode) update.get("Update")).set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":t", attributeValue("N", "1")));
+
+        Response response = handler.handle("TransactWriteItems", transactWriteOf(update), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+        assertNull(service.getItem("Movies", item("id", "m1"), "eu-west-1"));
+    }
+
+    @Test
+    void executeTransactionCancelsOnAnUpdateSettingAnIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Movies");
+        putRequest.set("Item", item("id", "m1", "title", "Old"));
+        handler.handle("PutItem", putRequest, "eu-west-1");
+        ObjectNode statement = mapper.createObjectNode();
+        statement.put("Statement", "UPDATE \"Movies\" SET title = ? WHERE id = ?");
+        statement.set("Parameters", mapper.createArrayNode()
+                .add(attributeValue("N", "1")).add(attributeValue("S", "m1")));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactStatements", mapper.createArrayNode().add(statement));
+
+        Response response = handler.handle("ExecuteTransaction", request, "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+        assertEquals("Old", service.getItem("Movies", item("id", "m1"), "eu-west-1").get("title").get("S").asText());
     }
 }

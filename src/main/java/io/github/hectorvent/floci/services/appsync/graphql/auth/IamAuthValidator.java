@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.appsync.graphql.auth;
 
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.AccountResolver;
+import io.github.hectorvent.floci.core.common.auth.CredentialScope;
+import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -10,14 +13,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
@@ -44,7 +44,6 @@ public class IamAuthValidator {
 
     private static final String ALGORITHM = "AWS4-HMAC-SHA256";
     private static final String SIGNING_SERVICE = "appsync";
-    private static final String TERMINATOR = "aws4_request";
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
     private static final long MAX_CLOCK_SKEW_SECONDS = 300;
@@ -120,23 +119,27 @@ public class IamAuthValidator {
         }
         String secretKey = resolveSecretKey(accessKeyId);
         if (secretKey == null) {
-            LOG.debugv("AppSync SigV4 request references unregistered access key={0}", sanitizeForLog(accessKeyId));
+            LOG.debugv("AppSync SigV4 request references unregistered access key={0}",
+                    SigV4RequestValidator.sanitizeForLog(accessKeyId));
             throw AppSyncAuth.unauthorized();
         }
         checkSessionToken(accessKeyId, info.requestHeaders());
         try {
             String canonicalUri = "/v1/apis/" + apiId + "/graphql";
-            String payloadHash = sha256Hex(info.rawBody().getBytes(StandardCharsets.UTF_8));
+            String payloadHash = SigV4RequestValidator.sha256Hex(info.rawBody().getBytes(StandardCharsets.UTF_8));
             String canonicalHeaders = canonicalHeaders(signed.signedHeaders(), info.requestHeaders());
             String canonicalRequest = "POST\n" + canonicalUri + "\n\n"
                     + canonicalHeaders + "\n" + signed.signedHeaders() + "\n" + payloadHash;
             String stringToSign = ALGORITHM + "\n" + signed.amzDate() + "\n" + scope.credentialScope() + "\n"
-                    + sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
-            byte[] signingKey = deriveSigningKey(secretKey, scope.date(), scope.region(), scope.service());
-            String expected = hexEncode(hmacSha256(signingKey, stringToSign));
+                    + SigV4RequestValidator.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
+            byte[] signingKey = SigV4RequestValidator.deriveSigningKey(
+                    secretKey, scope.date(), scope.region(), scope.service());
+            String expected = SigV4RequestValidator.hexEncode(
+                    SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
             if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
                     signed.signature().getBytes(StandardCharsets.UTF_8))) {
-                LOG.debugv("AppSync SigV4 signature mismatch for accessKey={0}", sanitizeForLog(accessKeyId));
+                LOG.debugv("AppSync SigV4 signature mismatch for accessKey={0}",
+                        SigV4RequestValidator.sanitizeForLog(accessKeyId));
                 throw AppSyncAuth.unauthorized();
             }
         } catch (AppSyncTransportException e) {
@@ -182,7 +185,7 @@ public class IamAuthValidator {
         String presented = header(requestHeaders, SECURITY_TOKEN);
         if (isBlank(presented)) {
             LOG.debugv("AppSync SigV4 request uses temporary credential accessKey={0} with no {1}",
-                    sanitizeForLog(accessKeyId), SECURITY_TOKEN);
+                    SigV4RequestValidator.sanitizeForLog(accessKeyId), SECURITY_TOKEN);
             throw AppSyncAuth.unauthorized();
         }
         String issued = iamService.findSessionToken(accessKeyId).orElse(null);
@@ -192,7 +195,7 @@ public class IamAuthValidator {
         if (!MessageDigest.isEqual(issued.getBytes(StandardCharsets.UTF_8),
                 presented.getBytes(StandardCharsets.UTF_8))) {
             LOG.debugv("AppSync SigV4 request presents a session token that does not match the one"
-                    + " issued for accessKey={0}", sanitizeForLog(accessKeyId));
+                    + " issued for accessKey={0}", SigV4RequestValidator.sanitizeForLog(accessKeyId));
             throw AppSyncAuth.unauthorized();
         }
     }
@@ -209,55 +212,24 @@ public class IamAuthValidator {
      * regardless.
      */
     private static SignedRequest headerSignedRequest(String authorization, Map<String, String> requestHeaders) {
-        if (authorization == null) {
+        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
+        if (parsed == null) {
             return null;
         }
-        String trimmed = authorization.trim();
-        if (!trimmed.regionMatches(true, 0, ALGORITHM, 0, ALGORITHM.length())) {
-            return null;
-        }
-        Map<String, String> parameters = new LinkedHashMap<>();
-        for (String part : trimmed.substring(ALGORITHM.length()).split(",")) {
-            int equals = part.indexOf('=');
-            if (equals > 0) {
-                parameters.put(part.substring(0, equals).trim(), part.substring(equals + 1).trim());
-            }
-        }
-        String credential = parameters.get("Credential");
-        String signedHeaders = parameters.get("SignedHeaders");
-        String signature = parameters.get("Signature");
         String amzDate = header(requestHeaders, "X-Amz-Date");
-        if (isBlank(credential) || isBlank(signedHeaders) || isBlank(signature) || isBlank(amzDate)) {
+        if (isBlank(parsed.credential()) || isBlank(parsed.signedHeaders())
+                || isBlank(parsed.signature()) || isBlank(amzDate)) {
             return null;
         }
-        return new SignedRequest(credential, signedHeaders.toLowerCase(Locale.ROOT), signature, amzDate);
-    }
-
-    private record CredentialScope(String accessKeyId, String date, String region, String service) {
-
-        String credentialScope() {
-            return date + "/" + region + "/" + service + "/" + TERMINATOR;
-        }
-
-        static CredentialScope parse(String credential) {
-            if (credential == null) {
-                return null;
-            }
-            String[] parts = credential.split("/");
-            if (parts.length != 5 || !TERMINATOR.equals(parts[4])) {
-                return null;
-            }
-            if (parts[0].isBlank() || parts[1].length() != 8 || parts[2].isBlank() || parts[3].isBlank()) {
-                return null;
-            }
-            return new CredentialScope(parts[0], parts[1], parts[2], parts[3].toLowerCase(Locale.ROOT));
-        }
+        return new SignedRequest(parsed.credential(), parsed.signedHeaders().toLowerCase(Locale.ROOT),
+                parsed.signature(), amzDate);
     }
 
     private static String canonicalHeaders(String signedHeaders, Map<String, String> requestHeaders) {
         StringBuilder canonical = new StringBuilder();
         for (String name : signedHeaders.split(";")) {
-            canonical.append(name).append(':').append(normalizeHeaderValue(header(requestHeaders, name))).append('\n');
+            canonical.append(name).append(':')
+                    .append(SigV4RequestValidator.normalizeHeaderValue(header(requestHeaders, name))).append('\n');
         }
         return canonical.toString();
     }
@@ -278,44 +250,8 @@ public class IamAuthValidator {
         return "";
     }
 
-    private static String normalizeHeaderValue(String value) {
-        return value == null ? "" : value.trim().replaceAll("\\s+", " ");
-    }
-
-    private static byte[] deriveSigningKey(String secretKey, String date, String region, String service)
-            throws Exception {
-        byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
-        byte[] kDate = hmacSha256(kSecret, date);
-        byte[] kRegion = hmacSha256(kDate, region);
-        byte[] kService = hmacSha256(kRegion, service);
-        return hmacSha256(kService, TERMINATOR);
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String sha256Hex(byte[] input) throws Exception {
-        return hexEncode(MessageDigest.getInstance("SHA-256").digest(input));
-    }
-
-    private static String hexEncode(byte[] bytes) {
-        StringBuilder hex = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-        }
-        return hex.toString();
-    }
-
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
-    }
-
-    /** Strips control characters from attacker-controlled values before they reach a log line. */
-    private static String sanitizeForLog(String value) {
-        return value == null ? null : value.replaceAll("\\p{Cntrl}", "");
     }
 
     public boolean isFieldDenied(String accessKeyId, String fieldArn) {

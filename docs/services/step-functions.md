@@ -16,6 +16,11 @@
 | `PublishStateMachineVersion` | - |
 | `ListStateMachineVersions` | - |
 | `DeleteStateMachineVersion` | - |
+| `CreateStateMachineAlias` | - |
+| `DescribeStateMachineAlias` | - |
+| `ListStateMachineAliases` | - |
+| `UpdateStateMachineAlias` | - |
+| `DeleteStateMachineAlias` | - |
 | `ValidateStateMachineDefinition` | Validate an ASL definition without creating a state machine |
 | `StartExecution` | Start a new execution |
 | `StartSyncExecution` | - |
@@ -105,8 +110,9 @@ scheduling time, not when a worker actually picks up the task. `TaskSubmitted`, 
 AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When a
 branch fails, AWS records `*StateAborted` and `MapIterationAborted` events for the states its
 sibling branches were in; Floci cancels the siblings without recording them. A Distributed
-`Map` whose item fails reports the item's own error rather than AWS's
-`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error.
+`Map` that declares no tolerance reports a failed item's own error rather than AWS's
+`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error. A `Map` that
+declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
 
 ## Map concurrency
 
@@ -118,6 +124,62 @@ omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline
 Results remain in input order even when iterations finish out of order. If an iteration fails,
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
 iterations.
+
+## Distributed Map ItemReader
+
+`ItemReader` reads a dataset from S3. The resource decides how the dataset is found, and
+`ReaderConfig.InputType` decides how it is read.
+
+`arn:aws:states:::s3:getObject` reads a single object:
+
+- `JSON` is either an array, or an object whose entries become `Key` and `Value` items.
+  `ReaderConfig.ItemsPointer` selects a node inside it.
+- `JSONL` is one item per line. Blank lines are skipped, and `ItemsPointer` does not apply,
+  matching AWS.
+- `CSV`, `PARQUET` and `MANIFEST` are accepted by `CreateStateMachine` and fail the execution
+  with `States.ItemReaderFailed`.
+
+`arn:aws:states:::s3:listObjectsV2` reads every page under `Prefix`. Each item carries the AWS
+fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`. An empty prefix
+gives zero iterations and the Map succeeds.
+
+`ReaderConfig.MaxItems` applies to every reader; `MaxItemsPath` is not supported.
+
+## Distributed Map ItemBatcher
+
+`ItemBatcher` hands each child execution a batch of items instead of a single item. The child input
+is `{"BatchInput": ..., "Items": [...]}`, with `BatchInput` present only when the state declares it.
+`ItemSelector` still runs per item, before the items are grouped.
+
+A batch closes on `MaxItemsPerBatch`, on `MaxInputBytesPerBatch`, or on the 256 KiB child-input
+ceiling AWS applies whether or not a byte limit is declared. Either limit may be given as a
+`...Path` field, or as an expression in a JSONata state machine. With neither declared, items fill
+one batch up to that ceiling. The size measured is the serialized child payload, envelope and
+`BatchInput` included, not the items alone. An item that would exceed the ceiling on its own can
+never start a child execution, so the state fails with `States.DataLimitExceeded` rather than
+building a batch AWS would reject: reduce the item with `ItemSelector` first.
+
+`MaxConcurrency` then bounds concurrent batches, and the Map result has one entry per batch rather
+than per item. `DescribeMapRun` reports items under `itemCounts` and batches under
+`executionCounts`.
+
+## Tolerated failures
+
+`ToleratedFailureCount` and `ToleratedFailurePercentage` let a Distributed `Map` absorb failed items
+instead of failing on the first one. Both accept a `...Path` field, or an expression in a JSONata
+state machine, and the percentage is taken over the item count. Declaring both applies the stricter
+of the two.
+
+An absorbed failure contributes no result, so the `Map` output carries one entry per successful
+child execution. A `ResultWriter` still exports it: successful children go to `SUCCEEDED_0.json` and
+absorbed failures to `FAILED_0.json`, each listed under the matching key of the manifest's
+`ResultFiles`. A failed record carries `Error` and `Cause` in place of an output. Once the budget is
+spent, the state fails with `States.ExceedToleratedFailureThreshold` and the run emits
+`MapRunFailed`.
+
+`DescribeMapRun` reports the declared values under `toleratedFailureCount` and
+`toleratedFailurePercentage`. A `Map` that declares neither keeps the earlier behaviour: the first
+failed item fails the state, carrying that item's own error.
 
 ## Retry policies
 

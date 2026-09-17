@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
+import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
 import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
 import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
@@ -846,6 +847,57 @@ public class ApiGatewayController {
         }
     }
 
+    /**
+     * {@code GetUsage}. Returns the real response envelope with an entry per attached key and one
+     * pair per day of the requested range.
+     *
+     * <p>Paginated over the API key entries with {@code limit} and {@code position}, defaulting to
+     * 25 keys a page.
+     *
+     * <p>Each pair is {@code [used, remaining]}, not {@code [used, quota]}: measured against real
+     * API Gateway, the second element is the quota limit minus the cumulative use so far in the
+     * period. Both elements are {@code 0} here because the emulator neither meters requests per API
+     * key nor stores a quota on a usage plan. Once a quota lives on {@code UsagePlan} and the
+     * execute path counts per key, this method is where both feed in; until then a caller that sums
+     * the used counts gets the same zero it already gets from an unsupported action, without having
+     * to special-case a missing endpoint.
+     */
+    @GET
+    @Path("/usageplans/{usagePlanId}/usage")
+    public Response getUsage(@Context HttpHeaders headers,
+                             @PathParam("usagePlanId") String usagePlanId,
+                             @QueryParam("startDate") String startDate,
+                             @QueryParam("endDate") String endDate,
+                             @QueryParam("keyId") String keyId,
+                             @QueryParam("limit") Integer limit,
+                             @QueryParam("position") String position) {
+        String region = regionResolver.resolveRegion(headers);
+        ApiGatewayService.UsageReport report =
+                service.getUsage(region, usagePlanId, startDate, endDate, keyId, limit, position);
+
+        ObjectNode root = objectMapper.createObjectNode();
+        // The wire key is "values", not "items": the Usage shape models this map with
+        // locationName "values", and "items" is only the SDK-side member name. A body keyed
+        // "items" parses to nothing in a real client.
+        ObjectNode values = root.putObject("values");
+        report.items().forEach((apiKeyId, perDay) -> {
+            ArrayNode days = values.putArray(apiKeyId);
+            for (long[] pair : perDay) {
+                ArrayNode entry = days.addArray();
+                entry.add(pair[0]);
+                entry.add(pair[1]);
+            }
+        });
+        root.put("usagePlanId", report.usagePlanId());
+        root.put("startDate", report.startDate());
+        root.put("endDate", report.endDate());
+        // Only present when another page exists, matching the terminal page captured from AWS.
+        if (report.position() != null) {
+            root.put("position", report.position());
+        }
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
     @GET
     @Path("/usageplans/{usagePlanId}/keys")
     public Response getUsagePlanKeys(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId) {
@@ -869,6 +921,71 @@ public class ApiGatewayController {
     public Response deleteUsagePlanKey(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId, @PathParam("keyId") String keyId) {
         String region = regionResolver.resolveRegion(headers);
         service.deleteUsagePlanKey(region, usagePlanId, keyId);
+        return Response.accepted().build();
+    }
+
+    // ──────────────────────────── Gateway Responses (v1) ────────────────────────────
+
+    @PUT
+    @Path("/restapis/{apiId}/gatewayresponses/{responseType}")
+    public Response putGatewayResponse(@Context HttpHeaders headers,
+                                       @PathParam("apiId") String apiId,
+                                       @PathParam("responseType") String responseType,
+                                       String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = body == null || body.isBlank()
+                    ? new HashMap<>()
+                    : objectMapper.readValue(body, Map.class);
+            GatewayResponse response = service.putGatewayResponse(region, apiId, responseType, request);
+            return Response.status(201).entity(toGatewayResponseNode(response).toString())
+                    .type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/gatewayresponses")
+    public Response getGatewayResponses(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+        String region = regionResolver.resolveRegion(headers);
+        List<GatewayResponse> responses = service.getGatewayResponses(region, apiId);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("item");
+        responses.forEach(response -> items.add(toGatewayResponseNode(response)));
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/gatewayresponses/{responseType}")
+    public Response getGatewayResponse(@Context HttpHeaders headers,
+                                       @PathParam("apiId") String apiId,
+                                       @PathParam("responseType") String responseType) {
+        String region = regionResolver.resolveRegion(headers);
+        GatewayResponse response = service.getGatewayResponse(region, apiId, responseType);
+        return Response.ok(toGatewayResponseNode(response).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @PATCH
+    @Path("/restapis/{apiId}/gatewayresponses/{responseType}")
+    public Response updateGatewayResponse(@Context HttpHeaders headers,
+                                          @PathParam("apiId") String apiId,
+                                          @PathParam("responseType") String responseType,
+                                          String body) {
+        String region = regionResolver.resolveRegion(headers);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        GatewayResponse response = service.updateGatewayResponse(region, apiId, responseType, patchOperations);
+        return Response.ok(toGatewayResponseNode(response).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/restapis/{apiId}/gatewayresponses/{responseType}")
+    public Response deleteGatewayResponse(@Context HttpHeaders headers,
+                                          @PathParam("apiId") String apiId,
+                                          @PathParam("responseType") String responseType) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteGatewayResponse(region, apiId, responseType);
         return Response.accepted().build();
     }
 
@@ -2307,6 +2424,20 @@ public class ApiGatewayController {
         if (m.getDescription() != null) node.put("description", m.getDescription());
         node.put("contentType", m.getContentType());
         if (m.getSchema() != null) node.put("schema", m.getSchema());
+        return node;
+    }
+
+    private ObjectNode toGatewayResponseNode(GatewayResponse response) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("responseType", response.getResponseType());
+        if (response.getStatusCode() != null) {
+            node.put("statusCode", response.getStatusCode());
+        }
+        ObjectNode parameters = node.putObject("responseParameters");
+        response.getResponseParameters().forEach(parameters::put);
+        ObjectNode templates = node.putObject("responseTemplates");
+        response.getResponseTemplates().forEach(templates::put);
+        node.put("defaultResponse", response.isDefaultResponse());
         return node;
     }
 

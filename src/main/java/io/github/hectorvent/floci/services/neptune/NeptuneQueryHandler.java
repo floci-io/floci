@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.neptune;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.BackupWindows;
+import io.github.hectorvent.floci.core.common.RdsFamilyQuerySupport;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneCluster;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneClusterSettings;
@@ -66,7 +68,7 @@ public class NeptuneQueryHandler {
         } catch (Exception e) {
             LOG.errorv(e, "Unexpected error in Neptune {0}", action);
             return AwsQueryResponse.error("InternalFailure",
-                    "Unexpected error: " + e.getMessage(), AwsNamespaces.RDS, 500);
+                    "Unexpected error: " + AwsErrorMessages.describe(e), AwsNamespaces.RDS, 500);
         }
     }
 
@@ -188,30 +190,7 @@ public class NeptuneQueryHandler {
     }
 
     private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
-        String maxRecords = params.getFirst("MaxRecords");
-        if (maxRecords != null && !maxRecords.isBlank()) {
-            int max = -1;
-            try {
-                max = Integer.parseInt(maxRecords.trim());
-            } catch (NumberFormatException e) {
-                LOG.debugv("Non-numeric MaxRecords {0} on DescribeGlobalClusters", maxRecords);
-            }
-            if (max < 20 || max > 100) {
-                throw new AwsException("InvalidParameterValue",
-                        "Invalid value " + maxRecords + " for MaxRecords. Must be between 20 and 100", 400);
-            }
-        }
-        String identifier = params.getFirst("GlobalClusterIdentifier");
-        if (identifier != null && !identifier.isBlank()) {
-            throw new AwsException("GlobalClusterNotFoundFault",
-                    "Global cluster '" + identifier + "' not found", 404);
-        }
-        String marker = params.getFirst("Marker");
-        if (marker != null && !marker.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "The request token is invalid.", 400);
-        }
-        XmlBuilder xml = new XmlBuilder().start("GlobalClusters").end("GlobalClusters");
-        return Response.ok(AwsQueryResponse.envelope("DescribeGlobalClusters", AwsNamespaces.RDS, xml.build())).build();
+        return RdsFamilyQuerySupport.handleDescribeGlobalClusters(LOG, params);
     }
 
     // ── Instances ─────────────────────────────────────────────────────────────

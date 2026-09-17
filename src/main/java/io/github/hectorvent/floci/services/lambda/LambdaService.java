@@ -1320,6 +1320,7 @@ public class LambdaService implements ResourceProvider {
                 : null;
 
         Integer maximumRetryAttempts = parseMaximumRetryAttempts(request);
+        Integer maximumRecordAgeInSeconds = parseMaximumRecordAgeInSeconds(request);
 
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
@@ -1347,6 +1348,7 @@ public class LambdaService implements ResourceProvider {
         esm.setFunctionResponseTypes(functionResponseTypes);
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
         esm.setMaximumRetryAttempts(maximumRetryAttempts);
+        esm.setMaximumRecordAgeInSeconds(maximumRecordAgeInSeconds);
         esm.setDestinationConfig(destinationConfig);
         esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
@@ -1752,6 +1754,28 @@ public class LambdaService implements ResourceProvider {
         return (int) value;
     }
 
+    private Integer parseMaximumRecordAgeInSeconds(Map<String, Object> request) {
+        Object raw = request.get("MaximumRecordAgeInSeconds");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Number)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRecordAgeInSeconds must be a numeric value", 400);
+        }
+        double d = ((Number) raw).doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRecordAgeInSeconds must be an integer", 400);
+        }
+        long value = ((Number) raw).longValue();
+        if (value != -1 && (value < 60 || value > 604800)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaximumRecordAgeInSeconds must be -1 or between 60 and 604800 (got " + value + ")", 400);
+        }
+        return (int) value;
+    }
+
     private void startPollingHelper(EventSourceMapping esm) {
         if (esm.getEventSourceArn() == null) {
             return;
@@ -1825,6 +1849,9 @@ public class LambdaService implements ResourceProvider {
 
         if (request.containsKey("MaximumRetryAttempts")) {
             esm.setMaximumRetryAttempts(parseMaximumRetryAttempts(request));
+        }
+        if (request.containsKey("MaximumRecordAgeInSeconds")) {
+            esm.setMaximumRecordAgeInSeconds(parseMaximumRecordAgeInSeconds(request));
         }
 
         if (request.containsKey("DestinationConfig")) {

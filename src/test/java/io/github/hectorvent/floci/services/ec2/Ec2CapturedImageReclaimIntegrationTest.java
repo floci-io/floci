@@ -113,7 +113,7 @@ class Ec2CapturedImageReclaimIntegrationTest {
     /** The image reference the container manager was asked to launch for the given instance. */
     private ResolvedAmiImage launchedImageOf(Instance instance) {
         ArgumentCaptor<ResolvedAmiImage> resolved = ArgumentCaptor.forClass(ResolvedAmiImage.class);
-        verify(containerManager).launch(eq(instance), resolved.capture(), any(), anyString(), any());
+        verify(containerManager).launch(eq(instance), resolved.capture(), any(), anyString(), any(), any(), any());
         return resolved.getValue();
     }
 

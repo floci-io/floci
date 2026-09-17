@@ -106,6 +106,24 @@ public interface TagHandler {
         return false;
     }
 
+    /**
+     * JSON member name for a tag entry's key when {@link #tagsBodyIsList()} is {@code true}.
+     * Defaults to {@code "Key"}, matching the great majority of list-shaped AWS services.
+     * Override to {@code "key"} for services that lowercase entry members (CodeArtifact).
+     */
+    default String tagEntryKeyName() {
+        return "Key";
+    }
+
+    /**
+     * JSON member name for a tag entry's value when {@link #tagsBodyIsList()} is {@code true}.
+     * Defaults to {@code "Value"}, matching the great majority of list-shaped AWS services.
+     * Override to {@code "value"} for services that lowercase entry members (CodeArtifact).
+     */
+    default String tagEntryValueName() {
+        return "Value";
+    }
+
     /** HTTP status for successful path-based TagResource requests. */
     default int tagResourceSuccessStatus() {
         return 204;

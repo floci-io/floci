@@ -10,6 +10,7 @@ import io.vertx.core.net.NetSocket;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.Config;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
@@ -40,6 +41,10 @@ import java.util.concurrent.CompletionException;
  * so they PUT to 443 regardless of Floci's configured port; binding 443 lets those callbacks
  * reach Floci. The extra binding is skipped when the port is {@code 0} or equals the public port.
  *
+ * <p>Both listen on the configured {@code quarkus.http.host}, not the loopback pin
+ * {@link TlsConfigSource} applies to Quarkus itself, and a non-loopback host needs the same consent
+ * as without TLS; see {@link NetworkExposureGuard}.
+ *
  * <p>This bean is only active when {@code floci.tls.enabled=true}. When TLS is disabled,
  * Quarkus serves HTTP directly on port 4566 and this proxy is not started.
  */
@@ -57,6 +62,7 @@ public class TlsProxyServer {
 
     private final Vertx vertx;
     private final EmulatorConfig config;
+    private final String host;
     private final int httpBackendPort;
     private final int httpsBackendPort;
     private final List<NetServer> proxyServers = new ArrayList<>();
@@ -82,14 +88,15 @@ public class TlsProxyServer {
     private NetClient client;
 
     @Inject
-    public TlsProxyServer(Vertx vertx, EmulatorConfig config) {
-        this(vertx, config, HTTP_BACKEND_PORT, HTTPS_BACKEND_PORT);
+    public TlsProxyServer(Vertx vertx, EmulatorConfig config, Config mpConfig) {
+        this(vertx, config, NetworkExposureGuard.publicHost(mpConfig), HTTP_BACKEND_PORT, HTTPS_BACKEND_PORT);
     }
 
     /** Visible for testing — lets tests point the proxy at backends on non-default ports. */
-    TlsProxyServer(Vertx vertx, EmulatorConfig config, int httpBackendPort, int httpsBackendPort) {
+    TlsProxyServer(Vertx vertx, EmulatorConfig config, String host, int httpBackendPort, int httpsBackendPort) {
         this.vertx = vertx;
         this.config = config;
+        this.host = host;
         this.httpBackendPort = httpBackendPort;
         this.httpsBackendPort = httpsBackendPort;
         startIfTlsEnabled();
@@ -100,12 +107,14 @@ public class TlsProxyServer {
             return;
         }
 
+        NetworkExposureGuard.requireConsent(host, config.security());
+
         client = vertx.createNetClient();
         Handler<NetSocket> connectHandler = buildConnectHandler();
 
         for (int port : listenPorts()) {
             NetServerOptions options = new NetServerOptions()
-                    .setHost("0.0.0.0")
+                    .setHost(host)
                     .setPort(port);
             NetServer server = vertx.createNetServer(options);
             server.connectHandler(connectHandler);
@@ -114,8 +123,8 @@ public class TlsProxyServer {
             bind.onComplete(ar -> {
                 if (ar.succeeded()) {
                     failedPorts.remove(port);
-                    LOG.infov("TLS proxy: listening on port {0} (HTTP→{1}, HTTPS→{2})",
-                            String.valueOf(port), String.valueOf(httpBackendPort), String.valueOf(httpsBackendPort));
+                    LOG.infov("TLS proxy: listening on {0}:{1} (HTTP→{2}, HTTPS→{3})",
+                            host, String.valueOf(port), String.valueOf(httpBackendPort), String.valueOf(httpsBackendPort));
                 } else if (port == config.port()) {
                     LOG.errorv("TLS proxy: failed to start on public port {0}: {1}",
                             String.valueOf(port), ar.cause().getMessage());

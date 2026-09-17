@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.AccessConfig;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
@@ -64,12 +65,13 @@ public class EksService implements TagHandler, ResourceProvider {
     private final EksClusterManager clusterManager;
     private final Ec2Service ec2Service;
     private final EksOidcService oidcService;
+    private final EksAccessEntryService accessEntries;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
-            EksOidcService oidcService) {
+            EksOidcService oidcService, EksAccessEntryService accessEntries) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -84,6 +86,7 @@ public class EksService implements TagHandler, ResourceProvider {
         this.clusterManager = clusterManager;
         this.ec2Service = ec2Service;
         this.oidcService = oidcService;
+        this.accessEntries = accessEntries;
     }
 
     @PostConstruct
@@ -235,6 +238,15 @@ public class EksService implements TagHandler, ResourceProvider {
                     "Cluster already exists: " + name, 409);
         }
 
+        AccessConfig requestedAccess = request.getAccessConfig();
+        String authenticationMode = requestedAccess == null || requestedAccess.authenticationMode() == null
+                ? "CONFIG_MAP" : requestedAccess.authenticationMode();
+        if (!Set.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API").contains(authenticationMode)) {
+            throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
+        }
+        AccessConfig accessConfig = new AccessConfig(authenticationMode,
+                requestedAccess == null || requestedAccess.bootstrapClusterCreatorAdminPermissions() == null
+                        || requestedAccess.bootstrapClusterCreatorAdminPermissions());
         String region = regionResolver.getRegion();
         String resolvedVpcId = validateSubnetsAndResolveVpcId(region, request.getResourcesVpcConfig());
         String accountId = regionResolver.getAccountId();
@@ -242,6 +254,7 @@ public class EksService implements TagHandler, ResourceProvider {
 
         Cluster cluster = new Cluster();
         cluster.setName(name);
+        cluster.setAccessConfig(accessConfig);
         cluster.setArn(arn);
         cluster.setAccountId(accountId);
         cluster.setCreatedAt(Instant.now());
@@ -310,6 +323,7 @@ public class EksService implements TagHandler, ResourceProvider {
         if (!config.services().eks().mock()) {
             clusterManager.stopCluster(cluster);
         }
+        accessEntries.deleteClusterEntries(cluster);
         storage.delete(name);
         oidcService.deleteKey(name);
         return cluster;

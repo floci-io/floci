@@ -404,3 +404,31 @@ teardown() {
     assert_failure
     assert_output --partial 'InvalidParameterCombination'
 }
+
+@test "rds: a master username longer than 16 characters is accepted on postgres, as on AWS" {
+    run aws_cmd rds create-db-instance \
+        --db-instance-identifier "$DB_ID" \
+        --engine postgres \
+        --db-instance-class db.t3.micro \
+        --allocated-storage 10 \
+        --master-username application_db_admin_user \
+        --master-user-password "secret99password"
+    assert_success
+
+    run aws_cmd rds describe-db-instances --db-instance-identifier "$DB_ID" \
+        --query 'DBInstances[0].MasterUsername'
+    assert_success
+    assert_output --partial 'application_db_admin_user'
+
+    # 64 characters is one past what PostgreSQL accepts on a live account
+    long_username="a$(printf 'b%.0s' $(seq 63))"
+    run aws_cmd rds create-db-instance \
+        --db-instance-identifier "$DB_ID_2" \
+        --engine postgres \
+        --db-instance-class db.t3.micro \
+        --allocated-storage 10 \
+        --master-username "$long_username" \
+        --master-user-password "secret99password"
+    assert_failure
+    assert_output --partial 'InvalidParameterValue'
+}

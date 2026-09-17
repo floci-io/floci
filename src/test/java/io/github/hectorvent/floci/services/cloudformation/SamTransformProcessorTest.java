@@ -262,7 +262,7 @@ class SamTransformProcessorTest {
                   "Type": "AWS::Serverless::Function",
                   "Properties": {
                     "PackageType": "Image",
-                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest"
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest"
                   }
                 }
               }
@@ -273,7 +273,7 @@ class SamTransformProcessorTest {
 
         JsonNode lambdaProps = expanded.path("Resources").path("MyFunc").path("Properties");
         assertEquals("Image", lambdaProps.path("PackageType").asText());
-        assertEquals("000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest",
+        assertEquals("000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest",
                 lambdaProps.path("Code").path("ImageUri").asText());
         // No Handler/Runtime were declared and none should be synthesized by the transform itself —
         // CloudFormationResourceProvisioner is responsible for not defaulting them once it sees
@@ -337,7 +337,7 @@ class SamTransformProcessorTest {
                   "Type": "AWS::Serverless::Function",
                   "Properties": {
                     "PackageType": "Image",
-                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:5100/my-repo:latest",
+                    "ImageUri": "000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest",
                     "ImageConfig": {
                       "EntryPoint": ["/bootstrap"],
                       "Command": ["handler.main"],

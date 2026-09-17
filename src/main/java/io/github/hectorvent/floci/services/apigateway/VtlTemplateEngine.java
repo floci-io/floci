@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.vtl.VtlUtilFunctions;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -24,11 +25,13 @@ import org.apache.velocity.runtime.resource.ResourceManagerImpl;
 import org.apache.velocity.runtime.resource.loader.FileResourceLoader;
 import org.apache.velocity.runtime.resource.loader.StringResourceLoader;
 import org.apache.velocity.runtime.resource.util.StringResourceRepositoryImpl;
+import org.apache.velocity.util.introspection.SecureUberspector;
 import org.apache.velocity.util.introspection.TypeConversionHandlerImpl;
 import org.apache.velocity.util.introspection.UberspectImpl;
 
 import java.io.StringWriter;
 import java.util.AbstractMap;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -46,6 +49,7 @@ import java.util.Set;
         VtlTemplateEngine.UtilVariable.class,
         VtlTemplateEngine.ResponseOverride.class,
         UberspectImpl.class,
+        SecureUberspector.class,
         TypeConversionHandlerImpl.class,
         ResourceManagerImpl.class,
         ResourceCacheImpl.class,
@@ -54,6 +58,7 @@ import java.util.Set;
         StringResourceLoader.class,
         StringResourceRepositoryImpl.class,
         Foreach.class,
+        SandboxedForeach.class,
         Include.class,
         Parse.class,
         Macro.class,
@@ -67,17 +72,22 @@ public class VtlTemplateEngine {
 
     private final VelocityEngine engine;
     private final ObjectMapper objectMapper;
+    private final EmulatorConfig config;
 
     @Inject
-    public VtlTemplateEngine(ObjectMapper objectMapper) {
+    public VtlTemplateEngine(ObjectMapper objectMapper, EmulatorConfig config) {
         this.objectMapper = objectMapper;
+        this.config = config;
         this.engine = new VelocityEngine();
         engine.setProperty(RuntimeConstants.INPUT_ENCODING, "UTF-8");
         engine.setProperty(RuntimeConstants.RUNTIME_LOG_NAME, "io.github.hectorvent.floci.vtl");
         engine.setProperty(RuntimeConstants.RESOURCE_LOADERS, "string");
         engine.setProperty("resource.loader.string.class",
                 "org.apache.velocity.runtime.resource.loader.StringResourceLoader");
+        engine.setProperty(RuntimeConstants.MAX_NUMBER_LOOPS, config.services().apigateway().vtlMaxLoops());
+        VtlSandbox.restrictIntrospection(engine);
         engine.init();
+        VtlSandbox.installSandboxedForeach(engine);
     }
 
     /**
@@ -110,10 +120,16 @@ public class VtlTemplateEngine {
         vc.put("context", buildContextMap(ctx, override));
         vc.put("stageVariables", ctx.stageVariables() != null ? ctx.stageVariables() : Map.of());
 
-        StringWriter writer = new StringWriter();
-        engine.evaluate(vc, writer, "apigw-template", template);
+        StringWriter rawWriter = new StringWriter();
+        BoundedWriter writer = new BoundedWriter(rawWriter, config.services().apigateway().vtlMaxOutputChars());
+        VtlExecutionGuard.begin(Duration.ofMillis(config.services().apigateway().vtlTimeoutMillis()));
+        try {
+            engine.evaluate(vc, writer, "apigw-template", template);
+        } finally {
+            VtlExecutionGuard.end();
+        }
         return new EvaluateResult(
-                writer.toString(),
+                rawWriter.toString(),
                 override.getStatus(),
                 override.getHeader().isEmpty() ? Map.of() : Map.copyOf(override.getHeader()));
     }
@@ -132,6 +148,11 @@ public class VtlTemplateEngine {
 
         if (ctx.authorizer() != null) {
             map.put("authorizer", ctx.authorizer());
+        }
+
+        if (ctx.gatewayResponseContext() != null) {
+            // A gateway response sees the full request context plus $context.error.
+            map.putAll(ctx.gatewayResponseContext());
         }
 
         map.put("responseOverride", responseOverride);
@@ -172,7 +193,10 @@ public class VtlTemplateEngine {
     // ────────── Context variable classes ──────────
 
     /**
-     * Request context for VTL evaluation.
+     * Request context for VTL evaluation. {@code gatewayResponseContext} is only set while a
+     * gateway response template renders: its entries are merged into {@code $context}, which is
+     * how {@code $context.error} ({@code message}, {@code messageString}, {@code responseType},
+     * {@code validationErrorString}), {@code $context.path} and the other request fields reach it.
      */
     public record VtlContext(
             String body,
@@ -185,8 +209,24 @@ public class VtlTemplateEngine {
             String requestId,
             String accountId,
             Map<String, String> stageVariables,
-            Map<String, Object> authorizer
-    ) {}
+            Map<String, Object> authorizer,
+            Map<String, Object> gatewayResponseContext
+    ) {
+        public VtlContext(String body,
+                          Map<String, String> headers,
+                          Map<String, String> queryParams,
+                          Map<String, String> pathParams,
+                          String stage,
+                          String httpMethod,
+                          String resourcePath,
+                          String requestId,
+                          String accountId,
+                          Map<String, String> stageVariables,
+                          Map<String, Object> authorizer) {
+            this(body, headers, queryParams, pathParams, stage, httpMethod, resourcePath, requestId, accountId,
+                    stageVariables, authorizer, null);
+        }
+    }
 
     /**
      * The {@code $input} variable available in API Gateway VTL templates.

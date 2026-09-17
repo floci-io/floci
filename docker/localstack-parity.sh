@@ -19,8 +19,12 @@ fi
 _ls_host="${LOCALSTACK_HOST:-${LOCALSTACK_HOSTNAME:-}}"
 [ -n "${_ls_host}" ] && export FLOCI_HOSTNAME="${FLOCI_HOSTNAME:-${_ls_host}}"
 
-# Bind address — GATEWAY_LISTEN → QUARKUS_HTTP_HOST
-[ -n "${GATEWAY_LISTEN:-}" ] && export QUARKUS_HTTP_HOST="${QUARKUS_HTTP_HOST:-${GATEWAY_LISTEN}}"
+# Bind address — GATEWAY_LISTEN → QUARKUS_HTTP_HOST. LocalStack listens there with no further
+# opt-in, so GATEWAY_LISTEN also gives the consent Floci requires for a non-loopback address.
+if [ -n "${GATEWAY_LISTEN:-}" ]; then
+    export QUARKUS_HTTP_HOST="${QUARKUS_HTTP_HOST:-${GATEWAY_LISTEN}}"
+    export FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE="${FLOCI_SECURITY_ALLOW_UNSAFE_NETWORK_EXPOSURE:-true}"
+fi
 
 # Log level — LS_LOG / DEBUG=1 → QUARKUS_LOG_LEVEL
 if [ -n "${LS_LOG:-}" ]; then
@@ -75,4 +79,4 @@ if [ -n "${CUSTOM_SSL_CERT_PATH:-}" ]; then
     export FLOCI_TLS_KEY_PATH="${FLOCI_TLS_KEY_PATH:-${CUSTOM_SSL_CERT_PATH}}"
 fi
 
-# SERVICES — intentionally ignored; Floci starts all 41 services in ~24ms.
+# SERVICES: intentionally ignored; Floci starts every service in ~24ms.

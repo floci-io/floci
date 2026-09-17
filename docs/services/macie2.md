@@ -10,6 +10,8 @@ Floci implements the REST JSON organization surfaces used to configure Macie loc
 | `EnableOrganizationAdminAccount` | Designates the delegated Macie administrator account. |
 | `GetMacieSession` | Returns the current account Macie session. |
 | `EnableMacie` | Enables Macie for the current account. |
+| `CreateMember` | - |
+| `ListMembers` | - |
 | `UpdateOrganizationConfiguration` | Updates organization auto-enable settings as the delegated administrator. |
 | `DescribeOrganizationConfiguration` | Reads organization auto-enable settings as the delegated administrator. |
 | `ListOrganizationAdminAccounts` | Lists the delegated Macie administrator for the organization. |

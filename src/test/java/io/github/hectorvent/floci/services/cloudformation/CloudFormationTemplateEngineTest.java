@@ -7,6 +7,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -391,6 +392,50 @@ class CloudFormationTemplateEngineTest {
 
         assertEquals("https://real.example.com",
                 e.resolveNode(json("\"{{resolve:ssm:/demo/url}}\"")).asText());
+    }
+
+    /**
+     * CDK emits an RDS master credential as an {@code Fn::Join} whose fragments split one dynamic
+     * reference: {@code ["{{resolve:secretsmanager:", {"Ref": "Secret"}, ":SecretString:password::}}"]}.
+     * Resolving each fragment on its own rejects the opening fragment as an unclosed reference, so
+     * the reference must be resolved once, on the concatenated string.
+     */
+    @Test
+    void resolveNodeResolvesDynamicReferenceSplicedAcrossJoinFragments() {
+        List<String> resolverInputs = new ArrayList<>();
+        UnaryOperator<String> resolver = value -> {
+            resolverInputs.add(value);
+            return "resolved-password";
+        };
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(),
+                Map.of("Secret", "arn:aws:secretsmanager:us-east-1:000000000000:secret:creds-AbC123"),
+                Map.of(), Map.of(), Map.of(), mapper, (Function<String, String>) name -> null, resolver);
+
+        String resolved = e.resolveNode(json("{\"Fn::Join\":[\"\",[\"{{resolve:secretsmanager:\","
+                + "{\"Ref\":\"Secret\"},\":SecretString:password::}}\"]]}")).asText();
+
+        assertEquals("resolved-password", resolved);
+        assertEquals(List.of("{{resolve:secretsmanager:arn:aws:secretsmanager:us-east-1:000000000000:"
+                + "secret:creds-AbC123:SecretString:password::}}"), resolverInputs);
+    }
+
+    /**
+     * The RDS credential path opts out of the general dynamic-reference stage and resolves the
+     * reference itself, so the joined string must survive intact with the reference untouched.
+     */
+    @Test
+    void resolveWithoutDynamicReferencesKeepsJoinSplicedReferenceIntact() {
+        UnaryOperator<String> resolver = value -> fail("dynamic reference must not be resolved here: " + value);
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(),
+                Map.of("Secret", "arn:aws:secretsmanager:us-east-1:000000000000:secret:creds-AbC123"),
+                Map.of(), Map.of(), Map.of(), mapper, (Function<String, String>) name -> null, resolver);
+
+        assertEquals("{{resolve:secretsmanager:arn:aws:secretsmanager:us-east-1:000000000000:"
+                        + "secret:creds-AbC123:SecretString:password::}}",
+                e.resolveWithoutDynamicReferences(json("{\"Fn::Join\":[\"\",[\"{{resolve:secretsmanager:\","
+                        + "{\"Ref\":\"Secret\"},\":SecretString:password::}}\"]]}")));
     }
 
     /**

@@ -132,7 +132,9 @@ public class Ec2PortForwardManager {
     }
 
     boolean enabled() {
-        return config.services().ec2().publishSecurityGroupPorts() && !config.services().ec2().mock();
+        return config.services().ec2().publishSecurityGroupPorts() && !config.services().ec2().mock()
+                && (config.network() == null || config.network().securityGroupEnforcement() == null
+                || !config.network().securityGroupEnforcement().enabled());
     }
 
     /** Sets the callback used to persist an instance after its forwards change. */

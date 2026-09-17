@@ -14,8 +14,10 @@ import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.StreamType;
 import java.nio.charset.StandardCharsets;
 import com.github.dockerjava.api.model.NetworkSettings;
@@ -333,6 +335,74 @@ class Ec2ContainerManagerTest {
                         + "from an address nothing knows about");
     }
 
+    @Test
+    void startOfAProtectedInstanceReusesTheHelperTransportAddress() throws Exception {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
+                .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        // A workload in the helper's namespace has no Docker attachment of its own, so there is
+        // no bridge address on it to rediscover after the restart.
+        InspectContainerResponse workload = mock(InspectContainerResponse.class);
+        HostConfig hostConfig = mock(HostConfig.class);
+        when(hostConfig.getNetworkMode()).thenReturn("container:helper-1");
+        when(workload.getHostConfig()).thenReturn(hostConfig);
+        InspectContainerCmd inspectWorkload = mock(InspectContainerCmd.class);
+        when(inspectWorkload.exec()).thenReturn(workload);
+        when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspectWorkload);
+
+        InspectContainerResponse helper = mock(InspectContainerResponse.class);
+        ContainerConfig helperConfig = mock(ContainerConfig.class);
+        when(helperConfig.getLabels()).thenReturn(Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"));
+        when(helper.getConfig()).thenReturn(helperConfig);
+        NetworkSettings helperNetworks = mock(NetworkSettings.class);
+        when(helperNetworks.getNetworks())
+                .thenReturn(Map.of("bridge", new ContainerNetwork().withIpv4Address("172.17.0.7")));
+        when(helper.getNetworkSettings()).thenReturn(helperNetworks);
+        InspectContainerCmd inspectHelper = mock(InspectContainerCmd.class);
+        when(inspectHelper.exec()).thenReturn(helper);
+        when(dockerClient.inspectContainerCmd("helper-1")).thenReturn(inspectHelper);
+
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.port()).thenReturn(4566);
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        Ec2ContainerManager manager = new Ec2ContainerManager(
+                mock(ContainerBuilder.class),
+                lifecycleManager,
+                mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class),
+                mock(DockerHostResolver.class),
+                dockerClient,
+                mock(PortAllocator.class),
+                config,
+                metadataServer,
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class),
+                mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class),
+                mock(SecurityGroupFirewallManager.class));
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-protected");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+
+        manager.start(instance);
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
+
+        verify(metadataServer, timeout(2000)).registerContainer("172.17.0.7", "i-protected", instance);
+        assertEquals("172.17.0.7", instance.getContainerBridgeIp(),
+                "StartInstances must keep addressing the instance through its protected namespace");
+    }
+
     private static Ec2ContainerManager managerWith(ContainerLifecycleManager lifecycleManager,
                                                    DockerClient dockerClient,
                                                    Ec2MetadataServer metadataServer) {
@@ -366,7 +436,7 @@ class Ec2ContainerManagerTest {
 
     @Test
     void userDataExecutionCommandRunsScriptDirectlySoShebangIsHonored() {
-        assertArrayEquals(new String[]{"/tmp/user-data.sh"}, Ec2ContainerManager.userDataExecutionCommand());
+        assertArrayEquals(new String[]{"/var/lib/user-data.sh"}, Ec2ContainerManager.userDataExecutionCommand());
     }
 
     @Test
@@ -824,6 +894,16 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void instanceProfileEnvironmentLetsTheSdkUseImds() {
+        List<String> environment = Ec2ContainerManager.localAwsEnvironment(
+                "us-west-2", "http://floci:4566", "http://floci:9169", true);
+        assertTrue(environment.contains("AWS_EC2_METADATA_SERVICE_ENDPOINT=http://floci:9169"));
+        assertTrue(environment.contains("AWS_ENDPOINT_URL=http://floci:4566"));
+        assertFalse(environment.stream().anyMatch(value -> value.startsWith("AWS_ACCESS_KEY_ID=")
+                || value.startsWith("AWS_SECRET_ACCESS_KEY=") || value.startsWith("AWS_SESSION_TOKEN=")));
+    }
+
+    @Test
     void localAwsEnvironmentProvidesCliCredentialsAndFlociEndpoint() {
         assertEquals(
                 java.util.List.of(
@@ -1116,6 +1196,28 @@ class Ec2ContainerManagerTest {
         assertFalse(finishUserData.await(10, TimeUnit.MILLISECONDS), "user data should still be blocked");
         finishUserData.countDown();
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void userDataIsCopiedAndExecutedOutsideGuestTemporaryMounts() throws Exception {
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.10");
+        when(inspect.exec()).thenReturn(withIp);
+        CountDownLatch userDataStarted = new CountDownLatch(1);
+        harness.stubSuccessfulExecs(userDataStarted, new CountDownLatch(0));
+        CopyArchiveToContainerCmd copy = harness.dockerClient.copyArchiveToContainerCmd(TEST_CONTAINER_ID);
+        Instance instance = instance("i-userdata-persistent-path");
+        instance.setUserData("#!/bin/sh\necho ready\n");
+
+        harness.manager.launch(instance, "amazonlinux:2023", null, "us-west-2");
+
+        assertTrue(userDataStarted.await(2, TimeUnit.SECONDS), "user data should start");
+        verify(copy).withRemotePath("/var/lib");
+        verify(copy, never()).withRemotePath("/tmp");
+        assertTrue(harness.executedCommands.stream()
+                .anyMatch(command -> Arrays.equals(command, new String[]{"/var/lib/user-data.sh"})));
     }
 
     @Test
@@ -1573,7 +1675,7 @@ class Ec2ContainerManagerTest {
         });
         when(execCreate.exec()).thenAnswer(invocation -> {
             String[] command = currentCommand.get();
-            return command != null && command.length == 1 && "/tmp/user-data.sh".equals(command[0])
+            return command != null && command.length == 1 && "/var/lib/user-data.sh".equals(command[0])
                     ? userDataExec : metadataExec;
         });
 
@@ -1736,7 +1838,7 @@ class Ec2ContainerManagerTest {
             });
             when(execCreate.exec()).thenAnswer(invocation -> {
                 String[] command = currentCommand.get();
-                if (command != null && command.length == 1 && "/tmp/user-data.sh".equals(command[0])) {
+                if (command != null && command.length == 1 && "/var/lib/user-data.sh".equals(command[0])) {
                     return userDataExec;
                 }
                 return metadataExec;

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -11,8 +12,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -45,6 +44,13 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
+        // A browser preflight reuses the target request's presigned URL, so its OPTIONS method
+        // must not be verified against a signature created for the follow-up PUT/GET request.
+        // The dedicated S3 OPTIONS resource performs the bucket CORS evaluation instead.
+        if (isCorsPreflight(requestContext)) {
+            return;
+        }
+
         var queryParams = requestContext.getUriInfo().getQueryParameters();
 
         // Only process if this is a pre-signed URL request
@@ -145,6 +151,16 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         }
     }
 
+    private static boolean isCorsPreflight(ContainerRequestContext requestContext) {
+        return "OPTIONS".equalsIgnoreCase(requestContext.getMethod())
+                && hasText(requestContext.getHeaderString("Origin"))
+                && hasText(requestContext.getHeaderString("Access-Control-Request-Method"));
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
     private boolean verifySigV4Signature(ContainerRequestContext requestContext,
                                         String signature, String secretKey) {
         try {
@@ -167,7 +183,8 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             URI requestUri = requestContext.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) instanceof URI uri
                     ? uri
                     : requestContext.getUriInfo().getRequestUri();
-            String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"), requestUri);
+            String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"),
+                    requestContext.getHeaderString("X-Forwarded-Host"), requestUri);
 
             StringBuilder canonicalHeaders = new StringBuilder();
             for (String header : signedHeaders.split(";")) {
@@ -200,11 +217,12 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             String stringToSign = "AWS4-HMAC-SHA256\n"
                     + amzDate + "\n"
                     + credentialScope + "\n"
-                    + sha256Hex(canonicalRequest);
+                    + SigV4RequestValidator.sha256Hex(canonicalRequest);
 
             // Derive signing key and compute expected signature
-            byte[] signingKey = deriveSigningKey(secretKey, date, region, service);
-            String expectedSignature = hexEncode(hmacSha256(signingKey, stringToSign));
+            byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, date, region, service);
+            String expectedSignature = SigV4RequestValidator.hexEncode(
+                    SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
 
             return MessageDigest.isEqual(
                     expectedSignature.getBytes(StandardCharsets.UTF_8),
@@ -284,34 +302,6 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             }
         }
         return encoded.toString();
-    }
-
-    static byte[] deriveSigningKey(String secretKey, String date, String region,
-                                   String service) throws Exception {
-        byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
-        byte[] kDate = hmacSha256(kSecret, date);
-        byte[] kRegion = hmacSha256(kDate, region);
-        byte[] kService = hmacSha256(kRegion, service);
-        return hmacSha256(kService, "aws4_request");
-    }
-
-    static byte[] hmacSha256(byte[] key, String data) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    static String sha256Hex(String input) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        return hexEncode(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    static String hexEncode(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 
     static Response errorResponse(int status, String code, String message) {

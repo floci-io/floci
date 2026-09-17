@@ -84,15 +84,29 @@ public class GlueJsonHandler {
                 Table table = glueService.getTable(dbName, tableName);
                 yield Response.ok(Map.of("Table", table)).build();
             }
+            case "CreatePartitionIndex" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                PartitionIndex index = mapper.treeToValue(request.get("PartitionIndex"), PartitionIndex.class);
+                glueService.createPartitionIndex(dbName, tableName, index);
+                // AWS answers with an empty body, as it does for CreateTable above.
+                yield Response.ok().build();
+            }
+            case "DeletePartitionIndex" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                String indexName = request.get("IndexName").asText();
+                glueService.deletePartitionIndex(dbName, tableName, indexName);
+                yield Response.ok().build();
+            }
             case "GetPartitionIndexes" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
-                // Resolve the table so a missing one is reported as such rather than as an empty
-                // index list. No index can exist until CreatePartitionIndex is supported, so the
-                // list is empty for every table that does resolve - which is the answer a client
-                // reading a table's indexes needs, rather than an unsupported-action failure.
-                glueService.getTable(dbName, tableName);
-                yield Response.ok(Map.of("PartitionIndexDescriptorList", List.of())).build();
+                // The service resolves the table first, so a missing one is reported as such
+                // rather than as an empty index list.
+                yield Response.ok(Map.of(
+                        "PartitionIndexDescriptorList",
+                        glueService.getPartitionIndexes(dbName, tableName))).build();
             }
             case "GetTables" -> {
                 String dbName = request.get("DatabaseName").asText();

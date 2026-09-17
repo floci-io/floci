@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -520,5 +521,204 @@ class SnsServiceTest {
     void extractFunctionNameLeavesABareNameAlone() {
         assertEquals("order-processor", SnsService.extractFunctionName("order-processor"));
         assertNull(SnsService.extractFunctionName(null));
+    }
+
+    private static Map<String, MessageAttributeValue> attr(String name, String value, String dataType) {
+        return Map.of(name, new MessageAttributeValue(value, dataType));
+    }
+
+    private static Map<String, MessageAttributeValue> stringArray(String name, String json) {
+        return attr(name, json, "String.Array");
+    }
+
+    /**
+     * A String.Array attribute carries a JSON array in its StringValue, and AWS matches a rule
+     * against each element separately. Comparing the rule against the serialized array as one
+     * opaque string makes every such subscription match nothing at all.
+     */
+    @Test
+    void filterPolicy_stringArrayAttribute_matchesAnyElement() {
+        Subscription sub = subscriptionWithPolicy("{\"updatedFields\":[\"Name\"]}", null);
+        assertTrue(snsService.matchesFilterPolicy(sub, null,
+                stringArray("updatedFields", "[\"Name\",\"stringName\"]")));
+        assertTrue(snsService.matchesFilterPolicy(sub, null,
+                stringArray("updatedFields", "[\"Name\"]")));
+        assertFalse(snsService.matchesFilterPolicy(sub, null,
+                stringArray("updatedFields", "[\"Description\",\"stringName\"]")));
+        assertFalse(snsService.matchesFilterPolicy(sub, null,
+                stringArray("updatedFields", "[]")));
+    }
+
+    /** Operator rules apply per element too. */
+    @Test
+    void filterPolicy_stringArrayAttribute_appliesOperatorsPerElement() {
+        Subscription prefix = subscriptionWithPolicy(
+                "{\"updatedFields\":[{\"prefix\":\"string\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(prefix, null,
+                stringArray("updatedFields", "[\"Name\",\"stringName\"]")));
+        assertFalse(snsService.matchesFilterPolicy(prefix, null,
+                stringArray("updatedFields", "[\"Name\",\"Description\"]")));
+
+        Subscription numeric = subscriptionWithPolicy(
+                "{\"codes\":[{\"numeric\":[\">=\",100]}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(numeric, null,
+                stringArray("codes", "[\"12\",\"150\"]")));
+        assertFalse(snsService.matchesFilterPolicy(numeric, null,
+                stringArray("codes", "[\"12\",\"99\"]")));
+    }
+
+    /**
+     * anything-but does not follow the any-element rule: AWS matches a String.Array only when
+     * NONE of its elements are listed, so a single listed element vetoes the whole attribute.
+     */
+    @Test
+    void filterPolicy_stringArrayAttribute_anythingButRequiresNoElementListed() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"updatedFields\":[{\"anything-but\":[\"Name\"]}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(sub, null,
+                stringArray("updatedFields", "[\"Description\",\"stringName\"]")));
+        assertFalse(snsService.matchesFilterPolicy(sub, null,
+                stringArray("updatedFields", "[\"Description\",\"Name\"]")));
+    }
+
+    /** exists asks about the attribute, not its elements. */
+    @Test
+    void filterPolicy_stringArrayAttribute_existsIsAboutTheAttribute() {
+        Subscription present = subscriptionWithPolicy("{\"updatedFields\":[{\"exists\":true}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(present, null,
+                stringArray("updatedFields", "[\"Name\"]")));
+        assertTrue(snsService.matchesFilterPolicy(present, null, stringArray("updatedFields", "[]")));
+        assertFalse(snsService.matchesFilterPolicy(present, null, Map.of()));
+
+        Subscription absent = subscriptionWithPolicy("{\"updatedFields\":[{\"exists\":false}]}", null);
+        assertFalse(snsService.matchesFilterPolicy(absent, null,
+                stringArray("updatedFields", "[\"Name\"]")));
+        assertTrue(snsService.matchesFilterPolicy(absent, null, Map.of()));
+    }
+
+    /** A String attribute keeps whole-string semantics even when its value looks like an array. */
+    @Test
+    void filterPolicy_plainStringAttribute_isNotSplit() {
+        Subscription sub = subscriptionWithPolicy("{\"updatedFields\":[\"Name\"]}", null);
+        assertFalse(snsService.matchesFilterPolicy(sub, null,
+                attr("updatedFields", "[\"Name\",\"stringName\"]", "String")));
+        assertTrue(snsService.matchesFilterPolicy(sub, null,
+                attr("updatedFields", "Name", "String")));
+    }
+
+    /** A String.Array whose value is not a JSON array falls back to whole-string matching. */
+    @Test
+    void filterPolicy_stringArrayAttribute_malformedValueFallsBackToWholeString() {
+        Subscription sub = subscriptionWithPolicy("{\"updatedFields\":[\"Name\"]}", null);
+        assertTrue(snsService.matchesFilterPolicy(sub, null, stringArray("updatedFields", "Name")));
+        assertFalse(snsService.matchesFilterPolicy(sub, null,
+                stringArray("updatedFields", "[\"Name\",")));
+        // trailing tokens make the whole value malformed, not a one-element array
+        assertFalse(snsService.matchesFilterPolicy(sub, null,
+                stringArray("updatedFields", "[\"Name\"] junk")));
+    }
+
+    /**
+     * AWS ignores Binary message attributes when applying a filter policy, so a Binary attribute
+     * counts as absent however the policy asks about it. Binary is also the only data type whose
+     * StringValue is null, which is why no rule here ever sees a value.
+     */
+    @Test
+    void filterPolicy_binaryAttribute_countsAsAbsent() {
+        Map<String, MessageAttributeValue> binary = Map.of(
+                "updatedFields", new MessageAttributeValue(new byte[] {1, 2, 3}, "Binary"));
+
+        Subscription value = subscriptionWithPolicy("{\"updatedFields\":[\"Name\"]}", null);
+        assertFalse(snsService.matchesFilterPolicy(value, null, binary));
+
+        Subscription present = subscriptionWithPolicy("{\"updatedFields\":[{\"exists\":true}]}", null);
+        assertFalse(snsService.matchesFilterPolicy(present, null, binary));
+
+        Subscription absent = subscriptionWithPolicy("{\"updatedFields\":[{\"exists\":false}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(absent, null, binary));
+    }
+
+    /**
+     * $or lets one subscription watch two unrelated collections. Without it the key is looked up
+     * as an attribute literally named "$or", which never exists, so the subscription goes silent.
+     */
+    @Test
+    void filterPolicy_orOperator_messageAttributes() {
+        Subscription sub = subscriptionWithPolicy("{\"$or\":["
+                + "{\"tableName\":[\"Asset\"],\"updatedFields\":[\"Name\"]},"
+                + "{\"tableName\":[\"Location\"],\"updatedFields\":[\"stringName\"]}]}", null);
+
+        assertTrue(snsService.matchesFilterPolicy(sub, null, Map.of(
+                "tableName", new MessageAttributeValue("Asset", "String"),
+                "updatedFields", new MessageAttributeValue("[\"Name\"]", "String.Array"))));
+        assertTrue(snsService.matchesFilterPolicy(sub, null, Map.of(
+                "tableName", new MessageAttributeValue("Location", "String"),
+                "updatedFields", new MessageAttributeValue("[\"id\",\"stringName\"]", "String.Array"))));
+        // right table, wrong field
+        assertFalse(snsService.matchesFilterPolicy(sub, null, Map.of(
+                "tableName", new MessageAttributeValue("Asset", "String"),
+                "updatedFields", new MessageAttributeValue("[\"stringName\"]", "String.Array"))));
+        // clauses must not cross-pollinate: Location + Name matches neither branch
+        assertFalse(snsService.matchesFilterPolicy(sub, null, Map.of(
+                "tableName", new MessageAttributeValue("Location", "String"),
+                "updatedFields", new MessageAttributeValue("[\"Name\"]", "String.Array"))));
+    }
+
+    /** Keys beside $or still have to match, and they AND with the $or result. */
+    @Test
+    void filterPolicy_orOperator_andsWithSiblingKeys() {
+        Subscription sub = subscriptionWithPolicy("{\"env\":[\"prod\"],\"$or\":["
+                + "{\"tableName\":[\"Asset\"]},{\"tableName\":[\"Location\"]}]}", null);
+
+        assertTrue(snsService.matchesFilterPolicy(sub, null, Map.of(
+                "env", new MessageAttributeValue("prod", "String"),
+                "tableName", new MessageAttributeValue("Asset", "String"))));
+        assertFalse(snsService.matchesFilterPolicy(sub, null, Map.of(
+                "env", new MessageAttributeValue("dev", "String"),
+                "tableName", new MessageAttributeValue("Asset", "String"))));
+        assertFalse(snsService.matchesFilterPolicy(sub, null, Map.of(
+                "env", new MessageAttributeValue("prod", "String"),
+                "tableName", new MessageAttributeValue("WorkOrder", "String"))));
+    }
+
+    /**
+     * AWS only reads $or as an operator when it holds at least two objects and none of them use a
+     * reserved operator name as a field; otherwise it is an ordinary attribute name.
+     */
+    @Test
+    void filterPolicy_orOperator_invalidShapesAreOrdinaryAttributeNames() {
+        Subscription single = subscriptionWithPolicy(
+                "{\"$or\":[{\"tableName\":[\"Asset\"]}]}", null);
+        assertFalse(snsService.matchesFilterPolicy(single, null,
+                Map.of("tableName", new MessageAttributeValue("Asset", "String"))));
+
+        Subscription reserved = subscriptionWithPolicy(
+                "{\"$or\":[{\"prefix\":\"a\"},{\"tableName\":[\"Asset\"]}]}", null);
+        assertFalse(snsService.matchesFilterPolicy(reserved, null,
+                Map.of("tableName", new MessageAttributeValue("Asset", "String"))));
+
+        // a literal attribute named "$or" is matched as one
+        Subscription literal = subscriptionWithPolicy("{\"$or\":[\"yes\"]}", null);
+        assertTrue(snsService.matchesFilterPolicy(literal, null,
+                Map.of("$or", new MessageAttributeValue("yes", "String"))));
+    }
+
+    /** $or works the same way against a JSON body, including nested inside a key. */
+    @Test
+    void filterPolicy_orOperator_messageBody() {
+        Subscription sub = subscriptionWithPolicy("{\"$or\":["
+                + "{\"tableName\":[\"Asset\"],\"updatedFields\":[\"Name\"]},"
+                + "{\"tableName\":[\"Location\"],\"updatedFields\":[\"stringName\"]}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(sub,
+                body("{\"tableName\":\"Asset\",\"updatedFields\":[\"id\",\"Name\"]}"), null));
+        assertTrue(snsService.matchesFilterPolicy(sub,
+                body("{\"tableName\":\"Location\",\"updatedFields\":[\"stringName\"]}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub,
+                body("{\"tableName\":\"Location\",\"updatedFields\":[\"Name\"]}"), null));
+
+        Subscription nested = subscriptionWithPolicy(
+                "{\"detail\":{\"$or\":[{\"a\":[\"1\"]},{\"b\":[\"2\"]}]}}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(nested, body("{\"detail\":{\"b\":\"2\"}}"), null));
+        assertFalse(snsService.matchesFilterPolicy(nested, body("{\"detail\":{\"b\":\"3\"}}"), null));
     }
 }

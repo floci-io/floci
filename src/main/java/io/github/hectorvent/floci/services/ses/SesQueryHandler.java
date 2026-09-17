@@ -47,14 +47,24 @@ public class SesQueryHandler {
     private final SesService sesService;
     private final SesReceiptRuleService receiptRuleService;
     private final SesIdentityService identityService;
+    private final SesTemplateService templateService;
+    private final SesCvetService cvetService;
+    private final SesAccountService accountService;
+    private final SesSentEmailService sentEmailService;
     private final ObjectMapper objectMapper;
 
     @Inject
     public SesQueryHandler(SesService sesService, SesReceiptRuleService receiptRuleService,
-                           SesIdentityService identityService, ObjectMapper objectMapper) {
+                           SesIdentityService identityService, SesTemplateService templateService,
+                           SesCvetService cvetService, SesAccountService accountService,
+                           SesSentEmailService sentEmailService, ObjectMapper objectMapper) {
         this.sesService = sesService;
         this.receiptRuleService = receiptRuleService;
         this.identityService = identityService;
+        this.templateService = templateService;
+        this.cvetService = cvetService;
+        this.accountService = accountService;
+        this.sentEmailService = sentEmailService;
         this.objectMapper = objectMapper;
     }
 
@@ -218,7 +228,7 @@ public class SesQueryHandler {
     }
 
     private Response handleSendEmail(MultivaluedMap<String, String> params, String region) {
-        if (!sesService.isAccountSendingEnabled(region)) {
+        if (!accountService.isAccountSendingEnabled(region)) {
             throw new AwsException("AccountSendingPausedException",
                     "Account sending is disabled.", 400);
         }
@@ -244,7 +254,7 @@ public class SesQueryHandler {
     }
 
     private Response handleSendRawEmail(MultivaluedMap<String, String> params, String region) {
-        if (!sesService.isAccountSendingEnabled(region)) {
+        if (!accountService.isAccountSendingEnabled(region)) {
             throw new AwsException("AccountSendingPausedException",
                     "Account sending is disabled.", 400);
         }
@@ -265,12 +275,13 @@ public class SesQueryHandler {
         var xml = new XmlBuilder()
                 .elem("Max24HourSend", "200.0")
                 .elem("MaxSendRate", "1.0")
-                .elem("SentLast24Hours", String.valueOf((double) sesService.getSentEmailCount(region)));
+                .elem("SentLast24Hours",
+                        String.valueOf((double) sentEmailService.countInRegion(region)));
         return Response.ok(AwsQueryResponse.envelope("GetSendQuota", AwsNamespaces.SES, xml.build())).build();
     }
 
     private Response handleGetSendStatistics(String region) {
-        long sentCount = sesService.getSentEmailCount(region);
+        long sentCount = sentEmailService.countInRegion(region);
         var xml = new XmlBuilder().start("SendDataPoints");
         if (sentCount > 0) {
             xml.start("member")
@@ -286,14 +297,14 @@ public class SesQueryHandler {
     }
 
     private Response handleGetAccountSendingEnabled(String region) {
-        boolean enabled = sesService.isAccountSendingEnabled(region);
+        boolean enabled = accountService.isAccountSendingEnabled(region);
         String result = new XmlBuilder().elem("Enabled", String.valueOf(enabled)).build();
         return Response.ok(AwsQueryResponse.envelope("GetAccountSendingEnabled", AwsNamespaces.SES, result)).build();
     }
 
     private Response handleUpdateAccountSendingEnabled(MultivaluedMap<String, String> params, String region) {
         boolean enabled = parseXsdBoolean(params, "Enabled");
-        sesService.setAccountSendingEnabled(region, enabled);
+        accountService.setAccountSendingEnabled(region, enabled);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("UpdateAccountSendingEnabled", AwsNamespaces.SES)).build();
     }
 
@@ -506,19 +517,19 @@ public class SesQueryHandler {
 
     private Response handleCreateTemplate(MultivaluedMap<String, String> params, String region) {
         EmailTemplate template = readTemplateParams(params);
-        sesService.createTemplate(template, region);
+        templateService.createTemplate(template, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("CreateTemplate", AwsNamespaces.SES)).build();
     }
 
     private Response handleUpdateTemplate(MultivaluedMap<String, String> params, String region) {
         EmailTemplate template = readTemplateParams(params);
-        sesService.updateTemplate(template, region);
+        templateService.updateTemplate(template, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("UpdateTemplate", AwsNamespaces.SES)).build();
     }
 
     private Response handleGetTemplate(MultivaluedMap<String, String> params, String region) {
         String templateName = getParam(params, "TemplateName");
-        EmailTemplate template = sesService.getTemplate(templateName, region);
+        EmailTemplate template = templateService.getTemplate(templateName, region);
         var xml = new XmlBuilder().start("Template")
                 .elem("TemplateName", template.getTemplateName());
         if (template.getSubject() != null) {
@@ -541,7 +552,7 @@ public class SesQueryHandler {
     }
 
     private Response handleListTemplates(String region) {
-        List<EmailTemplate> templates = sesService.listTemplates(region);
+        List<EmailTemplate> templates = templateService.listTemplates(region);
         var xml = new XmlBuilder().start("TemplatesMetadata");
         for (EmailTemplate t : templates) {
             xml.start("member")
@@ -556,7 +567,7 @@ public class SesQueryHandler {
     }
 
     private Response handleSendTemplatedEmail(MultivaluedMap<String, String> params, String region) {
-        if (!sesService.isAccountSendingEnabled(region)) {
+        if (!accountService.isAccountSendingEnabled(region)) {
             throw new AwsException("AccountSendingPausedException",
                     "Account sending is disabled.", 400);
         }
@@ -595,7 +606,7 @@ public class SesQueryHandler {
             throw new AwsException("InvalidParameterValue", "TemplateName is required.", 400);
         }
         String templateDataRaw = getParam(params, "TemplateData");
-        String rendered = sesService.renderTestTemplate(templateName, templateDataRaw, region);
+        String rendered = templateService.renderTestTemplate(templateName, templateDataRaw, region);
         // XML 1.0 character data forbids C0 controls except \t \n \r; strip them
         // so SDK clients can parse the response when template data injects \x01 etc.
         String xmlSafe = stripXml10InvalidChars(rendered);
@@ -618,7 +629,7 @@ public class SesQueryHandler {
     }
 
     private Response handleGetCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
-        CustomVerificationEmailTemplate t = sesService.getCustomVerificationEmailTemplate(
+        CustomVerificationEmailTemplate t = cvetService.getCustomVerificationEmailTemplate(
                 requireParam(params, "TemplateName"), region);
         String xml = new XmlBuilder()
                 .elem("TemplateName", t.getTemplateName())
@@ -634,7 +645,9 @@ public class SesQueryHandler {
 
     private Response handleListCustomVerificationEmailTemplates(String region) {
         XmlBuilder xml = new XmlBuilder().start("CustomVerificationEmailTemplates");
-        for (CustomVerificationEmailTemplate t : sesService.listCustomVerificationEmailTemplates(region)) {
+        List<CustomVerificationEmailTemplate> templates =
+                cvetService.listCustomVerificationEmailTemplates(region);
+        for (CustomVerificationEmailTemplate t : templates) {
             xml.start("member")
                     .elem("TemplateName", t.getTemplateName())
                     .elem("FromEmailAddress", t.getFromEmailAddress())
@@ -649,13 +662,14 @@ public class SesQueryHandler {
     }
 
     private Response handleDeleteCustomVerificationEmailTemplate(MultivaluedMap<String, String> params, String region) {
-        sesService.deleteCustomVerificationEmailTemplate(requireParam(params, "TemplateName"), region);
+        cvetService.deleteCustomVerificationEmailTemplate(requireParam(params, "TemplateName"),
+                region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "DeleteCustomVerificationEmailTemplate", AwsNamespaces.SES)).build();
     }
 
     private Response handleSendCustomVerificationEmail(MultivaluedMap<String, String> params, String region) {
-        if (!sesService.isAccountSendingEnabled(region)) {
+        if (!accountService.isAccountSendingEnabled(region)) {
             throw new AwsException("AccountSendingPausedException",
                     "Account sending is disabled.", 400);
         }
@@ -681,7 +695,7 @@ public class SesQueryHandler {
     }
 
     private Response handleSendBulkTemplatedEmail(MultivaluedMap<String, String> params, String region) {
-        if (!sesService.isAccountSendingEnabled(region)) {
+        if (!accountService.isAccountSendingEnabled(region)) {
             throw new AwsException("AccountSendingPausedException",
                     "Account sending is disabled.", 400);
         }
@@ -698,7 +712,7 @@ public class SesQueryHandler {
                     "Template or TemplateArn is required.", 400);
         }
         String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
-        EmailTemplate template = sesService.getTemplate(resolvedName, region);
+        EmailTemplate template = templateService.getTemplate(resolvedName, region);
         JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
 
         List<BulkEmailEntry> entries = new ArrayList<>();

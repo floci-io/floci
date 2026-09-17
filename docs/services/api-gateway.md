@@ -2,6 +2,19 @@
 
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
+## JWT issuer network policy
+
+HTTP API JWT authorizers fetch the configured issuer's OIDC discovery document and JWKS. Floci
+rejects HTTP issuers and destinations that resolve to local, link-local, private, or other
+non-public addresses by default. This prevents an authorizer configuration from turning JWT
+verification into an SSRF path.
+
+For an isolated development environment with a local fixture issuer, set
+`FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`. This shared JWT policy also applies to AppSync
+OIDC providers. The option permits private HTTPS targets and HTTP URLs that use a literal private
+or loopback address. It does not permit public HTTP targets. Keep it disabled when Floci can
+receive untrusted API configuration.
+
 ## Custom API IDs
 
 API IDs are generated randomly, which means endpoint URLs change every time you recreate an API. To pin
@@ -53,9 +66,10 @@ duplicate override IDs.
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **API Keys** | CreateApiKey, ImportApiKeys, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
-| **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan |
+| **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan, GetUsage |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
+| **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
@@ -174,13 +188,55 @@ handling; a hand-rolled signer must include it.
 > signed, known caller is let through. `principalOrgId` and `cognitoIdentity` are always null -
 > Organizations membership and identity-pool federation are not modelled.
 
+### Gateway Responses
+
+A REST API's gateway responses customise what the gateway itself answers when it, rather than
+the integration, produces the response. All 21 AWS response types are accepted, keyed by
+`responseType`; `GetGatewayResponses` lists every type, reporting the ones never customised with
+`defaultResponse: true`, their AWS default `statusCode`, and the default
+`{"message":$context.error.messageString}` template. `PutGatewayResponse` is an upsert,
+`UpdateGatewayResponse` accepts `add`/`replace`/`remove` on `/statusCode`,
+`/responseParameters/<name>` and `/responseTemplates/<content-type>` (JSON-pointer escaped, e.g.
+`application~1json`), and `DeleteGatewayResponse` restores the default. The
+`x-amazon-apigateway-gateway-responses` OpenAPI extension is imported by `ImportRestApi` and
+`PutRestApi`, and `AWS::ApiGateway::GatewayResponse` is provisioned by CloudFormation.
+
+On the execute plane every gateway-generated answer resolves the customisation for its type,
+then for `DEFAULT_4XX` / `DEFAULT_5XX`, and applies the configured `statusCode`, the
+`gatewayresponse.header.*` parameters (`'static'`, `method.request.header.*`,
+`method.request.querystring.*`, `method.request.path.*`, `context.*`, `stageVariables.*`) and the
+`responseTemplates` (selected by the request's `Accept` header, falling back to
+`application/json`), with `$context.error.message`, `$context.error.messageString`,
+`$context.error.responseType` and `$context.error.validationErrorString` available to the template.
+This is what lets a browser read a `401`/`403`/`400` as such instead of as a CORS failure once
+`DEFAULT_4XX` maps `Access-Control-Allow-Origin`, exactly as the console's "Enable CORS" does.
+
+| Gateway-generated answer | `responseType` |
+|---|---|
+| No resource matches the path, or none declares the method (`403 Missing Authentication Token`) | `MISSING_AUTHENTICATION_TOKEN` |
+| `AWS_IAM` method without a signature | `MISSING_AUTHENTICATION_TOKEN` |
+| `AWS_IAM` signature malformed or mismatching | `INVALID_SIGNATURE` |
+| `AWS_IAM` signature outside the 5-minute window, or a presigned URL past its expiry | `EXPIRED_TOKEN` |
+| `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` |
+| Lambda authorizer returns `Deny` | `ACCESS_DENIED` |
+| Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` |
+| Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` |
+| Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` |
+| `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` |
+| Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` |
+| Lambda proxy function error, malformed proxy payload, or missing function | `INTEGRATION_FAILURE` |
+
+A customised `statusCode` overrides the status Floci would otherwise send. Throttling, quota, request size and WAF answers are not produced on the execute plane, so
+`THROTTLED`, `QUOTA_EXCEEDED`, `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be configured but never
+fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than treated as a gateway
+response.
+
 ### Not Implemented
 
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
 - Authorizer testing: `TestInvokeAuthorizer`
 - Model templates: `GetModelTemplate`
-- Gateway Responses (the entire family: `PutGatewayResponse`, `GetGatewayResponse`, etc.)
 - Documentation parts and versions (the entire family, 10 operations)
 - VPC Links (5 operations)
 - Client Certificates (5 operations)
@@ -260,6 +316,32 @@ aws apigateway create-deployment \
 curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 ```
 
+### Usage reporting
+
+`GetUsage` returns the real response envelope: a `values` map of API key id to one `[used, remaining]`
+pair per day of the inclusive range, alongside `usagePlanId`, `startDate` and `endDate`. The second
+element of each pair is the quota limit minus cumulative use on real API Gateway, not the quota
+itself.
+
+The operation pages over the API key entries with `limit` and `position`, defaulting to 25 keys a
+page and emitting `position` only when another page exists.
+
+Request acceptance and response page size are separate things here. Probed against real API
+Gateway, every `limit` from 500 up to `Integer.MAX_VALUE` is accepted without error, so none is
+rejected. That does not show the service ever returning more than 500 entries in one page, and the
+documented contract caps a page at 500, so a larger `limit` is honoured as a request while the page
+returned stays capped at 500.
+
+The lower bound is a deliberate divergence: real API Gateway answers `limit=0` and `limit=-1` with
+an `InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected
+as a `BadRequestException` instead of reproducing a 500.
+
+**Both numbers are always zero.** Nothing meters requests per API key, and a usage plan stores no
+quota to subtract from, so there is no limit to report against. Throttle settings are likewise
+accepted and stored but never enforced. Storing a quota on the usage plan and counting on the
+execute path are the two pieces still missing; a caller that sums the used counts gets zero, which
+is what it already got before the action existed, without having to special-case a missing endpoint.
+
 ### Usage Plan Tags and Custom IDs
 
 Usage plans accept arbitrary tags, and the same reserved `floci:override-id` tag used for
@@ -289,6 +371,19 @@ setups, and `floci:override-id` wins when both are present. Every other tag is p
 |---|---|---|
 | `FLOCI_SERVICES_APIGATEWAY_ENABLED` | `true` | Enable or disable API Gateway v1 (REST APIs) |
 | `FLOCI_SERVICES_APIGATEWAYV2_ENABLED` | `true` | Enable or disable API Gateway v2 (HTTP and WebSocket APIs) |
+| `FLOCI_SERVICES_APIGATEWAY_VTL_MAX_LOOPS` | `10000` | Maximum `#foreach` iterations a VTL mapping template may execute |
+| `FLOCI_SERVICES_APIGATEWAY_VTL_MAX_OUTPUT_CHARS` | `1048576` | Maximum characters a VTL mapping template may render |
+| `FLOCI_SERVICES_APIGATEWAY_VTL_TIMEOUT_MILLIS` | `5000` | Maximum wall-clock time a VTL mapping template may spend evaluating |
+
+VTL (Velocity Template Language) mapping templates render inside a reflection-restricted sandbox
+(`SecureUberspector`, with `Class`, `ClassLoader`, `Runtime`, `ProcessBuilder`, `System`, `Thread`,
+`java.io.File` and related classes/packages blocked) and are subject to the three limits above.
+The loop cap truncates a `#foreach` at the configured iteration count and lets the template finish
+rendering with whatever output it produced up to that point; it does not fail the template.
+Exceeding the output-size or execution-time limit does fail the template, the same way any other
+Velocity evaluation error does; neither introduces a new error shape. This applies to both API
+Gateway v1 (`AWS`/Lambda mapping templates) and the AppSync resolver templates described in
+[appsync.md](appsync.md).
 
 ## API Gateway v2 (HTTP and WebSocket APIs) {#v2}
 

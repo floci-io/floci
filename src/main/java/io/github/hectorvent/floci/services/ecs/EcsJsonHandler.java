@@ -414,10 +414,13 @@ public class EcsJsonHandler {
         String deploymentControllerType = parseChoice(req.path("deploymentController"), "type",
                 "deploymentController.type", DEPLOYMENT_CONTROLLER_TYPES);
         String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
+        Map<String, Object> serviceConnectConfiguration =
+                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration"));
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
                 desiredCount, launchType, loadBalancers, networkConfiguration, tags,
-                schedulingStrategy, deploymentControllerType, availabilityZoneRebalancing, region);
+                schedulingStrategy, deploymentControllerType, availabilityZoneRebalancing,
+                serviceConnectConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -494,9 +497,12 @@ public class EcsJsonHandler {
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
         String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
         boolean forceNewDeployment = req.path("forceNewDeployment").asBoolean(false);
+        Map<String, Object> serviceConnectConfiguration =
+                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration"));
 
         EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount,
-                networkConfiguration, availabilityZoneRebalancing, forceNewDeployment, region);
+                networkConfiguration, availabilityZoneRebalancing, forceNewDeployment,
+                serviceConnectConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -1177,6 +1183,23 @@ public class EcsJsonHandler {
         if (t.getStartedAt() != null) { n.put("startedAt", t.getStartedAt().toEpochMilli() / 1000.0); }
         if (t.getStoppedAt() != null) { n.put("stoppedAt", t.getStoppedAt().toEpochMilli() / 1000.0); }
         if (t.getStoppedReason() != null) { n.put("stoppedReason", t.getStoppedReason()); }
+        if (t.getNetworkInterfaceId() != null) {
+            ObjectNode attachment = objectMapper.createObjectNode();
+            attachment.put("id", "eni-attach-" + t.getNetworkInterfaceId());
+            attachment.put("type", "ElasticNetworkInterface");
+            attachment.put("status", "ATTACHED");
+            ArrayNode details = objectMapper.createArrayNode();
+            if (t.getNetworkConfiguration() != null
+                    && t.getNetworkConfiguration().getAwsvpcConfiguration() != null
+                    && !t.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().isEmpty()) {
+                details.addObject().put("name", "subnetId").put("value",
+                        t.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst());
+            }
+            details.addObject().put("name", "networkInterfaceId").put("value", t.getNetworkInterfaceId());
+            details.addObject().put("name", "privateIPv4Address").put("value", t.getPrivateIpAddress());
+            attachment.set("details", details);
+            n.putArray("attachments").add(attachment);
+        }
 
         ArrayNode containers = objectMapper.createArrayNode();
         if (t.getContainers() != null) {
@@ -1314,7 +1337,23 @@ public class EcsJsonHandler {
         if (d.getLaunchType() != null) { n.put("launchType", d.getLaunchType().name()); }
         if (d.getCreatedAt() != null) { n.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
         if (d.getUpdatedAt() != null) { n.put("updatedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
+        if (d.getServiceConnectConfiguration() != null) {
+            n.set("serviceConnectConfiguration", objectMapper.valueToTree(d.getServiceConnectConfiguration()));
+        }
         return n;
+    }
+
+    /**
+     * Keeps the caller's Service Connect configuration as given. AWS's {@code Service} shape has
+     * no member for it, so DescribeServices reports it on each deployment rather than on the
+     * service, and a generated client drops anything written anywhere else.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseServiceConnectConfiguration(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        return objectMapper.convertValue(node, Map.class);
     }
 
     private ObjectNode containerInstanceNode(ContainerInstance ci) {

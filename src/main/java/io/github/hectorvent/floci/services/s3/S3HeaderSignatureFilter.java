@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
@@ -156,7 +157,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
 
         boolean matches;
         try {
-            matches = containsHeader(signedHeaders, "host") && signatureMatches(
+            matches = SigV4RequestValidator.containsHeader(signedHeaders, "host") && signatureMatches(
                     ctx, secretKey.get(), scopeDate, region, amzDate, signedHeaders, declaredHash, signature);
         } catch (Exception e) {
             LOG.debugv(e, "S3 header SigV4 verification failed to complete for accessKey={0}", accessKeyId);
@@ -168,7 +169,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
             return;
         }
 
-        if (isSha256Hex(declaredHash) && !bodyMatches(ctx, declaredHash)) {
+        if (SigV4RequestValidator.isSha256Hex(declaredHash) && !bodyMatches(ctx, declaredHash)) {
             abort(ctx, 400, "XAmzContentSHA256Mismatch",
                     "The provided 'x-amz-content-sha256' header does not match what was computed.");
         }
@@ -184,7 +185,8 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         URI requestUri = ctx.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) instanceof URI uri
                 ? uri
                 : ctx.getUriInfo().getRequestUri();
-        String host = S3VirtualHostFilter.resolveHost(ctx.getHeaderString("Host"), requestUri);
+        String host = S3VirtualHostFilter.resolveHost(ctx.getHeaderString("Host"),
+                ctx.getHeaderString("X-Forwarded-Host"), requestUri);
 
         StringBuilder canonicalHeaders = new StringBuilder();
         for (String name : signedHeaders.split(";")) {
@@ -202,9 +204,9 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         String stringToSign = ALGORITHM + "\n"
                 + amzDate + "\n"
                 + scopeDate + "/" + region + "/" + SIGNING_SERVICE + "/" + TERMINATOR + "\n"
-                + PreSignedUrlFilter.sha256Hex(canonicalRequest);
-        byte[] signingKey = PreSignedUrlFilter.deriveSigningKey(secretKey, scopeDate, region, SIGNING_SERVICE);
-        String expected = PreSignedUrlFilter.hexEncode(PreSignedUrlFilter.hmacSha256(signingKey, stringToSign));
+                + SigV4RequestValidator.sha256Hex(canonicalRequest);
+        byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, scopeDate, region, SIGNING_SERVICE);
+        String expected = SigV4RequestValidator.hexEncode(SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
         return MessageDigest.isEqual(
                 expected.getBytes(StandardCharsets.UTF_8),
                 signature.getBytes(StandardCharsets.UTF_8));
@@ -221,7 +223,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         byte[] body = ctx.getEntityStream() != null ? ctx.getEntityStream().readAllBytes() : new byte[0];
         ctx.setEntityStream(new ByteArrayInputStream(body));
         try {
-            String actual = PreSignedUrlFilter.hexEncode(MessageDigest.getInstance("SHA-256").digest(body));
+            String actual = SigV4RequestValidator.hexEncode(MessageDigest.getInstance("SHA-256").digest(body));
             return MessageDigest.isEqual(
                     actual.getBytes(StandardCharsets.UTF_8),
                     declaredHash.toLowerCase().getBytes(StandardCharsets.UTF_8));
@@ -262,27 +264,6 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
             }
         }
         return null;
-    }
-
-    private static boolean containsHeader(String signedHeaders, String name) {
-        for (String header : signedHeaders.split(";")) {
-            if (name.equals(header)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isSha256Hex(String value) {
-        if (value.length() != 64) {
-            return false;
-        }
-        for (int index = 0; index < value.length(); index++) {
-            if (Character.digit(value.charAt(index), 16) < 0) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static void abort(ContainerRequestContext ctx, int status, String code, String message) {

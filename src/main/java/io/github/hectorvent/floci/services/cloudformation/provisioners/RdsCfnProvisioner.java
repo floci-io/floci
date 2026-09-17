@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -17,6 +19,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -41,6 +44,45 @@ import java.util.Set;
 public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(RdsCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * The createOnlyProperties of {@code AWS::RDS::DBCluster} that nothing on the cluster on file
+     * records. {@code DBClusterIdentifier} is the physical id, {@code EngineMode},
+     * {@code StorageEncrypted} and {@code DatabaseName} are fields of the cluster, but Floci does not
+     * emulate a KMS key, public access, a subnet group placement chosen by the template or a
+     * restore source on a cluster, so a change to one of these can only be seen against what the
+     * template said last time. The values the last successful provision resolved are kept on the
+     * resource under {@link #DB_CLUSTER_CREATE_ONLY_ATTR}, which is how CloudFormation decides too:
+     * on the template's change, not on the live entity.
+     */
+    static final List<String> DB_CLUSTER_RECORDED_CREATE_ONLY = List.of(
+            "ClusterScalabilityType", "DBSubnetGroupName", "DBSystemId", "KmsKeyId",
+            "PubliclyAccessible", "RestoreToTime", "RestoreType", "SnapshotIdentifier",
+            "SourceDBClusterIdentifier", "SourceDbClusterResourceId", "SourceRegion",
+            "UseLatestRestorableTime");
+    /**
+     * The booleans among {@link #DB_CLUSTER_RECORDED_CREATE_ONLY}, recorded as {@code true}/
+     * {@code false} however the template spelled them. {@code UseLatestRestorableTime} defaults to
+     * false, so an absent one is recorded as false. {@code PubliclyAccessible} has no fixed default
+     * (AWS documents true without a subnet group or with the default one, false with a custom one),
+     * so an absent one is recorded as absent and a template that later spells out either value is a
+     * change: the cluster may have been created public.
+     */
+    private static final Set<String> DB_CLUSTER_BOOLEAN_CREATE_ONLY =
+            Set.of("PubliclyAccessible", "UseLatestRestorableTime");
+    private static final Set<String> DB_CLUSTER_DEFAULT_FALSE_CREATE_ONLY = Set.of("UseLatestRestorableTime");
+    /**
+     * The recorded createOnly values of a DB cluster resource, a JSON object keyed by property.
+     * Internal, like the other {@code __Floci} attributes. A resource provisioned before these were
+     * recorded has none, and its first update records them without replacing anything.
+     */
+    static final String DB_CLUSTER_CREATE_ONLY_ATTR = "__FlociDbClusterCreateOnly";
+    /**
+     * The record an update overwrote, kept until the update commits so a rollback puts it back
+     * beside the prior cluster; an empty value means there was no record before.
+     */
+    static final String DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR = "__FlociDbClusterCreateOnlyPrior";
 
     private final RdsService rdsService;
     private final CfnDynamicReferences dynamicReferences;
@@ -113,23 +155,35 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
     /**
      * A replacement is undone through the cleanup record: the resource names the displaced cluster
-     * again and the replacement is deleted. Without a record the update was in place, and putting
-     * that back needs a snapshot this provisioner does not keep, so the engine keeps reporting it
-     * as not rolled back, as before.
+     * again and the replacement is deleted. The createOnly record follows the cluster back, since
+     * {@link ReplacementCleanup} leaves {@code __Floci} attributes alone. Without a record the
+     * update was in place, and putting that back needs a snapshot this provisioner does not keep,
+     * so the engine keeps reporting it as not rolled back, as before.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource, this::delete);
+        boolean replaced = ReplacementCleanup.rollback(resource, this::delete);
+        String priorRecord = resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
+        if (priorRecord != null) {
+            if (priorRecord.isEmpty()) {
+                resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_ATTR);
+            } else {
+                resource.getAttributes().put(DB_CLUSTER_CREATE_ONLY_ATTR, priorRecord);
+            }
+        }
+        return replaced;
     }
 
     private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -292,14 +346,16 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * A DB cluster follows CloudFormation's replacement lifecycle. {@code DBClusterIdentifier},
-     * {@code EngineMode} and {@code StorageEncrypted} are createOnlyProperties in the
-     * {@code AWS::RDS::DBCluster} schema, so a change to any of them creates the replacement under
-     * a distinct physical id first and leaves the displaced cluster standing: it is deleted once
-     * the stack update commits ({@link #completeUpdate}), or the resource is pointed back at it and
-     * the replacement is removed when a later resource fails the update ({@link #rollbackUpdate}).
-     * A cluster the template names explicitly has no distinct id to move to, which is the update
-     * CloudFormation refuses for a custom-named resource, so it is refused here the same way.
+     * A DB cluster follows CloudFormation's replacement lifecycle. A change to any of the
+     * createOnlyProperties in the {@code AWS::RDS::DBCluster} schema ({@code DBClusterIdentifier},
+     * {@code EngineMode}, {@code StorageEncrypted} and {@code DatabaseName} against the cluster on
+     * file, the rest against what the template said last time, see
+     * {@link #DB_CLUSTER_RECORDED_CREATE_ONLY}) creates the replacement under a distinct physical
+     * id first and leaves the displaced cluster standing: it is deleted once the stack update
+     * commits ({@link #completeUpdate}), or the resource is pointed back at it and the replacement
+     * is removed when a later resource fails the update ({@link #rollbackUpdate}). A cluster the
+     * template names explicitly has no distinct id to move to, which is the update CloudFormation
+     * refuses for a custom-named resource, so it is refused here the same way.
      */
     private void provisionDbCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                     ProvisionContext ctx, String region) {
@@ -321,16 +377,19 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         DbCluster cluster = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbCluster);
         String engineMode = resolveOptional(props, "EngineMode", engine);
         boolean storageEncrypted = parseBoolProp(props, "StorageEncrypted", engine);
-        if (cluster != null && requiresDbClusterReplacement(cluster, engineMode, storageEncrypted)) {
+        String databaseName = resolveOptional(props, "DatabaseName", engine);
+        Map<String, String> createOnly = dbClusterRecordedCreateOnly(props, engine);
+        String replacementReason = cluster == null ? null : dbClusterReplacementReason(cluster,
+                engineMode, storageEncrypted, databaseName,
+                readDbClusterCreateOnly(attributesBefore.get(DB_CLUSTER_CREATE_ONLY_ATTR)), createOnly);
+        if (replacementReason != null) {
             if (customNamed) {
                 throw new AwsException("ValidationError",
                         "CloudFormation cannot update a stack when a custom-named resource requires "
                                 + "replacing. Rename " + id + " and update the stack again.", 400);
             }
             id = ctx.generatePhysicalName(r.getLogicalId(), 60, true);
-            LOG.infov("Replacing DB cluster {0} with {1}: EngineMode/StorageEncrypted changed from "
-                            + "{2}/{3} to {4}/{5}", priorPhysicalId, id, cluster.getEngineMode(),
-                    cluster.isStorageEncrypted(), engineMode, storageEncrypted);
+            LOG.infov("Replacing DB cluster {0} with {1}: {2}", priorPhysicalId, id, replacementReason);
             cluster = null;
         }
         if (cluster != null) {
@@ -352,25 +411,12 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     resolveOptionalWithoutDynamicReferences(props, "MasterUsername", engine), region, false);
             String masterPassword = resolveDynamicReferences(
                     resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true);
-            String databaseName = resolveOptional(props, "DatabaseName", engine);
             boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
             String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
-            if (engineMode == null && !storageEncrypted) {
-                if (serverlessV2MinCapacity == null && serverlessV2MaxCapacity == null
-                        && serverlessV2SecondsUntilAutoPause == null) {
-                    cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region);
-                } else {
-                    cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
-                            serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause);
-                }
-            } else {
-                cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                        masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
-                        serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
-                        false, null, engineMode, storageEncrypted);
-            }
+            cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
+                    masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
+                    serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
+                    false, null, engineMode, storageEncrypted);
         }
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
@@ -387,23 +433,107 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (cluster.getDbClusterResourceId() != null) {
             r.getAttributes().put("DBClusterResourceId", cluster.getDbClusterResourceId());
         }
+        recordDbClusterCreateOnly(r, ctx, attributesBefore, createOnly);
         // A provision that left the resource with a new physical id replaced the cluster: the
         // displaced one is deleted once the update commits, or restored if the update rolls back.
         ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     /**
-     * Whether the template's {@code EngineMode}/{@code StorageEncrypted} differ from the cluster on
-     * file. Both are createOnlyProperties, so a difference means replacement. A template without
-     * {@code EngineMode} means the RDS default {@code provisioned}, and a cluster persisted before
-     * the mode was tracked reports no mode at all, which is the same default.
+     * Why the template's createOnly properties call for a replacement of the cluster on file, or
+     * null when they describe it. {@code EngineMode}, {@code StorageEncrypted} and
+     * {@code DatabaseName} are read from the cluster itself: a template without {@code EngineMode}
+     * means the RDS default {@code provisioned}, and a cluster persisted before the mode was tracked
+     * reports no mode at all, which is the same default. The rest are read from the record the last
+     * provision left ({@link #DB_CLUSTER_RECORDED_CREATE_ONLY}); a resource without one predates
+     * the record, and nothing on file can say what it was created with, so it is kept.
      */
-    private static boolean requiresDbClusterReplacement(DbCluster existing, String engineMode,
-                                                        boolean storageEncrypted) {
+    private static String dbClusterReplacementReason(DbCluster existing, String engineMode,
+                                                     boolean storageEncrypted, String databaseName,
+                                                     Map<String, String> recorded,
+                                                     Map<String, String> desired) {
+        List<String> changed = new ArrayList<>();
         String desiredMode = firstNonBlank(engineMode, "provisioned");
         String currentMode = firstNonBlank(existing.getEngineMode(), "provisioned");
-        return !desiredMode.equalsIgnoreCase(currentMode)
-                || existing.isStorageEncrypted() != storageEncrypted;
+        if (!desiredMode.equalsIgnoreCase(currentMode)) {
+            changed.add("EngineMode " + currentMode + " -> " + desiredMode);
+        }
+        if (existing.isStorageEncrypted() != storageEncrypted) {
+            changed.add("StorageEncrypted " + existing.isStorageEncrypted() + " -> " + storageEncrypted);
+        }
+        String currentDatabase = firstNonBlank(existing.getDatabaseName(), null);
+        String desiredDatabase = firstNonBlank(databaseName, null);
+        if (!Objects.equals(currentDatabase, desiredDatabase)) {
+            changed.add("DatabaseName " + currentDatabase + " -> " + desiredDatabase);
+        }
+        if (recorded != null) {
+            for (String property : DB_CLUSTER_RECORDED_CREATE_ONLY) {
+                if (!Objects.equals(recorded.get(property), desired.get(property))) {
+                    changed.add(property + " " + recorded.get(property) + " -> " + desired.get(property));
+                }
+            }
+        }
+        return changed.isEmpty() ? null : String.join(", ", changed);
+    }
+
+    /**
+     * The template's values for {@link #DB_CLUSTER_RECORDED_CREATE_ONLY}: a value only when set,
+     * booleans normalised to {@code true}/{@code false}, and the ones with a fixed default of false
+     * recorded as false when absent (see {@link #DB_CLUSTER_BOOLEAN_CREATE_ONLY}).
+     */
+    private Map<String, String> dbClusterRecordedCreateOnly(JsonNode props,
+                                                            CloudFormationTemplateEngine engine) {
+        Map<String, String> values = new LinkedHashMap<>();
+        for (String property : DB_CLUSTER_RECORDED_CREATE_ONLY) {
+            String value = resolveOptional(props, property, engine);
+            boolean set = value != null && !value.isBlank();
+            if (DB_CLUSTER_BOOLEAN_CREATE_ONLY.contains(property)) {
+                if (set) {
+                    values.put(property, String.valueOf(Boolean.parseBoolean(value.trim())));
+                } else if (DB_CLUSTER_DEFAULT_FALSE_CREATE_ONLY.contains(property)) {
+                    values.put(property, "false");
+                }
+            } else if (set) {
+                values.put(property, value);
+            }
+        }
+        return values;
+    }
+
+    /**
+     * Writes the createOnly record the next update compares against. On an update that changed it
+     * (a replacement, or the first record of a resource that predates it) the previous record is
+     * kept beside it until the update commits, so {@link #rollbackUpdate} can put it back.
+     */
+    private static void recordDbClusterCreateOnly(StackResource r, ProvisionContext ctx,
+                                                  Map<String, String> attributesBefore,
+                                                  Map<String, String> createOnly) {
+        String priorRecord = attributesBefore.get(DB_CLUSTER_CREATE_ONLY_ATTR);
+        if (ctx.isUpdate() && !createOnly.equals(readDbClusterCreateOnly(priorRecord))) {
+            r.getAttributes().put(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR, priorRecord == null ? "" : priorRecord);
+        }
+        ObjectNode record = MAPPER.createObjectNode();
+        createOnly.forEach(record::put);
+        r.getAttributes().put(DB_CLUSTER_CREATE_ONLY_ATTR, record.toString());
+    }
+
+    /** The record as a map, or null when the resource carries none or it cannot be read. */
+    private static Map<String, String> readDbClusterCreateOnly(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode node = MAPPER.readTree(raw);
+            if (!node.isObject()) {
+                return null;
+            }
+            Map<String, String> values = new LinkedHashMap<>();
+            node.fields().forEachRemaining(e -> values.put(e.getKey(), e.getValue().asText()));
+            return values;
+        } catch (Exception e) {
+            LOG.warnv("Ignoring unreadable DB cluster createOnly record: {0}", raw);
+            return null;
+        }
     }
 
     private Double parseServerlessV2Capacity(JsonNode props, String field,
@@ -456,9 +586,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         String endpointNetworkType = resolveOptional(props, "EndpointNetworkType", engine);
         String targetConnectionNetworkType = resolveOptional(
                 props, "TargetConnectionNetworkType", engine);
-        validateIpv4DbProxyNetworkType(endpointNetworkType,
+        validateDbProxyNetworkType(endpointNetworkType,
                 "EndpointNetworkType", true, "IPV4, IPV6, or DUAL");
-        validateIpv4DbProxyNetworkType(targetConnectionNetworkType,
+        validateDbProxyNetworkType(targetConnectionNetworkType,
                 "TargetConnectionNetworkType", false, "IPV4 or IPV6");
         boolean requireTls = parseBoolProp(props, "RequireTLS", engine);
         boolean debugLogging = parseBoolProp(props, "DebugLogging", engine);
@@ -480,9 +610,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         var proxy = r.getPhysicalId() == null
                 ? rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth,
                 defaultAuthScheme, roleArn, subnetIds, sgIds, auth, idleClientTimeout,
-                debugLogging, tags, region)
+                debugLogging, tags, region, endpointNetworkType, targetConnectionNetworkType)
                 : updateDbProxy(r, name, engineFamily, defaultAuthScheme, requireTls,
-                idleClientTimeout, debugLogging, roleArn, subnetIds, sgIds, auth, tags, region);
+                idleClientTimeout, debugLogging, roleArn, subnetIds, sgIds, auth, tags, region,
+                endpointNetworkType, targetConnectionNetworkType);
         r.setPhysicalId(proxy.getDbProxyName());              // Ref -> DBProxyName
         r.getAttributes().put("Endpoint", proxy.getEndpoint());   // GetAtt "Endpoint" (bare host)
         r.getAttributes().put("DBProxyArn", proxy.getDbProxyArn());
@@ -495,15 +626,31 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             StackResource resource, String name, String engineFamily, String defaultAuthScheme,
             boolean requireTls, int idleClientTimeout, boolean debugLogging, String roleArn,
             List<String> subnetIds, List<String> securityGroupIds, List<DbProxyAuth> auth,
-            Map<String, String> tags, String region) {
+            Map<String, String> tags, String region, String endpointNetworkType,
+            String targetConnectionNetworkType) {
         var existing = rdsService.getDbProxy(resource.getPhysicalId(), region);
+        // ModifyDBProxy has no EndpointNetworkType/TargetConnectionNetworkType parameters; AWS
+        // documents both as requiring CloudFormation replacement, same as DBProxyName, EngineFamily,
+        // and VpcSubnetIds.
+        String effectiveEndpointNetworkType = endpointNetworkType != null && !endpointNetworkType.isBlank()
+                ? endpointNetworkType.toUpperCase() : "IPV4";
+        String effectiveTargetConnectionNetworkType =
+                targetConnectionNetworkType != null && !targetConnectionNetworkType.isBlank()
+                ? targetConnectionNetworkType.toUpperCase() : "IPV4";
+        String existingEndpointNetworkType = existing.getEndpointNetworkType() != null
+                ? existing.getEndpointNetworkType() : "IPV4";
+        String existingTargetConnectionNetworkType = existing.getTargetConnectionNetworkType() != null
+                ? existing.getTargetConnectionNetworkType() : "IPV4";
         if (!Objects.equals(existing.getDbProxyName(), name)
                 || engineFamily == null
                 || !existing.getEngineFamily().equalsIgnoreCase(engineFamily)
-                || !Set.copyOf(existing.getVpcSubnetIds()).equals(Set.copyOf(subnetIds))) {
+                || !Set.copyOf(existing.getVpcSubnetIds()).equals(Set.copyOf(subnetIds))
+                || !existingEndpointNetworkType.equalsIgnoreCase(effectiveEndpointNetworkType)
+                || !existingTargetConnectionNetworkType.equalsIgnoreCase(effectiveTargetConnectionNetworkType)) {
             throw new AwsException("UnsupportedOperation",
-                    "Changing DBProxyName, EngineFamily, or VpcSubnetIds requires CloudFormation "
-                            + "replacement, which is not yet supported by Floci.", 400);
+                    "Changing DBProxyName, EngineFamily, VpcSubnetIds, EndpointNetworkType, or "
+                            + "TargetConnectionNetworkType requires CloudFormation replacement, "
+                            + "which is not yet supported by Floci.", 400);
         }
         return rdsService.modifyDbProxy(existing.getDbProxyName(), defaultAuthScheme, auth,
                 requireTls, idleClientTimeout, debugLogging, roleArn,
@@ -578,12 +725,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         return auth;
     }
 
-    private void validateIpv4DbProxyNetworkType(
+    private void validateDbProxyNetworkType(
             String value, String propertyName, boolean dualAllowed, String validValues) {
-        if (value == null) {
-            return;
-        }
-        if ("IPV4".equalsIgnoreCase(value)) {
+        if (value == null || "IPV4".equalsIgnoreCase(value)) {
             return;
         }
         boolean supportedAwsValue = "IPV6".equalsIgnoreCase(value)
@@ -592,10 +736,6 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("InvalidParameterValue",
                     propertyName + " must be " + validValues + ".", 400);
         }
-        throw new AwsException("UnsupportedOperation",
-                propertyName + " " + value.toUpperCase()
-                        + " is not supported because Floci currently exposes IPv4 proxy networking only.",
-                400);
     }
 
     private void deleteDbProxySafe(String name, String region) {

@@ -11,6 +11,8 @@ import java.util.Map;
 public class PolicyStatement {
 
     private final String effect;            // "Allow" or "Deny"
+    private final Map<String, List<String>> principals;    // Principal patterns by type; null when not set
+    private final Map<String, List<String>> notPrincipals; // NotPrincipal patterns by type; null when not set
     private final List<String> actions;     // IAM action patterns; null when notActions is set
     private final List<String> notActions;  // NotAction patterns; null when actions is set
     private final List<String> resources;   // resource ARN patterns; null when notResources is set
@@ -19,12 +21,16 @@ public class PolicyStatement {
     private final Map<String, Map<String, List<String>>> conditions;
 
     public PolicyStatement(String effect,
+                           Map<String, List<String>> principals,
+                           Map<String, List<String>> notPrincipals,
                            List<String> actions,
                            List<String> notActions,
                            List<String> resources,
                            List<String> notResources,
                            Map<String, Map<String, List<String>>> conditions) {
         this.effect = effect;
+        this.principals = principals;
+        this.notPrincipals = notPrincipals;
         this.actions = actions;
         this.notActions = notActions;
         this.resources = resources;
@@ -32,12 +38,23 @@ public class PolicyStatement {
         this.conditions = conditions;
     }
 
+    public PolicyStatement(String effect,
+                           List<String> actions,
+                           List<String> notActions,
+                           List<String> resources,
+                           List<String> notResources,
+                           Map<String, Map<String, List<String>>> conditions) {
+        this(effect, null, null, actions, notActions, resources, notResources, conditions);
+    }
+
     /** Convenience constructor for simple allow/deny without conditions or Not* fields. */
     public PolicyStatement(String effect, List<String> actions, List<String> resources) {
-        this(effect, actions, null, resources, null, null);
+        this(effect, null, null, actions, null, resources, null, null);
     }
 
     public String getEffect()              { return effect; }
+    public Map<String, List<String>> getPrincipals()    { return principals; }
+    public Map<String, List<String>> getNotPrincipals() { return notPrincipals; }
     public List<String> getActions()       { return actions; }
     public List<String> getNotActions()    { return notActions; }
     public List<String> getResources()     { return resources; }

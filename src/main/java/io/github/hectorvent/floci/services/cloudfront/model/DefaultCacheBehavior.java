@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
-public class DefaultCacheBehavior {
+public class DefaultCacheBehavior implements CacheBehaviorSettings {
 
     private String targetOriginId;
     private String viewerProtocolPolicy = "redirect-to-https";

@@ -57,6 +57,49 @@ class IamServiceTest {
         );
     }
 
+    @Test
+    void ec2SessionUsesInstanceIdentityTokenAndOwningAccount() {
+        SessionCredential session = new SessionCredential("ASIAEC2SESSION", "secret", "token",
+                "arn:aws:iam::123456789012:role/path/worker", Instant.now().plusSeconds(3600), null, "123456789012");
+        session.setEc2InstanceId("i-worker");
+        AccountAwareStorageBackend<SessionCredential> stored = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        iamService = iamService(false, new InMemoryStorage<>(), stored);
+        iamService.registerEc2InstanceSession(session);
+        assertTrue(stored.getForAccount("000000000000", session.getAccessKeyId()).isEmpty());
+        assertEquals("i-worker", stored.getForAccount("123456789012", session.getAccessKeyId())
+                .orElseThrow().getEc2InstanceId());
+        assertEquals("123456789012", iamService.resolveAccountId(session.getAccessKeyId()).orElseThrow());
+        assertEquals("arn:aws:sts::123456789012:assumed-role/worker/i-worker",
+                iamService.resolveCallerArn(session.getAccessKeyId()).orElseThrow());
+        assertEquals("secret", iamService.findSecretKey(session.getAccessKeyId(), "token").orElseThrow());
+        assertTrue(iamService.findSecretKey(session.getAccessKeyId(), "wrong-token").isEmpty());
+        assertTrue(iamService.findSecretKey(session.getAccessKeyId(), null).isEmpty());
+        iamService.registerSession("ASIAOTHER", "other-secret", "other-token", session.getRoleArn(),
+                Instant.now().plusSeconds(3600), null);
+        assertEquals(1, iamService.sweepOrphanedEc2InstanceSessions());
+        assertTrue(iamService.findSecretKey(session.getAccessKeyId(), "token").isEmpty());
+        assertTrue(iamService.findSecretKey("ASIAOTHER", "other-token").isPresent());
+    }
+
+    @Test
+    void ec2SessionMarkerSurvivesPersistenceAndExpiredCredentialsCannotAuthenticate() throws Exception {
+        SessionCredential expired = new SessionCredential("ASIAEXPIREDEC2", "secret", "token",
+                "arn:aws:iam::123456789012:role/worker", Instant.now().minusSeconds(1), null, "123456789012");
+        expired.setEc2InstanceId("i-expired");
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        SessionCredential restored = mapper.readValue(mapper.writeValueAsBytes(expired), SessionCredential.class);
+        assertEquals("i-expired", restored.getEc2InstanceId());
+        AccountAwareStorageBackend<SessionCredential> stored = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), stored);
+        service.registerEc2InstanceSession(restored);
+        assertTrue(service.findSecretKey(restored.getAccessKeyId(), "token").isEmpty());
+        IamService restarted = iamService(false, new InMemoryStorage<>(), stored);
+        assertEquals(1, restarted.sweepOrphanedEc2InstanceSessions());
+        assertTrue(stored.getForAccount("123456789012", restored.getAccessKeyId()).isEmpty());
+    }
+
     // =========================================================================
     // Users
     // =========================================================================

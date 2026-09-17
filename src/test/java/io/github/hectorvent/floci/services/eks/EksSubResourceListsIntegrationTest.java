@@ -51,7 +51,7 @@ class EksSubResourceListsIntegrationTest {
     void createCluster() {
         given().contentType(JSON)
                 .body("{\"name\":\"" + CLUSTER + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/eks-role\","
-                        + "\"version\":\"1.29\"}")
+                        + "\"version\":\"1.29\",\"accessConfig\":{\"authenticationMode\":\"API\",\"bootstrapClusterCreatorAdminPermissions\":false}}")
                 .when().post("/clusters")
                 .then().statusCode(200)
                 .body("cluster.name", equalTo(CLUSTER));

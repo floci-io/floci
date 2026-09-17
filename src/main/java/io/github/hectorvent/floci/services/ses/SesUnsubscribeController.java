@@ -33,11 +33,11 @@ import java.nio.charset.StandardCharsets;
 @Path("/_aws/ses/unsubscribe")
 public class SesUnsubscribeController {
 
-    private final SesService sesService;
+    private final SesContactService contactService;
 
     @Inject
-    public SesUnsubscribeController(SesService sesService) {
-        this.sesService = sesService;
+    public SesUnsubscribeController(SesContactService contactService) {
+        this.contactService = contactService;
     }
 
     @GET
@@ -79,7 +79,7 @@ public class SesUnsubscribeController {
             return invalid;
         }
         try {
-            sesService.unsubscribeContact(contactList, address, topic, region);
+            contactService.unsubscribeContact(contactList, address, topic, region);
         } catch (AwsException e) {
             return Response.status(e.getHttpStatus()).entity(e.getMessage()).build();
         }

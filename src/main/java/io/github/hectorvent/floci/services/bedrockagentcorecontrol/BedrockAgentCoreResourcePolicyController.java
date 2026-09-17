@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -74,18 +73,6 @@ public class BedrockAgentCoreResourcePolicyController {
     }
 
     private Response error(Exception e, String action) {
-        if (e instanceof AwsException aws) {
-            return Response.status(aws.getHttpStatus())
-                    .type(MediaType.APPLICATION_JSON)
-                    .header("X-Amzn-Errortype", aws.jsonType())
-                    .entity(new AwsErrorResponse(aws.jsonType(), aws.getMessage()))
-                    .build();
-        }
-        LOG.errorv(e, "Error {0}", action);
-        return Response.status(400)
-                .type(MediaType.APPLICATION_JSON)
-                .header("X-Amzn-Errortype", "ValidationException")
-                .entity(new AwsErrorResponse("ValidationException", e.getMessage()))
-                .build();
+        return BedrockAgentCoreControllerSupport.error(LOG, e, action);
     }
 }

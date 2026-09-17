@@ -12,7 +12,9 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import com.github.dockerjava.api.DockerClient;
@@ -47,6 +49,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
@@ -60,6 +63,7 @@ import java.util.function.BiPredicate;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -73,7 +77,8 @@ import java.util.zip.GZIPInputStream;
 public class Ec2ContainerManager {
 
     private static final Logger LOG = Logger.getLogger(Ec2ContainerManager.class);
-    private static final String USER_DATA_SCRIPT_PATH = "/tmp/user-data.sh";
+    // Guest-created /tmp mounts hide files copied through Docker's archive API.
+    private static final String USER_DATA_SCRIPT_PATH = "/var/lib/user-data.sh";
     private static final Pattern MIME_BOUNDARY = Pattern.compile("(?im)^content-type:\\s*multipart/[^;]+;\\s*boundary=\"?([^\";\\n\\r]+)\"?.*$");
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
     /** Exit code the sshd install probe uses for "sshd is present but scp is not". See startSshd. */
@@ -171,13 +176,98 @@ public class Ec2ContainerManager {
     private final ContainerNetworkReachability containerNetworkReachability;
     private final VpcNetworkManager vpcNetworkManager;
     private final ContainerReachableEndpoint reachableEndpoint;
+    private SecurityGroupFirewallManager firewallManager;
     private final ExecutorService executor;
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
 
     private volatile boolean dockerUnavailableLogged;
 
+    public void refreshSecurityGroups(String region, Map<String, SecurityGroup> groups,
+                                      Map<String, List<String>> prefixLists) {
+        if (firewallManager != null && firewallManager.enabled()) {
+            firewallManager.refreshPolicies(region, groups, prefixLists);
+        }
+    }
+
+    public void updateSecurityGroups(String eniId, Set<String> groupIds,
+                                     Map<String, SecurityGroup> groups,
+                                     Map<String, List<String>> prefixLists) {
+        if (firewallManager != null && firewallManager.enabled()) {
+            firewallManager.updateGroups(eniId, groupIds, groups, prefixLists);
+        }
+    }
+
+    /** A workload's own Floci-owned namespace, or null when the instance is not protected. */
+    private ProtectedNamespace protectedNamespace(Instance instance) {
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null) {
+            return null;
+        }
+        InspectContainerResponse worker = dockerClient.inspectContainerCmd(containerId).exec();
+        String mode = worker.getHostConfig() == null ? null : worker.getHostConfig().getNetworkMode();
+        if (mode == null || !mode.startsWith("container:")) {
+            return null;
+        }
+        String helperId = mode.substring("container:".length());
+        InspectContainerResponse helper = dockerClient.inspectContainerCmd(helperId).exec();
+        Map<String, String> labels = helper.getConfig().getLabels();
+        if (!"true".equals(labels.get("floci.security-group-helper"))
+                || !"ec2".equals(labels.get(LABEL_SERVICE))
+                || !instance.getInstanceId().equals(labels.get(LABEL_RESOURCE_ID))
+                || !ownerIdentity().equals(labels.get("floci_owner_port"))) {
+            throw new IllegalStateException("EC2 workload network namespace is not Floci protected");
+        }
+        String address = helper.getNetworkSettings().getNetworks().values().stream()
+                .map(network -> network.getIpAddress()).filter(ip -> ip != null && !ip.isBlank())
+                .findFirst().orElseThrow(() -> new IllegalStateException("EC2 firewall helper has no Docker IP"));
+        return new ProtectedNamespace(helperId, address);
+    }
+
+    private record ProtectedNamespace(String helperId, String transportAddress) {}
+
+    public void restoreSecurityGroups(Instance instance, String region, List<SecurityGroup> groups,
+                                      Map<String, List<String>> prefixLists) {
+        if (firewallManager == null || !firewallManager.enabled()) {
+            return;
+        }
+        ProtectedNamespace namespace = protectedNamespace(instance);
+        if (namespace == null) {
+            throw new IllegalStateException("EC2 workload has no protected network namespace");
+        }
+        String helperId = namespace.helperId();
+        String address = namespace.transportAddress();
+        InstanceNetworkInterface eni = instance.getNetworkInterfaces().getFirst();
+        String logical = instance.getLogicalPrivateIpAddress() != null
+                ? instance.getLogicalPrivateIpAddress() : eni.getPrivateIpAddress();
+        firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(), region,
+                instance.getVpcId(), eni.getNetworkInterfaceId(), logical, address,
+                instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId)
+                        .collect(Collectors.toSet()), groups), helperId, prefixLists);
+    }
+
     @Inject
+    public Ec2ContainerManager(ContainerBuilder containerBuilder,
+                               ContainerLifecycleManager lifecycleManager,
+                               ContainerLogStreamer logStreamer,
+                               ContainerDetector containerDetector,
+                               DockerHostResolver dockerHostResolver,
+                               DockerClient dockerClient,
+                               PortAllocator portAllocator,
+                               EmulatorConfig config,
+                               Ec2MetadataServer metadataServer,
+                               Ec2PortForwardManager portForwardManager,
+                               RegionResolver regionResolver,
+                               ContainerNetworkReachability containerNetworkReachability,
+                               VpcNetworkManager vpcNetworkManager,
+                               ContainerReachableEndpoint reachableEndpoint,
+                               SecurityGroupFirewallManager firewallManager) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver,
+                dockerClient, portAllocator, config, metadataServer, portForwardManager, regionResolver,
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint);
+        this.firewallManager = firewallManager;
+    }
+
     public Ec2ContainerManager(ContainerBuilder containerBuilder,
                                ContainerLifecycleManager lifecycleManager,
                                ContainerLogStreamer logStreamer,
@@ -278,6 +368,12 @@ public class Ec2ContainerManager {
      *                 via socat sidecars once the container is running (empty for none)
      */
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region, Set<Integer> appPorts) {
+        launch(instance, image, publicKey, region, appPorts, List.of(), Map.of());
+    }
+
+    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region,
+                       Set<Integer> appPorts, List<SecurityGroup> groups,
+                       Map<String, List<String>> prefixLists) {
         instance.setState(InstanceState.pending());
 
         // An instance record is metadata: id, addresses, tags and lifecycle state are all
@@ -286,7 +382,11 @@ public class Ec2ContainerManager {
         // instead of dying: Floci in Docker without a mounted socket, or a stopped daemon
         // on the host, would otherwise terminate every instance the moment it launched.
         if (!isDockerAvailable()) {
-            markContainerlessRunning(instance);
+            if (firewallManager != null && firewallManager.enabled()) {
+                failLaunch(instance);
+            } else {
+                markContainerlessRunning(instance);
+            }
             return;
         }
 
@@ -303,14 +403,14 @@ public class Ec2ContainerManager {
                 String flociHost = dockerHostResolver.resolve();
                 int imdsPort = config.services().ec2().imdsPort();
                 StartedContainer started = createAndStartContainer(instance, image, region, flociHost, imdsPort,
-                        leasedPrivateIp);
+                        leasedPrivateIp, groups, prefixLists);
                 if (started == null) {
                     return;
                 }
                 int sshHostPort = started.sshHostPort();
                 String containerId = started.containerId();
                 String vpcAddress = started.vpcAddress();
-                if (vpcAddress == null) {
+                if (vpcAddress == null && started.namespace() == null) {
                     // Nothing holds the address, and moments from now this instance will be
                     // reporting its bridge address instead, so the lease would no longer be
                     // findable from the instance at terminate time. Give it back here.
@@ -350,8 +450,10 @@ public class Ec2ContainerManager {
                 // Docker can report the container as running before network
                 // settings are populated; wait here so IMDS is registered
                 // before link-local metadata validation and UserData run.
-                String containerIp = waitForContainerBridgeIp(containerId, instanceId, instance);
-                if (vpcAddress != null) {
+                String containerIp = started.namespace() == null
+                        ? waitForContainerBridgeIp(containerId, instanceId, instance)
+                        : started.namespace().transportAddress();
+                if (vpcAddress != null && started.namespace() == null) {
                     // The VPC address is the one Floci reports and the one peers in the same VPC
                     // dial. The bridge address still identifies this container to IMDS, because
                     // the default route, and so the source address of its metadata requests, is
@@ -364,7 +466,10 @@ public class Ec2ContainerManager {
                 }
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
-                    exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
+                    if (started.namespace() == null) {
+                        exposeReachablePrivateAddress(instance, containerIp,
+                                config.services().ec2().awsFaithfulPrivateIp());
+                    }
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                 }
                 else {
@@ -393,7 +498,8 @@ public class Ec2ContainerManager {
 
                 // IMDS proxy setup is best effort and has its own bounded commands. The instance
                 // is already running once Docker has assigned its reachable network address.
-                configureLinkLocalMetadataEndpoint(containerId, instanceId, flociHost, imdsPort);
+                configureLinkLocalMetadataEndpoint(started.namespace() == null
+                        ? containerId : started.namespace().helperId(), instanceId, flociHost, imdsPort);
 
                 // Publish security-group TCP ingress ports on the host via socat sidecars.
                 if (appPorts != null && !appPorts.isEmpty()) {
@@ -425,7 +531,7 @@ public class Ec2ContainerManager {
                     // The daemon can disappear between the probe above and any of the calls in
                     // this block. Losing Docker is not the instance's fault, so degrade to a
                     // metadata-only instance; a genuine container failure still fails the launch.
-                    if (isDockerAvailable()) {
+                    if ((firewallManager != null && firewallManager.enabled()) || isDockerAvailable()) {
                         failLaunch(instance, leasedPrivateIp);
                     } else {
                         markContainerlessRunning(instance);
@@ -440,7 +546,9 @@ public class Ec2ContainerManager {
     }
 
     private StartedContainer createAndStartContainer(Instance instance, ResolvedAmiImage image, String region,
-                                                     String flociHost, int imdsPort, String leasedPrivateIp) {
+                                                     String flociHost, int imdsPort, String leasedPrivateIp,
+                                                     List<SecurityGroup> groups,
+                                                     Map<String, List<String>> prefixLists) {
         String instanceId = instance.getInstanceId();
         String containerName = ContainerStorageHelper.resourceName(config, "ec2", null, instanceId);
         String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
@@ -453,16 +561,38 @@ public class Ec2ContainerManager {
             int sshHostPort = portAllocator.allocate(
                     config.services().ec2().sshPortRangeStart(),
                     config.services().ec2().sshPortRangeEnd());
-            ContainerSpec spec = buildContainerSpec(containerName, image, region, serviceEndpoint, imdsEndpoint,
-                    instanceId, sshHostPort);
+            SecurityGroupFirewallManager.Namespace namespace = null;
+            String eniId = null;
             String containerId = null;
             boolean recorded = false;
             try {
+                if (firewallManager != null && firewallManager.enabled()) {
+                    if (instance.getNetworkInterfaces() == null || instance.getNetworkInterfaces().isEmpty()) {
+                        throw new IllegalStateException("EC2 instance has no network interface to protect");
+                    }
+                    InstanceNetworkInterface eni = instance.getNetworkInterfaces().getFirst();
+                    eniId = eni.getNetworkInterfaceId();
+                    instance.setLogicalPrivateIpAddress(eni.getPrivateIpAddress());
+                    namespace = firewallManager.createNamespace("ec2", instanceId,
+                            regionResolver.getAccountId(), region, Optional.empty(), Map.of(22, sshHostPort));
+                    firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
+                            region, instance.getVpcId(), eniId, eni.getPrivateIpAddress(),
+                            namespace.transportAddress(),
+                            instance.getSecurityGroups().stream().map(g -> g.getGroupId())
+                                    .collect(Collectors.toSet()), groups),
+                            namespace.helperId(), prefixLists);
+                }
+                ContainerSpec spec = buildContainerSpec(containerName, image, region, serviceEndpoint, imdsEndpoint,
+                        instanceId, sshHostPort, namespace, instance.getIamInstanceProfileArn() != null);
                 containerId = image.dockerPlatform() == null
                         ? lifecycleManager.create(spec)
                         : lifecycleManager.create(spec, image.dockerPlatform());
                 if (!recordCreatedContainer(instance, containerId, sshHostPort)) {
                     lifecycleManager.removeIfExists(containerId);
+                    if (namespace != null) {
+                        firewallManager.unregister(eniId);
+                        lifecycleManager.removeIfExists(namespace.helperId());
+                    }
                     portAllocator.release(sshHostPort);
                     return null;
                 }
@@ -471,12 +601,12 @@ public class Ec2ContainerManager {
                 // container starts, so the guest comes up already holding its private IP. The
                 // default bridge attachment stays: it is what carries the published SSH host
                 // port, which a network mode set at creation time would suppress.
-                String vpcAddress = vpcNetworkManager.attach(region, instance.getVpcId(), instance.getSubnetId(),
-                                containerId, leasedPrivateIp)
-                        .map(network -> leasedPrivateIp)
-                        .orElse(null);
+                String vpcAddress = namespace == null
+                        ? vpcNetworkManager.attach(region, instance.getVpcId(), instance.getSubnetId(),
+                                containerId, leasedPrivateIp).map(network -> leasedPrivateIp).orElse(null)
+                        : null;
                 lifecycleManager.startCreated(containerId, spec);
-                return new StartedContainer(containerId, sshHostPort, vpcAddress);
+                return new StartedContainer(containerId, sshHostPort, vpcAddress, namespace, eniId);
             } catch (Exception e) {
                 boolean ownsCleanup = !recorded || clearRecordedContainer(instance, containerId, sshHostPort);
                 if (!ownsCleanup) {
@@ -484,6 +614,12 @@ public class Ec2ContainerManager {
                 }
                 if (containerId != null) {
                     lifecycleManager.removeIfExists(containerId);
+                }
+                if (namespace != null) {
+                    if (eniId != null) {
+                        firewallManager.unregister(eniId);
+                    }
+                    lifecycleManager.removeIfExists(namespace.helperId());
                 }
                 if (isHostPortCollision(e)) {
                     // Docker Desktop can own a published port without exposing it to a host-side
@@ -501,15 +637,16 @@ public class Ec2ContainerManager {
 
     private ContainerSpec buildContainerSpec(String containerName, ResolvedAmiImage image, String region,
                                              String serviceEndpoint, String imdsEndpoint, String instanceId,
-                                             int sshHostPort) {
+                                             int sshHostPort, SecurityGroupFirewallManager.Namespace namespace,
+                                             boolean hasInstanceProfile) {
         // Minimal images keep the historic tail command, while cloud-image AMI guests can boot their init.
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image.dockerImage())
                 .withName(containerName)
                 .withEmbeddedDns()
                 .withDockerNetwork(Optional.empty())
-                .withEnv(localAwsEnvironment(region, serviceEndpoint, imdsEndpoint))
+                .withEnv(localAwsEnvironment(region, serviceEndpoint, imdsEndpoint,
+                        hasInstanceProfile))
                 .withEnv("AWS_EC2_INSTANCE_ID", instanceId)
-                .withPortBinding(22, sshHostPort)
                 .withHostDockerInternalOnLinux()
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
@@ -519,8 +656,14 @@ public class Ec2ContainerManager {
                 .withLabels(Map.of(LABEL_OWNER_PORT, ownerIdentity()))
                 // EC2 instances expose IMDS on 169.254.169.254. Floci needs network administration
                 // privileges in the local container to attach that link-local address.
-                .withPrivileged(true)
+                .withPrivileged(namespace == null)
                 .withCmd(image.systemd() ? List.of("/sbin/init") : List.of("tail", "-f", "/dev/null"));
+        if (namespace == null) {
+            specBuilder.withPortBinding(22, sshHostPort);
+        } else {
+            specBuilder.withNetworkMode("container:" + namespace.helperId());
+            specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+        }
         if (image.systemd()) {
             specBuilder
                     .withCgroupnsMode("host")
@@ -584,6 +727,10 @@ public class Ec2ContainerManager {
             } catch (Exception e) {
                 LOG.warnv("Error removing failed EC2 container {0}: {1}", containerId, e.getMessage());
             }
+        }
+        if (firewallManager != null && firewallManager.enabled()
+                && instance.getNetworkInterfaces() != null && !instance.getNetworkInterfaces().isEmpty()) {
+            firewallManager.unregister(instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId());
         }
         if (sshHostPort > 0) {
             portAllocator.release(sshHostPort);
@@ -675,7 +822,8 @@ public class Ec2ContainerManager {
         return false;
     }
 
-    private record StartedContainer(String containerId, int sshHostPort, String vpcAddress) {
+    private record StartedContainer(String containerId, int sshHostPort, String vpcAddress,
+                                    SecurityGroupFirewallManager.Namespace namespace, String eniId) {
     }
 
     /**
@@ -781,10 +929,19 @@ public class Ec2ContainerManager {
                     }
                 }
                 String instanceId = instance.getInstanceId();
-                String containerIp = waitForContainerBridgeIp(containerId, instanceId);
+                // A protected workload shares the helper's namespace, so it has no Docker network
+                // attachment of its own to rediscover: the helper keeps the transport address
+                // across the workload's stop/start, exactly as launch used it.
+                ProtectedNamespace namespace = protectedNamespace(instance);
+                String containerIp = namespace == null
+                        ? waitForContainerBridgeIp(containerId, instanceId)
+                        : namespace.transportAddress();
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
-                    exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
+                    if (namespace == null) {
+                        exposeReachablePrivateAddress(instance, containerIp,
+                                config.services().ec2().awsFaithfulPrivateIp());
+                    }
                     // Docker hands out a new bridge IP on restart, so the previously reported
                     // public address can now point at another container entirely.
                     if (instance.isAssociatePublicIp() || instance.getPublicIpAddress() != null) {
@@ -796,8 +953,12 @@ public class Ec2ContainerManager {
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                instance.setState(InstanceState.stopped());
+                return;
             } catch (Exception e) {
                 LOG.warnv("Error starting EC2 container {0}: {1}", containerId, e.getMessage());
+                instance.setState(InstanceState.stopped());
+                return;
             }
             instance.setState(InstanceState.running());
         });
@@ -1095,6 +1256,10 @@ public class Ec2ContainerManager {
                     Thread.currentThread().interrupt();
                 }
             }
+            if (firewallManager != null && firewallManager.enabled()
+                    && instance.getNetworkInterfaces() != null && !instance.getNetworkInterfaces().isEmpty()) {
+                firewallManager.unregister(instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId());
+            }
             if (sshHostPort > 0) {
                 portAllocator.release(sshHostPort);
             }
@@ -1307,7 +1472,7 @@ public class Ec2ContainerManager {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
         byte[] tar = buildSingleFileTar("user-data.sh", script, 0755);
         dockerClient.copyArchiveToContainerCmd(containerId)
-                .withRemotePath("/tmp")
+                .withRemotePath("/var/lib")
                 .withTarInputStream(new ByteArrayInputStream(tar))
                 .exec();
 
@@ -1626,59 +1791,30 @@ public class Ec2ContainerManager {
     }
 
     static String[] metadataProxyInstallCommand() {
-        return new String[]{"sh", "-c", String.join("\n",
-                "set -eu",
-                "if command -v ip >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then exit 0; fi",
-                "if command -v apt-get >/dev/null 2>&1; then",
-                "  apt-get update -qq >/dev/null",
-                "  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 socat curl ca-certificates >/dev/null",
-                "elif command -v dnf >/dev/null 2>&1; then",
-                // --allowerasing lets dnf swap the curl-minimal that
-                // public.ecr.aws/amazonlinux/amazonlinux:2023 ships by default for the full
-                // curl package this proxy needs. Without it, dnf aborts the whole transaction
-                // on a curl/curl-minimal conflict and iproute+socat never install either, even
-                // though neither of them conflicts with anything.
-                "  dnf install -y --allowerasing iproute socat curl ca-certificates >/dev/null",
-                // Same gap as the sshd probe: Amazon Linux 2 has only yum, so on an instance
-                // launched from ami-amazonlinux2 this chain reached its else branch and exited 1
-                // with "No supported package manager found for IMDS proxy dependencies" --
-                // leaving the instance without a link-local IMDS endpoint.
-                "elif command -v yum >/dev/null 2>&1; then",
-                "  yum install -y iproute socat curl ca-certificates >/dev/null",
-                "elif command -v apk >/dev/null 2>&1; then",
-                "  apk add --no-cache iproute2 socat curl ca-certificates >/dev/null",
-                "else",
-                "  echo 'No supported package manager found for IMDS proxy dependencies' >&2",
-                "  exit 1",
-                "fi")};
+        return Ec2MetadataProxy.installCommand();
     }
 
     static String[] metadataProxyStartCommand(String flociHost, int imdsPort) {
-        return new String[]{"sh", "-c", String.join("\n",
-                "set -eu",
-                "ip addr show dev lo | grep -q '169.254.169.254/32' || ip addr add 169.254.169.254/32 dev lo",
-                "if [ -f /tmp/floci-imds-proxy.pid ] && kill -0 \"$(cat /tmp/floci-imds-proxy.pid)\" 2>/dev/null; then",
-                "  exit 0",
-                "fi",
-                "nohup socat TCP-LISTEN:80,bind=169.254.169.254,fork,reuseaddr TCP:" + flociHost + ":" + imdsPort + " >/tmp/floci-imds-proxy.log 2>&1 &",
-                "echo $! > /tmp/floci-imds-proxy.pid",
-                "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do",
-                "  curl -fsS --max-time 1 http://169.254.169.254/latest/meta-data/instance-id >/dev/null && exit 0",
-                "  sleep 1",
-                "done",
-                "cat /tmp/floci-imds-proxy.log >&2 || true",
-                "exit 1")};
+        return Ec2MetadataProxy.startCommand(flociHost, imdsPort);
     }
 
+
     static List<String> localAwsEnvironment(String region, String serviceEndpoint, String imdsEndpoint) {
-        return List.of(
+        return localAwsEnvironment(region, serviceEndpoint, imdsEndpoint, false);
+    }
+
+    static List<String> localAwsEnvironment(String region, String serviceEndpoint, String imdsEndpoint,
+                                            boolean hasInstanceProfile) {
+        List<String> environment = new ArrayList<>(List.of(
                 "AWS_EC2_METADATA_SERVICE_ENDPOINT=" + imdsEndpoint,
                 "AWS_ENDPOINT_URL=" + serviceEndpoint,
                 "AWS_DEFAULT_REGION=" + region,
-                "AWS_REGION=" + region,
-                "AWS_ACCESS_KEY_ID=test",
-                "AWS_SECRET_ACCESS_KEY=test",
-                "AWS_SESSION_TOKEN=test-session-token");
+                "AWS_REGION=" + region));
+        if (!hasInstanceProfile) {
+            environment.addAll(List.of("AWS_ACCESS_KEY_ID=test", "AWS_SECRET_ACCESS_KEY=test",
+                    "AWS_SESSION_TOKEN=test-session-token"));
+        }
+        return environment;
     }
 
     static String summarizeUserDataOutput(BoundedOutput output) {
@@ -1892,26 +2028,7 @@ public class Ec2ContainerManager {
     }
 
     static Optional<String> preferredMetadataSourceIp(Map<String, ContainerNetwork> networks) {
-        if (networks == null || networks.isEmpty()) {
-            return Optional.empty();
-        }
-        Optional<String> configuredNetworkIp = networks.entrySet().stream()
-                .filter(entry -> !"bridge".equals(entry.getKey()))
-                .map(Map.Entry::getValue)
-                .map(ContainerNetwork::getIpAddress)
-                .filter(ip -> ip != null && !ip.isBlank())
-                .findFirst();
-        if (configuredNetworkIp.isPresent()) {
-            return configuredNetworkIp;
-        }
-        ContainerNetwork bridge = networks.get("bridge");
-        if (bridge != null && bridge.getIpAddress() != null && !bridge.getIpAddress().isBlank()) {
-            return Optional.of(bridge.getIpAddress());
-        }
-        return networks.values().stream()
-                .map(ContainerNetwork::getIpAddress)
-                .filter(ip -> ip != null && !ip.isBlank())
-                .findFirst();
+        return Ec2MetadataProxy.preferredMetadataSourceIp(networks);
     }
 
     private byte[] buildSingleFileTar(String filename, byte[] content, int mode) throws IOException {
