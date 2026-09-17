@@ -59,22 +59,24 @@ final class DynamoDbPartiQLKeyPlan {
         for (Branch branch : branches) {
             for (Cond.Leaf condition : branch.keyConditions()) {
                 String name = condition.path().root();
-                String schemaType = table.getAttributeDefinitions().stream()
-                        .filter(definition -> definition.getAttributeName().equals(name))
-                        .map(AttributeDefinition::getAttributeType)
-                        .findFirst()
-                        .orElse("S");
                 for (PVal value : values(condition)) {
                     String type = DynamoDbPartiQLParser.typeCode(value);
                     if (!Set.of("S", "N", "B").contains(type)) {
                         throw validationEx("Key value must be of type S, N, or B. Key name: " + name + ", Key type: " + type);
                     }
-                    if (!type.equals(schemaType)) {
+                    if (!matchesKeyType(table, name, value)) {
                         throw validationEx("Key attribute's data type should match its data type in table's schema: Key " + name);
                     }
                 }
             }
         }
+    }
+
+    static boolean matchesKeyType(TableDefinition table, String keyName, PVal value) {
+        return table.getAttributeDefinitions().stream()
+                .filter(definition -> definition.getAttributeName().equals(keyName))
+                .map(AttributeDefinition::getAttributeType)
+                .anyMatch(DynamoDbPartiQLParser.typeCode(value)::equals);
     }
 
     void requireNoOverlap() {

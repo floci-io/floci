@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.*;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
 import java.nio.charset.StandardCharsets;
@@ -598,6 +599,10 @@ class DynamoDbPartiQLHandler {
             throw new AwsException("ValidationException",
                     "RETURNING clause is not supported in ExecuteTransaction.", 400);
         }
+        Optional<TransactMember> keyProblem = keyProblemOf(stmt, table);
+        if (keyProblem.isPresent()) {
+            return keyProblem.get();
+        }
         ObjectNode txItem = mapper.createObjectNode();
         switch (stmt) {
             case Stmt.Insert ins -> {
@@ -674,6 +679,41 @@ class DynamoDbPartiQLHandler {
         return check;
     }
 
+    // A write that does not name exactly one item cancels the transaction instead of failing it
+    // (checked on real AWS, eu-west-2, 2026-09-17).
+    private static Optional<TransactMember> keyProblemOf(Stmt stmt, TableDefinition table) {
+        return switch (stmt) {
+            case Stmt.Insert ins -> table.getKeySchema().stream()
+                    .map(KeySchemaElement::getAttributeName)
+                    .filter(name -> !ins.item().containsKey(name))
+                    .findFirst()
+                    .map(name -> TransactMember.cancels("ValidationError",
+                            "One or more parameter values were invalid: Missing the key " + name + " in the item"));
+            case Stmt.Update upd -> wrongKey(table, upd.where());
+            case Stmt.Delete del -> wrongKey(table, del.where());
+            default -> Optional.empty();
+        };
+    }
+
+    private static Optional<TransactMember> wrongKey(TableDefinition table, List<Cond> where) {
+        if (namesOneItem(table, where)) {
+            return Optional.empty();
+        }
+        return Optional.of(TransactMember.cancels("ValidationError", "The provided key element does not match the schema"));
+    }
+
+    private static boolean namesOneItem(TableDefinition table, List<Cond> where) {
+        Set<String> keyNames = keyAttributeNames(table);
+        Map<String, PVal> firstValues = new HashMap<>();
+        for (Cond c : where) {
+            if (c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames) && !matchesFirstValue(firstValues, eq)) {
+                return false;
+            }
+        }
+        return firstValues.size() == keyNames.size() && firstValues.entrySet().stream()
+                .allMatch(key -> DynamoDbPartiQLKeyPlan.matchesKeyType(table, key.getKey(), key.getValue()));
+    }
+
     // A read of a missing table cancels too, and it is found before the index qualifier is checked.
     TransactMember toTransactGetItem(Stmt.Select stmt, String region) {
         Optional<TableDefinition> found = service.findTable(stmt.table(), region);
@@ -689,6 +729,9 @@ class DynamoDbPartiQLHandler {
         if (!namesOnlyTheKey(table, stmt.where())) {
             throw new AwsException("ValidationException",
                     "Select statements within ExecuteTransaction must specify the primary key in the where clause.", 400);
+        }
+        if (!namesOneItem(table, asEqualities(stmt.where()))) {
+            return TransactMember.cancels("ValidationError", "The provided key element does not match the schema");
         }
         ObjectNode get = mapper.createObjectNode();
         get.put("TableName", stmt.table());

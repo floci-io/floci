@@ -584,6 +584,30 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("missing").body("Item.a", nullValue());
     }
 
+    @Test
+    @Order(26)
+    void cancelsATransactionWhoseWriteDoesNotNameOneItem() {
+        putItem("keys", "\"flag\":{\"S\":\"right\"}");
+        String update = "UPDATE \"" + TABLE + "\" SET a=1 WHERE ";
+        String mismatch = "The provided key element does not match the schema";
+
+        transaction(update + "pk='keys'", update + "pk IN ['keys'] AND sk='1'", update + "pk='keys' AND sk='1' AND pk='other'",
+                update + "pk='keys' AND sk=1", update + "pk='keys' AND sk='1'")
+            .statusCode(400)
+            .body("CancellationReasons.Code", contains("ValidationError", "ValidationError", "ValidationError",
+                    "ValidationError", "None"))
+            .body("CancellationReasons[0].Message", equalTo(mismatch))
+            .body("CancellationReasons[3].Message", equalTo(mismatch));
+        transaction("INSERT INTO \"" + TABLE + "\" VALUE {'pk':'keys-insert'}", "DELETE FROM \"" + TABLE + "\" WHERE sk='1'")
+            .statusCode(400)
+            .body("CancellationReasons[0].Message", equalTo("One or more parameter values were invalid: Missing the key sk in the item"))
+            .body("CancellationReasons[1].Message", equalTo(mismatch));
+        transaction("SELECT * FROM \"" + TABLE + "\" WHERE pk='keys' AND sk=1")
+            .statusCode(400)
+            .body("CancellationReasons[0].Message", equalTo(mismatch));
+        getItem("keys").body("Item.a", nullValue());
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
