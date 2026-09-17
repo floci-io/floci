@@ -295,6 +295,7 @@ class CloudWatchLogsMetricFilterRetryTest {
             start.countDown();
             first.get(5, TimeUnit.SECONDS);
             second.get(5, TimeUnit.SECONDS);
+            f.service.publishQueued();
             assertEquals(3, f.service.pendingSamples());
             sink.fail = false;
             Future<?> retryOne = pool.submit(f.service::retryPending);
@@ -314,7 +315,7 @@ class CloudWatchLogsMetricFilterRetryTest {
         f.service.start(!logsDisabled, logsDisabled);
         f.put("disabled", "ERROR", "3", 7.0);
         f.ingest(TIME, "ERROR");
-        assertFalse(f.service.retryWorkerRunning());
+        assertFalse(f.service.publisherRunning());
         f.stats("disabled", TIME, 0, 0);
         assertEquals(0, f.service.pendingSamples());
     }
@@ -323,13 +324,13 @@ class CloudWatchLogsMetricFilterRetryTest {
     void enabledWorkerStartsOnceAndStopIsIdempotentAndCancelsPending() {
         f.service.start(true, true);
         f.service.start(true, true);
-        assertTrue(f.service.retryWorkerRunning());
+        assertTrue(f.service.publisherRunning());
         f.put("stop", "ERROR", "3", 7.0);
         sink.fail = true;
         f.ingest(TIME, "INFO");
         f.service.stop();
         f.service.stop();
-        assertFalse(f.service.retryWorkerRunning());
+        assertFalse(f.service.publisherRunning());
         assertEquals(0, f.service.pendingSamples());
         sink.fail = false;
         f.service.retryPending();

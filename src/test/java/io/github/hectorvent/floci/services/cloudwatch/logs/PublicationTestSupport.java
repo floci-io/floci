@@ -43,8 +43,12 @@ class PublicationTestSupport {
         this(new InMemoryStorage<>());
     }
 
-    @SuppressWarnings("unchecked")
     PublicationTestSupport(StorageBackend<String, MetricDatum> sink) {
+        this(sink, CloudWatchLogsMetricFilterService.MAX_QUEUED_SAMPLES);
+    }
+
+    @SuppressWarnings("unchecked")
+    PublicationTestSupport(StorageBackend<String, MetricDatum> sink, int queueCapacity) {
         Instance<RequestContext> contexts = mock(Instance.class);
         RequestContext context = mock(RequestContext.class);
         when(contexts.get()).thenReturn(context);
@@ -64,7 +68,7 @@ class PublicationTestSupport {
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), contexts, ACCOUNT), filters,
                 new InMemoryStorage<>(), 10_000, Integer.MAX_VALUE, resolver, 0L, System::currentTimeMillis,
                 ingested, deleted);
-        service = new CloudWatchLogsMetricFilterService(logs, metrics, resolver);
+        service = new CloudWatchLogsMetricFilterService(logs, metrics, resolver, queueCapacity);
         doAnswer(call -> { service.onLogEventsIngested(call.getArgument(0)); return null; }).when(ingested).fire(any());
         doAnswer(call -> { service.onLogGroupDeleted(call.getArgument(0)); return null; }).when(deleted).fire(any());
         group(GROUP, REGION);
@@ -98,7 +102,18 @@ class PublicationTestSupport {
         ingest(null, GROUP, REGION, time, List.of(messages));
     }
 
+    /** Ingests and drains the publication queue on this thread, as the worker would. */
     void ingest(String owner, String group, String region, long time, List<String> messages) {
+        enqueue(owner, group, region, time, messages);
+        service.publishQueued();
+    }
+
+    /** Ingests without draining: the samples stay queued until publishQueued, start or stop. */
+    void enqueue(long time, String... messages) {
+        enqueue(null, GROUP, REGION, time, List.of(messages));
+    }
+
+    void enqueue(String owner, String group, String region, long time, List<String> messages) {
         List<Map<String, Object>> events = messages.stream()
                 .map(message -> Map.<String, Object>of("timestamp", time, "message", message)).toList();
         assertNotNull(logs.putLogEventsForAccount(owner, group, "s", events, region));

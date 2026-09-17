@@ -23,6 +23,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -33,8 +34,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
@@ -79,7 +82,19 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
     private final CloudWatchMetricsService metricsService;
     private final RegionResolver regionResolver;
 
-    /** Process-local best effort, bounded by samples, not ingestion batches. No durable outbox. */
+    /**
+     * Accepted samples wait here for the publisher thread, so PutLogEvents never writes to the Metrics
+     * sink itself. ponytail: one fixed ceiling and one worker; a batch that does not fit is written
+     * inline on the request thread instead of being dropped. Shard the queue if that shows in traces.
+     */
+    static final int MAX_QUEUED_SAMPLES = 100_000;
+    private final int queueCapacity;
+    private final ArrayDeque<Batch> queued = new ArrayDeque<>();
+    private int queuedSamples;
+    /** Bumped by every reset or clear, so a batch taken before one is never written after it. */
+    private int resetGeneration;
+    private final AtomicBoolean drainScheduled = new AtomicBoolean();
+    /** Failed samples retried by the worker. Process-local best effort, bounded by samples. No durable outbox. */
     private static final int MAX_PENDING_SAMPLES = 10_000;
     private final Map<String, Publication> pending = new LinkedHashMap<>();
     // One detail per owning filter's pending-work outage, then one aggregate warning per 60
@@ -89,12 +104,19 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
     private int failedRetryTicks;
     // The canonical filter backend is the only monitor, shared with quotas and group deletion.
     // Never acquire StorageFactory's monitor while holding a separate runtime-state monitor.
-    private ScheduledExecutorService retryWorker;
+    private ScheduledExecutorService publisher;
     private boolean enabled = true;
     private boolean paused;
     private boolean stopped;
 
     private record Owner(String account, String region, String group, String filter) {}
+
+    /** One filter's samples for one PutLogEvents request, evaluated at ingestion and immutable after. */
+    private record Batch(Owner owner, List<Publication> publications) {
+        Batch {
+            publications = List.copyOf(publications);
+        }
+    }
 
     private record Publication(String id, Owner owner, String namespace, String metricName, String unit,
                                List<Dimension> dimensions, double value, long timestamp) {
@@ -116,10 +138,16 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
     @Inject
     public CloudWatchLogsMetricFilterService(CloudWatchLogsService logsService,
                                              CloudWatchMetricsService metricsService, RegionResolver regionResolver) {
+        this(logsService, metricsService, regionResolver, MAX_QUEUED_SAMPLES);
+    }
+
+    CloudWatchLogsMetricFilterService(CloudWatchLogsService logsService, CloudWatchMetricsService metricsService,
+                                      RegionResolver regionResolver, int queueCapacity) {
         this.store = logsService.metricFilterStore();
         this.logsService = logsService;
         this.metricsService = metricsService;
         this.regionResolver = regionResolver;
+        this.queueCapacity = queueCapacity;
     }
 
     /** A page of DescribeMetricFilters. */
@@ -501,7 +529,10 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
         }
     }
 
-    /** Publishes each event's contribution immediately, independent of other events or later traffic. */
+    /**
+     * Evaluates the group's filters as they are at ingestion and queues each event's contribution,
+     * independent of other events or later traffic. The Metrics writes happen on the publisher thread.
+     */
     void onLogEventsIngested(@Observes LogEventsIngested event) {
         synchronized (store) {
             if (!enabled || paused || stopped) {
@@ -513,7 +544,7 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
                 for (MetricFilter filter : filtersOf(event.logGroupName(), event.region(), account)) {
                     try {
                         if (selects(filter, account, event.region())) {
-                            publish(filter, event, account);
+                            enqueue(evaluate(filter, event, account));
                         }
                     } catch (RuntimeException e) {
                         LOG.errorv(e, "Cannot evaluate metric filter: account={0}, region={1}, group={2}, filter={3}",
@@ -528,14 +559,12 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
         }
     }
 
-    private void publish(MetricFilter filter, LogEventsIngested event, String account) {
+    private Batch evaluate(MetricFilter filter, LogEventsIngested event, String account) {
         FilterPattern pattern = FilterPattern.parse(filter.getFilterPattern());
         MetricTransformation t = filter.getMetricTransformations().getFirst();
         Double literal = number(t.getMetricValue());
         Owner owner = new Owner(account, event.region(), event.logGroupName(), filter.getFilterName());
-        int failed = 0;
-        int dropped = 0;
-        RuntimeException firstFailure = null;
+        List<Publication> publications = new ArrayList<>();
         for (LogEvent logEvent : event.events()) {
             FilterMatch match = pattern.match(logEvent.getMessage());
             Double value = t.getDefaultValue();
@@ -559,9 +588,88 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
                 withSystemDimensions(filter, account, event.region(), dimensions);
             }
             if (value != null) {
-                Publication publication = new Publication(UUID.randomUUID().toString(), owner, t.getMetricNamespace(),
+                publications.add(new Publication(UUID.randomUUID().toString(), owner, t.getMetricNamespace(),
                         t.getMetricName(), t.getUnit() == null ? "None" : t.getUnit(), dimensions,
-                        value, logEvent.getTimestamp() / 1000);
+                        value, logEvent.getTimestamp() / 1000));
+            }
+        }
+        return new Batch(owner, publications);
+    }
+
+    /** Under the monitor. A batch the queue cannot hold is written here, on the request thread. */
+    private void enqueue(Batch batch) {
+        int size = batch.publications().size();
+        if (size == 0) {
+            return;
+        }
+        if (queuedSamples + size > queueCapacity) {
+            write(batch);
+            return;
+        }
+        queued.addLast(batch);
+        queuedSamples += size;
+        scheduleDrain();
+    }
+
+    private void scheduleDrain() {
+        if (publisher == null || !drainScheduled.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            publisher.execute(() -> {
+                drainScheduled.set(false);
+                try {
+                    publishQueued();
+                } catch (RuntimeException e) {
+                    LOG.errorv(e, "Metric publication drain failed; queued work retained");
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // Racing stop(), whose synchronous drain picks the batch up.
+            drainScheduled.set(false);
+            LOG.debugv("Metric publisher already stopping; {0} queued samples drain on shutdown", queuedSamples);
+        }
+    }
+
+    /** Writes every queued batch. The worker's entry point, also used by tests and the shutdown drain. */
+    void publishQueued() {
+        while (true) {
+            Batch batch;
+            int generation;
+            synchronized (store) {
+                if (paused) {
+                    return;
+                }
+                batch = queued.pollFirst();
+                if (batch == null) {
+                    return;
+                }
+                queuedSamples -= batch.publications().size();
+                generation = resetGeneration;
+            }
+            write(batch, generation);
+        }
+    }
+
+    /** Under the monitor, for a batch the queue cannot hold. */
+    private void write(Batch batch) {
+        write(batch, resetGeneration);
+    }
+
+    /**
+     * One monitor acquisition per sample, so a PutMetricFilter or a reset waits for at most one
+     * write. A reset seen mid-batch, paused or already completed, discards the rest: the samples
+     * belong to the state that was wiped.
+     */
+    private void write(Batch batch, int generation) {
+        int failed = 0;
+        int dropped = 0;
+        RuntimeException firstFailure = null;
+        for (Publication publication : batch.publications()) {
+            synchronized (store) {
+                if (paused || generation != resetGeneration) {
+                    return;
+                }
                 try {
                     write(publication);
                 } catch (RuntimeException e) {
@@ -577,13 +685,16 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
                 }
             }
         }
+        Owner owner = batch.owner();
         if (failed > dropped) {
             // Only retained work owns suppression state. Dropped-only work gets the ERROR below.
-            logPublicationFailureOnce(owner, firstFailure);
+            synchronized (store) {
+                logPublicationFailureOnce(owner, firstFailure);
+            }
         }
         if (dropped > 0) {
             LOG.errorv("Metric publication retry queue overflow: account={0}, region={1}, group={2}, filter={3}, dropped={4}, capacity={5}",
-                    account, event.region(), event.logGroupName(), filter.getFilterName(), dropped, MAX_PENDING_SAMPLES);
+                    owner.account(), owner.region(), owner.group(), owner.filter(), dropped, MAX_PENDING_SAMPLES);
         }
     }
 
@@ -646,13 +757,18 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
 
     void start(boolean logsEnabled, boolean metricsEnabled) {
         synchronized (store) {
-            if (retryWorker != null || stopped) {
+            if (publisher != null || stopped) {
                 return;
             }
             enabled = logsEnabled && metricsEnabled;
-            if (enabled) {
-                retryWorker = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "logs-metric-publication-retry"));
-                retryWorker.scheduleWithFixedDelay(this::retryPending, 1, 1, TimeUnit.SECONDS);
+            if (!enabled) {
+                discardQueued();
+                return;
+            }
+            publisher = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "logs-metric-publisher"));
+            publisher.scheduleWithFixedDelay(this::retryPending, 1, 1, TimeUnit.SECONDS);
+            if (!queued.isEmpty()) {
+                scheduleDrain();
             }
         }
     }
@@ -662,25 +778,36 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
         stop();
     }
 
+    /** Accepted samples are written before storage shuts down; failed retries are abandoned. */
     @PreDestroy
     void stop() {
         ScheduledExecutorService worker;
         synchronized (store) {
             stopped = true;
-            pending.clear();
-            forgetCompletedOutages();
-            worker = retryWorker;
+            worker = publisher;
         }
+        publishQueued();
         if (worker != null) {
             worker.shutdownNow();
             try {
                 if (!worker.awaitTermination(5, TimeUnit.SECONDS)) {
-                    LOG.errorv("Metric publication retry worker did not terminate within 5 seconds");
+                    LOG.errorv("Metric publisher did not terminate within 5 seconds");
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                LOG.warnv(e, "Interrupted while stopping metric publication retry worker");
+                LOG.warnv(e, "Interrupted while stopping the metric publisher");
             }
+        }
+        // After the worker is gone, so a write failing during the drain cannot repopulate the map.
+        synchronized (store) {
+            pending.clear();
+            forgetCompletedOutages();
+        }
+    }
+
+    int queuedSamples() {
+        synchronized (store) {
+            return queuedSamples;
         }
     }
 
@@ -690,18 +817,19 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
         }
     }
 
-    boolean retryWorkerRunning() {
+    boolean publisherRunning() {
         synchronized (store) {
-            return retryWorker != null && !retryWorker.isShutdown();
+            return publisher != null && !publisher.isShutdown();
         }
     }
 
     @Override
     public void beforeReset() {
         synchronized (store) {
-            // Acquiring the canonical monitor drains any active write. Release it before the
+            // Acquiring the canonical monitor drains the active write. Release it before the
             // controller enters StorageFactory.clearAll(), avoiding factory/backend inversion.
             paused = true;
+            discardQueued();
             pending.clear();
             forgetCompletedOutages();
         }
@@ -717,9 +845,16 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
     @Override
     public void clear() {
         synchronized (store) {
+            discardQueued();
             pending.clear();
             forgetCompletedOutages();
         }
+    }
+
+    private void discardQueued() {
+        queued.clear();
+        queuedSamples = 0;
+        resetGeneration++;
     }
 
     private List<MetricFilter> filtersOf(String logGroupName, String region) {

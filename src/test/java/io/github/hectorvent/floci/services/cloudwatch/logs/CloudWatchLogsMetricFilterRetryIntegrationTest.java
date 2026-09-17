@@ -12,11 +12,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -68,7 +70,7 @@ class CloudWatchLogsMetricFilterRetryIntegrationTest {
         doThrow(new IllegalStateException("outage through reset")).when(metrics)
                 .publishMetricForAccount(anyString(), eq(group), any(), eq("eu-west-1"), anyString());
         ingest(group);
-        assertTrue(publications.pendingSamples() > 0);
+        await().atMost(Duration.ofSeconds(10)).until(() -> publications.pendingSamples() > 0);
         given().post("/_floci/state/reset").then().statusCode(200).body("status", equalTo("OK"));
         assertEquals(0, publications.pendingSamples());
         reset(metrics);
@@ -76,8 +78,8 @@ class CloudWatchLogsMetricFilterRetryIntegrationTest {
         statistics(group).then().statusCode(200).body("Datapoints", hasSize(0));
         create(group);
         ingest(group);
-        statistics(group).then().statusCode(200).body("Datapoints[0].Sum", equalTo(7.0f))
-                .body("Datapoints[0].SampleCount", equalTo(1.0f));
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> statistics(group).then().statusCode(200)
+                .body("Datapoints[0].Sum", equalTo(7.0f)).body("Datapoints[0].SampleCount", equalTo(1.0f)));
         logs("DeleteLogGroup", "{\"logGroupName\":\"" + group + "\"}").then().statusCode(200);
     }
 

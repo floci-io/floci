@@ -218,7 +218,9 @@ class CloudWatchLogsMetricFilterStorageReloadTest {
             return factory.create("cloudformation", "reload-resources.json", new TypeReference<>() {});
         }
 
+        /** Production order: the publisher drains and stops before storage shuts down. */
         @Override public void close() {
+            filters.stop();
             factory.shutdownAll();
         }
     }

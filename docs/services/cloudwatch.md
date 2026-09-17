@@ -97,15 +97,25 @@ as a unit while requested system dimensions are retained. Null ordinary dimensio
 treated as missing; empty strings retain the existing scalar-extraction behavior. These combinations
 were not measured by the recorded probes. Floci does not infer centralized source provenance.
 
-**Runtime publication failures:** accepted Logs ingestion remains successful if the Metrics sink
-reports a failure. Each failed sample retains an immutable account/region/group/filter and transformation
-snapshot, event timestamp and stable internal publication ID. Retries replace that same metric-store
-key, making partial or ambiguous writes safe without deduplicating distinct identical log events.
-The existing AWS `PutMetricData` APIs continue appending samples as before.
+**Publication runs off the request thread:** `PutLogEvents` evaluates the group's filters as they
+are at that moment, builds one immutable sample per contributing event (canonical account, region,
+group, filter, transformation snapshot, event timestamp and a stable internal publication ID) and
+hands them to a process-wide queue. One managed worker writes them to the Metrics store, so
+ingestion latency does not depend on the Metrics sink and a `PutMetricFilter` or a reset waits for
+at most one sample write. The queue holds **100,000 samples**; a batch that does not fit is written
+on the request thread under the filter-store monitor instead of being dropped, so accepted samples
+are never lost to the bound and only an overfull queue makes the request wait on the sink.
+A read issued immediately after `PutLogEvents` may run before the worker has written the sample,
+as on AWS; SDK tests should poll. Shutdown drains the queue before storage shuts down.
 
-One managed worker retries only failed publications at one-second intervals while both Logs and
-Metrics services are enabled; idle ticks never create defaults. The process-wide queue holds at most
-**10,000 samples**, not 10,000 batches. This fixed conservative limit bounds outage memory without
+**Runtime publication failures:** accepted Logs ingestion remains successful if the Metrics sink
+reports a failure. Each failed sample keeps its snapshot and publication ID, and retries replace
+that same metric-store key, making partial or ambiguous writes safe without deduplicating distinct
+identical log events. The existing AWS `PutMetricData` APIs continue appending samples as before.
+
+The same worker retries failed publications at one-second intervals while both Logs and Metrics
+services are enabled; idle ticks never create defaults. The retry map holds at most **10,000
+samples**, not 10,000 batches. This fixed conservative limit bounds outage memory without
 introducing a configuration surface. When full, new failed samples are dropped with an **ERROR**
 containing account, region, group, filter and dropped count; already queued samples and their IDs are
 preserved. Successful retries and cancellations release capacity. Each filter-owned outage logs
@@ -115,15 +125,16 @@ lossless delivery through an indefinite outage. Pending work is in memory only; 
 pending publication is not implemented. Storage failures that a backend only logs rather than
 throws are not observable to this retry path; configured storage durability semantics are unchanged.
 
-A filter update affects new ingestion only; old queued samples may still publish under the old
-definition. Deleting a filter or group cancels only its own account/region-scoped pending work and
-does not retract stored metrics. Reset pauses publication, drains active synchronous store writes,
-cancels pending work, wipes storage and resumes the same live service. The canonical filter-store
-monitor serializes publication with update/delete; reset hooks release it before the storage-factory
-wipe to avoid lock inversion. Shutdown drains active synchronous writes and cancels the queue before
-storage shutdown, then stops the worker (up to five seconds to await executor termination). Storage
-backends expose synchronous operations without a cancellation deadline; a stuck backend can delay
-that initial drain. Runtime cancellation is not a crash-recovery guarantee.
+A filter update or deletion affects new ingestion only: samples already accepted for a batch still
+publish under the definition that was current at ingestion, as on AWS, and deleting a filter or
+group cancels only its own account/region-scoped failed retries without retracting stored metrics.
+Reset pauses publication, waits for the active sample write, discards queued and failed samples,
+wipes storage and resumes the same live service. The canonical filter-store monitor serializes
+each sample write with update/delete; reset hooks release it before the storage-factory wipe to
+avoid lock inversion. Shutdown writes the queued samples, abandons failed retries and stops the
+worker (up to five seconds to await executor termination). Storage backends expose synchronous
+operations without a cancellation deadline; a stuck backend can delay that drain. Runtime
+cancellation is not a crash-recovery guarantee.
 
 Samples are readable with `GetMetricStatistics` and `GetMetricData`, and alarms evaluate normally.
 

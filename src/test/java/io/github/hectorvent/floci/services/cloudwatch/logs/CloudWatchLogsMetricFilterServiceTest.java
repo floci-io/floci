@@ -225,6 +225,8 @@ class CloudWatchLogsMetricFilterServiceTest {
         event.setTimestamp(1_700_000_000_000L);
 
         service.onLogEventsIngested(new LogEventsIngested(null, REGION, GROUP, "s", List.of(event)));
+        assertEquals(0, service.queuedSamples());
+        service.publishQueued();
 
         verifyNoInteractions(metrics);
     }

@@ -22,6 +22,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -36,6 +37,7 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -622,7 +624,7 @@ class CloudFormationLogsMetricFilterIntegrationTest {
                 .body(Map.of("logGroupName", group, "logStreamName", stream,
                         "logEvents", List.of(Map.of("timestamp", timestamp, "message", message))))
                 .post("/").then().statusCode(200);
-        given().contentType("application/x-amz-json-1.0")
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> given().contentType("application/x-amz-json-1.0")
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260908/us-east-1/monitoring/aws4_request")
                 .header("X-Amz-Target", "GraniteServiceVersion20100801.GetMetricStatistics")
                 .body(Map.of("Namespace", namespace, "MetricName", "ErrorCount", "Period", 60,
@@ -630,7 +632,7 @@ class CloudFormationLogsMetricFilterIntegrationTest {
                         "Statistics", List.of("Sum", "SampleCount")))
                 .post("/").then().statusCode(200)
                 .body("Datapoints", hasSize(1)).body("Datapoints[0].Sum", equalTo((float) value))
-                .body("Datapoints[0].SampleCount", equalTo(1.0f));
+                .body("Datapoints[0].SampleCount", equalTo(1.0f)));
     }
 
     @Test

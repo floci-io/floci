@@ -6,11 +6,13 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
@@ -100,7 +102,9 @@ class CloudWatchLogsMetricFilterIntegrationTest {
 
         Instant from = Instant.ofEpochMilli(now).minusSeconds(120);
         Instant to = Instant.ofEpochMilli(now).plusSeconds(120);
-        assertEquals(1534 + 4355, sum(statistics(group, "Volume", "Status", "200", from, to)), 0.001);
+        // The 4355 sample is the batch's last write, so its sum arriving means the 500 sample is stored too.
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertEquals(1534 + 4355, sum(statistics(group, "Volume", "Status", "200", from, to)), 0.001));
         assertEquals(5324, sum(statistics(group, "Volume", "Status", "500", from, to)), 0.001);
         assertEquals(0, sum(statistics(group, "Volume", "Status", "404", from, to)), 0.001);
     }
@@ -120,6 +124,8 @@ class CloudWatchLogsMetricFilterIntegrationTest {
         putLogEvents(group, "app", time, List.of("INFO one", "INFO two", "INFO three"));
         Instant from = Instant.ofEpochMilli(time);
         Instant to = from.plusSeconds(59);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertEquals(21, sum(statistics(group, "ErrorCount", null, null, from, to)), 0.001));
         for (int read = 0; read < 2; read++) {
             Response result = statistics(group, "ErrorCount", null, null, from, to);
             assertEquals(21, sum(result), 0.001);

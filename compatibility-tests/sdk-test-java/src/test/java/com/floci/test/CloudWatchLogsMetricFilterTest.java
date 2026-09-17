@@ -62,7 +62,7 @@ class CloudWatchLogsMetricFilterTest {
     }
 
     @Test
-    void aFilterIsStoredDescribedTestedAndPublishesItsMetric() {
+    void aFilterIsStoredDescribedTestedAndPublishesItsMetric() throws InterruptedException {
         logs.putMetricFilter(r -> r
                 .logGroupName(group)
                 .filterName("volume")
@@ -121,14 +121,22 @@ class CloudWatchLogsMetricFilterTest {
                 InputLogEvent.builder().timestamp(now + 2).message(
                         "127.0.0.1 - frank [10/Oct/2000:13:50:35 -0700] \"GET /index.html HTTP/1.0\" 200 4355").build()));
 
-        List<Datapoint> datapoints = cloudWatch.getMetricStatistics(r -> r
-                .namespace(namespace)
-                .metricName("Volume")
-                .dimensions(Dimension.builder().name("Status").value("200").build())
-                .startTime(Instant.ofEpochMilli(now).minusSeconds(120))
-                .endTime(Instant.ofEpochMilli(now).plusSeconds(120))
-                .period(300)
-                .statistics(Statistic.SUM, Statistic.SAMPLE_COUNT)).datapoints();
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        List<Datapoint> datapoints;
+        do {
+            datapoints = cloudWatch.getMetricStatistics(r -> r
+                    .namespace(namespace)
+                    .metricName("Volume")
+                    .dimensions(Dimension.builder().name("Status").value("200").build())
+                    .startTime(Instant.ofEpochMilli(now).minusSeconds(120))
+                    .endTime(Instant.ofEpochMilli(now).plusSeconds(120))
+                    .period(300)
+                    .statistics(Statistic.SUM, Statistic.SAMPLE_COUNT)).datapoints();
+            if (datapoints.stream().mapToDouble(Datapoint::sampleCount).sum() >= 2) {
+                break;
+            }
+            Thread.sleep(50);
+        } while (System.nanoTime() < deadline);
         assertThat(datapoints.stream().mapToDouble(Datapoint::sum).sum()).isEqualTo(1534 + 4355);
         assertThat(datapoints.stream().mapToDouble(Datapoint::sampleCount).sum()).isEqualTo(2);
 
