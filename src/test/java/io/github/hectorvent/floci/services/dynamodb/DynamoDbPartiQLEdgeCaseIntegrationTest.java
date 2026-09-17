@@ -134,6 +134,37 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("sets").body("Item.BandMembers.SS", containsInAnyOrder("member1", "member2"));
     }
 
+    @Test
+    @Order(7)
+    void refusesDuplicateMembersInABag() {
+        putItem("bags", "\"s\":{\"SS\":[\"a\"]},\"n\":{\"NS\":[\"1\"]}");
+        String update = "UPDATE \"" + TABLE + "\" SET ";
+        String where = " WHERE pk='bags' AND sk='1'";
+
+        statement(update + "s = set_add(s, <<'b','b'>>)" + where)
+            .statusCode(400)
+            .body("message", equalTo(
+                    "One or more parameter values were invalid: Input collection [b, b] contains duplicates."));
+        statement(update + "n = set_add(n, <<2, 2.0>>)" + where)
+            .statusCode(400)
+            .body("message", equalTo(
+                    "One or more parameter values were invalid: Input collection [2, 2.0] contains duplicates! under root"));
+        statement("SELECT sk FROM \"" + TABLE + "\"" + where + " AND s = <<'a','a'>>")
+            .statusCode(400)
+            .body("message", equalTo(
+                    "One or more parameter values were invalid: Input collection [a, a] contains duplicates."));
+        transaction("INSERT INTO \"" + TABLE + "\" VALUE {'pk':'bags-tx','sk':'1','x':[<<'a','a'>>]}")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]:"
+                    + " One or more parameter values were invalid: Input collection [a, a] contains duplicates."));
+        getItem("bags-tx").body("Item", nullValue());
+
+        statement(update + "n = <<1, 10>>" + where).statusCode(200);
+        getItem("bags")
+            .body("Item.s.SS", containsInAnyOrder("a"))
+            .body("Item.n.NS", containsInAnyOrder("1", "10"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

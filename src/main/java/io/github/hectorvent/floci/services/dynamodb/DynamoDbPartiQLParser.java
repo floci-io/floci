@@ -884,7 +884,23 @@ public class DynamoDbPartiQLParser {
             throw validationEx(
                     "Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags");
         }
+        requireDistinctMembers(memberType, members);
         return new PVal.Bag(memberType + "S", List.copyOf(members));
+    }
+
+    private static void requireDistinctMembers(String memberType, List<PVal> members) {
+        boolean numbers = memberType.equals("N");
+        List<String> texts = members.stream()
+                .map(member -> member instanceof PVal.Num n ? n.v() : ((PVal.Str) member).v())
+                .toList();
+        long distinct = texts.stream()
+                .map(text -> numbers ? DynamoDbNumberUtils.validateAndNormalize(text) : text)
+                .distinct()
+                .count();
+        if (distinct < texts.size()) {
+            throw validationEx("One or more parameter values were invalid: Input collection ["
+                    + String.join(", ", texts) + "] contains duplicates" + (numbers ? "! under root" : "."));
+        }
     }
 
     private PVal resolveParam() {
