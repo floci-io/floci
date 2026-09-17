@@ -740,23 +740,23 @@ public class S3Service implements Resettable, ResourceProvider {
      * reusing the identity-policy + resource-policy evaluation a genuine SigV4 request goes
      * through. Used for Redshift {@code COPY ... IAM_ROLE '<arn>'}.
      */
-    public void authorizeSignedGetObject(String accessKeyId, String bucketName, String key) {
-        authorizeGetObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, null));
+    public void authorizeSignedGetObject(String accessKeyId, String sessionToken, String bucketName, String key) {
+        authorizeGetObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, sessionToken));
     }
 
     /** Authorize a signed {@code s3:PutObject}; see {@link #authorizeSignedGetObject}. */
-    public void authorizeSignedPutObject(String accessKeyId, String bucketName, String key) {
-        authorizePutObject(bucketName, key, new RequestAuthorization(true, accessKeyId, null));
+    public void authorizeSignedPutObject(String accessKeyId, String sessionToken, String bucketName, String key) {
+        authorizePutObject(bucketName, key, new RequestAuthorization(true, accessKeyId, sessionToken));
     }
 
     /** Authorize a signed {@code s3:ListBucket}; see {@link #authorizeSignedGetObject}. */
-    public void authorizeSignedListBucket(String accessKeyId, String bucketName) {
-        authorizeListBucket(bucketName, new RequestAuthorization(true, accessKeyId, null));
+    public void authorizeSignedListBucket(String accessKeyId, String sessionToken, String bucketName) {
+        authorizeListBucket(bucketName, new RequestAuthorization(true, accessKeyId, sessionToken));
     }
 
     /** Authorize a signed {@code s3:DeleteObject}; see {@link #authorizeSignedGetObject}. */
-    public void authorizeSignedDeleteObject(String accessKeyId, String bucketName, String key) {
-        authorizeDeleteObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, null));
+    public void authorizeSignedDeleteObject(String accessKeyId, String sessionToken, String bucketName, String key) {
+        authorizeDeleteObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, sessionToken));
     }
 
     public void authorizeCloudFrontOacGetObject(
@@ -953,7 +953,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElse(false);
     }
 
-    boolean isAuthEnforced() {
+    public boolean isAuthEnforced() {
         return enforceAuth;
     }
 

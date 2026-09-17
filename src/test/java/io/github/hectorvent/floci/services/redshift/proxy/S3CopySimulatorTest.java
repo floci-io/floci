@@ -221,10 +221,10 @@ class S3CopySimulatorTest {
 
         org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousGetObject(any(), any());
         org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousListBucket(any());
-        org.mockito.Mockito.verify(s3).authorizeSignedListBucket(any(), eq("b"));
-        org.mockito.Mockito.verify(s3).authorizeSignedGetObject(any(), eq("b"), eq("k"));
+        org.mockito.Mockito.verify(s3).authorizeSignedListBucket(any(), any(), eq("b"));
+        org.mockito.Mockito.verify(s3).authorizeSignedGetObject(any(), any(), eq("b"), eq("k"));
         org.mockito.Mockito.verify(iamService).registerSessionForAccount(
-                eq("000000000000"), any(), any(), eq(ROLE_ARN), any(), isNull());
+                eq("000000000000"), any(), any(), any(), eq(ROLE_ARN), any(), isNull());
         org.mockito.Mockito.verify(iamService).unregisterSession(eq("000000000000"), any());
     }
 

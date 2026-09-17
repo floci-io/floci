@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
@@ -67,13 +70,21 @@ public final class S3CopySimulator {
     /** COPY/UNLOAD is synchronous end-to-end; this only needs to outlive one statement. */
     private static final Duration ROLE_SESSION_TTL = Duration.ofMinutes(5);
 
+    // S3Service's signed-request authorization only checks the bucket's resource policy: for a
+    // genuine HTTP request the identity-policy gate already happened upstream in
+    // IamEnforcementFilter before the request ever reached S3Service. This in-process call never
+    // goes through that filter, so the role's identity policy is evaluated here explicitly.
+    // Stateless (only needs an ObjectMapper), so a local instance avoids threading a new
+    // dependency through the whole proxy chain for this one check.
+    private static final IamPolicyEvaluator ROLE_POLICY_EVALUATOR = new IamPolicyEvaluator(new ObjectMapper());
+
     private S3CopySimulator() {
     }
 
     record CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3) {
     }
 
-    private record RoleSession(String accessKeyId) {
+    private record RoleSession(String accessKeyId, String sessionToken) {
     }
 
     /**
@@ -100,10 +111,14 @@ public final class S3CopySimulator {
         }
 
         String accessKeyId = "ASIA" + randomString(UPPER_ALPHANUMERIC, 16);
+        // A session token is required: IamService.findSecretKey(accessKeyId, sessionToken) treats a
+        // null token on either side as a non-match, so a tokenless session can never be recognised
+        // as a known access key and every signed authorization call would fail closed.
+        String sessionToken = randomString(SECRET_CHARACTERS, 200);
         iamService.registerSessionForAccount(parsed.accountId(), accessKeyId,
-                randomString(SECRET_CHARACTERS, 40), iamRoleArn,
+                randomString(SECRET_CHARACTERS, 40), sessionToken, iamRoleArn,
                 Instant.now().plus(ROLE_SESSION_TTL), null);
-        return new RoleSession(accessKeyId);
+        return new RoleSession(accessKeyId, sessionToken);
     }
 
     private static void releaseRoleSession(RoleSession roleSession, String iamRoleArn, IamService iamService) {
@@ -112,6 +127,38 @@ public final class S3CopySimulator {
         }
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(iamRoleArn);
         iamService.unregisterSession(parsed.accountId(), roleSession.accessKeyId());
+    }
+
+    /**
+     * Evaluates the role's identity-based policy for one S3 action, skipped entirely when
+     * {@code FLOCI_SERVICES_S3_ENFORCE_AUTH} is off (matching the anonymous path's behavior).
+     */
+    private static void authorizeRoleAction(S3Service s3, IamService iamService, String roleArn,
+                                            String action, String resourceArn) {
+        if (!s3.isAuthEnforced()) {
+            return;
+        }
+        CallerContext caller;
+        try {
+            caller = iamService.resolvePrincipalContext(roleArn);
+        } catch (AwsException e) {
+            throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "IAM Role '" + roleArn + "' could not be assumed: " + e.getMessage(), e);
+        }
+        IamPolicyEvaluator.SimulationDecision decision =
+                ROLE_POLICY_EVALUATOR.simulatePrincipalPolicy(caller, action, resourceArn, Map.of());
+        if (decision != IamPolicyEvaluator.SimulationDecision.ALLOWED) {
+            throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for IAM Role '" + roleArn + "': " + action + " on " + resourceArn, null);
+        }
+    }
+
+    private static String bucketArn(String bucket) {
+        return "arn:aws:s3:::" + bucket;
+    }
+
+    private static String objectArn(String bucket, String key) {
+        return "arn:aws:s3:::" + bucket + "/" + key;
     }
 
     private static String randomString(String characters, int length) {
@@ -153,7 +200,8 @@ public final class S3CopySimulator {
         try {
             try {
                 if (roleSession != null) {
-                    s3.authorizeSignedListBucket(roleSession.accessKeyId(), spec.bucket());
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket", bucketArn(spec.bucket()));
+                    s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
                 } else {
                     s3.authorizeAnonymousListBucket(spec.bucket());
                 }
@@ -177,7 +225,8 @@ public final class S3CopySimulator {
             try {
                 for (String key : keys) {
                     if (roleSession != null) {
-                        s3.authorizeSignedGetObject(roleSession.accessKeyId(), spec.bucket(), key);
+                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.bucket(), key));
+                        s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
                     } else {
                         s3.authorizeAnonymousGetObject(spec.bucket(), key);
                     }
@@ -207,12 +256,16 @@ public final class S3CopySimulator {
         String probeKey = unloadDataKey(spec, 0);
         try {
             if (roleSession != null) {
-                s3.authorizeSignedPutObject(roleSession.accessKeyId(), spec.bucket(), probeKey);
+                authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.bucket(), probeKey));
+                s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), probeKey);
                 if (spec.manifest()) {
-                    s3.authorizeSignedPutObject(roleSession.accessKeyId(), spec.bucket(), spec.prefix() + "manifest");
+                    String manifestKey = spec.prefix() + "manifest";
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.bucket(), manifestKey));
+                    s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), manifestKey);
                 }
                 if (!spec.allowOverwrite()) {
-                    s3.authorizeSignedListBucket(roleSession.accessKeyId(), spec.bucket());
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket", bucketArn(spec.bucket()));
+                    s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
                     if (targetPrefixHasObjects(spec, s3)) {
                         throw new S3TransferException(SQLSTATE_INTERNAL,
                                 "S3 prefix s3://" + spec.bucket() + "/" + spec.prefix()
@@ -840,7 +893,8 @@ public final class S3CopySimulator {
                 try {
                     String key = spec.prefix() + "manifest";
                     if (roleSession != null) {
-                        s3.authorizeSignedPutObject(roleSession.accessKeyId(), spec.bucket(), key);
+                        authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.bucket(), key));
+                        s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
                     } else {
                         s3.authorizeAnonymousPutObject(spec.bucket(), key);
                     }
@@ -902,7 +956,8 @@ public final class S3CopySimulator {
             String key = unloadDataKey(spec, index);
             try {
                 if (roleSession != null) {
-                    s3.authorizeSignedPutObject(roleSession.accessKeyId(), spec.bucket(), key);
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject", objectArn(spec.bucket(), key));
+                    s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
                 } else {
                     s3.authorizeAnonymousPutObject(spec.bucket(), key);
                 }
@@ -1024,7 +1079,7 @@ public final class S3CopySimulator {
         for (String k : keys) {
             try {
                 if (roleSession != null) {
-                    s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), spec.bucket(), k);
+                    s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), k);
                 } else {
                     s3.authorizeAnonymousDeleteObject(spec.bucket(), k);
                 }
