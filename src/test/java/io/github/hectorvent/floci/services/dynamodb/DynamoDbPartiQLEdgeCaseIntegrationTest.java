@@ -276,6 +276,25 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Items[0].pk.S", equalTo("p"));
     }
 
+    @Test
+    @Order(12)
+    void skipsLineAndBlockComments() {
+        putItem("comments", "\"n\":{\"N\":\"1\"},\"note\":{\"S\":\"a--b /*c*/\"}");
+        String key = "pk='comments' AND sk='1'";
+
+        statement("SELECT/**/* FROM \"" + TABLE + "\" -- the table\nWHERE pk/* key */='comments' AND sk='1' --")
+            .statusCode(200)
+            .body("Items[0].note.S", equalTo("a--b /*c*/"));
+        statement("SELECT note FROM \"" + TABLE + "\" WHERE " + key + " AND note = 'a--b /*c*/'; -- done")
+            .statusCode(200)
+            .body("Items.size()", equalTo(1));
+        statement("UPDATE \"" + TABLE + "\" SET n=n--1 WHERE " + key)
+            .statusCode(400);
+        statement("SELECT * FROM \"" + TABLE + "\" WHERE " + key + " /* open")
+            .statusCode(400);
+        getItem("comments").body("Item.n.N", equalTo("1"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

@@ -204,6 +204,18 @@ public class DynamoDbPartiQLParser {
         while (i < n) {
             char c = input.charAt(i);
             if (Character.isWhitespace(c)) { i++; continue; }
+            if (input.startsWith("--", i)) {
+                while (i < n && input.charAt(i) != '\n' && input.charAt(i) != '\r') i++;
+                continue;
+            }
+            if (input.startsWith("/*", i)) {
+                int end = input.indexOf("*/", i + 2);
+                if (end < 0) {
+                    throw validationEx("Statement wasn't well formed, can't be processed: ");
+                }
+                i = end + 2;
+                continue;
+            }
             if (c == '\'') {
                 StringBuilder text = new StringBuilder();
                 i++;
