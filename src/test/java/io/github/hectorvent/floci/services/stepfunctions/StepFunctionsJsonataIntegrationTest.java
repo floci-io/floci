@@ -1345,7 +1345,134 @@ class StepFunctionsJsonataIntegrationTest {
         assertEquals("plain", items.get(1).path("note").asText());
     }
 
+    /**
+     * The file and the state machine from the AWS "how Step Functions parses input CSV files"
+     * reference. The unquoted MyObject field only survives States.StringToJson if the doubled
+     * quotes around its keys are preserved, so this pins the documented output.
+     */
+    @Test
+    void distributedMapWithS3CsvItemReader_parsesTheAwsReferenceFile() throws Exception {
+        createBucket("map-inputs-csv-reference");
+        putObject("map-inputs-csv-reference", "myCSVInput.csv",
+                "abc,123,\"This string contains commas, a double quotation marks (\"\"), "
+                        + "and a newline (\n)\",{\"\"MyKey\"\":\"\"MyValue\"\"},\"[1,2,3]\"");
 
+        String definition = """
+                {
+                    "StartAt": "Map",
+                    "States": {
+                        "Map": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV",
+                                    "CSVHeaderLocation": "GIVEN",
+                                    "CSVHeaders": ["MyLetters", "MyNumbers", "MyString",
+                                                   "MyObject", "MyArray"]
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv-reference",
+                                    "Key": "myCSVInput.csv"
+                                }
+                            },
+                            "ItemSelector": {
+                                "MyLetters.$": "$$.Map.Item.Value.MyLetters",
+                                "MyNumbers.$": "States.StringToJson($$.Map.Item.Value.MyNumbers)",
+                                "MyString.$": "$$.Map.Item.Value.MyString",
+                                "MyObject.$": "States.StringToJson($$.Map.Item.Value.MyObject)",
+                                "MyArray.$": "States.StringToJson($$.Map.Item.Value.MyArray)"
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-reference-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        JsonNode items = new ObjectMapper().readTree(output);
+        assertEquals(1, items.size(), "the quoted newline must not split the record: " + output);
+        JsonNode item = items.get(0);
+        assertEquals("abc", item.path("MyLetters").asText());
+        assertEquals(123, item.path("MyNumbers").asInt());
+        assertEquals("This string contains commas, a double quotation marks (\"), "
+                + "and a newline (\n)", item.path("MyString").asText());
+        assertEquals("MyValue", item.path("MyObject").path("MyKey").asText(),
+                "doubled quotes in an unquoted field must survive: " + output);
+        assertEquals(3, item.path("MyArray").size());
+        assertEquals(1, item.path("MyArray").get(0).asInt());
+    }
+
+    @Test
+    void distributedMapWithS3CsvItemReader_honoursBackslashEscapes() throws Exception {
+        createBucket("map-inputs-csv-backslash");
+        putObject("map-inputs-csv-backslash", "paths.csv",
+                "path,note\nC:\\\\Program Files\\\\MyApp.exe,a\\\"quoted\\\" word\n"
+                        + "second\\,field,dropped\\zslash\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessPaths",
+                    "States": {
+                        "ProcessPaths": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv-backslash",
+                                    "Key": "paths.csv"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-backslash-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        JsonNode items = new ObjectMapper().readTree(output);
+        assertEquals(2, items.size(), output);
+        assertEquals("C:\\Program Files\\MyApp.exe", items.get(0).path("path").asText());
+        assertEquals("a\"quoted\" word", items.get(0).path("note").asText());
+        assertEquals("second,field", items.get(1).path("path").asText(),
+                "an escaped delimiter must not split the field: " + output);
+        assertEquals("dropped" + "zslash", items.get(1).path("note").asText());
+    }
 
     @Test
     void distributedMapWithItemBatcher_groupsItemsIntoBatchesOfMaxItemsPerBatch() throws Exception {

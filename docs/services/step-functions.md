@@ -140,7 +140,9 @@ iterations.
   `CSVHeaderLocation` is `GIVEN`. Every value is a string: a row shorter than the headers pads
   with empty strings, and a longer one drops the surplus. `ReaderConfig.CSVDelimiter` selects
   `COMMA`, `PIPE`, `SEMICOLON`, `SPACE` or `TAB`, and a quoted field may contain the delimiter
-  or a line break without ending the record.
+  or a line break without ending the record. A doubled quote stands for a single quote, in an
+  unquoted field as well as a quoted one, and a backslash escapes another backslash, a quote or
+  the delimiter. A backslash before anything else is dropped, as AWS documents.
 - `PARQUET` and `MANIFEST` are accepted by `CreateStateMachine` and fail the execution with
   `States.ItemReaderFailed`.
 
