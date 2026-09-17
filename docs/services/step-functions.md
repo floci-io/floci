@@ -138,7 +138,9 @@ iterations.
   matching AWS.
 - `CSV` takes its field names from the first row, or from `ReaderConfig.CSVHeaders` when
   `CSVHeaderLocation` is `GIVEN`. Every value is a string: a row shorter than the headers pads
-  with empty strings, and a longer one drops the surplus.
+  with empty strings, and a longer one drops the surplus. `ReaderConfig.CSVDelimiter` selects
+  `COMMA`, `PIPE`, `SEMICOLON`, `SPACE` or `TAB`, and a quoted field may contain the delimiter
+  or a line break without ending the record.
 - `PARQUET` and `MANIFEST` are accepted by `CreateStateMachine` and fail the execution with
   `States.ItemReaderFailed`.
 

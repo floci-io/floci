@@ -3142,7 +3142,8 @@ public class AslExecutor {
     private ArrayNode readCsvRows(JsonNode itemReader, byte[] data) {
         JsonNode readerConfig = itemReader.path("ReaderConfig");
         String headerLocation = readerConfig.path("CSVHeaderLocation").asText("FIRST_ROW");
-        List<List<String>> rows = CsvParser.parseAll(new String(data, StandardCharsets.UTF_8));
+        List<List<String>> rows = CsvParser.parseAll(new String(data, StandardCharsets.UTF_8),
+                csvDelimiter(readerConfig.path("CSVDelimiter").asText("COMMA")));
 
         List<String> headers;
         int firstDataRow;
@@ -3172,6 +3173,17 @@ public class AslExecutor {
         return items;
     }
 
+    private char csvDelimiter(String delimiter) {
+        return switch (delimiter) {
+            case "COMMA" -> ',';
+            case "PIPE" -> '|';
+            case "SEMICOLON" -> ';';
+            case "SPACE" -> ' ';
+            case "TAB" -> '\t';
+            default -> throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader CSVDelimiter " + delimiter + " is not supported");
+        };
+    }
 
     private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,
                                                  boolean jsonata, ObjectNode variables) throws Exception {
