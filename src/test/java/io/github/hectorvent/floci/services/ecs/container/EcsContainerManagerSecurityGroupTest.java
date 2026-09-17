@@ -221,6 +221,11 @@ class EcsContainerManagerSecurityGroupTest {
 
         verify(builder, times(2)).withNetworkMode("container:helper-id");
         verify(builder, times(2)).withLabels(Map.of("floci.security-group-workload", "true"));
+
+        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any());
+        verify(lifecycleManager).create(any());
+        verify(lifecycleManager).startCreated(eq("router-id"), any());
+        verify(lifecycleManager).createAndStart(any());
     }
 
     private static EcsTask awsvpcTask() {
