@@ -54,6 +54,10 @@ import java.util.function.Consumer;
 public class RedshiftService {
     private static final Logger LOG = Logger.getLogger(RedshiftService.class);
 
+    // The parameter group real AWS attaches when a cluster is created without one named
+    // explicitly. Every cluster always has at least this one — see its two call sites.
+    private static final String DEFAULT_PARAMETER_GROUP_NAME = "default.redshift-1.0";
+
     private final AccountAwareStorageBackend<Cluster> clusters;
     private final AccountAwareStorageBackend<Snapshot> snapshots;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
@@ -195,6 +199,10 @@ public class RedshiftService {
         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
         cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds != null ? vpcSecurityGroupIds : List.of());
         cluster.setIamRoleArns(iamRoleArns != null ? List.copyOf(iamRoleArns) : List.of());
+        // Real AWS attaches the default parameter group to every cluster, whether or not the
+        // caller names one — resourceClusterRead in the Terraform AWS provider indexes
+        // ClusterParameterGroups[0] unconditionally on the assumption this is never empty.
+        cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setClusterStatus("creating");
         clusters.put(identifier, cluster);
         clusters.flush();
@@ -994,6 +1002,9 @@ public class RedshiftService {
         cluster.setNodeType(effectiveNodeType);
         cluster.setMasterUsername(username);
         cluster.setMasterPassword(password);
+        // See createCluster: every cluster gets the default parameter group unless the caller
+        // named one, matching real AWS and what the Terraform provider's read path requires.
+        cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setClusterStatus("creating");
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();

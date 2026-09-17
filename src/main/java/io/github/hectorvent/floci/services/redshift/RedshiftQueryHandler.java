@@ -762,6 +762,10 @@ public class RedshiftQueryHandler {
             .elem("ClusterStatus", cluster.getClusterStatus())
             .elem("ClusterAvailabilityStatus", availabilityStatus(cluster.getClusterStatus()))
             .elem("AvailabilityZoneRelocationStatus", "disabled")
+            // Real AWS always returns "enabled" or "disabled" here — never blank — and the
+            // Terraform provider's read path treats any other value as an error, not a missing
+            // field. floci runs one Postgres container per cluster; Multi-AZ has no meaning here.
+            .elem("MultiAZ", "disabled")
             .elem("ClusterSubnetGroupName", cluster.getClusterSubnetGroupName());
 
         if (cluster.getMasterPasswordSecretArn() != null) {
