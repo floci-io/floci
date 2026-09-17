@@ -395,6 +395,26 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("arithmetic").body("Item.n.N", equalTo("1"));
     }
 
+    @Test
+    @Order(18)
+    void readsAttributeExistsAndAttributeNotExists() {
+        putItem("exists", "\"m\":{\"M\":{\"x\":{\"S\":\"y\"}}},\"l\":{\"L\":[{\"S\":\"a\"}]}");
+        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE pk='exists' AND sk='1' AND ";
+
+        statement(select + "attribute_exists(m.x) AND ATTRIBUTE_NOT_EXISTS (nope) AND attribute_exists(l[0])")
+            .statusCode(200)
+            .body("Items.size()", equalTo(1));
+        statement(select + "(attribute_exists(nope) OR NOT attribute_exists(\"m\"))")
+            .statusCode(200)
+            .body("Items.size()", equalTo(0));
+        statement(select + "attribute_exists('m')").statusCode(400);
+
+        statement("UPDATE \"" + TABLE + "\" SET t=1 WHERE pk='exists' AND sk='1' AND attribute_exists(nope)")
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+        getItem("exists").body("Item.t", nullValue());
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

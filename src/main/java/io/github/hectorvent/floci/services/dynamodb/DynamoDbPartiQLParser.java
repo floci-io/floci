@@ -664,6 +664,13 @@ public class DynamoDbPartiQLParser {
             requireAttributeTypeName(type);
             return new Cond.AttributeType(path, type);
         }
+        if (peekFunction("attribute_exists") || peekFunction("attribute_not_exists")) {
+            boolean exists = "attribute_exists".equalsIgnoreCase(advance().value());
+            consume(TType.LPAREN);
+            Path path = parsePath();
+            consume(TType.RPAREN);
+            return new Cond.Missing(path, exists);
+        }
         if (peekFunction("size")) {
             advance();
             consume(TType.LPAREN);
