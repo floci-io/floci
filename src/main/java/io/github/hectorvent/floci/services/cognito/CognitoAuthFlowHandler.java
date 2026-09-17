@@ -114,7 +114,7 @@ final class CognitoAuthFlowHandler {
         }
 
         return switch (authFlow) {
-            case "ADMIN_USER_PASSWORD_AUTH" ->
+            case "ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH" ->
                     authenticateWithPassword(pool, client, authParameters, clientMetadata);
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, client, authParameters, clientMetadata);
             case "USER_SRP_AUTH", "ADMIN_USER_SRP_AUTH" -> handleUserSrpAuth(pool, client, authParameters, clientMetadata);
@@ -139,6 +139,12 @@ final class CognitoAuthFlowHandler {
                     throw unsupportedAuthFlow(authFlow);
                 }
                 yield "ALLOW_ADMIN_USER_PASSWORD_AUTH";
+            }
+            case "ADMIN_NO_SRP_AUTH" -> {
+                if (!adminApi) {
+                    throw unsupportedAuthFlow(authFlow);
+                }
+                yield "ALLOW_ADMIN_NO_SRP_AUTH";
             }
             case "USER_SRP_AUTH", "ADMIN_USER_SRP_AUTH" -> "ALLOW_USER_SRP_AUTH";
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> "ALLOW_REFRESH_TOKEN_AUTH";

@@ -135,6 +135,9 @@ class TestCognitoAuth:
             Username=username,
             UserAttributes=[{"Name": "email", "Value": "pytest@example.com"}],
         )
+        cognito_client.admin_set_user_password(
+            UserPoolId=pool_id, Username=username, Password="any", Permanent=True
+        )
 
         try:
             response = cognito_client.admin_initiate_auth(

@@ -1928,6 +1928,19 @@ class CognitoServiceTest {
     }
 
     @Test
+    void adminInitiateAuthSupportsAdminNoSrpAuth() {
+        UserPool pool = createPoolAndUser();
+        service.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false,
+                List.of(), List.of());
+
+        Map<String, Object> result = service.adminInitiateAuth(pool.getId(), client.getClientId(),
+                "ADMIN_NO_SRP_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"), Map.of());
+
+        assertNotNull(result.get("AuthenticationResult"));
+    }
+
+    @Test
     void initiateAuthRejectsPasswordFlowDisabledOnClient() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false,
