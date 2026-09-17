@@ -608,6 +608,28 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("keys").body("Item.a", nullValue());
     }
 
+    @Test
+    @Order(27)
+    void refusesAWriteThatLeavesTheItemTooDeep() {
+        putItem("deep-path", "\"m\":{\"M\":{}}");
+        String update = "UPDATE \"" + TABLE + "\" SET m.deep = ? WHERE pk='deep-path' AND sk='1'";
+        String parameters = "[" + "{\"M\":{\"a\":".repeat(31) + "{\"S\":\"x\"}" + "}}".repeat(31) + "]";
+        String tooDeep = "Nesting Levels have exceeded supported limits";
+
+        request("DynamoDB_20120810.ExecuteStatement", member(update, parameters))
+            .statusCode(400)
+            .body("message", equalTo(tooDeep));
+        request("DynamoDB_20120810.ExecuteTransaction", "{\"TransactStatements\":[" + member(update, parameters) + "]}")
+            .statusCode(400)
+            .body("CancellationReasons[0].Code", equalTo("ValidationError"))
+            .body("CancellationReasons[0].Message", equalTo(tooDeep));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[" + member(update, parameters) + "]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Message", equalTo(tooDeep))
+            .body("Responses[0].TableName", equalTo(TABLE));
+        getItem("deep-path").body("Item.m.M.deep", nullValue());
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

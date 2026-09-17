@@ -607,6 +607,7 @@ public class DynamoDbService implements ResourceProvider {
             if (conditionExpression != null) {
                 evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             }
+            requireItemNestingWithinLimit(normalizedItem);
 
             tableItems.put(itemKey, normalizedItem);
             if (shouldPersist) {
@@ -896,6 +897,7 @@ public class DynamoDbService implements ResourceProvider {
 
             // Reject any attempt to modify a key attribute
             validateKeyNotModified(table, key, item);
+            requireItemNestingWithinLimit(item);
 
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
@@ -1440,7 +1442,7 @@ public class DynamoDbService implements ResourceProvider {
             for (int i = 0; i < transactItems.size(); i++) {
                 try {
                     validateTransactItem(transactItems.get(i), region, staged);
-                } catch (KeySchemaMismatchException e) {
+                } catch (KeySchemaMismatchException | ItemNestingExceededException e) {
                     throw cancelledByMember(transactItems.size(), i, e.getMessage());
                 }
             }
@@ -1584,6 +1586,14 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
+    // A value that fits the request can still leave the stored item too deep, as when it is
+    // written under a nested path (checked on real AWS, eu-west-2, 2026-09-17).
+    private static void requireItemNestingWithinLimit(JsonNode item) {
+        if (!DynamoDbAttributeValueValidator.nestingWithinLimit(item)) {
+            throw new ItemNestingExceededException();
+        }
+    }
+
     private static TransactionCanceledException cancelledByMember(int memberCount, int failedMember,
                                                                    String message) {
         List<TransactionCanceledException.CancellationReason> reasons = new ArrayList<>();
@@ -1686,6 +1696,7 @@ public class DynamoDbService implements ResourceProvider {
             DynamoDbItemSize.validateSize(normalizedItem);
             buildItemKey(table, normalizedItem);
             validateIndexKeyTypes(table, normalizedItem, false);
+            requireItemNestingWithinLimit(normalizedItem);
         } else if (transactItem.has("Delete")) {
             JsonNode del = transactItem.get("Delete");
             String tableName = canonicalTableName(region, del.path("TableName").asText());
@@ -1717,6 +1728,7 @@ public class DynamoDbService implements ResourceProvider {
                 applyUpdateExpression(item, updateExpression, exprAttrNames, exprAttrValues);
             }
             validateKeyNotModified(table, key, item);
+            requireItemNestingWithinLimit(item);
             validateIndexKeyTypes(table, item, true);
         }
     }

@@ -2857,7 +2857,7 @@ public class DynamoDbJsonHandler {
             err.put("Code", batchMemberErrorCode(e.getErrorCode()));
             err.put("Message", e.getMessage());
             slot.set("Error", err);
-            if (tableName != null && batchMemberReachedItsTable(e.getErrorCode())) {
+            if (tableName != null && (e instanceof ItemNestingExceededException || batchMemberReachedItsTable(e.getErrorCode()))) {
                 slot.put("TableName", tableName);
             }
         }

@@ -1322,6 +1322,24 @@ class DynamoDbJsonHandlerTest {
         assertEquals(NESTING_MESSAGE, ex.getMessage());
     }
 
+    @Test
+    void updateItemRejectsAValueThatLeavesALeafAtLevel33UnderANestedPath() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode create = updateUserRequest();
+        create.put("UpdateExpression", "SET parent = :empty");
+        ObjectNode emptyMap = mapper.createObjectNode();
+        emptyMap.putObject("M");
+        create.set("ExpressionAttributeValues", mapper.createObjectNode().set(":empty", emptyMap));
+        handler.handle("UpdateItem", create, "eu-west-1");
+
+        ObjectNode request = updateUserRequest();
+        request.put("UpdateExpression", "SET parent.deep = :deep");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(31)));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+    }
+
     private ObjectNode transactWrite(String action, ObjectNode op) {
         op.put("TableName", "Users");
         var member = mapper.createObjectNode();
