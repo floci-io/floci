@@ -1003,22 +1003,29 @@ public class ApiGatewayService {
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
         apiKey.setDescription((String) request.get("description"));
+        apiKey.setCustomerId((String) request.get("customerId"));
 
-        boolean generateDistinctId = Boolean.TRUE.equals(request.get("generateDistinctId"));
         String suppliedValue = (String) request.get("value");
+        String keyValue = (suppliedValue != null && !suppliedValue.isBlank())
+                ? suppliedValue
+                : UUID.randomUUID().toString().replace("-", "");
+        boolean generateDistinctId = !Boolean.FALSE.equals(request.get("generateDistinctId"));
+        apiKey.setId(generateDistinctId ? shortId(10) : keyValue);
+        apiKey.setValue(keyValue);
 
-        if (!generateDistinctId) {
-            String sharedValue = (suppliedValue != null && !suppliedValue.isBlank())
-                    ? suppliedValue
-                    : UUID.randomUUID().toString().replace("-", "");
-            apiKey.setId(sharedValue);
-            apiKey.setValue(sharedValue);
-        } else {
-            apiKey.setId(shortId(10));
-            apiKey.setValue((suppliedValue != null && !suppliedValue.isBlank())
-                    ? suppliedValue
-                    : UUID.randomUUID().toString().replace("-", ""));
+        List<String> stageKeys = new ArrayList<>();
+        if (request.get("stageKeys") instanceof List<?> rawStageKeys) {
+            for (Object rawStageKey : rawStageKeys) {
+                if (rawStageKey instanceof Map<?, ?> stageKey) {
+                    Object restApiId = stageKey.get("restApiId");
+                    Object stageName = stageKey.get("stageName");
+                    if (restApiId != null && stageName != null) {
+                        stageKeys.add(restApiId + "/" + stageName);
+                    }
+                }
+            }
         }
+        apiKey.setStageKeys(stageKeys);
 
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {
@@ -1146,6 +1153,7 @@ public class ApiGatewayService {
                     case "/name"        -> key.setName(op.get("value"));
                     case "/description" -> key.setDescription(op.get("value"));
                     case "/enabled"     -> key.setEnabled(Boolean.parseBoolean(op.get("value")));
+                    case "/customerId"  -> key.setCustomerId(op.get("value"));
                 }
             }
         }

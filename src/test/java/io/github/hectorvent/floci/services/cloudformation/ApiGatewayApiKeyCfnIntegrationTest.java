@@ -91,7 +91,7 @@ class ApiGatewayApiKeyCfnIntegrationTest {
             .body("description", equalTo("first"))
             .body("enabled", equalTo(false))
             .body("tags.stack", equalTo("v1"))
-            .body("value", equalTo(namedId));
+            .body("value", not(equalTo(namedId)));
 
         // A key with no properties gets a CloudFormation-style generated name and AWS's defaults.
         getApiKey(unnamedId)
