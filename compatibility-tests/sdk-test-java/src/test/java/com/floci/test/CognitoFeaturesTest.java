@@ -122,6 +122,7 @@ class CognitoFeaturesTest {
                 .clientName("compat-test-client")
                 .explicitAuthFlows(
                         ExplicitAuthFlowsType.ALLOW_USER_PASSWORD_AUTH,
+                        ExplicitAuthFlowsType.ALLOW_ADMIN_USER_PASSWORD_AUTH,
                         ExplicitAuthFlowsType.ALLOW_REFRESH_TOKEN_AUTH));
         clientId = resp.userPoolClient().clientId();
         assertThat(clientId).isNotBlank();
