@@ -20,6 +20,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -212,16 +213,8 @@ public class KinesisAnalyticsV2Service {
     }
 
     public FlinkApplication describeApplication(String applicationName, String region) {
-        Optional<FlinkApplication> scoped = storage.get(applicationKey(region, applicationName));
-        Optional<FlinkApplication> legacy = region.equals(config.defaultRegion())
-                ? storage.get(applicationName) : Optional.empty();
-        legacy.ifPresent(application -> {
-            if (scoped.isEmpty()) {
-                putApplication(application);
-            }
-            storage.delete(applicationName);
-        });
-        return scoped.or(() -> scoped.isEmpty() ? legacy : Optional.empty())
+        String accountId = regionResolver.getAccountId();
+        return getStoredApplication(accountId, region, applicationName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Application not found: " + applicationName, 400));
     }
@@ -232,25 +225,19 @@ public class KinesisAnalyticsV2Service {
 
     public List<FlinkApplication> listApplications(String region) {
         String prefix = region + "/";
-        List<FlinkApplication> applications = new java.util.ArrayList<>(storage.scan(k -> k.startsWith(prefix)));
+        String accountId = regionResolver.getAccountId();
+        if (storage instanceof AccountAwareStorageBackend<FlinkApplication> aware) {
+            migrateLegacyApplications(aware, accountId, region);
+            return aware.scanForAccount(accountId, key -> key.startsWith(prefix));
+        }
         if (region.equals(config.defaultRegion())) {
-            java.util.Set<String> names = applications.stream()
-                    .map(FlinkApplication::getApplicationName)
-                    .collect(java.util.stream.Collectors.toSet());
-            for (String key : new java.util.ArrayList<>(storage.keys())) {
-                if (key.contains("/")) {
-                    continue;
+            for (String key : new ArrayList<>(storage.keys())) {
+                if (!key.contains("/")) {
+                    getStoredApplication(accountId, region, key);
                 }
-                storage.get(key).ifPresent(legacy -> {
-                    if (names.add(legacy.getApplicationName())) {
-                        putApplication(legacy);
-                        applications.add(legacy);
-                    }
-                    storage.delete(key);
-                });
             }
         }
-        return applications;
+        return storage.scan(key -> key.startsWith(prefix));
     }
 
     public FlinkApplication startApplication(String applicationName) {
@@ -631,14 +618,27 @@ public class KinesisAnalyticsV2Service {
         if (resourceArn == null || resourceArn.isBlank()) {
             throw new AwsException("InvalidArgumentException", "ResourceARN is required", 400);
         }
-        // Resource format is "application/<name>"; application names never contain '/'.
-        int slash = resourceArn.lastIndexOf('/');
-        if (slash < 0 || slash == resourceArn.length() - 1) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidArgumentException", "Invalid resource ARN: " + resourceArn, 400);
         }
-        String applicationName = resourceArn.substring(slash + 1);
-        String region = AwsArnUtils.regionOrDefault(resourceArn, config.defaultRegion());
-        return storage.get(applicationKey(region, applicationName))
+        String accountId = regionResolver.getAccountId();
+        String resourcePrefix = "application/";
+        if (!"kinesisanalytics".equals(arn.service())
+                || !arn.resource().startsWith(resourcePrefix)
+                || arn.resource().length() == resourcePrefix.length()
+                || arn.resource().substring(resourcePrefix.length()).contains("/")) {
+            throw new AwsException("InvalidArgumentException", "Invalid resource ARN: " + resourceArn, 400);
+        }
+        if (!accountId.equals(arn.accountId())) {
+            throw new AwsException("ResourceNotFoundException",
+                    "No application found for ARN: " + resourceArn, 400);
+        }
+        String applicationName = arn.resource().substring(resourcePrefix.length());
+        String region = arn.region().isEmpty() ? config.defaultRegion() : arn.region();
+        return getStoredApplication(accountId, region, applicationName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No application found for ARN: " + resourceArn, 400));
     }
@@ -699,6 +699,60 @@ public class KinesisAnalyticsV2Service {
             aware.putForAccount(app.getAccountId(), key, app);
         } else {
             storage.put(key, app);
+        }
+    }
+
+    private Optional<FlinkApplication> getStoredApplication(String accountId, String region,
+                                                             String applicationName) {
+        String key = applicationKey(region, applicationName);
+        if (storage instanceof AccountAwareStorageBackend<FlinkApplication> aware) {
+            List<String> legacyKeys = region.equals(config.defaultRegion())
+                    ? List.of(applicationName) : List.of();
+            return aware.getForAccountMigratingLegacyKeys(accountId, key, legacyKeys,
+                    application -> belongsTo(application, accountId, region, applicationName),
+                    isDefaultScope(accountId, region));
+        }
+        synchronized (storage) {
+            Optional<FlinkApplication> scoped = storage.get(key);
+            if (scoped.isPresent() || !region.equals(config.defaultRegion())) {
+                return scoped;
+            }
+            Optional<FlinkApplication> legacy = storage.get(applicationName)
+                    .filter(application -> belongsTo(application, accountId, region, applicationName));
+            legacy.ifPresent(application -> {
+                storage.put(key, application);
+                storage.delete(applicationName);
+            });
+            return legacy;
+        }
+    }
+
+    private void migrateLegacyApplications(AccountAwareStorageBackend<FlinkApplication> aware,
+                                           String accountId, String region) {
+        if (!region.equals(config.defaultRegion())) {
+            return;
+        }
+        aware.migrateLegacyEntries(accountId, key -> !key.contains("/"),
+                application -> applicationKey(region, application.getApplicationName()),
+                application -> belongsTo(application, accountId, region, application.getApplicationName()));
+    }
+
+    private boolean isDefaultScope(String accountId, String region) {
+        return accountId.equals(regionResolver.getDefaultAccountId())
+                && region.equals(regionResolver.getDefaultRegion());
+    }
+
+    private static boolean belongsTo(FlinkApplication application, String accountId, String region,
+                                     String applicationName) {
+        if (!Objects.equals(applicationName, application.getApplicationName())) {
+            return false;
+        }
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(application.getApplicationArn());
+            return accountId.equals(arn.accountId()) && region.equals(arn.region())
+                    && (application.getAccountId() == null || accountId.equals(application.getAccountId()));
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
