@@ -146,6 +146,7 @@ nav:
     - Lake Formation: services/lakeformation.md
     - Neptune: services/neptune.md
     - DocumentDB: services/docdb.md
+    - DMS: services/dms.md
     - Athena: services/athena.md
     - Redshift: services/redshift.md
     - Redshift Data API: services/redshift-data.md

@@ -791,6 +791,12 @@ public interface EmulatorConfig {
         CodeGuruReviewerServiceConfig codegurureviewer();
         CodeArtifactServiceConfig codeartifact();
         MarketplaceServiceConfig marketplace();
+        DmsServiceConfig dms();
+    }
+
+    interface DmsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface CodeArtifactServiceConfig {
