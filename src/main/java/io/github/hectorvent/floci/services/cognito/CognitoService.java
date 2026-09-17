@@ -3051,6 +3051,16 @@ public class CognitoService implements ResourceProvider {
         return oauthEndpoint(poolId, "userInfo");
     }
 
+    /**
+     * Returns the callback endpoint that an external identity provider uses to return its
+     * authorization response to Cognito.
+     */
+    public String getIdentityProviderCallbackEndpoint(String poolId) {
+        return findCustomDomainForPool(poolId)
+                .map(d -> "https://" + d.getDomain() + "/oauth2/idpresponse")
+                .orElse(baseUrl + "/cognito-idp/oauth2/idpresponse");
+    }
+
     private String oauthEndpoint(String poolId, String operation) {
         return findCustomDomainForPool(poolId)
                 .map(d -> "https://" + d.getDomain() + "/oauth2/" + operation)

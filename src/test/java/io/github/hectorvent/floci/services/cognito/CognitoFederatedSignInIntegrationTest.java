@@ -82,7 +82,7 @@ class CognitoFederatedSignInIntegrationTest {
             Map<String, String> providerParameters = provider.authorizationParameters();
             assertEquals("provider-client", providerParameters.get("client_id"));
             assertEquals("code", providerParameters.get("response_type"));
-            assertEquals("https://client.example/callback", providerParameters.get("redirect_uri"));
+            assertEquals("https://" + DOMAIN + "/oauth2/idpresponse", providerParameters.get("redirect_uri"));
             assertEquals("openid", providerParameters.get("scope"));
 
             Response callbackResponse = given()

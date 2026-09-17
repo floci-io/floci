@@ -27,6 +27,7 @@ import org.jboss.logging.Logger;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -167,7 +168,7 @@ public class CognitoOAuthController {
         String basicClientId = basicCredentials != null ? basicCredentials.clientId() : null;
         String basicClientSecret = basicCredentials != null ? basicCredentials.clientSecret() : null;
 
-        if (bodyClientSecret != null && basicClientSecret != null && !bodyClientSecret.equals(basicClientSecret)) {
+        if (bodyClientSecret != null && basicClientSecret != null && !secretsEqual(bodyClientSecret, basicClientSecret)) {
             return oauthError("invalid_request", "client_secret does not match Authorization header");
         }
 
@@ -229,7 +230,7 @@ public class CognitoOAuthController {
             return oauthError("invalid_client", "Client not found");
         }
         if (client.getClientSecret() != null && !client.getClientSecret().isBlank()
-                && !client.getClientSecret().equals(clientSecret)) {
+                && !secretsEqual(client.getClientSecret(), clientSecret)) {
             return oauthError("invalid_client", "Client secret is invalid");
         }
 
@@ -279,6 +280,13 @@ public class CognitoOAuthController {
             first = false;
         }
         return Response.status(Response.Status.FOUND).location(URI.create(location.toString())).build();
+    }
+
+    private boolean secretsEqual(String expected, String actual) {
+        if (expected == null || actual == null) {
+            return expected == actual;
+        }
+        return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), actual.getBytes(StandardCharsets.UTF_8));
     }
 
     private void putRelyingPartyState(Map<String, String> parameters, CognitoAuthorizationTransaction transaction) {

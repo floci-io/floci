@@ -60,7 +60,7 @@ public class CognitoFederationService {
         Map<String, String> parameters = new LinkedHashMap<>();
         parameters.put("response_type", "code");
         parameters.put("client_id", providerClientId);
-        parameters.put("redirect_uri", redirectUri);
+        parameters.put("redirect_uri", cognitoService.getIdentityProviderCallbackEndpoint(userPoolId));
         parameters.put("scope", providerScopes(provider, scopes));
         parameters.put("state", state);
         if (nonce != null && !nonce.isBlank()) {
