@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.sagemaker;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -41,7 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @ApplicationScoped
-public class SageMakerEndpointManager implements ContainerTeardown {
+public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
     private static final Logger LOG = Logger.getLogger(SageMakerEndpointManager.class);
     private static final int PORT = 8080;
     private static final int DEFAULT_FILE_MODE = 0644;
@@ -53,7 +54,8 @@ public class SageMakerEndpointManager implements ContainerTeardown {
     private final EmulatorConfig config;
     private final ContainerDetector containerDetector;
     private final S3Service s3Service;
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    // Replaced by clear() after a state reset, whose container teardown shuts this pool down.
+    private volatile ExecutorService executor = Executors.newCachedThreadPool();
     private final ConcurrentHashMap<String, String> containers = new ConcurrentHashMap<>();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 
@@ -144,10 +146,26 @@ public class SageMakerEndpointManager implements ContainerTeardown {
     }
 
     @Override
-    public void stopManagedContainers() {
+    public synchronized void stopManagedContainers() {
         containers.forEach((name, id) -> lifecycleManager.stopAndRemove(id, null));
         containers.clear();
         executor.shutdownNow();
+    }
+
+    /**
+     * Runs after a state reset has torn the containers down and wiped the store, never on
+     * shutdown. The teardown shut the worker pool down, so without a new one every later
+     * CreateEndpoint and UpdateEndpoint would be rejected until the emulator restarted.
+     */
+    @Override
+    public synchronized void clear() {
+        if (executor.isShutdown()) {
+            executor = Executors.newCachedThreadPool();
+        }
+    }
+
+    boolean acceptsWork() {
+        return !executor.isShutdown();
     }
 
     private List<String> environment(String region, Map<String, String> modelEnv) {

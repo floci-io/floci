@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.sagemaker.model.SageMakerEntities.Mod
 import io.github.hectorvent.floci.services.sagemaker.model.SageMakerEntities.TrainingJobResource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.util.ArrayList;
@@ -22,12 +23,14 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 @ApplicationScoped
 public class SageMakerService {
+    private static final Logger LOG = Logger.getLogger(SageMakerService.class);
     static final int DEFAULT_LIMIT = 100;
     static final int MAX_RESULTS_CEILING = 100;
     private static final ObjectMapper STATIC_MAPPER = new ObjectMapper();
@@ -468,8 +471,23 @@ public class SageMakerService {
         return true;
     }
 
-    public synchronized void updateTrainingJob(TrainingJobResource job) {
-        trainingJobStore.put(regionKey(job.region, job.trainingJobName), job);
+    /**
+     * Publishes a training run's progress or outcome only while the job the run started from is
+     * still stored. A state reset interrupts in-flight runs and wipes the store, and an
+     * interrupted run's failure write must not bring the wiped job back, whether it lands before
+     * or after the wipe, nor overwrite a same-named job created after the reset.
+     */
+    public synchronized boolean updateTrainingJob(TrainingJobResource job) {
+        String key = regionKey(job.region, job.trainingJobName);
+        TrainingJobResource current = trainingJobStore.get(key).orElse(null);
+        if (current == null || !Objects.equals(current.trainingJobArn, job.trainingJobArn)
+                || current.creationTime != job.creationTime) {
+            LOG.debugv("SageMaker training job {0} is no longer the stored job; discarding its run update",
+                    job.trainingJobName);
+            return false;
+        }
+        trainingJobStore.put(key, job);
+        return true;
     }
 
     private Map<String, String> resourceTags(String arn) {

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
@@ -63,7 +64,7 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 
 @ApplicationScoped
-public class EcsService implements ContainerTeardown, ResourceProvider {
+public class EcsService implements ContainerTeardown, ResourceProvider, Resettable {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
     private static final String DEFAULT_CLUSTER = "default";
@@ -75,8 +76,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     private final EcsEventPublisher eventPublisher;
     private final boolean dockerMode;
     private final String baseUrl;
-    private final ScheduledExecutorService reconciler = Executors.newSingleThreadScheduledExecutor(
-            r -> { Thread t = new Thread(r, "ecs-reconciler"); t.setDaemon(true); return t; });
+    // Replaced by clear() after a state reset, whose container teardown shuts this scheduler down.
+    private volatile ScheduledExecutorService reconciler = newReconciler();
+    private final Object reconcilerLock = new Object();
 
     // region::clusterName → EcsCluster
     private Map<String, EcsCluster> clusters = new ConcurrentHashMap<>();
@@ -132,7 +134,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     @PostConstruct
     void init() {
         initializeStorage();
-        reconciler.scheduleAtFixedRate(this::reconcile, 5, 5, TimeUnit.SECONDS);
+        scheduleReconciliation(reconciler);
+    }
+
+    private void scheduleReconciliation(ScheduledExecutorService scheduler) {
+        scheduler.scheduleAtFixedRate(this::reconcile, 5, 5, TimeUnit.SECONDS);
+    }
+
+    private static ScheduledExecutorService newReconciler() {
+        return Executors.newSingleThreadScheduledExecutor(
+                r -> { Thread t = new Thread(r, "ecs-reconciler"); t.setDaemon(true); return t; });
     }
 
     void initializeStorage() {
@@ -191,18 +202,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
     }
 
     /**
-     * Stops the Docker containers of all still-running tasks on emulator shutdown.
-     * Task state is transient (memory-only), so without this the containers outlive
-     * the process as orphans. The reconciler is shut down first — and any in-flight
-     * tick awaited — so it cannot restart drained tasks between this teardown and
-     * the final storage flush. Handles are claimed atomically to avoid racing an
-     * explicit StopTask.
+     * Stops the Docker containers of all still-running tasks on emulator shutdown and on a
+     * state reset. Task state is transient (memory-only), so without this the containers
+     * outlive the process as orphans. The reconciler is shut down first, and any in-flight
+     * tick awaited, so it cannot restart drained tasks between this teardown and the final
+     * storage flush. A reset brings it back in {@link #clear()}. Handles are claimed
+     * atomically to avoid racing an explicit StopTask.
      */
     @Override
     public void stopManagedContainers() {
-        reconciler.shutdownNow();
+        ScheduledExecutorService current = reconciler;
+        current.shutdownNow();
         try {
-            reconciler.awaitTermination(2, TimeUnit.SECONDS);
+            current.awaitTermination(2, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -215,6 +227,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 containerManager.stopTask(claimed);
             } catch (Exception e) {
                 LOG.warnv("Failed to stop ECS task {0} on shutdown: {1}", taskArn, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Runs after a state reset has drained the tasks and wiped the store, never on shutdown.
+     * The reset's teardown stopped the reconciler, so without a new one no service would be
+     * reconciled again until the emulator restarted.
+     */
+    @Override
+    public void clear() {
+        synchronized (reconcilerLock) {
+            if (reconciler.isShutdown()) {
+                ScheduledExecutorService replacement = newReconciler();
+                scheduleReconciliation(replacement);
+                reconciler = replacement;
             }
         }
     }
