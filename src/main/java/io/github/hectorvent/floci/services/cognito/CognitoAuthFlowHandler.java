@@ -81,23 +81,15 @@ final class CognitoAuthFlowHandler {
                                       Map<String, String> clientMetadata) {
         UserPoolClient client = service.findClientById(clientId);
         UserPool pool = service.describeUserPool(client.getUserPoolId());
+        String requiredFlow = requiredExplicitAuthFlow(authFlow, false);
+        ensureAuthFlowEnabled(client, requiredFlow);
 
         return switch (authFlow) {
             case "USER_PASSWORD_AUTH" -> authenticateWithPassword(pool, client, authParameters, clientMetadata);
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, client, authParameters, clientMetadata);
             case "USER_SRP_AUTH" -> handleUserSrpAuth(pool, client, authParameters, clientMetadata);
             case "CUSTOM_AUTH" -> handleCustomAuth(pool, client, authParameters, clientMetadata);
-            default -> {
-                String username = authParameters.get("USERNAME");
-                if (username == null) {
-                    throw new AwsException("InvalidParameterException", "USERNAME is required", 400);
-                }
-                CognitoUser user = service.adminGetUser(pool.getId(), username);
-                Map<String, Object> result = new HashMap<>();
-                result.put("AuthenticationResult",
-                        issueTokens(pool, client, user, "TokenGeneration_Authentication", clientMetadata));
-                yield result;
-            }
+            default -> throw unsupportedAuthFlow(authFlow);
         };
     }
 
@@ -105,6 +97,8 @@ final class CognitoAuthFlowHandler {
                                            Map<String, String> authParameters, Map<String, String> clientMetadata) {
         UserPoolClient client = service.describeUserPoolClient(userPoolId, clientId);
         UserPool pool = service.describeUserPool(userPoolId);
+        String requiredFlow = requiredExplicitAuthFlow(authFlow, true);
+        ensureAuthFlowEnabled(client, requiredFlow);
 
         String username = authParameters.get("USERNAME");
         if (username != null) {
@@ -120,19 +114,51 @@ final class CognitoAuthFlowHandler {
         }
 
         return switch (authFlow) {
-            case "ADMIN_USER_PASSWORD_AUTH", "USER_PASSWORD_AUTH" ->
+            case "ADMIN_USER_PASSWORD_AUTH" ->
                     authenticateWithPassword(pool, client, authParameters, clientMetadata);
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, client, authParameters, clientMetadata);
-            case "ADMIN_USER_SRP_AUTH" -> handleUserSrpAuth(pool, client, authParameters, clientMetadata);
+            case "USER_SRP_AUTH", "ADMIN_USER_SRP_AUTH" -> handleUserSrpAuth(pool, client, authParameters, clientMetadata);
             case "CUSTOM_AUTH" -> handleCustomAuth(pool, client, authParameters, clientMetadata);
-            default -> {
-                CognitoUser user = service.adminGetUser(userPoolId, username);
-                Map<String, Object> result = new HashMap<>();
-                result.put("AuthenticationResult",
-                        issueTokens(pool, client, user, "TokenGeneration_Authentication", clientMetadata));
-                yield result;
-            }
+            default -> throw unsupportedAuthFlow(authFlow);
         };
+    }
+
+    private static String requiredExplicitAuthFlow(String authFlow, boolean adminApi) {
+        if (authFlow == null) {
+            throw unsupportedAuthFlow(null);
+        }
+        return switch (authFlow) {
+            case "USER_PASSWORD_AUTH" -> {
+                if (adminApi) {
+                    throw unsupportedAuthFlow(authFlow);
+                }
+                yield "ALLOW_USER_PASSWORD_AUTH";
+            }
+            case "ADMIN_USER_PASSWORD_AUTH" -> {
+                if (!adminApi) {
+                    throw unsupportedAuthFlow(authFlow);
+                }
+                yield "ALLOW_ADMIN_USER_PASSWORD_AUTH";
+            }
+            case "USER_SRP_AUTH", "ADMIN_USER_SRP_AUTH" -> "ALLOW_USER_SRP_AUTH";
+            case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> "ALLOW_REFRESH_TOKEN_AUTH";
+            case "CUSTOM_AUTH" -> "ALLOW_CUSTOM_AUTH";
+            default -> throw unsupportedAuthFlow(authFlow);
+        };
+    }
+
+    private static void ensureAuthFlowEnabled(UserPoolClient client, String requiredFlow) {
+        List<String> explicitAuthFlows = client.getExplicitAuthFlows();
+        if (explicitAuthFlows != null && !explicitAuthFlows.isEmpty()
+                && !explicitAuthFlows.contains(requiredFlow)) {
+            throw new AwsException("UnsupportedOperationException",
+                    requiredFlow + " flow not enabled for this client", 400);
+        }
+    }
+
+    private static AwsException unsupportedAuthFlow(String authFlow) {
+        String detail = authFlow == null ? "AuthFlow is required" : "AuthFlow is not supported: " + authFlow;
+        return new AwsException("InvalidParameterException", detail, 400);
     }
 
     Map<String, Object> respondToAuthChallenge(String clientId, String challengeName, String session,
