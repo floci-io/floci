@@ -67,6 +67,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEve
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEventSourceMappingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsMetricFilterCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftClusterCfnProvisioner;
@@ -82,6 +83,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudForm
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsMetricFilterService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
@@ -182,6 +184,7 @@ final class CfnProvisionerFixture {
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
         private FlowLogService flowLogService;
         private CloudWatchDashboardsService cloudWatchDashboardsService;
+        private CloudWatchLogsMetricFilterService logsMetricFilterService;
         private IotDomainConfigurationService iotDomainConfigurationService;
         private IotService iotService;
         private LambdaMicrovmsService lambdaMicrovmsService;
@@ -266,6 +269,9 @@ final class CfnProvisionerFixture {
             }
             if (logsService != null) {
                 discovered.add(new LogsCfnProvisioner(logsService));
+            }
+            if (logsMetricFilterService != null) {
+                discovered.add(new LogsMetricFilterCfnProvisioner(logsMetricFilterService));
             }
             if (kinesisService != null) {
                 discovered.add(new KinesisCfnProvisioner(kinesisService));
@@ -568,6 +574,11 @@ final class CfnProvisionerFixture {
 
         public Builder cloudWatchDashboards(CloudWatchDashboardsService v) {
             this.cloudWatchDashboardsService = v;
+            return this;
+        }
+
+        public Builder logsMetricFilters(CloudWatchLogsMetricFilterService v) {
+            this.logsMetricFilterService = v;
             return this;
         }
 

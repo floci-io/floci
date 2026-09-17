@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ReplacementCleanup;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
@@ -52,6 +53,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -221,6 +223,14 @@ public class CloudFormationResourceProvisioner {
                                    CloudFormationTemplateEngine engine, String region, String accountId,
                                    String stackName, String existingPhysicalId,
                                    Map<String, String> existingAttributes) {
+        return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
+                existingPhysicalId, existingAttributes, event -> {});
+    }
+
+    public StackResource provision(String logicalId, String resourceType, JsonNode properties,
+                                   CloudFormationTemplateEngine engine, String region, String accountId,
+                                   String stackName, String existingPhysicalId,
+                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
@@ -231,7 +241,7 @@ public class CloudFormationResourceProvisioner {
             CfnResourceProvisioner extracted = resourceRegistry.forType(resourceType).orElse(null);
             if (extracted != null) {
                 extracted.provision(resource, properties,
-                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId));
+                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
                 resource.setStatus("CREATE_COMPLETE");
                 return resource;
             }
@@ -1924,6 +1934,21 @@ public class CloudFormationResourceProvisioner {
                 .map(owner -> owner.updateCleanupPhysicalId(resource))
                 .orElse(null);
     }
+
+    /** Only an opted-in provisioner may identify cleanup owed by an UPDATE_FAILED resource. */
+    boolean hasPendingRollbackCleanup(StackResource resource) {
+        return resourceRegistry.forType(resource.getResourceType())
+                .map(owner -> owner.hasPendingRollbackCleanup(resource))
+                .orElse(false);
+    }
+
+    /** Only an opted-in provisioner may keep a failed update attempt in place of the previous resource. */
+    boolean retainsFailedUpdateState(StackResource resource) {
+        return resourceRegistry.forType(resource.getResourceType())
+                .map(owner -> owner.retainsFailedUpdateState(resource))
+                .orElse(false);
+    }
+
     /**
      * Whether this update replaced the resource's physical entity, so the stack has cleanup
      * pending.
@@ -1944,8 +1969,12 @@ public class CloudFormationResourceProvisioner {
      * the stack update, delegated to the provisioner that owns the type.
      */
     boolean rollbackUpdate(StackResource resource) {
+        return rollbackUpdate(resource, event -> {});
+    }
+
+    boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
         return resourceRegistry.forType(resource.getResourceType())
-                .map(owner -> owner.rollbackUpdate(resource))
+                .map(owner -> owner.rollbackUpdate(resource, progress))
                 .orElse(false);
     }
 
