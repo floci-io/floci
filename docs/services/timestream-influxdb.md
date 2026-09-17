@@ -81,7 +81,13 @@ write and query data against it.
 - `RestoreFromDbBackup` with `NEW_RESOURCE` starts a new container and runs `influx restore --full`, so the
   restored resource has the users, tokens, organizations and buckets of the source. `REPLACE_EXISTING`
   restores into the existing container and requires `name` to match the existing resource.
-- `restoreToTime` is accepted but ignored: only on-demand backups exist, so there is no point-in-time log.
+- `restoreToTime` is rejected with `ValidationException`. Point-in-time restore is only available for
+  continuous backups, and Floci models on-demand backups only, so accepting the parameter would silently
+  restore the on-demand contents instead of the requested moment.
+- `REPLACE_EXISTING` accepts no configuration overrides: `vpcSubnetIds`, `vpcSecurityGroupIds`,
+  `publiclyAccessible`, `logDeliveryConfiguration`, `maintenanceSchedule`, `tags`, `port`, `networkType`,
+  `deploymentType`, `dbBackupConfigurations` and `kmsKeyId` are rejected with `ValidationException` naming the
+  member, because restoring into an existing resource changes only its data.
 - `dbBackupConfigurations` are validated and stored; automated backups are not scheduled.
 
 ## Configuration

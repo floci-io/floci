@@ -235,6 +235,39 @@ class TimestreamInfluxDbServiceTest {
     }
 
     @Test
+    void restoreToTimeIsRejectedBecausePointInTimeRestoreNeedsContinuousBackups() throws Exception {
+        String sourceId = createInstance("pitr-db", null).getId();
+        String backupId = service.createDbBackup(json("{\"name\":\"pitr\",\"dbResourceId\":\"" + sourceId + "\"}"),
+                REGION).resource().getId();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.restoreFromDbBackup(json(
+                "{\"name\":\"pitr-copy\",\"dbBackupId\":\"" + backupId + "\",\"restoreToTime\":1700000000}"), REGION));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("continuous"), error.getMessage());
+        verify(containerManager, never()).restore(anyString(), anyString());
+    }
+
+    @Test
+    void replaceExistingRejectsOverridesAndRestoresDataWithoutThem() throws Exception {
+        String sourceId = createInstance("replace-db", null).getId();
+        String backupId = service.createDbBackup(json("{\"name\":\"replace\",\"dbResourceId\":\"" + sourceId + "\"}"),
+                REGION).resource().getId();
+        String replaceBase = "{\"name\":\"replace-db\",\"dbBackupId\":\"" + backupId
+                + "\",\"restoreMode\":\"REPLACE_EXISTING\"";
+
+        AwsException error = assertThrows(AwsException.class, () -> service.restoreFromDbBackup(
+                json(replaceBase + ",\"port\":9100}"), REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("port"), error.getMessage());
+        verify(containerManager, never()).restore(anyString(), anyString());
+        assertEquals(18086, service.getDbInstance(json("{\"identifier\":\"" + sourceId + "\"}"), REGION).getPort());
+
+        service.restoreFromDbBackup(json(replaceBase + "}"), REGION);
+        verify(containerManager).restore("container-1", backupId);
+    }
+
+    @Test
     void tagsBeyondTheQuotaAreRejected() throws Exception {
         String arn = createInstance("quota-db", null).getArn();
         StringBuilder tags = new StringBuilder();

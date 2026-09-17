@@ -68,6 +68,10 @@ public class TimestreamInfluxDbService implements Resettable {
     private static final int V3_PORT = 8181;
     private static final int MAX_TAGS = 200;
     private static final int MAX_PAGE = 100;
+    private static final List<String> REPLACE_EXISTING_REJECTED_MEMBERS = List.of(
+            "vpcSubnetIds", "vpcSecurityGroupIds", "publiclyAccessible", "logDeliveryConfiguration",
+            "maintenanceSchedule", "tags", "port", "networkType", "deploymentType", "dbBackupConfigurations",
+            "kmsKeyId");
 
     public record Reported<T>(T resource, String status) {
     }
@@ -624,6 +628,10 @@ public class TimestreamInfluxDbService implements Resettable {
         if (restoreToTime != null && !restoreToTime.isNull() && !restoreToTime.isNumber() && !restoreToTime.isTextual()) {
             throw validation("restoreToTime must be a timestamp.");
         }
+        if (restoreToTime != null && !restoreToTime.isNull()) {
+            throw validation("restoreToTime requests a point-in-time restore, which is only available for "
+                    + "continuous backups and is not supported.");
+        }
         String restoreMode = orDefault(TimestreamInfluxDbValidation.optionalEnum(request, "restoreMode",
                 TimestreamInfluxDbValidation.RESTORE_MODES), "NEW_RESOURCE");
         List<String> subnets = TimestreamInfluxDbValidation.subnetIds(request, false);
@@ -651,6 +659,7 @@ public class TimestreamInfluxDbService implements Resettable {
         }
 
         if ("REPLACE_EXISTING".equals(restoreMode)) {
+            rejectReplaceExistingOverrides(request);
             return replaceExisting(backup, region, name, clusterBackup);
         }
 
@@ -944,6 +953,20 @@ public class TimestreamInfluxDbService implements Resettable {
     private InfluxDbSetup temporarySetup() {
         String secret = UUID.randomUUID().toString().replace("-", "");
         return new InfluxDbSetup("floci-restore", secret, "floci-restore", "floci-restore");
+    }
+
+    /**
+     * Restoring into an existing resource accepts no parameters beyond the resource to restore and the
+     * backup to restore from: the existing configuration is left untouched and only the data is restored.
+     */
+    private static void rejectReplaceExistingOverrides(JsonNode request) {
+        for (String member : REPLACE_EXISTING_REJECTED_MEMBERS) {
+            JsonNode value = request.get(member);
+            if (value != null && !value.isNull()) {
+                throw validation(member + " can't be supplied when restoreMode is REPLACE_EXISTING: restoring "
+                        + "into an existing resource makes no configuration changes.");
+            }
+        }
     }
 
     private RestoreResult replaceExisting(DbBackup backup, String region, String name, boolean clusterBackup) {

@@ -414,6 +414,49 @@ class TimestreamInfluxDbIntegrationTest {
                 .body("resourceType", equalTo("DB_BACKUP"));
     }
 
+    @Test
+    void pointInTimeRestoreIsRejectedAndLeavesNothingBehind() {
+        String instanceId = createInstance("pitr-source", "").statusCode(200).extract().path("id");
+        String backupId = call("CreateDbBackup", "{\"name\":\"pitr-snap\",\"dbResourceId\":\"" + instanceId + "\"}")
+                .statusCode(200).extract().path("id");
+
+        assertValidationFor("RestoreFromDbBackup",
+                "{\"name\":\"pitr-restored\",\"dbBackupId\":\"" + backupId + "\",\"restoreToTime\":1700000000}");
+
+        call("ListDbInstances", "{\"maxResults\":100}")
+                .statusCode(200)
+                .body("items.name", not(hasItem("pitr-restored")));
+    }
+
+    @Test
+    void replaceExistingRejectsConfigurationOverrides() {
+        String instanceId = createInstance("replace-source", "").statusCode(200).extract().path("id");
+        String backupId = call("CreateDbBackup", "{\"name\":\"replace-snap\",\"dbResourceId\":\"" + instanceId + "\"}")
+                .statusCode(200).extract().path("id");
+        String replaceBase = "{\"name\":\"replace-source\",\"dbBackupId\":\"" + backupId
+                + "\",\"restoreMode\":\"REPLACE_EXISTING\"";
+
+        assertValidationFor("RestoreFromDbBackup", replaceBase + ",\"port\":9100}");
+        assertValidationFor("RestoreFromDbBackup", replaceBase + ",\"tags\":{\"env\":\"dev\"}}");
+        assertValidationFor("RestoreFromDbBackup", replaceBase + ",\"networkType\":\"DUAL\"}");
+        assertValidationFor("RestoreFromDbBackup", replaceBase + ",\"vpcSubnetIds\":[\"subnet-zzz999\"]}");
+        assertValidationFor("RestoreFromDbBackup", replaceBase + ",\"publiclyAccessible\":true}");
+        assertValidationFor("RestoreFromDbBackup", replaceBase + ",\"deploymentType\":\"WITH_MULTIAZ_STANDBY\"}");
+        assertValidationFor("RestoreFromDbBackup", replaceBase + ",\"kmsKeyId\":\"alias/floci\"}");
+
+        call("GetDbInstance", "{\"identifier\":\"" + instanceId + "\"}")
+                .statusCode(200)
+                .body("port", equalTo(8086))
+                .body("networkType", equalTo("IPV4"))
+                .body("deploymentType", equalTo("SINGLE_AZ"))
+                .body("publiclyAccessible", equalTo(false))
+                .body("vpcSubnetIds", contains("subnet-abc123"));
+
+        call("RestoreFromDbBackup", replaceBase + "}")
+                .statusCode(200)
+                .body("restoredDbResourceId", equalTo(instanceId));
+    }
+
     private static org.hamcrest.Matcher<String> endsWithResource(String resourceType) {
         return matchesPattern("arn:aws:timestream-influxdb:us-east-1:" + ACCOUNT + ":" + resourceType + "/" + ID_PATTERN);
     }
