@@ -600,7 +600,7 @@ public class EcsContainerManager {
         } else if (router.getMemory() != null) {
             memoryMb = router.getMemory();
         }
-        String cluster = clusterName(task.getClusterArn());
+        String cluster = extractTaskId(task.getClusterArn());
         String familyRevision = taskDef.getFamily() + ":" + taskDef.getRevision();
         String networkMode = taskDef.getNetworkMode() != null
                 ? taskDef.getNetworkMode().name()
@@ -617,14 +617,6 @@ public class EcsContainerManager {
         return isFluentdRouter(router)
                 ? FirelensConfigGenerator.fluentdConfig(ctx)
                 : FirelensConfigGenerator.fluentBitConfig(ctx);
-    }
-
-    private static String clusterName(String clusterArn) {
-        if (clusterArn == null) {
-            return "";
-        }
-        int slash = clusterArn.lastIndexOf('/');
-        return slash >= 0 ? clusterArn.substring(slash + 1) : clusterArn;
     }
 
     private String unixSocketAddress(String volumeName) {
@@ -1011,9 +1003,12 @@ public class EcsContainerManager {
         return container;
     }
 
-    private static String extractTaskId(String taskArn) {
-        int slash = taskArn.lastIndexOf('/');
-        return slash >= 0 ? taskArn.substring(slash + 1) : taskArn;
+    private static String extractTaskId(String arn) {
+        if (arn == null) {
+            return "";
+        }
+        int slash = arn.lastIndexOf('/');
+        return slash >= 0 ? arn.substring(slash + 1) : arn;
     }
 
     /**
