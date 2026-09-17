@@ -29,6 +29,11 @@ class ElbClassicIntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/elasticloadbalancing/aws4_request";
+    private static final String SOURCE_GROUP_ACCOUNT = "333333333333";
+    private static final String SOURCE_GROUP_ELB_AUTH = "AWS4-HMAC-SHA256 Credential="
+            + SOURCE_GROUP_ACCOUNT + "/20260427/us-east-1/elasticloadbalancing/aws4_request";
+    private static final String SOURCE_GROUP_EC2_AUTH = "AWS4-HMAC-SHA256 Credential="
+            + SOURCE_GROUP_ACCOUNT + "/20260427/us-east-1/ec2/aws4_request";
     private static final String V1 = "2012-06-01";
     private static final String V2 = "2015-12-01";
     private static final String CLASSIC_XMLNS =
@@ -567,5 +572,54 @@ class ElbClassicIntegrationTest {
             .then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("LoadBalancerNotFound"));
+    }
+
+    @Test
+    @Order(19)
+    void describeIncludesTheAttachedSecurityGroupsOwnerAndName() {
+        String groupId = given()
+                .formParam("Action", "CreateSecurityGroup")
+                .formParam("Version", "2016-11-15")
+                .formParam("GroupName", "elb-source-sg")
+                .formParam("GroupDescription", "Classic ELB source group")
+                .header("Authorization", SOURCE_GROUP_EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("CreateSecurityGroupResponse.groupId");
+
+        String loadBalancerName = "classic-elb-source-group";
+        given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Version", V1)
+                .formParam("LoadBalancerName", loadBalancerName)
+                .formParam("Subnets.member.1", subnetA())
+                .formParam("SecurityGroups.member.1", groupId)
+                .formParam("Listeners.member.1.Protocol", "TCP")
+                .formParam("Listeners.member.1.LoadBalancerPort", "443")
+                .formParam("Listeners.member.1.InstanceProtocol", "TCP")
+                .formParam("Listeners.member.1.InstancePort", "8443")
+                .header("Authorization", SOURCE_GROUP_ELB_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("Version", V1)
+                .formParam("LoadBalancerNames.member.1", loadBalancerName)
+                .header("Authorization", SOURCE_GROUP_ELB_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult"
+                                + ".LoadBalancerDescriptions.member.SourceSecurityGroup.OwnerAlias",
+                        equalTo(SOURCE_GROUP_ACCOUNT))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult"
+                                + ".LoadBalancerDescriptions.member.SourceSecurityGroup.GroupName",
+                        equalTo("elb-source-sg"));
     }
 }
