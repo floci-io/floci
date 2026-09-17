@@ -599,7 +599,68 @@ public class DynamoDbPartiQLParser {
             advance();
             return new Cond.Not(parseNot());
         }
-        return parseCond();
+        return parseComparison();
+    }
+
+    private static final Set<TType> COMPARISONS = EnumSet.of(TType.EQ, TType.NE, TType.LT, TType.LE, TType.GT, TType.GE);
+
+    private static final List<String> PREDICATE_FUNCTIONS =
+            List.of("begins_with", "contains", "attribute_type", "attribute_exists", "attribute_not_exists");
+
+    // A condition compared with a value reads as a boolean, so attribute_exists(a) = false holds
+    // for a missing a and attribute_exists(a) = 1 holds for nothing (checked on real AWS, eu-west-2, 2026-09-17).
+    private Cond parseComparison() {
+        TType afterBool = tokens.get(Math.min(pos + 1, tokens.size() - 1)).type();
+        if (peek().type() == TType.BOOL && (afterBool == TType.EQ || afterBool == TType.NE)) {
+            boolean flag = Boolean.parseBoolean(advance().value());
+            boolean equal = advance().type() == TType.EQ;
+            Cond predicate = parseCond();
+            return flag == equal ? predicate : new Cond.Not(predicate);
+        }
+        Cond cond = parseCond();
+        if (peek().type() == TType.BETWEEN) {
+            throw incorrectOperandType("BETWEEN", new PVal.Bool(true));
+        }
+        if (peek().type() == TType.IN) {
+            advance();
+            consume(TType.LBRACKET);
+            List<Cond> matches = new ArrayList<>();
+            matches.add(conditionEquals(cond));
+            while (peek().type() == TType.COMMA) {
+                advance();
+                matches.add(conditionEquals(cond));
+            }
+            consume(TType.RBRACKET);
+            return matches.size() == 1 ? matches.getFirst() : new Cond.Or(List.copyOf(matches));
+        }
+        if (!COMPARISONS.contains(peek().type())) {
+            return cond;
+        }
+        String op = parseOp();
+        if (!"=".equals(op) && !"<>".equals(op)) {
+            throw incorrectOperandType(op, new PVal.Bool(true));
+        }
+        Cond equal = conditionEquals(cond);
+        return "=".equals(op) ? equal : new Cond.Not(equal);
+    }
+
+    private Cond conditionEquals(Cond cond) {
+        boolean predicateNext = peek().type() == TType.LPAREN
+                || PREDICATE_FUNCTIONS.stream().anyMatch(this::peekFunction);
+        if (predicateNext) {
+            Cond other = parseCond();
+            return new Cond.Or(List.of(new Cond.And(List.of(cond, other)),
+                    new Cond.And(List.of(new Cond.Not(cond), new Cond.Not(other)))));
+        }
+        if (peek().type() == TType.IDENT) {
+            Path path = parsePath();
+            return new Cond.Or(List.of(new Cond.And(List.of(cond, new Cond.Eq(path, new PVal.Bool(true)))),
+                    new Cond.And(List.of(new Cond.Not(cond), new Cond.Eq(path, new PVal.Bool(false))))));
+        }
+        if (parseValue() instanceof PVal.Bool flag) {
+            return flag.v() ? cond : new Cond.Not(cond);
+        }
+        return new Cond.And(List.of(cond, new Cond.Not(cond)));
     }
 
     // S, N and B are the only types DynamoDB gives an ordering.

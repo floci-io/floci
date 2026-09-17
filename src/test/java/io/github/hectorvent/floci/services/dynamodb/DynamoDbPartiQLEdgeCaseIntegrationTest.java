@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
@@ -413,6 +414,27 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ConditionalCheckFailedException"));
         getItem("exists").body("Item.t", nullValue());
+    }
+
+    @Test
+    @Order(19)
+    void comparesAConditionWithABoolean() {
+        putItem("booleans", "\"n\":{\"N\":\"1\"},\"flag\":{\"S\":\"right\"},\"yes\":{\"BOOL\":true}");
+        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE pk='booleans' AND sk='1' AND ";
+
+        for (String holds : List.of("attribute_exists(nope) = false", "true = attribute_exists(n)",
+                "attribute_exists(n) <> 1", "contains(nope, 'z') = false", "(n BETWEEN 0 AND 5) = true",
+                "(n = 5 OR flag = 'x') = false", "attribute_exists(nope) IN [true, false]",
+                "attribute_exists(n) = attribute_exists(flag)", "attribute_exists(n) = yes")) {
+            statement(select + holds).statusCode(200).body("Items.size()", equalTo(1));
+        }
+        for (String fails : List.of("attribute_exists(n) = 1", "NOT attribute_exists(n) = true",
+                "(attribute_exists(n) = true) = false", "attribute_exists(n) = flag")) {
+            statement(select + fails).statusCode(200).body("Items.size()", equalTo(0));
+        }
+        statement(select + "attribute_exists(n) > false")
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function; operator or function: >, operand type: BOOL"));
     }
 
     private static ValidatableResponse getItem(String pk) {
