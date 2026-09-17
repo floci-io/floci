@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -1100,6 +1101,17 @@ public class EcsJsonHandler {
             n.set("mountPoints", mps);
         }
 
+        if (def.getVolumesFrom() != null && !def.getVolumesFrom().isEmpty()) {
+            ArrayNode volumesFrom = objectMapper.createArrayNode();
+            for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
+                ObjectNode volumeFromNode = objectMapper.createObjectNode();
+                volumeFromNode.put("sourceContainer", volumeFrom.sourceContainer());
+                volumeFromNode.put("readOnly", volumeFrom.readOnly());
+                volumesFrom.add(volumeFromNode);
+            }
+            n.set("volumesFrom", volumesFrom);
+        }
+
         if (def.getLogConfiguration() != null) {
             LogConfiguration logConfig = def.getLogConfiguration();
             ObjectNode logNode = objectMapper.createObjectNode();
@@ -1481,6 +1493,7 @@ public class EcsJsonHandler {
                 def.setSecrets(parseSecrets(item.path("secrets")));
             }
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
+            def.setVolumesFrom(parseVolumesFrom(item.path("volumesFrom")));
             def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
             if (item.has("healthCheck")) {
                 def.setHealthCheck(parseHealthCheck(item.path("healthCheck")));
@@ -1534,6 +1547,19 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             result.add(new Secret(item.path("name").asText(), item.path("valueFrom").asText()));
+        }
+        return result;
+    }
+
+    private List<VolumeFrom> parseVolumesFrom(JsonNode node) {
+        List<VolumeFrom> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            result.add(new VolumeFrom(
+                    item.path("sourceContainer").asText(),
+                    item.path("readOnly").asBoolean(false)));
         }
         return result;
     }

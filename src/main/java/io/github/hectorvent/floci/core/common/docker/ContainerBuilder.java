@@ -9,6 +9,7 @@ import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Volume;
+import com.github.dockerjava.api.model.VolumesFrom;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -132,6 +133,7 @@ public class ContainerBuilder {
         private String networkMode;
         private final List<Mount> mounts = new ArrayList<>();
         private final List<Bind> binds = new ArrayList<>();
+        private final List<VolumesFrom> volumesFrom = new ArrayList<>();
         private final List<String> extraHosts = new ArrayList<>();
         private final Map<String, String> labels = new HashMap<>();
         private LogConfig logConfig;
@@ -316,6 +318,14 @@ public class ContainerBuilder {
                     .withSource(volumeName)
                     .withTarget(containerPath)
                     .withReadOnly(readOnly));
+            return this;
+        }
+
+        /**
+         * Inherits every volume declared by another container.
+         */
+        public Builder withVolumesFrom(String sourceContainerId, boolean readOnly) {
+            volumesFrom.add(new VolumesFrom(sourceContainerId, readOnly ? AccessMode.ro : AccessMode.rw));
             return this;
         }
 
@@ -592,6 +602,7 @@ public class ContainerBuilder {
                     networkMode,
                     List.copyOf(mounts),
                     List.copyOf(binds),
+                    List.copyOf(volumesFrom),
                     List.copyOf(extraHosts),
                     Map.copyOf(labels),
                     logConfig,

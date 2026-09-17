@@ -19,6 +19,7 @@ public class ContainerDefinition {
     private List<String> command;
     private List<String> entryPoint;
     private List<MountPoint> mountPoints;
+    private List<VolumeFrom> volumesFrom;
     private LogConfiguration logConfiguration;
     private HealthCheck healthCheck;
 
@@ -57,6 +58,9 @@ public class ContainerDefinition {
 
     public List<MountPoint> getMountPoints() { return mountPoints; }
     public void setMountPoints(List<MountPoint> mountPoints) { this.mountPoints = mountPoints; }
+
+    public List<VolumeFrom> getVolumesFrom() { return volumesFrom; }
+    public void setVolumesFrom(List<VolumeFrom> volumesFrom) { this.volumesFrom = volumesFrom; }
 
     public LogConfiguration getLogConfiguration() { return logConfiguration; }
     public void setLogConfiguration(LogConfiguration logConfiguration) { this.logConfiguration = logConfiguration; }

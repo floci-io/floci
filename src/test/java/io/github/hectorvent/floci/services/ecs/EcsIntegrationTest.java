@@ -639,6 +639,48 @@ class EcsIntegrationTest {
             .body("taskDefinition.containerDefinitions[0]", not(hasKey("logConfiguration")));
     }
 
+    @Test
+    @Order(27)
+    void registerTaskDefinitionRoundTripsVolumesFrom() {
+        String volumesFromTaskDefArn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "task-with-volumes-from",
+                    "containerDefinitions": [
+                        {"name": "source", "image": "sidecar:latest"},
+                        {
+                            "name": "app",
+                            "image": "app:latest",
+                            "volumesFrom": [
+                                {"sourceContainer": "source", "readOnly": true}
+                            ]
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[1].volumesFrom", hasSize(1))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0].sourceContainer", equalTo("source"))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0].readOnly", equalTo(true))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(volumesFromTaskDefArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[1].volumesFrom", hasSize(1))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0].sourceContainer", equalTo("source"))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0].readOnly", equalTo(true));
+    }
+
     // ── Services ──────────────────────────────────────────────────────────────
 
     @Test

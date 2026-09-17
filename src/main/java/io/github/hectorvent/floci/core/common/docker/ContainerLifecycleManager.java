@@ -937,6 +937,10 @@ public class ContainerLifecycleManager {
             hostConfig.withBinds(spec.binds().toArray(new Bind[0]));
         }
 
+        if (spec.volumesFrom() != null && !spec.volumesFrom().isEmpty()) {
+            hostConfig.withVolumesFrom(spec.volumesFrom());
+        }
+
         // Extra hosts (e.g., host.docker.internal on Linux)
         if (spec.extraHosts() != null && !spec.extraHosts().isEmpty()) {
             hostConfig.withExtraHosts(spec.extraHosts().toArray(new String[0]));

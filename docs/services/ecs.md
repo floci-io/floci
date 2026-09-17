@@ -36,6 +36,10 @@ own `RegisterTaskDefinition`) sees no drift. Neither changes how a local task ru
 every task on the host's own architecture, and a task's output stays with its Docker container
 rather than being routed to the configured log driver.
 
+Container `volumesFrom` entries are also stored and returned. In Docker mode, source containers
+are launched before their consumers and their declared volumes are inherited with the requested
+read-only or read-write access mode.
+
 ### Tasks
 
 | Operation | Description |

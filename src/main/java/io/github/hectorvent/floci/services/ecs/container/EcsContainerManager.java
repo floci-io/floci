@@ -32,6 +32,7 @@ import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.github.dockerjava.api.DockerClient;
@@ -134,6 +135,7 @@ public class EcsContainerManager {
         Map<String, String> containerIds = new LinkedHashMap<>();
         Map<String, Closeable> logStreamsByContainerId = new LinkedHashMap<>();
         List<Container> runtimeContainers = new ArrayList<>();
+        List<ContainerDefinition> launchOrder = orderForVolumesFrom(taskDef.getContainerDefinitions());
 
         // Task-level volumes consumed by per-container mountPoints: host volumes map their
         // name -> absolute host source path; efsVolumeConfiguration volumes map their
@@ -157,7 +159,7 @@ public class EcsContainerManager {
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
-        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+        for (ContainerDefinition def : launchOrder) {
             envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region));
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
@@ -165,7 +167,7 @@ public class EcsContainerManager {
         PreparedNetwork protectedNetwork = prepareNetwork(task, taskDef, region, taskId);
 
         try {
-        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+        for (ContainerDefinition def : launchOrder) {
             String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
 
             // RunTask containerOverrides matched by container name: command replaces
@@ -263,6 +265,17 @@ public class EcsContainerManager {
                 }
             }
 
+            if (def.getVolumesFrom() != null) {
+                for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
+                    String sourceContainerId = containerIds.get(volumeFrom.sourceContainer());
+                    if (sourceContainerId == null) {
+                        throw new IllegalStateException("ECS volumesFrom source container "
+                                + volumeFrom.sourceContainer() + " has not started");
+                    }
+                    specBuilder.withVolumesFrom(sourceContainerId, volumeFrom.readOnly());
+                }
+            }
+
             ContainerSpec spec = specBuilder.build();
 
             // Create and start container
@@ -302,13 +315,66 @@ public class EcsContainerManager {
             throw e;
         }
 
-        task.setContainers(runtimeContainers);
+        Map<String, Container> runtimeContainersByName = new LinkedHashMap<>();
+        for (Container container : runtimeContainers) {
+            runtimeContainersByName.put(container.getName(), container);
+        }
+        List<Container> containersInDefinitionOrder = new ArrayList<>();
+        for (ContainerDefinition definition : taskDef.getContainerDefinitions()) {
+            Container container = runtimeContainersByName.get(definition.getName());
+            if (container != null) {
+                containersInDefinitionOrder.add(container);
+            }
+        }
+        task.setContainers(containersInDefinitionOrder);
         task.setLastStatus(TaskStatus.RUNNING.name());
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region);
+    }
+
+    private List<ContainerDefinition> orderForVolumesFrom(List<ContainerDefinition> definitions) {
+        Map<String, ContainerDefinition> definitionsByName = new LinkedHashMap<>();
+        for (ContainerDefinition definition : definitions) {
+            definitionsByName.put(definition.getName(), definition);
+        }
+
+        List<ContainerDefinition> ordered = new ArrayList<>();
+        Set<ContainerDefinition> visiting = new HashSet<>();
+        Set<ContainerDefinition> visited = new HashSet<>();
+        for (ContainerDefinition definition : definitions) {
+            addAfterVolumeSources(definition, definitionsByName, visiting, visited, ordered);
+        }
+        return ordered;
+    }
+
+    private void addAfterVolumeSources(ContainerDefinition definition,
+                                       Map<String, ContainerDefinition> definitionsByName,
+                                       Set<ContainerDefinition> visiting,
+                                       Set<ContainerDefinition> visited,
+                                       List<ContainerDefinition> ordered) {
+        if (visited.contains(definition)) {
+            return;
+        }
+        if (!visiting.add(definition)) {
+            throw new IllegalArgumentException("ECS volumesFrom references contain a cycle at container "
+                    + definition.getName());
+        }
+        if (definition.getVolumesFrom() != null) {
+            for (VolumeFrom volumeFrom : definition.getVolumesFrom()) {
+                ContainerDefinition source = definitionsByName.get(volumeFrom.sourceContainer());
+                if (source == null) {
+                    throw new IllegalArgumentException("ECS volumesFrom references unknown source container "
+                            + volumeFrom.sourceContainer());
+                }
+                addAfterVolumeSources(source, definitionsByName, visiting, visited, ordered);
+            }
+        }
+        visiting.remove(definition);
+        visited.add(definition);
+        ordered.add(definition);
     }
 
     private PreparedNetwork prepareNetwork(EcsTask task, TaskDefinition definition, String region, String taskId) {
