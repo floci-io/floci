@@ -508,7 +508,9 @@ public class SesIdentityController {
     }
 
     private static String toV2Status(String v1Status) {
-        if (v1Status == null) return null;
+        if (v1Status == null) {
+            return null;
+        }
         return switch (v1Status) {
             case "Success" -> "SUCCESS";
             case "NotStarted" -> "NOT_STARTED";
