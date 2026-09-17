@@ -61,9 +61,10 @@ An injected `http://` endpoint also gets `tls Off`. Fluent Bit 1.9 (the `aws-for
 and `:latest` line) still calls `flb_tls_session_create` on HTTP S3 and SIGSEGVs on a NULL
 TLS context; the scheme alone is not enough. A `tls` the task definition already set is left
 alone.
-The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci does not
-share a network namespace, so the injected `FLUENT_HOST` (the router's container IP) must be
-reachable. Fluent Bit config is written to `/fluent-bit/etc/fluent-bit.conf`. Fluentd config is
+The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci only
+shares a network namespace when security-group enforcement is enabled for an awsvpc task. In every
+other case, the injected `FLUENT_HOST` (the router's container IP) must be reachable. Fluent Bit
+config is written to `/fluent-bit/etc/fluent-bit.conf`. Fluentd config is
 written to `/fluentd/etc/fluent.conf` and uses `@type` (not `Name`) for output plugins; Floci
 does not inject an `endpoint` into Fluentd outputs.
 `config-file-type=s3` follows where ECS itself draws the line. `RegisterTaskDefinition` rejects
