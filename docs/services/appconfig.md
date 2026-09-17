@@ -28,6 +28,7 @@ The management plane allows you to create and manage applications, environments,
 - `DeleteDeploymentStrategy`
 - `StartDeployment`
 - `GetDeployment`
+- `ListDeployments` (`GET /applications/{ApplicationId}/environments/{EnvironmentId}/deployments`)
 
 ## Data Plane (AppConfigData) {#data-plane}
 

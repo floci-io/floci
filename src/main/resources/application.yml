@@ -802,5 +802,7 @@ floci:
       enabled: true
     codegurureviewer:
       enabled: true
+    codeartifact:
+      enabled: true
     marketplace:
       enabled: true

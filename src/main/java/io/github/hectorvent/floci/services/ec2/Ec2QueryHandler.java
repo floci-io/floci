@@ -3029,8 +3029,18 @@ public class Ec2QueryHandler {
 
     // ─── Key Pair handlers ────────────────────────────────────────────────────
 
-    private Response handleCreateKeyPair(MultivaluedMap<String, String> p, String region) {
+    // KeyName is required on CreateKeyPair and ImportKeyPair. Accepting its absence used to store
+    // a nameless key pair, and the first nameless record broke every later CreateKeyPair (#3356).
+    private static String requireKeyName(MultivaluedMap<String, String> p) {
         String keyName = p.getFirst("KeyName");
+        if (keyName == null || keyName.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
+        }
+        return keyName;
+    }
+
+    private Response handleCreateKeyPair(MultivaluedMap<String, String> p, String region) {
+        String keyName = requireKeyName(p);
         KeyPair kp = service.createKeyPair(region, keyName);
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateKeyPairResponse", AwsNamespaces.EC2)
@@ -3066,14 +3076,36 @@ public class Ec2QueryHandler {
     private Response handleDeleteKeyPair(MultivaluedMap<String, String> p, String region) {
         String keyName = p.getFirst("KeyName");
         String keyPairId = p.getFirst("KeyPairId");
-        service.deleteKeyPair(region, keyName, keyPairId);
-        return booleanResponse("DeleteKeyPair");
+        boolean noName = keyName == null || keyName.isBlank();
+        boolean noId = keyPairId == null || keyPairId.isBlank();
+        if (noName && noId) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
+        }
+        KeyPair deleted = service.deleteKeyPair(region, keyName, keyPairId);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteKeyPairResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("return", "true");
+        if (deleted != null) {
+            xml.elem("keyPairId", deleted.getKeyPairId());
+        }
+        xml.end("DeleteKeyPairResponse");
+        return xmlResponse(xml.build());
     }
 
     private Response handleImportKeyPair(MultivaluedMap<String, String> p, String region) {
-        String keyName = p.getFirst("KeyName");
+        String keyName = requireKeyName(p);
         String encoded = p.getFirst("PublicKeyMaterial");
-        String publicKeyMaterial = new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        if (encoded == null || encoded.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter PublicKeyMaterial", 400);
+        }
+        String publicKeyMaterial;
+        try {
+            publicKeyMaterial = new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidKey.Format", "Key is not in valid OpenSSH public key format", 400);
+        }
         KeyPair kp = service.importKeyPair(region, keyName, publicKeyMaterial);
         XmlBuilder xml = new XmlBuilder()
                 .start("ImportKeyPairResponse", AwsNamespaces.EC2)

@@ -4546,11 +4546,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public KeyPair createKeyPair(String region, String keyName) {
         ensureDefaultResources(region);
-        boolean exists = keyPairs.scan(k -> true).stream()
-                .anyMatch(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
-        if (exists) {
-            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
-        }
+        requireKeyName(keyName);
+        rejectDuplicateKeyName(region, keyName);
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
@@ -4594,28 +4591,30 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
-    public void deleteKeyPair(String region, String keyName, String keyPairId) {
+    /**
+     * Deletes by id when one is given, otherwise by name, and returns the deleted key pair so
+     * the response can carry its id. Null when nothing matched: AWS answers a delete of an
+     * unknown key pair with plain success.
+     */
+    public KeyPair deleteKeyPair(String region, String keyName, String keyPairId) {
         ensureDefaultResources(region);
-        if (keyPairId != null && !keyPairId.isEmpty()) {
-            keyPairs.delete(key(region, keyPairId));
-        } else {
-            // scan() returns a detached copy, so the key pair has to be resolved to its
-            // store key and deleted through the backend — mutating the scan result does
-            // not touch the store.
-            keyPairs.scan(k -> true).stream()
-                    .filter(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName))
-                    .map(KeyPair::getKeyPairId)
-                    .forEach(id -> keyPairs.delete(key(region, id)));
+        boolean byId = keyPairId != null && !keyPairId.isEmpty();
+        // scan() returns detached copies, so each match is resolved to its store key and deleted
+        // through the backend; mutating the scan result does not touch the store.
+        List<KeyPair> matches = keyPairs.scan(k -> true).stream()
+                .filter(k -> region.equals(k.getRegion()))
+                .filter(k -> byId ? keyPairId.equals(k.getKeyPairId()) : keyName != null && keyName.equals(k.getKeyName()))
+                .toList();
+        for (KeyPair match : matches) {
+            keyPairs.delete(key(region, match.getKeyPairId()));
         }
+        return matches.isEmpty() ? null : matches.getFirst();
     }
 
     public KeyPair importKeyPair(String region, String keyName, String publicKeyMaterial) {
         ensureDefaultResources(region);
-        boolean exists = keyPairs.scan(k -> true).stream()
-                .anyMatch(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
-        if (exists) {
-            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
-        }
+        requireKeyName(keyName);
+        rejectDuplicateKeyName(region, keyName);
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
@@ -4654,6 +4653,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     || (!"shutting-down".equals(state) && !"terminated".equals(state) && !"stopping".equals(state));
         }
         return containerManager.isContainerRunning(instance.getDockerContainerId());
+    }
+
+    private static void requireKeyName(String keyName) {
+        if (keyName == null || keyName.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
+        }
+    }
+
+    // Compared name-first so a nameless record can never throw here. One such record, stored
+    // before KeyName was validated, used to fail every later CreateKeyPair in the account (#3356).
+    private void rejectDuplicateKeyName(String region, String keyName) {
+        boolean exists = keyPairs.scan(k -> true).stream()
+                .anyMatch(k -> region.equals(k.getRegion()) && keyName.equals(k.getKeyName()));
+        if (exists) {
+            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
+        }
     }
 
     public KeyPair findKeyPair(String region, String keyName) {

@@ -1310,6 +1310,102 @@ class SqsServiceTest {
     }
 
     @Test
+    void cancelMessageMoveTask_takesEffectWithoutWaitingOutTheRateInterval() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-latency-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-latency-dlq");
+        sqsService.createQueue("cancel-latency-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-latency-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-latency-destination");
+        for (int i = 0; i < 50; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        // At one message per second the worker sleeps a full second between moves. AWS
+        // reflects a cancel immediately (CANCELLING, then CANCELLED once nothing is in
+        // flight); the worker must be woken, not left to sleep out its interval.
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+
+        String statusRightAfterCancel = moveTaskStatus(dlqArn, taskHandle);
+        assertTrue("CANCELLING".equals(statusRightAfterCancel) || "CANCELLED".equals(statusRightAfterCancel),
+                "expected CANCELLING or CANCELLED right after CancelMessageMoveTask returned, was " + statusRightAfterCancel);
+
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300);
+        while (!"CANCELLED".equals(moveTaskStatus(dlqArn, taskHandle))) {
+            assertTrue(System.nanoTime() < deadline,
+                    "move task still " + moveTaskStatus(dlqArn, taskHandle) + " 300 ms after the cancel");
+            Thread.sleep(5);
+        }
+        assertEquals(1, sqsService.listMessageMoveTasks(dlqArn, "us-east-1").size());
+    }
+
+    @Test
+    void cancelMessageMoveTask_statusNeverRegressesToRunningWhileTheWorkerRecordsProgress() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-stomp-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-stomp-dlq");
+        sqsService.createQueue("cancel-stomp-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-stomp-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-stomp-destination");
+        for (int i = 0; i < 3000; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        // Unthrottled, so the worker records its count after every message while the cancel
+        // lands: the two writers share the store's lock, and once the cancel has returned the
+        // task must only ever read CANCELLING or CANCELLED.
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        String status;
+        while (!"CANCELLED".equals(status = moveTaskStatus(dlqArn, taskHandle))) {
+            assertNotEquals("RUNNING", status, "a cancelled task reported RUNNING again");
+            assertTrue(System.nanoTime() < deadline, "move task never reached CANCELLED, last seen " + status);
+        }
+    }
+
+    @Test
+    void cancelMessageMoveTask_acceptedCancelIsNotOverwrittenByTheWorkersTerminalWrite() throws Exception {
+        Queue dlq = sqsService.createQueue("cancel-terminal-dlq", null, "us-east-1");
+        String dlqArn = queueArn("cancel-terminal-dlq");
+        sqsService.createQueue("cancel-terminal-source",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                "us-east-1");
+        sqsService.createQueue("cancel-terminal-destination", null, "us-east-1");
+        String destinationArn = queueArn("cancel-terminal-destination");
+        for (int i = 0; i < 50; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        }
+
+        // The interleaving: the worker reads its own signal and concludes COMPLETED, the cancel is
+        // accepted (the task reads CANCELLING), and only then does the worker's terminal write
+        // land. Replaying that write with the stale decision must not turn CANCELLING back into
+        // COMPLETED.
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+        sqsService.finishMoveTask(taskHandle, 1, false);
+
+        assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
+        awaitMoveTaskStatus(dlqArn, taskHandle, "CANCELLED");
+        assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
+    }
+
+    private String moveTaskStatus(String sourceArn, String taskHandle) {
+        return sqsService.listMessageMoveTasks(sourceArn, "us-east-1").stream()
+                .filter(task -> task.taskHandle().equals(taskHandle))
+                .map(SqsService.MoveTask::status)
+                .findFirst()
+                .orElse("<absent>");
+    }
+
+    @Test
     void completedMessageMoveTasks_areBoundedToRecentSummaries() throws Exception {
         sqsService.createQueue("terminal-cap-dlq", null, "us-east-1");
         String dlqArn = queueArn("terminal-cap-dlq");

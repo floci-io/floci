@@ -1127,6 +1127,75 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createKeyPairRejectsMissingKeyName() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        for (String missing : new String[] {null, "", "   "}) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.createKeyPair("us-east-1", missing));
+            assertEquals("MissingParameter", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    void importKeyPairRejectsMissingKeyName() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.importKeyPair("us-east-1", null, "c3NoLXJzYSBBQUFB"));
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createKeyPairSurvivesANamelessRecordInTheStore() {
+        // Regression for #3356: a key pair stored without a name (accepted before KeyName was
+        // validated) made the duplicate check throw on every later CreateKeyPair.
+        AccountAwareStorageBackend<KeyPair> keyPairStore = AccountAwareStorageBackend.inMemory("000000000000");
+        KeyPair nameless = new KeyPair();
+        nameless.setKeyPairId("key-nameless");
+        nameless.setRegion("us-east-1");
+        keyPairStore.put("us-east-1:key-nameless", nameless);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+
+        KeyPair created = service.createKeyPair("us-east-1", "fresh");
+        KeyPair imported = service.importKeyPair("us-east-1", "fresh-imported",
+                Ec2KeyMaterial.generateRsa().openSshPublicKey());
+
+        assertEquals("fresh", created.getKeyName());
+        assertEquals("fresh-imported", imported.getKeyName());
+        assertNull(service.deleteKeyPair("us-east-1", "no-such-name", null));
+        assertEquals(3, service.describeKeyPairs("us-east-1", List.of(), List.of()).size());
+    }
+
+    @Test
+    void deleteKeyPairReturnsTheDeletedRecordOrNull() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        KeyPair byName = service.createKeyPair("us-east-1", "delete-by-name");
+        KeyPair byId = service.createKeyPair("us-east-1", "delete-by-id");
+
+        assertEquals(byName.getKeyPairId(), service.deleteKeyPair("us-east-1", "delete-by-name", null).getKeyPairId());
+        assertEquals(byId.getKeyPairId(), service.deleteKeyPair("us-east-1", null, byId.getKeyPairId()).getKeyPairId());
+        assertNull(service.deleteKeyPair("us-east-1", "delete-by-name", null));
+        assertNull(service.deleteKeyPair("us-east-1", null, byId.getKeyPairId()));
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    @Test
     void importKeyPairRejectsDuplicateKeyName() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),

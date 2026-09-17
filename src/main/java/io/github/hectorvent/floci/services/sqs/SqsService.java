@@ -30,6 +30,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
@@ -54,8 +56,9 @@ public class SqsService implements Resettable, ResourceProvider {
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
     /** Move tasks keyed by opaque task handle. */
     private final MoveTaskStore moveTasksByHandle;
-    /** Per-task cancellation flag the move worker polls between iterations. */
-    private final ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean> moveTaskCancellation =
+    /** Per-task cancellation signal: the move worker waits on it between moves, so a cancel wakes
+     *  the worker instead of being noticed only after the rate interval has elapsed. */
+    private final ConcurrentHashMap<String, MoveTaskCancellation> moveTaskCancellation =
             new ConcurrentHashMap<>();
     /** Move tasks execute on a background thread so MaxNumberOfMessagesPerSecond can throttle
      * and CancelMessageMoveTask has something to interrupt. One thread per task is sufficient. */
@@ -76,6 +79,26 @@ public class SqsService implements Resettable, ResourceProvider {
                            long approximateNumberOfMessagesMoved,
                            long approximateNumberOfMessagesToMove,
                            long startedTimestampMillis, String failureReason) {
+    }
+
+    /**
+     * A cancel request the worker can wait on. {@link #awaitRequested} is the worker's throttle
+     * sleep: it returns early, and true, as soon as the task is cancelled.
+     */
+    private static final class MoveTaskCancellation {
+        private final CountDownLatch requested = new CountDownLatch(1);
+
+        void request() {
+            requested.countDown();
+        }
+
+        boolean isRequested() {
+            return requested.getCount() == 0;
+        }
+
+        boolean awaitRequested(long millis) throws InterruptedException {
+            return requested.await(millis, TimeUnit.MILLISECONDS);
+        }
     }
 
     private static final class MoveTaskStore {
@@ -105,7 +128,7 @@ public class SqsService implements Resettable, ResourceProvider {
         }
 
         private synchronized void put(String taskHandle, MoveTask task) {
-            boolean terminal = !"RUNNING".equals(task.status());
+            boolean terminal = !isActive(task.status());
             Long terminalAtMillis = terminal ? clock.millis() : null;
             long sequence = terminal ? ++terminalSequence : 0;
             entries.put(taskHandle, new Entry(task, terminalAtMillis, sequence));
@@ -145,6 +168,60 @@ public class SqsService implements Resettable, ResourceProvider {
                     entries.remove(terminalEntries.get(i).getKey());
                 }
             }
+        }
+
+        private static boolean isActive(String status) {
+            return "RUNNING".equals(status) || "CANCELLING".equals(status);
+        }
+
+        /**
+         * Records the worker's running count against whatever status the task holds right now.
+         * The worker and {@code cancelMessageMoveTask} write the same record from two threads,
+         * so the read of the current status and the write back happen under the store's lock:
+         * a cancel that lands in between is never stomped back to RUNNING.
+         */
+        private synchronized void recordMoved(String taskHandle, long moved) {
+            Entry entry = entries.get(taskHandle);
+            if (entry == null) {
+                return;
+            }
+            MoveTask cur = entry.task();
+            put(taskHandle, new MoveTask(cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                    cur.maxNumberOfMessagesPerSecond(), cur.status(), moved,
+                    cur.approximateNumberOfMessagesToMove(), cur.startedTimestampMillis(), cur.failureReason()));
+        }
+
+        /**
+         * The worker's terminal write, resolved against the status the task holds at that moment.
+         * A cancel accepted while the worker was deciding has already moved the task to
+         * CANCELLING, so it ends CANCELLED whatever the worker concluded from its own signal;
+         * otherwise the worker's view (COMPLETED, or CANCELLED when it saw the cancel) stands.
+         * Reading the status and writing the outcome happen under one lock, so the two writers
+         * cannot interleave between them.
+         */
+        private synchronized void finish(String taskHandle, long moved, boolean cancellationRequested) {
+            Entry entry = entries.get(taskHandle);
+            if (entry == null) {
+                return;
+            }
+            MoveTask cur = entry.task();
+            String status = "CANCELLING".equals(cur.status()) || cancellationRequested ? "CANCELLED" : "COMPLETED";
+            put(taskHandle, new MoveTask(cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                    cur.maxNumberOfMessagesPerSecond(), status, moved,
+                    cur.approximateNumberOfMessagesToMove(), cur.startedTimestampMillis(), cur.failureReason()));
+        }
+
+        /** Moves a task from one status to another only if it still holds the expected one. */
+        private synchronized boolean transition(String taskHandle, String from, String to) {
+            Entry entry = entries.get(taskHandle);
+            if (entry == null || !from.equals(entry.task().status())) {
+                return false;
+            }
+            MoveTask cur = entry.task();
+            put(taskHandle, new MoveTask(cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                    cur.maxNumberOfMessagesPerSecond(), to, cur.approximateNumberOfMessagesMoved(),
+                    cur.approximateNumberOfMessagesToMove(), cur.startedTimestampMillis(), cur.failureReason()));
+            return true;
         }
 
         private record Entry(MoveTask task, Long terminalAtMillis, long terminalSequence) {
@@ -257,7 +334,7 @@ public class SqsService implements Resettable, ResourceProvider {
         queueLocks.clear();
         redrivePolicyCache.clear();
         deduplicationCache.clear();
-        moveTaskCancellation.values().forEach(flag -> flag.set(true));
+        moveTaskCancellation.values().forEach(MoveTaskCancellation::request);
         moveTaskCancellation.clear();
         moveTasksByHandle.clear();
     }
@@ -1068,7 +1145,7 @@ public class SqsService implements Resettable, ResourceProvider {
             if (!sourceArn.equals(existing.sourceArn())) {
                 continue;
             }
-            if ("RUNNING".equals(existing.status())
+            if (MoveTaskStore.isActive(existing.status())
                     || (now - existing.startedTimestampMillis()) < 1_000) {
                 throw new AwsException("InvalidParameterValue",
                         "There is already a task running. Only one active task is allowed for a source queue arn at a given time.",
@@ -1099,7 +1176,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 taskHandle, sourceArn, destinationArn,
                 maxNumberOfMessagesPerSecond, "RUNNING",
                 0L, toMove, clock.millis(), null));
-        var cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+        MoveTaskCancellation cancelled = new MoveTaskCancellation();
         moveTaskCancellation.put(taskHandle, cancelled);
 
         // Move the first message synchronously inside the request scope so callers
@@ -1181,22 +1258,21 @@ public class SqsService implements Resettable, ResourceProvider {
     private void runMoveTask(String taskHandle, String srcKey, String destUrl,
                              int maxRate, String region, String sourceArn,
                              String destinationArn,
-                             java.util.concurrent.atomic.AtomicBoolean cancelled,
+                             MoveTaskCancellation cancelled,
                              long initialMoved) {
         long intervalMillis = maxRate > 0 ? Math.max(1L, 1000L / maxRate) : 0L;
         long moved = initialMoved;
         try {
             var srcQueue = getOrCreateQueue(srcKey);
-            while (!cancelled.get()) {
+            while (!cancelled.isRequested()) {
                 if (intervalMillis > 0) {
                     try {
-                        Thread.sleep(intervalMillis);
+                        if (cancelled.awaitRequested(intervalMillis)) {
+                            break;
+                        }
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         return;
-                    }
-                    if (cancelled.get()) {
-                        break;
                     }
                 }
                 if (!moveOneMessage(srcQueue, destUrl, region)) {
@@ -1206,32 +1282,26 @@ public class SqsService implements Resettable, ResourceProvider {
                 updateMoveTaskCounter(taskHandle, moved);
             }
         } finally {
-            MoveTask cur = moveTasksByHandle.get(taskHandle);
-            if (cur != null) {
-                String status = cancelled.get() ? "CANCELLED" : "COMPLETED";
-                moveTasksByHandle.put(taskHandle, new MoveTask(
-                        cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
-                        cur.maxNumberOfMessagesPerSecond(), status,
-                        moved, cur.approximateNumberOfMessagesToMove(),
-                        cur.startedTimestampMillis(), cur.failureReason()));
-            }
+            finishMoveTask(taskHandle, moved, cancelled.isRequested());
             moveTaskCancellation.remove(taskHandle, cancelled);
             LOG.infov("Move task {0} {1}: moved {2} messages from {3} to {4}", taskHandle,
-                    cancelled.get() ? "cancelled" : "completed", moved, sourceArn,
+                    cancelled.isRequested() ? "cancelled" : "completed", moved, sourceArn,
                     destinationArn != null ? destinationArn : "original source");
         }
     }
 
     private void updateMoveTaskCounter(String taskHandle, long moved) {
-        MoveTask cur = moveTasksByHandle.get(taskHandle);
-        if (cur == null) {
-            return;
-        }
-        moveTasksByHandle.put(taskHandle, new MoveTask(
-                cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
-                cur.maxNumberOfMessagesPerSecond(), cur.status(),
-                moved, cur.approximateNumberOfMessagesToMove(),
-                cur.startedTimestampMillis(), cur.failureReason()));
+        moveTasksByHandle.recordMoved(taskHandle, moved);
+    }
+
+    /**
+     * Records a move task's outcome. {@code cancellationRequested} is what the worker saw on its
+     * own signal; the store still resolves a task that a cancel has already moved to CANCELLING
+     * as CANCELLED. Package-private so a test can replay the worker's terminal write with a stale
+     * decision after a cancel has been accepted.
+     */
+    void finishMoveTask(String taskHandle, long moved, boolean cancellationRequested) {
+        moveTasksByHandle.finish(taskHandle, moved, cancellationRequested);
     }
 
     public List<MoveTask> listMessageMoveTasks(String sourceArn, String region) {
@@ -1257,11 +1327,13 @@ public class SqsService implements Resettable, ResourceProvider {
             throw new AwsException("ResourceNotFoundException",
                     "The task you specified does not exist.", 404);
         }
-        // Signal the background worker to stop. The worker flips status to CANCELLED in
-        // its finally block and updates the moved counter; read both back here.
-        var flag = moveTaskCancellation.get(taskHandle);
-        if (flag != null) {
-            flag.set(true);
+        // As on AWS the task reports CANCELLING at once and CANCELLED when the worker has
+        // stopped: the worker is woken out of its throttle wait rather than left to notice the
+        // cancel after the interval, and its finally block writes CANCELLED and the final count.
+        moveTasksByHandle.transition(taskHandle, "RUNNING", "CANCELLING");
+        MoveTaskCancellation cancellation = moveTaskCancellation.get(taskHandle);
+        if (cancellation != null) {
+            cancellation.request();
         }
         return moveTasksByHandle.getCurrentOrDefault(taskHandle, task).approximateNumberOfMessagesMoved();
     }

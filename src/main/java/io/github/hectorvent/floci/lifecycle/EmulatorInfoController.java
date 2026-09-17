@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.ContainerTeardowns;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import jakarta.inject.Inject;
@@ -157,16 +158,9 @@ public class EmulatorInfoController {
         // in any order relative to the storage wipe below, but stopping them here means a
         // client's reset actually reflects a clean slate instead of leaving Batch, CodeBuild,
         // or SageMaker containers running with no record of them left in the store.
-        for (ContainerTeardown teardown : containerTeardowns) {
-            try {
-                teardown.stopManagedContainers();
-            } catch (Exception e) {
-                LOG.warnv("Container teardown failed for {0}: {1}",
-                        teardown.getClass().getSimpleName(), e.getMessage());
-            }
-        }
-        // Storage first. Services re-create their bootstrap state in clear(), and a wipe
-        // afterwards would remove it again until the next restart.
+        ContainerTeardowns.stopAll(containerTeardowns, LOG);
+        // Storage before resettables: services re-create their bootstrap state in clear(), and
+        // a wipe afterwards would remove it again until the next restart.
         storageFactory.clearAll();
         for (Resettable r : resettables) {
             r.clear();
