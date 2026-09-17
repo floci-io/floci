@@ -46,6 +46,20 @@ public class Cluster {
     public List<String> getIamRoleArns() { return iamRoleArns; }
     public void setIamRoleArns(List<String> iamRoleArns) { this.iamRoleArns = iamRoleArns; }
 
+    // Audit logging config as set by EnableLogging/DisableLogging. No log delivery is emulated —
+    // floci tracks only the configuration a caller set, the same way snapshot handling tracks a
+    // dump file without emulating S3 upload.
+    private boolean loggingEnabled = false;
+    private String loggingBucketName;
+    private String loggingS3KeyPrefix;
+
+    public boolean isLoggingEnabled() { return loggingEnabled; }
+    public void setLoggingEnabled(boolean loggingEnabled) { this.loggingEnabled = loggingEnabled; }
+    public String getLoggingBucketName() { return loggingBucketName; }
+    public void setLoggingBucketName(String loggingBucketName) { this.loggingBucketName = loggingBucketName; }
+    public String getLoggingS3KeyPrefix() { return loggingS3KeyPrefix; }
+    public void setLoggingS3KeyPrefix(String loggingS3KeyPrefix) { this.loggingS3KeyPrefix = loggingS3KeyPrefix; }
+
     // Real backend address of this cluster's PostgreSQL container. `endpoint` now points at the
     // auth proxy, not the container, so the container address is kept here for proxy wiring and
     // for restarting the proxy after a reboot or an adopt-on-startup.

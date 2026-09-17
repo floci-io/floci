@@ -583,6 +583,62 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "DescribeLoggingStatus" -> {
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
+            }
+            Cluster cluster = service.describeLoggingStatus(clusterIdentifier);
+            String xml = new XmlBuilder()
+                    .start("DescribeLoggingStatusResponse")
+                      .start("DescribeLoggingStatusResult")
+                        .raw(buildLoggingStatusXml(cluster))
+                      .end("DescribeLoggingStatusResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeLoggingStatusResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "EnableLogging" -> {
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
+            }
+            String bucketName = params.getFirst("BucketName");
+            String s3KeyPrefix = params.getFirst("S3KeyPrefix");
+            Cluster cluster = service.enableLogging(clusterIdentifier, bucketName, s3KeyPrefix);
+            String xml = new XmlBuilder()
+                    .start("EnableLoggingResponse")
+                      .start("EnableLoggingResult")
+                        .raw(buildLoggingStatusXml(cluster))
+                      .end("EnableLoggingResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("EnableLoggingResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DisableLogging" -> {
+            String clusterIdentifier = params.getFirst("ClusterIdentifier");
+            if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
+            }
+            Cluster cluster = service.disableLogging(clusterIdentifier);
+            String xml = new XmlBuilder()
+                    .start("DisableLoggingResponse")
+                      .start("DisableLoggingResult")
+                        .raw(buildLoggingStatusXml(cluster))
+                      .end("DisableLoggingResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DisableLoggingResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "RebootCluster" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
@@ -792,6 +848,18 @@ public class RedshiftQueryHandler {
             .elem("MasterUsername", snapshot.getMasterUsername());
 
         return builder.end("Snapshot").build();
+    }
+
+    // Shared by DescribeLoggingStatus/EnableLogging/DisableLogging, which all return the same
+    // shape. No log delivery is emulated, so LastSuccessfulDeliveryTime/LastFailureTime/
+    // LastFailureMessage/LogDestinationType/LogExports are never populated — omitted rather than
+    // faked, the same as the optional elements in buildSnapshotXml above.
+    private String buildLoggingStatusXml(Cluster cluster) {
+        return new XmlBuilder()
+            .elem("LoggingEnabled", cluster.isLoggingEnabled())
+            .elem("BucketName", cluster.getLoggingBucketName())
+            .elem("S3KeyPrefix", cluster.getLoggingS3KeyPrefix())
+            .build();
     }
 
     private String buildClusterParameterGroupXml(ClusterParameterGroup group) {

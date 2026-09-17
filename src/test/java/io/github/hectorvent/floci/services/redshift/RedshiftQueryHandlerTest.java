@@ -503,7 +503,76 @@ class RedshiftQueryHandlerTest {
     void modifyClusterIamRolesRequiresClusterIdentifier() {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("ModifyClusterIamRoles", new MultivaluedHashMap<>()));
+    void testDescribeLoggingStatus() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName("my-bucket");
+        cluster.setLoggingS3KeyPrefix("logs/");
+        when(service.describeLoggingStatus("test-cluster")).thenReturn(cluster);
+
+        Response response = handler.handle("DescribeLoggingStatus", params);
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        // The real AWS wire format wraps the fields in a *Result element matching the
+        // operation name — verified against the SDK's own deserializer, not guessed.
+        assertTrue(xml.contains("<DescribeLoggingStatusResult>"));
+        assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
+        assertTrue(xml.contains("<BucketName>my-bucket</BucketName>"));
+        assertTrue(xml.contains("<S3KeyPrefix>logs/</S3KeyPrefix>"));
+    }
+
+    @Test
+    void testDescribeLoggingStatusRequiresClusterIdentifier() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+
+        AwsException ex = assertThrows(
+                AwsException.class,
+                () -> handler.handle("DescribeLoggingStatus", params));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void testEnableLogging() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+        params.putSingle("BucketName", "my-bucket");
+        params.putSingle("S3KeyPrefix", "logs/");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName("my-bucket");
+        cluster.setLoggingS3KeyPrefix("logs/");
+        when(service.enableLogging("test-cluster", "my-bucket", "logs/")).thenReturn(cluster);
+
+        Response response = handler.handle("EnableLogging", params);
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<EnableLoggingResult>"));
+        assertTrue(xml.contains("<LoggingEnabled>true</LoggingEnabled>"));
+    }
+
+    @Test
+    void testDisableLogging() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(false);
+        when(service.disableLogging("test-cluster")).thenReturn(cluster);
+
+        Response response = handler.handle("DisableLogging", params);
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DisableLoggingResult>"));
+        assertTrue(xml.contains("<LoggingEnabled>false</LoggingEnabled>"));
+        // No bucket was ever configured; the element must be omitted, not emitted empty/"null".
+        assertFalse(xml.contains("<BucketName>"));
     }
 
     @Test

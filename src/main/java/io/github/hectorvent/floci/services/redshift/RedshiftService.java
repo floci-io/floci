@@ -705,6 +705,36 @@ public class RedshiftService {
         }
     }
 
+    public Cluster describeLoggingStatus(String clusterIdentifier) {
+        return clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+    }
+
+    public synchronized Cluster enableLogging(String clusterIdentifier, String bucketName, String s3KeyPrefix) {
+        Cluster cluster = clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        if (bucketName == null || bucketName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "BucketName is required", 400);
+        }
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName(bucketName);
+        cluster.setLoggingS3KeyPrefix(s3KeyPrefix);
+        clusters.put(clusterIdentifier, cluster);
+        clusters.flush();
+        return cluster;
+    }
+
+    public synchronized Cluster disableLogging(String clusterIdentifier) {
+        Cluster cluster = clusters.get(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        cluster.setLoggingEnabled(false);
+        cluster.setLoggingBucketName(null);
+        cluster.setLoggingS3KeyPrefix(null);
+        clusters.put(clusterIdentifier, cluster);
+        clusters.flush();
+        return cluster;
+    }
+
     public synchronized Cluster rebootCluster(String clusterIdentifier) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));

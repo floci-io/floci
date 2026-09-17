@@ -826,6 +826,36 @@ class RedshiftServiceTest {
                 updated.getIamRoleArns());
         verify(proxyManager).updateIamRoles("111111111111:c1", updated.getIamRoleArns());
         verify(clusterBackend).put(eq("c1"), any(Cluster.class));
+    void testDescribeLoggingStatusDefaultsToDisabled() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.describeLoggingStatus("my-cluster");
+
+        assertFalse(result.isLoggingEnabled());
+        assertNull(result.getLoggingBucketName());
+    }
+
+    @Test
+    void testDescribeLoggingStatusNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () -> service.describeLoggingStatus("missing"));
+    }
+
+    @Test
+    void testEnableLogging() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.enableLogging("my-cluster", "my-bucket", "logs/");
+
+        assertTrue(result.isLoggingEnabled());
+        assertEquals("my-bucket", result.getLoggingBucketName());
+        assertEquals("logs/", result.getLoggingS3KeyPrefix());
+        verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
         verify(clusterBackend).flush();
     }
 
@@ -864,6 +894,44 @@ class RedshiftServiceTest {
                 service.modifyClusterIamRoles("missing", List.of(), List.of()));
 
         assertEquals("ClusterNotFound", ex.getErrorCode());
+    void testEnableLoggingRequiresBucketName() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        assertThrows(AwsException.class, () -> service.enableLogging("my-cluster", null, null));
+    }
+
+    @Test
+    void testEnableLoggingNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () -> service.enableLogging("missing", "my-bucket", null));
+    }
+
+    @Test
+    void testDisableLoggingClearsConfig() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName("my-bucket");
+        cluster.setLoggingS3KeyPrefix("logs/");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.disableLogging("my-cluster");
+
+        assertFalse(result.isLoggingEnabled());
+        assertNull(result.getLoggingBucketName());
+        assertNull(result.getLoggingS3KeyPrefix());
+        verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
+        verify(clusterBackend).flush();
+    }
+
+    @Test
+    void testDisableLoggingNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () -> service.disableLogging("missing"));
     }
 
     @Test
