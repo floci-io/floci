@@ -3170,6 +3170,7 @@ public class Ec2QueryHandler {
                     .elem("imageOwnerAlias", img.getImageOwnerAlias())
                     .elem("creationDate", img.getCreationDate())
                     .raw(blockDeviceMappingXml(img.getBlockDeviceMappings()))
+                    .raw(tagSetXml(img.getTags()))
                     .end("item");
         }
         xml.end("imagesSet").end("DescribeImagesResponse");

@@ -4709,6 +4709,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // A deregistered AMI is retained only as a tombstone, so that ancestry and
                 // repeat-deregistration still resolve; DescribeImages must not report it.
                 .filter(img -> !DEREGISTERED_STATE.equals(img.getState()))
+                .map(this::withCurrentImageTags)
                 .filter(img -> matchesImageIds(img, imageIds))
                 .filter(img -> matchesImageOwners(img, owners))
                 .filter(img -> matchesRegisteredImageFilters(img, filters))
@@ -5680,6 +5681,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private boolean matchesImageFilter(Ec2ImageCatalog.CatalogImage catalogImage, String name, List<String> values) {
         Image image = catalogImage.toImage();
+        if (isImageTagFilter(name)) {
+            return matchesImageTagFilter(image, name, values);
+        }
         return switch (name) {
             case "architecture" -> matchesFilterValue(values, image.getArchitecture());
             case "hypervisor" -> matchesFilterValue(values, image.getHypervisor());
@@ -5748,6 +5752,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private boolean matchesRegisteredImageFilter(Image image, String name, List<String> values) {
+        if (isImageTagFilter(name)) {
+            return matchesImageTagFilter(image, name, values);
+        }
         return switch (name) {
             case "architecture" -> matchesFilterValue(values, image.getArchitecture());
             case "block-device-mapping.snapshot-id" -> image.getBlockDeviceMappings().stream()
@@ -5769,6 +5776,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             case "virtualization-type" -> matchesFilterValue(values, image.getVirtualizationType());
             default -> true;
         };
+    }
+
+    private Image withCurrentImageTags(Image image) {
+        List<Tag> currentTags = tags.get(image.getImageId())
+                .orElseGet(() -> image.getTags() == null ? List.of() : image.getTags());
+        image.setTags(new ArrayList<>(currentTags));
+        return image;
+    }
+
+    private boolean isImageTagFilter(String name) {
+        return name != null && (name.startsWith("tag:") || "tag-key".equals(name));
+    }
+
+    private boolean matchesImageTagFilter(Image image, String name, List<String> values) {
+        List<Tag> imageTags = image.getTags() == null ? List.of() : image.getTags();
+        if (name.startsWith("tag:")) {
+            String key = name.substring("tag:".length());
+            return imageTags.stream()
+                    .anyMatch(tag -> key.equals(tag.getKey())
+                            && matchesFilterValue(values, tag.getValue()));
+        }
+        return imageTags.stream()
+                .anyMatch(tag -> matchesFilterValue(values, tag.getKey()));
     }
 
     private Snapshot snapshotFrom(String region, String snapshotId, Image image, BlockDeviceMapping mapping) {
