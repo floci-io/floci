@@ -235,7 +235,7 @@ public class DynamoDbPartiQLParser {
                 i++;
                 continue;
             }
-            if (c == '?') { tokens.add(new Token(TType.QUESTION, "?")); i++; continue; }
+            if (c == '?') { tokens.add(new Token(TType.QUESTION, "?", i)); i++; continue; }
             if (c == '*') { tokens.add(new Token(TType.IDENT, "*")); i++; continue; }
             if (c == '=') { tokens.add(new Token(TType.EQ, "=")); i++; continue; }
             if (c == '!' && i + 1 < n && input.charAt(i + 1) == '=') { tokens.add(new Token(TType.NE, "!=")); i += 2; continue; }
@@ -440,16 +440,16 @@ public class DynamoDbPartiQLParser {
         }
         consume(TType.VALUE);
         consume(TType.LBRACE);
-        return new Stmt.Insert(table, parseTupleFields());
+        return new Stmt.Insert(table, parseTupleFields(null));
     }
 
     // Called with the opening brace already consumed.
-    private Map<String, PVal> parseTupleFields() {
+    private Map<String, PVal> parseTupleFields(String literalPath) {
         Map<String, PVal> fields = new LinkedHashMap<>();
         while (peek().type() != TType.RBRACE && peek().type() != TType.EOF) {
             String key = expectStringOrIdent();
             consume(TType.COLON);
-            fields.put(key, parseValue());
+            fields.put(key, parseValue(literalPath == null ? null : literalPath + "." + key));
             if (peek().type() == TType.COMMA) {
                 advance();
             }
@@ -850,16 +850,29 @@ public class DynamoDbPartiQLParser {
     }
 
     private PVal parseValue() {
+        return parseValue(null);
+    }
+
+    // AWS takes a parameter as an INSERT item field, but not inside a list, map or set literal
+    // (checked on real AWS, eu-west-2, 2026-09-17).
+    private PVal parseValue(String literalPath) {
         Token t = advance();
+        String nested = literalPath == null ? "root" : literalPath;
         return switch (t.type()) {
             case STRING   -> new PVal.Str(t.value());
             case NUMBER   -> new PVal.Num(t.value());
             case BOOL     -> new PVal.Bool(Boolean.parseBoolean(t.value()));
             case NULL     -> new PVal.Null();
-            case QUESTION -> resolveParam();
-            case LBRACKET -> new PVal.ListOf(parseListItems());
-            case LBRACE   -> new PVal.Tuple(parseTupleFields());
-            case LBAG     -> parseBag();
+            case QUESTION -> {
+                if (literalPath != null) {
+                    throw validationEx("Unsupported data type: Parameter under key " + literalPath + " at "
+                            + position(t.start(), 1));
+                }
+                yield resolveParam();
+            }
+            case LBRACKET -> new PVal.ListOf(parseListItems(nested));
+            case LBRACE   -> new PVal.Tuple(parseTupleFields(nested));
+            case LBAG     -> parseBag(nested);
             case PLUS, MINUS -> parseSignedNumber(t);
             default -> throw validationEx("Expected value literal or ?, got: " + t.value());
         };
@@ -880,10 +893,10 @@ public class DynamoDbPartiQLParser {
     }
 
     // Called with the opening bracket already consumed.
-    private List<PVal> parseListItems() {
+    private List<PVal> parseListItems(String literalPath) {
         List<PVal> items = new ArrayList<>();
         while (peek().type() != TType.RBRACKET && peek().type() != TType.EOF) {
-            items.add(parseValue());
+            items.add(parseValue(literalPath + "[" + items.size() + "]"));
             if (peek().type() == TType.COMMA) {
                 advance();
             }
@@ -893,10 +906,10 @@ public class DynamoDbPartiQLParser {
     }
 
     // A bag holds strings or numbers, never both (checked on real AWS, eu-west-2, 2026-09-17).
-    private PVal.Bag parseBag() {
+    private PVal.Bag parseBag(String literalPath) {
         List<PVal> members = new ArrayList<>();
         while (peek().type() != TType.RBAG && peek().type() != TType.EOF) {
-            members.add(parseValue());
+            members.add(parseValue(literalPath));
             if (peek().type() == TType.COMMA) {
                 advance();
             }

@@ -313,6 +313,31 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Item.l.L[0].N", equalTo("-1"));
     }
 
+    @Test
+    @Order(14)
+    void refusesAParameterInsideACollectionLiteral() {
+        String prefix = "UPDATE \"" + TABLE + "\" SET x = ";
+
+        request("DynamoDB_20120810.ExecuteStatement", member(prefix + "[?] WHERE pk='literals' AND sk='1'", "[{\"S\":\"v\"}]"))
+            .statusCode(400)
+            .body("message", equalTo("Unsupported data type: Parameter under key root[0] at 1:"
+                    + (prefix.length() + 2) + ":1"));
+        String insert = "INSERT INTO \"" + TABLE + "\" VALUE {'pk':'literals','sk':'1','m':{'k':?}}";
+        request("DynamoDB_20120810.ExecuteStatement", member(insert, "[{\"S\":\"v\"}]"))
+            .statusCode(400)
+            .body("message", equalTo("Unsupported data type: Parameter under key root.k at 1:"
+                    + (insert.indexOf('?') + 1) + ":1"));
+        getItem("literals").body("Item", nullValue());
+
+        request("DynamoDB_20120810.ExecuteStatement",
+                member("INSERT INTO \"" + TABLE + "\" VALUE {'pk':?,'sk':'1'}", "[{\"S\":\"literals\"}]"))
+            .statusCode(200);
+        request("DynamoDB_20120810.ExecuteStatement",
+                member("SELECT sk FROM \"" + TABLE + "\" WHERE pk='literals' AND sk IN [?, '2']", "[{\"S\":\"1\"}]"))
+            .statusCode(200)
+            .body("Items.size()", equalTo(1));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
