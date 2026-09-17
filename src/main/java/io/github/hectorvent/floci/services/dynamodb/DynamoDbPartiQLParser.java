@@ -343,6 +343,7 @@ public class DynamoDbPartiQLParser {
     private final List<JsonNode> parameters;
     private int pos = 0;
     private int paramIdx = 0;
+    private int literalDepth = 0;
 
     private DynamoDbPartiQLParser(String statement, List<JsonNode> parameters) {
         this.statement = statement;
@@ -445,16 +446,19 @@ public class DynamoDbPartiQLParser {
 
     // Called with the opening brace already consumed.
     private Map<String, PVal> parseTupleFields(String literalPath) {
+        boolean literal = literalPath != null;
+        literalDepth += literal ? 1 : 0;
         Map<String, PVal> fields = new LinkedHashMap<>();
         while (peek().type() != TType.RBRACE && peek().type() != TType.EOF) {
             String key = expectStringOrIdent();
             consume(TType.COLON);
-            fields.put(key, parseValue(literalPath == null ? null : literalPath + "." + key));
+            fields.put(key, parseValue(literal ? literalPath + "." + key : null));
             if (peek().type() == TType.COMMA) {
                 advance();
             }
         }
         consume(TType.RBRACE);
+        literalDepth -= literal ? 1 : 0;
         return fields;
     }
 
@@ -860,6 +864,10 @@ public class DynamoDbPartiQLParser {
     // AWS takes a parameter as an INSERT item field, but not inside a list, map or set literal
     // (checked on real AWS, eu-west-2, 2026-09-17).
     private PVal parseValue(String literalPath) {
+        // A literal member 32 levels down is refused (checked on real AWS, eu-west-2, 2026-09-17).
+        if (literalDepth == 32) {
+            throw validationEx("Nesting Levels have exceeded supported limits under " + literalPath);
+        }
         Token t = advance();
         String nested = literalPath == null ? "root" : literalPath;
         return switch (t.type()) {
@@ -898,6 +906,7 @@ public class DynamoDbPartiQLParser {
 
     // Called with the opening bracket already consumed.
     private List<PVal> parseListItems(String literalPath) {
+        literalDepth++;
         List<PVal> items = new ArrayList<>();
         while (peek().type() != TType.RBRACKET && peek().type() != TType.EOF) {
             items.add(parseValue(literalPath + "[" + items.size() + "]"));
@@ -906,11 +915,13 @@ public class DynamoDbPartiQLParser {
             }
         }
         consume(TType.RBRACKET);
+        literalDepth--;
         return List.copyOf(items);
     }
 
     // A bag holds strings or numbers, never both (checked on real AWS, eu-west-2, 2026-09-17).
     private PVal.Bag parseBag(String literalPath) {
+        literalDepth++;
         List<PVal> members = new ArrayList<>();
         while (peek().type() != TType.RBAG && peek().type() != TType.EOF) {
             members.add(parseValue(literalPath));
@@ -919,6 +930,7 @@ public class DynamoDbPartiQLParser {
             }
         }
         consume(TType.RBAG);
+        literalDepth--;
         if (members.isEmpty()) {
             throw validationEx("Empty bags are not supported");
         }

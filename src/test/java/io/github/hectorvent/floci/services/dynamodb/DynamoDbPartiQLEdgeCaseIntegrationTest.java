@@ -15,6 +15,7 @@ import java.util.stream.Collectors;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
@@ -349,6 +350,29 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                 member("SELECT sk FROM \"" + TABLE + "\" WHERE pk='literals' AND n IN [?, 2]", "[{\"N\":\"1\"}]"))
             .statusCode(200)
             .body("Items.size()", equalTo(1));
+    }
+
+    @Test
+    @Order(16)
+    void refusesALiteralNested32LevelsDeep() {
+        String update = "UPDATE \"" + TABLE + "\" SET d = ";
+        String where = " WHERE pk='nested' AND sk='1'";
+
+        statement(update + "{'a':".repeat(32) + "1" + "}".repeat(32) + where)
+            .statusCode(400)
+            .body("message", equalTo("Nesting Levels have exceeded supported limits under root" + ".a".repeat(32)));
+        statement(update + "{'a':" + "[".repeat(31) + "1" + "]".repeat(31) + "}" + where)
+            .statusCode(400)
+            .body("message", equalTo("Nesting Levels have exceeded supported limits under root.a" + "[0]".repeat(31)));
+        transaction(update + "[".repeat(32) + "1" + "]".repeat(32) + where)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]:"
+                    + " Nesting Levels have exceeded supported limits under root" + "[0]".repeat(32)));
+
+        statement("INSERT INTO \"" + TABLE + "\" VALUE {'pk':'nested','sk':'1','d':"
+                + "{'a':".repeat(31) + "1" + "}".repeat(31) + "}")
+            .statusCode(200);
+        getItem("nested").body("Item.d.M.a.M.a.M", notNullValue());
     }
 
     private static ValidatableResponse getItem(String pk) {
