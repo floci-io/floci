@@ -156,7 +156,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "b", "prefix/", null, 0, false, true, null, null);
 
-        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3);
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, null);
 
         assertEquals(List.of("prefix/a", "prefix/z"), input.keys());
         assertEquals("COPY t FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
@@ -170,7 +170,7 @@ class S3CopySimulatorTest {
 
         S3CopySimulator.S3TransferException error = assertThrows(
                 S3CopySimulator.S3TransferException.class,
-                () -> S3CopySimulator.prepareCopy(spec, s3));
+                () -> S3CopySimulator.prepareCopy(spec, s3, null));
 
         assertEquals("XX000", error.sqlState());
         assertEquals("S3 object s3://b/missing not found", error.getMessage());
@@ -185,7 +185,7 @@ class S3CopySimulatorTest {
         });
         CopyStatementParser.S3Unload spec = unloadSpec("b", "out/", false, false, true, false, 0);
 
-        try (S3CopySimulator.UnloadCollector collector = S3CopySimulator.prepareUnload(spec, s3)) {
+        try (S3CopySimulator.UnloadCollector collector = S3CopySimulator.prepareUnload(spec, s3, null)) {
             collector.complete();
         }
 
@@ -208,7 +208,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
         Thread backend = backendThread(() -> playUnloadBackend("1|alice\n", "2|bob\n"));
 
-        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertTrue(handled);
@@ -239,7 +239,7 @@ class S3CopySimulatorTest {
                     false, false, true, 0, null);
             // The fake backend stands in for PostgreSQL: the first CopyData frame is the header row.
             Thread backend = backendThread(() -> playUnloadBackend("h1|h2\n", "1|a\n", "2|b\n", "3|c\n"));
-            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
             joinBackend(backend);
 
             assertEquals(3, written.size(), written.keySet().toString());
@@ -267,7 +267,7 @@ class S3CopySimulatorTest {
 
             CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
             Thread backend = backendThread(() -> playUnloadBackend("1|alice\n", "2|bob\n", "3|carol\n"));
-            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
             joinBackend(backend);
 
             assertTrue(written.containsKey("out/0000_part_00"));
@@ -295,7 +295,7 @@ class S3CopySimulatorTest {
 
         CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, false, 0);
         Thread backend = backendThread(() -> playUnloadBackend("1|a\n"));
-        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertTrue(written.containsKey("out/000"), written.keySet().toString());
@@ -313,7 +313,7 @@ class S3CopySimulatorTest {
 
         CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", true, false, false, true, 0);
         Thread backend = backendThread(() -> playUnloadBackend("1|a\n", "2|b\n"));
-        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertTrue(written.containsKey("out/0000_part_00.gz"), written.keySet().toString());
@@ -340,7 +340,7 @@ class S3CopySimulatorTest {
 
             CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, true, false, true, 0);
             Thread backend = backendThread(() -> playUnloadBackend("1|alice\n", "2|bob\n", "3|carol\n"));
-            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
             joinBackend(backend);
 
             String manifest = new String(written.get("out/manifest"), StandardCharsets.UTF_8);
@@ -360,7 +360,7 @@ class S3CopySimulatorTest {
 
         CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
         // No backend thread: the select must never run.
-        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         assertTrue(handled);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -386,7 +386,7 @@ class S3CopySimulatorTest {
             out.flush();
         });
 
-        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -423,7 +423,7 @@ class S3CopySimulatorTest {
                 }
             });
 
-            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
             joinBackend(backend);
 
             PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -458,7 +458,7 @@ class S3CopySimulatorTest {
             out.flush();
         });
 
-        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'T');
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'T');
         joinBackend(backend);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -503,7 +503,7 @@ class S3CopySimulatorTest {
                 out.flush();
             });
 
-            boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
             joinBackend(backend);
 
             assertTrue(handled);
@@ -527,7 +527,7 @@ class S3CopySimulatorTest {
 
         S3CopySimulator.UNLOAD_HEAP_MIB.acquire(192);
         try {
-            boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
             assertTrue(handled);
 
             PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -565,7 +565,7 @@ class S3CopySimulatorTest {
             out.flush();
         });
 
-        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         String sql = seenSql.get();
@@ -602,7 +602,7 @@ class S3CopySimulatorTest {
             out.flush();
         });
 
-        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertTrue(handled);
@@ -617,7 +617,7 @@ class S3CopySimulatorTest {
                 .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
 
         CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
-        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         assertTrue(handled);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -648,7 +648,7 @@ class S3CopySimulatorTest {
 
         CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, true, false, true, 0);
         Thread backend = backendThread(() -> playUnloadBackend("1|a\n"));
-        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertEquals(1, deleted.size());
@@ -680,7 +680,7 @@ class S3CopySimulatorTest {
 
             CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, true, true, true, 0);
             Thread backend = backendThread(() -> playUnloadBackend("1|a\n", "2|b\n"));
-            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
             joinBackend(backend);
 
             // Under ALLOWOVERWRITE a written key may have replaced pre-existing (or another
@@ -701,7 +701,7 @@ class S3CopySimulatorTest {
                 .when(s3).authorizeAnonymousListBucket(eq("wh"));
 
         CopyStatementParser.S3Unload spec = unloadSpec("wh", "out/", false, false, false, true, 0);
-        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
         assertTrue(handled);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -741,7 +741,7 @@ class S3CopySimulatorTest {
                 testBackend.close();
             });
 
-            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
+            S3CopySimulator.runUnload(simClient, simBackend, spec, s3, null, 'I');
             joinBackend(backend);
 
             assertEquals(1, deleted.size());
@@ -814,7 +814,7 @@ class S3CopySimulatorTest {
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
         Thread backend = backendThread(() -> playHappyBackend(copyData));
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertTrue(handled);
@@ -835,7 +835,7 @@ class S3CopySimulatorTest {
         AtomicReference<String> fabricated = new AtomicReference<>();
         Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         String sql = fabricated.get();
@@ -856,7 +856,7 @@ class S3CopySimulatorTest {
         AtomicReference<String> fabricated = new AtomicReference<>();
         Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         String sql = fabricated.get();
@@ -876,7 +876,7 @@ class S3CopySimulatorTest {
         AtomicReference<String> fabricated = new AtomicReference<>();
         Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         String sql = fabricated.get();
@@ -902,7 +902,7 @@ class S3CopySimulatorTest {
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
         Thread backend = backendThread(() -> playHappyBackend(copyData));
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertEquals("1|a\n2|b\n", copyData.toString(StandardCharsets.US_ASCII));
@@ -918,7 +918,7 @@ class S3CopySimulatorTest {
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
         Thread backend = backendThread(() -> playHappyBackend(copyData));
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertEquals("1|a\n2|b\n", copyData.toString(StandardCharsets.US_ASCII));
@@ -931,7 +931,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "k", "|", 0, false, false, null, null);
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         assertTrue(handled);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -949,7 +949,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "missing", "|", 0, false, false, null, null);
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         assertTrue(handled);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -978,7 +978,7 @@ class S3CopySimulatorTest {
             out.flush();
         });
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
         assertTrue(handled);
 
@@ -1014,7 +1014,7 @@ class S3CopySimulatorTest {
             out.flush();
         });
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -1038,7 +1038,7 @@ class S3CopySimulatorTest {
             testBackend.close();
         });
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
         assertTrue(handled);
 
@@ -1069,7 +1069,7 @@ class S3CopySimulatorTest {
             out.flush();
         });
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'T');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'T');
         joinBackend(backend);
 
         PostgresWireDecoder in = new PostgresWireDecoder(testClient.getInputStream());
@@ -1101,7 +1101,7 @@ class S3CopySimulatorTest {
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
         Thread backend = backendThread(() -> playHappyBackend(copyData));
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
 
         assertEquals("1|a\n2|b\n", copyData.toString(StandardCharsets.US_ASCII));
@@ -1126,7 +1126,7 @@ class S3CopySimulatorTest {
             }
         });
 
-        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
         joinBackend(backend);
         assertTrue(handled);
 
@@ -1154,7 +1154,7 @@ class S3CopySimulatorTest {
             testBackend.close();
         });
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'T');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'T');
         joinBackend(backend);
 
         assertTrue(simBackend.isClosed(), "simBackend must be closed upon synchronization failure");
@@ -1185,7 +1185,7 @@ class S3CopySimulatorTest {
             out.flush();
         });
 
-        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'T');
+        S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'T');
         joinBackend(backend);
 
         assertTrue(simBackend.isClosed(), "simBackend must be closed when abort returns non-E status");
