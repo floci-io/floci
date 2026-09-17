@@ -22,6 +22,7 @@ class SesServiceSmtpTest {
     @Mock SmtpRelay smtpRelay;
 
     private SesService service;
+    private SesConfigurationSetService configSets;
     private InMemoryStorage<String, SentEmail> emailStore;
 
     @BeforeEach
@@ -29,6 +30,7 @@ class SesServiceSmtpTest {
         SesServiceTestBuilder builder = SesServiceTestBuilder.create().smtpRelay(smtpRelay);
         emailStore = builder.emailStore();
         service = builder.build();
+        configSets = builder.configSetService();
     }
 
     private SentEmail storedEmail(String messageId) {
@@ -233,7 +235,7 @@ class SesServiceSmtpTest {
         // suppression list with reason=BOUNCE should still reach the SMTP relay.
         service.putSuppressedDestination("us-east-1", "to@example.com", "BOUNCE");
         service.createConfigurationSet(new ConfigurationSet("cs-no-suppression"), "us-east-1");
-        service.putConfigurationSetSuppressionOptions("cs-no-suppression", List.of(), "us-east-1");
+        configSets.putSuppressionOptions("cs-no-suppression", List.of(), "us-east-1");
 
         service.sendEmail("from@example.com",
                 List.of("to@example.com"), null, null, null, null,
@@ -249,7 +251,7 @@ class SesServiceSmtpTest {
         // suppressed for COMPLAINT is NOT filtered when sending through this CS.
         service.putSuppressedDestination("us-east-1", "complainer@example.com", "COMPLAINT");
         service.createConfigurationSet(new ConfigurationSet("cs-bounce-only"), "us-east-1");
-        service.putConfigurationSetSuppressionOptions("cs-bounce-only", List.of("BOUNCE"), "us-east-1");
+        configSets.putSuppressionOptions("cs-bounce-only", List.of("BOUNCE"), "us-east-1");
 
         service.sendEmail("from@example.com",
                 List.of("complainer@example.com"), null, null, null, null,
@@ -277,7 +279,7 @@ class SesServiceSmtpTest {
     void sendRawEmail_csOverridesAccountToEmptyList_suppressionListIsIgnored() {
         service.putSuppressedDestination("us-east-1", "to@example.com", "BOUNCE");
         service.createConfigurationSet(new ConfigurationSet("cs-no-suppression-raw"), "us-east-1");
-        service.putConfigurationSetSuppressionOptions("cs-no-suppression-raw", List.of(), "us-east-1");
+        configSets.putSuppressionOptions("cs-no-suppression-raw", List.of(), "us-east-1");
 
         service.sendRawEmail("from@example.com",
                 List.of("to@example.com"), "raw MIME", null, "cs-no-suppression-raw", List.of(), null,

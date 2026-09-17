@@ -66,9 +66,10 @@ public class SesService {
     // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
     // reads via it, and ARN-dispatched tagging reads/writes via its find/save.
     private final SesTemplateService templateService;
-    // Configuration sets extracted to SesConfigurationSetService. The facade delegates; the
-    // cross-domain option validation (tracking's verified domain, delivery's dedicated pool), the
-    // send-path reads, and the ARN-dispatched tagging go through its get/find/save.
+    // Configuration sets live in SesConfigurationSetService, which the v2 controller and the v1
+    // handler call directly; the facade keeps the cross-domain option validation (tracking's
+    // verified domain, delivery's dedicated pool), the tenant-guarded delete, the send-path reads,
+    // and the ARN-dispatched tagging.
     private final SesConfigurationSetService configSetService;
     // Account suppression attributes + the per-address suppression list (two stores) extracted to
     // SesSuppressionService. The facade delegates; its send filters read via it.
@@ -168,7 +169,7 @@ public class SesService {
     public Identity createEmailIdentity(String emailIdentity, String configurationSetName,
                                         List<Tag> tags, String region) {
         Runnable configurationSetExistsCheck = configurationSetName == null ? null
-                : () -> getConfigurationSet(configurationSetName, region);
+                : () -> configSetService.get(configurationSetName, region);
         return identityService.createEmailIdentity(emailIdentity, configurationSetName, tags, region,
                 configurationSetExistsCheck);
     }
@@ -578,7 +579,7 @@ public class SesService {
                         "Identity <" + identityValue + "> does not exist.", 404));
         boolean clearing = configurationSetName == null || configurationSetName.isEmpty();
         if (!clearing) {
-            getConfigurationSet(configurationSetName, region);
+            configSetService.get(configurationSetName, region);
         }
         identity.setConfigurationSetName(clearing ? null : configurationSetName);
         identityService.save(identity, region);
@@ -663,10 +664,6 @@ public class SesService {
         sentEmailService.clear();
     }
 
-    public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {
-        configSetService.setSendingEnabled(configSetName, enabled, region);
-    }
-
     // ──────────────────────────── Templates ────────────────────────────
 
     // Email templates live in SesTemplateService, which the v2 controller and the v1 handler call
@@ -735,7 +732,7 @@ public class SesService {
                             + region.toUpperCase(Locale.ROOT) + ": " + template.getFromEmailAddress(), 400);
         }
         if (configurationSetName != null && !configurationSetName.isBlank()) {
-            getConfigurationSet(configurationSetName, region);
+            configSetService.get(configurationSetName, region);
         }
 
         // AWS registers the recipient as a pending-verification identity as part of sending the
@@ -856,10 +853,6 @@ public class SesService {
                 pool -> dedicatedIpService.dedicatedIpPoolExists(pool, region));
     }
 
-    public void setConfigurationSetReputationOptions(String configSetName, boolean metricsEnabled, String region) {
-        configSetService.setReputationMetricsEnabled(configSetName, metricsEnabled, region);
-    }
-
     private boolean isVerifiedDomainIdentity(String domain, String region) {
         Identity identity = getIdentityVerificationAttributes(domain, region);
         return identity != null && "Success".equals(identity.getVerificationStatus())
@@ -876,26 +869,6 @@ public class SesService {
                                                       String region) {
         configSetService.updateTrackingOptions(configSetName, customRedirectDomain, region,
                 domain -> isVerifiedDomainIdentity(domain, region));
-    }
-
-    public void deleteConfigurationSetTrackingOptions(String configSetName, String region) {
-        configSetService.deleteTrackingOptions(configSetName, region);
-    }
-
-    public void setConfigurationSetArchivingOptions(String configSetName, ArchivingOptions options, String region) {
-        configSetService.setArchivingOptions(configSetName, options, region);
-    }
-
-    public void setConfigurationSetVdmOptions(String configSetName, VdmOptions options, String region) {
-        configSetService.setVdmOptions(configSetName, options, region);
-    }
-
-    public ConfigurationSet getConfigurationSet(String name, String region) {
-        return configSetService.get(name, region);
-    }
-
-    public List<ConfigurationSet> listConfigurationSets(String region) {
-        return configSetService.list(region);
     }
 
     public void deleteConfigurationSet(String name, String region) {
@@ -1123,30 +1096,6 @@ public class SesService {
         }
     }
 
-    public void createConfigurationSetEventDestination(String configSetName, String eventDestinationName,
-                                                       EventDestination dest, String region) {
-        configSetService.createEventDestination(configSetName, eventDestinationName, dest, region);
-    }
-
-    public List<EventDestination> getConfigurationSetEventDestinations(String configSetName, String region) {
-        return configSetService.getEventDestinations(configSetName, region);
-    }
-
-    public void updateConfigurationSetEventDestination(String configSetName, String eventDestinationName,
-                                                       EventDestination dest, String region) {
-        configSetService.updateEventDestination(configSetName, eventDestinationName, dest, region);
-    }
-
-    public void deleteConfigurationSetEventDestination(String configSetName, String eventDestinationName,
-                                                       String region) {
-        configSetService.deleteEventDestination(configSetName, eventDestinationName, region);
-    }
-
-    public void putConfigurationSetSuppressionOptions(String configSetName,
-                                                      List<String> reasons, String region) {
-        configSetService.putSuppressionOptions(configSetName, reasons, region);
-    }
-
     /**
      * Returns the effective suppression reasons for a send that is using
      * {@code configurationSetName}. Per the AWS V2 contract, a configuration
@@ -1159,7 +1108,7 @@ public class SesService {
      */
     public List<String> getEffectiveSuppressedReasons(String configurationSetName, String region) {
         if (configurationSetName != null && !configurationSetName.isBlank()) {
-            ConfigurationSet cs = getConfigurationSet(configurationSetName, region);
+            ConfigurationSet cs = configSetService.get(configurationSetName, region);
             SuppressionOptions options = cs.getSuppressionOptions();
             if (options != null) {
                 return List.copyOf(options.getSuppressedReasons());

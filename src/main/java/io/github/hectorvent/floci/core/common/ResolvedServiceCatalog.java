@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.cloudfront.CloudFrontController;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontServingController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesAccountController;
+import io.github.hectorvent.floci.services.ses.SesConfigurationSetController;
 import io.github.hectorvent.floci.services.ses.SesContactController;
 import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.ses.SesCvetController;
@@ -295,10 +296,10 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON, ServiceProtocol.QUERY),
                         Set.of(), Set.of("email", "ses", "sesv2"), Set.of(),
                         Set.of(SesController.class, SesAccountController.class,
-                                SesContactController.class, SesCvetController.class,
-                                SesDedicatedIpController.class, SesSuppressionController.class,
-                                SesTagController.class, SesTemplateController.class,
-                                SesTenantController.class)),
+                                SesConfigurationSetController.class, SesContactController.class,
+                                SesCvetController.class, SesDedicatedIpController.class,
+                                SesSuppressionController.class, SesTagController.class,
+                                SesTemplateController.class, SesTenantController.class)),
                 descriptor("es", "opensearch", config.services().opensearch().enabled(), true,
                         "opensearch", storageMode(config.storage().services().opensearch().mode(), config.storage().mode()),
                         config.storage().services().opensearch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

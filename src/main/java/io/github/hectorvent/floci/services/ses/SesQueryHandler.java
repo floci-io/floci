@@ -50,6 +50,7 @@ public class SesQueryHandler {
     private final SesTemplateService templateService;
     private final SesCvetService cvetService;
     private final SesAccountService accountService;
+    private final SesConfigurationSetService configSetService;
     private final SesSentEmailService sentEmailService;
     private final ObjectMapper objectMapper;
 
@@ -57,6 +58,7 @@ public class SesQueryHandler {
     public SesQueryHandler(SesService sesService, SesReceiptRuleService receiptRuleService,
                            SesIdentityService identityService, SesTemplateService templateService,
                            SesCvetService cvetService, SesAccountService accountService,
+                           SesConfigurationSetService configSetService,
                            SesSentEmailService sentEmailService, ObjectMapper objectMapper) {
         this.sesService = sesService;
         this.receiptRuleService = receiptRuleService;
@@ -64,6 +66,7 @@ public class SesQueryHandler {
         this.templateService = templateService;
         this.cvetService = cvetService;
         this.accountService = accountService;
+        this.configSetService = configSetService;
         this.sentEmailService = sentEmailService;
         this.objectMapper = objectMapper;
     }
@@ -774,7 +777,7 @@ public class SesQueryHandler {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ConfigurationSetName is required.", 400);
         }
-        ConfigurationSet cs = sesService.getConfigurationSet(name, region);
+        ConfigurationSet cs = configSetService.get(name, region);
         List<String> attrs = extractMembers(params, "ConfigurationSetAttributeNames");
         XmlBuilder xml = new XmlBuilder()
                 .start("ConfigurationSet")
@@ -874,7 +877,7 @@ public class SesQueryHandler {
     }
 
     private Response handleListConfigurationSets(String region) {
-        List<ConfigurationSet> all = sesService.listConfigurationSets(region);
+        List<ConfigurationSet> all = configSetService.list(region);
         XmlBuilder xml = new XmlBuilder().start("ConfigurationSets");
         for (ConfigurationSet cs : all) {
             xml.start("member").elem("Name", cs.getName()).end("member");
@@ -897,7 +900,7 @@ public class SesQueryHandler {
         String configSet = requireParam(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        sesService.createConfigurationSetEventDestination(configSet, edName, dest, region);
+        configSetService.createEventDestination(configSet, edName, dest, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "CreateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -907,7 +910,7 @@ public class SesQueryHandler {
         String configSet = requireParam(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        sesService.updateConfigurationSetEventDestination(configSet, edName, dest, region);
+        configSetService.updateEventDestination(configSet, edName, dest, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -916,7 +919,7 @@ public class SesQueryHandler {
                                                                   String region) {
         String configSet = requireParam(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestinationName");
-        sesService.deleteConfigurationSetEventDestination(configSet, edName, region);
+        configSetService.deleteEventDestination(configSet, edName, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "DeleteConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -925,7 +928,7 @@ public class SesQueryHandler {
                                                                 String region) {
         String configSet = requireParam(params, "ConfigurationSetName");
         boolean enabled = parseXsdBoolean(params, "Enabled");
-        sesService.setConfigurationSetSendingEnabled(configSet, enabled, region);
+        configSetService.setSendingEnabled(configSet, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetSendingEnabled", AwsNamespaces.SES)).build();
     }
@@ -951,7 +954,7 @@ public class SesQueryHandler {
     private Response handleDeleteConfigurationSetTrackingOptions(MultivaluedMap<String, String> params,
                                                                  String region) {
         String configSet = requireParam(params, "ConfigurationSetName");
-        sesService.deleteConfigurationSetTrackingOptions(configSet, region);
+        configSetService.deleteTrackingOptions(configSet, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "DeleteConfigurationSetTrackingOptions", AwsNamespaces.SES)).build();
     }
@@ -960,7 +963,7 @@ public class SesQueryHandler {
                                                                           String region) {
         String configSet = requireParam(params, "ConfigurationSetName");
         boolean enabled = parseXsdBoolean(params, "Enabled");
-        sesService.setConfigurationSetReputationOptions(configSet, enabled, region);
+        configSetService.setReputationMetricsEnabled(configSet, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetReputationMetricsEnabled", AwsNamespaces.SES)).build();
     }

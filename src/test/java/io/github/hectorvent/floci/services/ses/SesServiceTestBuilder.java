@@ -52,10 +52,11 @@ final class SesServiceTestBuilder {
     private Route53Service route53Service = null;
     private ObjectMapper objectMapper = new ObjectMapper();
     private Clock clock = Clock.systemUTC();
-    // Built by build(); exposed so tests can seed contacts and account suppression through the domain
-    // services now that the facade no longer forwards those operations.
+    // Built by build(); exposed so tests can seed contacts, account suppression and configuration-set
+    // options through the domain services now that the facade no longer forwards those operations.
     private SesContactService contactService;
     private SesSuppressionService suppressionService;
+    private SesConfigurationSetService configSetService;
 
     static SesServiceTestBuilder create() {
         return new SesServiceTestBuilder();
@@ -125,15 +126,23 @@ final class SesServiceTestBuilder {
         return suppressionService;
     }
 
+    SesConfigurationSetService configSetService() {
+        if (configSetService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return configSetService;
+    }
+
     SesService build() {
         contactService = new SesContactService(contactListStore, contactStore, clock);
         suppressionService = new SesSuppressionService(suppressionStore, accountSuppressionStore,
                 new InMemoryStorage<>());
+        configSetService = new SesConfigurationSetService(configSetStore);
         return new SesService(
                 new SesIdentityService(identityStore, route53Service, clock),
                 new SesSentEmailService(emailStore),
                 new SesTemplateService(templateStore, objectMapper, new SecureRandom()),
-                new SesConfigurationSetService(configSetStore),
+                configSetService,
                 suppressionService,
                 new SesDedicatedIpService(dedicatedIpPoolStore),
                 contactService,
