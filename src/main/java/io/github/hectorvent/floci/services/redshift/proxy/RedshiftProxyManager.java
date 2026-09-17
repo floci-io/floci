@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
@@ -27,6 +28,7 @@ public class RedshiftProxyManager {
     private final RdsSigV4Validator sigV4Validator;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final S3Service s3Service;
+    private final IamService iamService;
     private final EmulatorConfig config;
     private final ConcurrentHashMap<String, RedshiftAuthProxy> proxies = new ConcurrentHashMap<>();
     /**
@@ -39,10 +41,11 @@ public class RedshiftProxyManager {
 
     @Inject
     public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
-                                S3Service s3Service, EmulatorConfig config) {
+                                S3Service s3Service, IamService iamService, EmulatorConfig config) {
         this.sigV4Validator = sigV4Validator;
         this.tlsCertificates = tlsCertificates;
         this.s3Service = s3Service;
+        this.iamService = iamService;
         this.config = config;
     }
 
@@ -58,7 +61,7 @@ public class RedshiftProxyManager {
         EmulatorConfig.RedshiftServiceConfig redshiftConfig = config.services().redshift();
         RedshiftAuthProxy proxy = new RedshiftAuthProxy(
                 relayKey, backendHost, backendPort, masterUsername, masterPassword, dbName,
-                sigV4Validator, tlsCertificates, passwordValidator, s3Service,
+                sigV4Validator, tlsCertificates, passwordValidator, s3Service, iamService,
                 redshiftConfig.proxyHandshakeTimeoutMillis(), redshiftConfig.proxyBackendConnectTimeoutMillis(),
                 redshiftConfig.proxyMaxConnections());
         try {

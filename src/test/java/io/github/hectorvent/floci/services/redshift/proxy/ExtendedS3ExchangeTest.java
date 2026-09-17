@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.AfterEach;
@@ -34,6 +35,7 @@ class ExtendedS3ExchangeTest {
     private Socket testClient;
     private Socket testBackend;
     private S3Service s3;
+    private IamService iamService;
     private final AtomicReference<Throwable> backendFailure = new AtomicReference<>();
 
     @BeforeEach
@@ -48,6 +50,7 @@ class ExtendedS3ExchangeTest {
         testBackend = backendListener.accept();
         backendListener.close();
         s3 = mock(S3Service.class);
+        iamService = mock(IamService.class);
     }
 
     @AfterEach
@@ -73,7 +76,7 @@ class ExtendedS3ExchangeTest {
         writeSync();
         Thread backend = backendThread(() -> playCopyIn(copied));
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, iamService, coordinator, ticket);
         joinBackend(backend);
 
         PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClient.getInputStream());
@@ -101,7 +104,7 @@ class ExtendedS3ExchangeTest {
         writeSync();
         Thread backend = backendThread(this::playCopyOut);
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), unload, s3, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), unload, s3, iamService, coordinator, ticket);
         joinBackend(backend);
 
         assertEquals("1\n2\n", new String(written.get("out/000"), StandardCharsets.US_ASCII));
@@ -134,7 +137,7 @@ class ExtendedS3ExchangeTest {
             testBackend.getOutputStream().flush();
         });
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, iamService, coordinator, ticket);
         joinBackend(backend);
 
         testClient.setSoTimeout(1_000);

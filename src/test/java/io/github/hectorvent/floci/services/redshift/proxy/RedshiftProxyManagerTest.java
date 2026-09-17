@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
@@ -32,7 +33,7 @@ class RedshiftProxyManagerTest {
     private RedshiftProxyManager newManager() {
         return new RedshiftProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class),
-                mock(S3Service.class), testConfig());
+                mock(S3Service.class), mock(IamService.class), testConfig());
     }
 
     private static EmulatorConfig testConfig() {

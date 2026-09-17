@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.jboss.logging.Logger;
 
@@ -41,6 +42,7 @@ public class RedshiftInterceptingBridge {
     private final Socket client;
     private final Socket backend;
     private final S3Service s3Service;
+    private final IamService iamService;
     private final ExtendedQuerySession session = new ExtendedQuerySession();
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
 
@@ -48,10 +50,11 @@ public class RedshiftInterceptingBridge {
     private volatile boolean pumpBetweenMessages = true;
     private volatile boolean pumpFinished = false;
 
-    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service) {
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
+        this.iamService = iamService;
     }
 
     @FunctionalInterface
@@ -138,10 +141,10 @@ public class RedshiftInterceptingBridge {
             CopyStatementParser.S3Statement statement = parsed;
             boolean intercepted = runWithBackendOwned(() -> switch (statement) {
                 case CopyStatementParser.S3CopyFrom copy -> S3CopySimulator.runCopyFrom(
-                        client, backend, copy, s3Service, coordinator.lastReadyStatus(),
+                        client, backend, copy, s3Service, iamService, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
                 case CopyStatementParser.S3Unload unload -> S3CopySimulator.runUnload(
-                        client, backend, unload, s3Service, coordinator.lastReadyStatus(),
+                        client, backend, unload, s3Service, iamService, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
             });
             if (intercepted) {
@@ -276,7 +279,7 @@ public class RedshiftInterceptingBridge {
         }
         try {
             backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
-            ExtendedS3Exchange.execute(client, backend, executeFrame, statement, s3Service, coordinator, ticket);
+            ExtendedS3Exchange.execute(client, backend, executeFrame, statement, s3Service, iamService, coordinator, ticket);
         } finally {
             try {
                 backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);

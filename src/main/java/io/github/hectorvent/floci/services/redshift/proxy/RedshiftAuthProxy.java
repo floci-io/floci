@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.PostgresProtocolHandler;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
@@ -35,6 +36,7 @@ public class RedshiftAuthProxy {
     private final RdsProxyTlsCertificates tlsCertificates;
     private final PasswordValidator passwordValidator;
     private final S3Service s3Service;
+    private final IamService iamService;
     private final int handshakeTimeoutMillis;
     private final int backendConnectTimeoutMillis;
     private final Semaphore connectionPermits;
@@ -46,7 +48,7 @@ public class RedshiftAuthProxy {
                              String masterUsername, String masterPassword, String dbName,
                              RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
                              PasswordValidator passwordValidator,
-                             S3Service s3Service,
+                             S3Service s3Service, IamService iamService,
                              int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                              int maxConnections) {
         this.clusterKey = clusterKey;
@@ -59,6 +61,7 @@ public class RedshiftAuthProxy {
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
         this.s3Service = s3Service;
+        this.iamService = iamService;
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
         this.backendConnectTimeoutMillis = backendConnectTimeoutMillis;
         this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
@@ -175,7 +178,7 @@ public class RedshiftAuthProxy {
             if (session != null) {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
-                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service).run();
+                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
