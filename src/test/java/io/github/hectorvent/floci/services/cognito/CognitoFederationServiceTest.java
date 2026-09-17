@@ -292,7 +292,7 @@ class CognitoFederationServiceTest {
         assertEquals("provider-client", formValue(observedTokenRequest.body(), "client_id"));
         assertEquals("provider-secret", formValue(observedTokenRequest.body(), "client_secret"));
         assertEquals("provider code", formValue(observedTokenRequest.body(), "code"));
-        assertEquals("https://application.example.test/callback",
+        assertEquals(cognitoService.getIdentityProviderCallbackEndpoint(pool.getId()),
                 formValue(observedTokenRequest.body(), "redirect_uri"));
 
         Request observedClaimsRequest = claimsRequest.get();

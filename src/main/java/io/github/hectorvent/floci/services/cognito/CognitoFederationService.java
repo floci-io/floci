@@ -79,7 +79,8 @@ public class CognitoFederationService {
         IdentityProvider provider = cognitoService.describeIdentityProvider(
                 transaction.userPoolId(), transaction.providerName());
         requireOidcProvider(provider);
-        JsonNode tokenResponse = oidcClient.exchangeCode(provider, providerCode, transaction.redirectUri());
+        String providerCallback = cognitoService.getIdentityProviderCallbackEndpoint(transaction.userPoolId());
+        JsonNode tokenResponse = oidcClient.exchangeCode(provider, providerCode, providerCallback);
         String accessToken = requiredText(tokenResponse, "access_token", "access token");
         JsonNode claims = oidcClient.fetchClaims(provider, accessToken);
         String subject = requiredText(claims, "sub", "subject");
