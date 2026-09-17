@@ -145,6 +145,53 @@ class AutoScalingReconcilerTest {
     }
 
     @Test
+    void scaleOutTerminatesInstancesWhenGroupDisappears() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = launchTemplateAsg();
+        stubLaunchTemplate(ec2Service, "ami-version-1", "t3.micro");
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(false);
+
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-stale");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
+                eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null), eq(List.of()),
+                eq(null), eq(null), eq(null))).thenReturn(reservation);
+
+        reconciler.reconcile(asg);
+
+        verify(ec2Service).terminateInstances("us-east-1", List.of("i-stale"));
+    }
+
+    @Test
+    void scaleOutPersistsInstancesWhenGroupStillExists() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = launchTemplateAsg();
+        stubLaunchTemplate(ec2Service, "ami-version-1", "t3.micro");
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(true);
+
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-owned");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
+                eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null), eq(List.of()),
+                eq(null), eq(null), eq(null))).thenReturn(reservation);
+
+        reconciler.reconcile(asg);
+
+        verify(asgService, times(2)).saveAutoScalingGroupIfPresent(asg);
+        verify(ec2Service, never()).terminateInstances("us-east-1", List.of("i-owned"));
+    }
+
+    @Test
     void scaleOutForwardsLaunchConfigurationAssociatePublicIpAddressBothDirections() {
         // An LC that explicitly sets false must suppress the public IP even in a
         // MapPublicIpOnLaunch subnet, so false has to reach runInstances as
@@ -306,7 +353,7 @@ class AutoScalingReconcilerTest {
                 targets.capture());
         assertEquals(1, targets.getValue().size());
         assertEquals("i-stale", targets.getValue().getFirst().getId());
-        verify(asgService).saveAutoScalingGroup(asg);
+        verify(asgService).saveAutoScalingGroupIfPresent(asg);
         verify(ec2Service, never()).terminateInstances(asg.getRegion(), List.of("i-active"));
     }
 
@@ -466,7 +513,7 @@ class AutoScalingReconcilerTest {
                 eq("Launching a new EC2 instance: i-pending"),
                 eq("An instance was started in response to a desired capacity change."),
                 eq("Successful"));
-        verify(asgService, times(2)).saveAutoScalingGroup(asg);
+        verify(asgService, times(2)).saveAutoScalingGroupIfPresent(asg);
     }
 
     @Test
@@ -509,6 +556,29 @@ class AutoScalingReconcilerTest {
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of(), List.of("app-lt"), Map.of()))
                 .thenThrow(failure);
         return asg;
+    }
+
+    private static AutoScalingGroup launchTemplateAsg() {
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(1);
+        asg.setLaunchTemplateId("lt-123");
+        asg.setLaunchTemplateVersion("1");
+        return asg;
+    }
+
+    private static void stubLaunchTemplate(Ec2Service ec2Service, String imageId, String instanceType) {
+        LaunchTemplate launchTemplate = new LaunchTemplate();
+        launchTemplate.setLaunchTemplateId("lt-123");
+        LaunchTemplate version = new LaunchTemplate();
+        version.setLatestVersionNumber("1");
+        version.getData().setImageId(imageId);
+        version.getData().setInstanceType(instanceType);
+        when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
+                .thenReturn(List.of(launchTemplate));
+        when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("1")))
+                .thenReturn(List.of(version));
     }
 
     private static AsgInstance instance(String lifecycleState) {
