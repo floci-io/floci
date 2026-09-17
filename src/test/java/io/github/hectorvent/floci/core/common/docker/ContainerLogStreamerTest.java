@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.LogContainerCmd;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -22,6 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -32,6 +35,45 @@ class ContainerLogStreamerTest {
 
     private static byte[] utf8(String s) {
         return s.getBytes(StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void ensureLogGroupAndStreamUsesOwningAccount() {
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(null, cloudWatchLogsService);
+
+        streamer.ensureLogGroupAndStreamForAccount(
+                "555555555555", "/aws/lambda/example", "2026/09/17/[$LATEST]stream", "us-east-1");
+
+        verify(cloudWatchLogsService).createLogGroupForAccount(
+                "555555555555", "/aws/lambda/example", null, null, "us-east-1");
+        verify(cloudWatchLogsService).createLogStreamForAccount(
+                "555555555555", "/aws/lambda/example", "2026/09/17/[$LATEST]stream", "us-east-1");
+    }
+
+    @Test
+    void streamToCloudWatchLogsForAccountUsesOwningAccount() {
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(null, cloudWatchLogsService);
+
+        streamer.streamToCloudWatchLogsForAccount(
+                "555555555555", "/aws/lambda/example", "stream", "us-east-1", "function output");
+
+        verify(cloudWatchLogsService).putLogEventsForAccount(
+                eq("555555555555"), eq("/aws/lambda/example"), eq("stream"), anyList(), eq("us-east-1"));
+    }
+
+    @Test
+    void execLogCallbackForAccountForwardsExtensionOutputToOwningAccount() {
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(null, cloudWatchLogsService);
+        ResultCallback.Adapter<Frame> callback = streamer.execLogCallbackForAccount(
+                "555555555555", "/aws/lambda/example", "stream", "us-east-1", "lambda:example:extension");
+
+        callback.onNext(new Frame(StreamType.STDOUT, utf8("extension output\n")));
+
+        verify(cloudWatchLogsService).putLogEventsForAccount(
+                eq("555555555555"), eq("/aws/lambda/example"), eq("stream"), anyList(), eq("us-east-1"));
     }
 
     @Test
