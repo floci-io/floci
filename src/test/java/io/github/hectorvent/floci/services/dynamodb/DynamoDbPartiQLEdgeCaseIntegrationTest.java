@@ -193,6 +193,24 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("params").body("Item", nullValue());
     }
 
+    @Test
+    @Order(9)
+    void refusesTwoReadsOfOneItemInATransaction() {
+        putItem("reads", "\"a\":{\"S\":\"x\"}");
+        String select = "SELECT * FROM \"" + TABLE + "\" WHERE pk='reads' AND sk='1'";
+
+        transaction(select, "SELECT a FROM \"" + TABLE + "\" WHERE sk='1' AND pk='reads'")
+            .statusCode(400)
+            .body("message", equalTo("Transaction request cannot include multiple operations on one item"));
+        transaction(select, select, "SELECT * FROM \"" + TABLE + "\" WHERE pk=1 AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("Transaction cancelled, please refer cancellation reasons for specific reasons"
+                    + " [None, None, ValidationError]"));
+        transaction(select, "SELECT * FROM \"" + TABLE + "\" WHERE pk='reads' AND sk='2'")
+            .statusCode(200)
+            .body("Responses[0].Item.a.S", equalTo("x"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

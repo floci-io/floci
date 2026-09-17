@@ -2735,6 +2735,9 @@ public class DynamoDbJsonHandler {
         }
 
         List<JsonNode> results = dynamoDbService.transactGetItems(getItems, region);
+        // A bad key cancels the transaction before a repeated item is refused
+        // (checked on real AWS, eu-west-2, 2026-09-17).
+        requireOneReadPerItem(getItems, tables);
         ArrayNode responses = objectMapper.createArrayNode();
         for (int i = 0; i < results.size(); i++) {
             JsonNode item = partiQLHandler.projectSelected(selects.get(i), results.get(i));
@@ -2747,6 +2750,19 @@ public class DynamoDbJsonHandler {
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("Responses", responses);
         return Response.ok(resp).build();
+    }
+
+    private void requireOneReadPerItem(List<JsonNode> getItems, Map<String, TableDefinition> tables) {
+        Set<List<String>> items = new HashSet<>();
+        for (JsonNode getItem : getItems) {
+            JsonNode get = getItem.path("Get");
+            String tableName = get.path("TableName").asText();
+            String itemKey = dynamoDbService.buildItemKey(tables.get(tableName), get.path("Key"), true);
+            if (!items.add(List.of(tableName, itemKey))) {
+                throw new AwsException("ValidationException",
+                        "Transaction request cannot include multiple operations on one item", 400);
+            }
+        }
     }
 
     // Only a validation error names its statement; a missing table comes back as it stands.
