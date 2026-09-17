@@ -26,7 +26,7 @@ class SesServiceDkimLookupCacheTest {
     private static final String REGION = "us-east-1";
     private static final String DOMAIN = "example.com";
 
-    private SesService service;
+    private SesIdentityService identities;
     private InMemoryStorage<String, Identity> identityStore;
     private Route53Service route53Service;
     private MutableClock clock;
@@ -40,7 +40,8 @@ class SesServiceDkimLookupCacheTest {
                 .route53Service(route53Service)
                 .clock(clock);
         identityStore = builder.identityStore();
-        service = builder.build();
+        builder.build();
+        identities = builder.identityService();
     }
 
     @Test
@@ -48,8 +49,12 @@ class SesServiceDkimLookupCacheTest {
         Identity identity = storePendingDomainIdentity();
         stubRoute53(identity, List.of());
 
-        assertEquals("Pending", service.getIdentityVerificationAttributes(DOMAIN, REGION).getVerificationStatus());
-        assertEquals("Pending", service.getIdentityVerificationAttributes(DOMAIN, REGION).getVerificationStatus());
+        assertEquals("Pending",
+                identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                        .getVerificationStatus());
+        assertEquals("Pending",
+                identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                        .getVerificationStatus());
 
         verify(route53Service, times(1)).listHostedZones(null, Integer.MAX_VALUE);
         verify(route53Service, times(1)).listResourceRecordSets(eq("zone-1"), eq(null), eq(null), eq(Integer.MAX_VALUE));
@@ -60,9 +65,13 @@ class SesServiceDkimLookupCacheTest {
         Identity identity = storePendingDomainIdentity();
         stubRoute53(identity, List.of());
 
-        assertEquals("Pending", service.getIdentityVerificationAttributes(DOMAIN, REGION).getVerificationStatus());
+        assertEquals("Pending",
+                identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                        .getVerificationStatus());
         clock.advance(Duration.ofSeconds(5));
-        assertEquals("Pending", service.getIdentityVerificationAttributes(DOMAIN, REGION).getVerificationStatus());
+        assertEquals("Pending",
+                identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                        .getVerificationStatus());
 
         verify(route53Service, times(2)).listHostedZones(null, Integer.MAX_VALUE);
         verify(route53Service, times(2)).listResourceRecordSets(eq("zone-1"), eq(null), eq(null), eq(Integer.MAX_VALUE));
@@ -74,14 +83,20 @@ class SesServiceDkimLookupCacheTest {
         List<ResourceRecordSet> matchingRecords = buildMatchingRecords(identity);
         stubRoute53(identity, List.of());
 
-        assertEquals("Pending", service.getIdentityVerificationAttributes(DOMAIN, REGION).getVerificationStatus());
+        assertEquals("Pending",
+                identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                        .getVerificationStatus());
 
         when(route53Service.listResourceRecordSets("zone-1", null, null, Integer.MAX_VALUE))
                 .thenReturn(matchingRecords);
 
         clock.advance(Duration.ofSeconds(5));
-        assertEquals("Success", service.getIdentityVerificationAttributes(DOMAIN, REGION).getVerificationStatus());
-        assertEquals("Success", service.getIdentityVerificationAttributes(DOMAIN, REGION).getVerificationStatus());
+        assertEquals("Success",
+                identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                        .getVerificationStatus());
+        assertEquals("Success",
+                identities.getIdentityVerificationAttributes(DOMAIN, REGION)
+                        .getVerificationStatus());
 
         verify(route53Service, times(4)).listHostedZones(null, Integer.MAX_VALUE);
         verify(route53Service, times(4)).listResourceRecordSets(eq("zone-1"), eq(null), eq(null), eq(Integer.MAX_VALUE));

@@ -18,14 +18,15 @@ class SesServiceLegacyDkimTokensTest {
 
     private static final String REGION = "us-east-1";
 
-    private SesService service;
+    private SesIdentityService identities;
     private InMemoryStorage<String, Identity> identityStore;
 
     @BeforeEach
     void setUp() {
         SesServiceTestBuilder builder = SesServiceTestBuilder.create();
         identityStore = builder.identityStore();
-        service = builder.build();
+        builder.build();
+        identities = builder.identityService();
     }
 
     @Test
@@ -40,7 +41,8 @@ class SesServiceLegacyDkimTokensTest {
         String key = "identity::" + REGION + "::" + legacy.getIdentity();
         identityStore.put(key, legacy);
 
-        Identity refreshed = service.getIdentityVerificationAttributes(legacy.getIdentity(), REGION);
+        Identity refreshed =
+                identities.getIdentityVerificationAttributes(legacy.getIdentity(), REGION);
 
         assertSame(legacy, refreshed);
         assertNotNull(refreshed.getDkimTokens());

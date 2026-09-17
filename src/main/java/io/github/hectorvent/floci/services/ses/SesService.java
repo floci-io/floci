@@ -55,9 +55,11 @@ public class SesService {
 
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
-    // Identities extracted to SesIdentityService (CRUD, verification, MAIL FROM, notifications,
-    // tags, and the DKIM state machine with its Route53 lookup). The facade keeps the cross-domain
-    // flows and send-path reads, reaching the store through its find/save.
+    // Identities live in SesIdentityService (CRUD, verification, MAIL FROM, notifications, tags,
+    // and the DKIM state machine with its Route53 lookup), which the v2 controller and the v1
+    // handler call directly. The facade keeps the cross-domain flows (create's configuration-set
+    // check, the tenant-guarded delete with its policy cascade, the default configuration set) and
+    // the send-path reads, reaching the store through its find/save.
     private final SesIdentityService identityService;
     // Sent-email records extracted to SesSentEmailService. The send path records finished emails via
     // it; the account and v1 statistics reads go to the service directly, inspection still reads
@@ -82,8 +84,9 @@ public class SesService {
     // and the unsubscribe endpoint call directly; the facade only reaches it from the send-path
     // list-management orchestration and the ARN-dispatched tagging.
     private final SesContactService contactService;
-    // Identity (sending authorization) policy storage, extracted to SesPolicyService.
-    // The facade keeps the identity-existence check and delegates the rest.
+    // Identity (sending authorization) policy storage lives in SesPolicyService, which the v1
+    // handler calls directly; the facade keeps the v2 operations, which check the identity exists
+    // first, and the delete cascade.
     private final SesPolicyService policyService;
     // Custom verification email templates: storage extracted to SesCvetService, which the v2
     // controller and the v1 handler call directly for get/list/delete. The facade keeps create and
@@ -157,10 +160,6 @@ public class SesService {
         this.regionResolver = null;
     }
 
-    public Identity verifyEmailIdentity(String emailAddress, String region) {
-        return identityService.verifyEmailIdentity(emailAddress, region);
-    }
-
     /**
      * v2 CreateEmailIdentity. The identity domain builds and persists the complete record in one
      * write; only the configuration-set existence check is cross-domain, so it is passed in as the
@@ -172,10 +171,6 @@ public class SesService {
                 : () -> configSetService.get(configurationSetName, region);
         return identityService.createEmailIdentity(emailIdentity, configurationSetName, tags, region,
                 configurationSetExistsCheck);
-    }
-
-    public Identity verifyDomainIdentity(String domain, String region) {
-        return identityService.verifyDomainIdentity(domain, region);
     }
 
     public void deleteIdentity(String identityValue, String region) {
@@ -194,14 +189,6 @@ public class SesService {
         policyService.deletePoliciesForIdentity(identityValue, region);
 
         LOG.infov("Deleted identity: {0}", identityValue);
-    }
-
-    public List<Identity> listIdentities(String identityType, String region) {
-        return identityService.listIdentities(identityType, region);
-    }
-
-    public Identity getIdentityVerificationAttributes(String identityValue, String region) {
-        return identityService.getIdentityVerificationAttributes(identityValue, region);
     }
 
     public String sendEmail(String source, List<String> toAddresses, List<String> ccAddresses,
@@ -540,38 +527,6 @@ public class SesService {
         return events;
     }
 
-    public void setIdentityNotificationTopic(String identityValue, String notificationType,
-                                              String snsTopic, String region) {
-        identityService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic, region);
-    }
-
-    public Identity getIdentityNotificationAttributes(String identityValue, String region) {
-        return identityService.getIdentityNotificationAttributes(identityValue, region);
-    }
-
-    public void setDkimAttributes(String identityValue, boolean signingEnabled, String region) {
-        identityService.setDkimAttributes(identityValue, signingEnabled, region);
-    }
-
-    public List<String> verifyDomainDkim(String domain, String region) {
-        return identityService.verifyDomainDkim(domain, region);
-    }
-
-    public SesIdentityService.DkimSigningResult putDkimSigningAttributes(String identityValue, String origin,
-                                                                         String signingSelector, String nextKeyLength,
-                                                                         String region) {
-        return identityService.putDkimSigningAttributes(identityValue, origin, signingSelector,
-                nextKeyLength, region);
-    }
-
-    public Identity effectiveDkimSource(Identity identity, String region) {
-        return identityService.effectiveDkimSource(identity, region);
-    }
-
-    public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
-        identityService.setFeedbackForwardingEnabled(identityValue, enabled, region);
-    }
-
     public void setEmailIdentityConfigurationSet(String identityValue, String configurationSetName,
                                                  String region) {
         Identity identity = identityService.find(identityValue, region)
@@ -636,24 +591,6 @@ public class SesService {
                     "Configuration set <" + cs + "> does not exist.", 400);
         }
         return cs;
-    }
-
-    public void setMailFromDomain(String identityValue, String mailFromDomain,
-                                   String behaviorOnMxFailure, String region) {
-        identityService.setMailFromDomain(identityValue, mailFromDomain, behaviorOnMxFailure, region);
-    }
-
-    public Identity getMailFromAttributes(String identityValue, String region) {
-        return identityService.getMailFromAttributes(identityValue, region);
-    }
-
-    public void setHeadersInNotificationsEnabled(String identityValue, String notificationType,
-                                                   boolean enabled, String region) {
-        identityService.setHeadersInNotificationsEnabled(identityValue, notificationType, enabled, region);
-    }
-
-    public List<String> getVerifiedEmailAddresses(String region) {
-        return identityService.getVerifiedEmailAddresses(region);
     }
 
     public List<SentEmail> getEmails() {
@@ -854,7 +791,7 @@ public class SesService {
     }
 
     private boolean isVerifiedDomainIdentity(String domain, String region) {
-        Identity identity = getIdentityVerificationAttributes(domain, region);
+        Identity identity = identityService.getIdentityVerificationAttributes(domain, region);
         return identity != null && "Success".equals(identity.getVerificationStatus())
                 && "Domain".equals(identity.getIdentityType());
     }
@@ -1053,10 +990,6 @@ public class SesService {
     // Policy storage lives in SesPolicyService; this facade forwards, and for the v2 mutators it runs
     // the identity-existence check (an Identity-domain read) first, before delegating.
 
-    public void putIdentityPolicy(String identity, String policyName, String policy, String region) {
-        policyService.putIdentityPolicy(identity, policyName, policy, region);
-    }
-
     public void createEmailIdentityPolicy(String identity, String policyName, String policy, String region) {
         requireIdentityExists(identity, region);
         policyService.createEmailIdentityPolicy(identity, policyName, policy, region);
@@ -1072,21 +1005,9 @@ public class SesService {
         return policyService.listAllPolicies(identity, region);
     }
 
-    public Map<String, String> getIdentityPolicies(String identity, List<String> policyNames, String region) {
-        return policyService.getIdentityPolicies(identity, policyNames, region);
-    }
-
-    public List<String> listIdentityPolicyNames(String identity, String region) {
-        return policyService.listIdentityPolicyNames(identity, region);
-    }
-
     public void deleteEmailIdentityPolicy(String identity, String policyName, String region) {
         requireIdentityExists(identity, region);
         policyService.deleteEmailIdentityPolicy(identity, policyName, region);
-    }
-
-    public void deleteIdentityPolicy(String identity, String policyName, String region) {
-        policyService.deleteIdentityPolicy(identity, policyName, region);
     }
 
     private void requireIdentityExists(String identity, String region) {
