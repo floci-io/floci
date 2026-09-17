@@ -199,8 +199,8 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
 - `IAM_ROLE '<role-arn>'` is supported. The role must exist in the local IAM service. With
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, the role only needs to exist. With it on, the role's
-  identity policy and the bucket policy must allow the required S3 actions. `IAM_ROLE default`
-  is not supported.
+  identity policy must allow the required S3 actions, and any bucket policy must not deny the
+  request. `IAM_ROLE default` is not supported.
 - Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `AVRO`, `ORC`, `MANIFEST`, `MAXERROR`,
   `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
   `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, `CREDENTIALS`, and so on) is not
@@ -252,8 +252,8 @@ the result to S3 as one or more objects under `<prefix>`.
   a manifest, and rerunning the same statement overwrites them.
 - `IAM_ROLE '<role-arn>'` is supported. The role must exist in the local IAM service. With
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, the role only needs to exist. With it on, the role's
-  identity policy and the bucket policy must allow the required S3 actions. `IAM_ROLE default`
-  is not supported.
+  identity policy must allow the required S3 actions, and any bucket policy must not deny the
+  request. `IAM_ROLE default` is not supported.
 - Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `CREDENTIALS`,
   `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.

@@ -81,7 +81,8 @@ public final class S3CopySimulator {
     private S3CopySimulator() {
     }
 
-    record CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3) {
+    record CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3,
+                     IamService iamService, RoleSession roleSession) {
     }
 
     private record RoleSession(String accessKeyId, String sessionToken) {
@@ -235,9 +236,10 @@ public final class S3CopySimulator {
                 throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                         "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), e);
             }
-            return new CopyInput(spec, List.copyOf(keys), s3);
-        } finally {
+            return new CopyInput(spec, List.copyOf(keys), s3, iamService, roleSession);
+        } catch (RuntimeException e) {
             releaseRoleSession(roleSession, spec.iamRoleArn(), iamService);
+            throw e;
         }
     }
 
@@ -246,7 +248,11 @@ public final class S3CopySimulator {
     }
 
     static void streamCopyInput(CopyInput input, OutputStream backendOut) throws IOException {
-        streamObjects(input.spec(), input.s3(), input.keys(), backendOut);
+        streamObjects(input.spec(), input.s3(), input.iamService(), input.roleSession(), input.keys(), backendOut);
+    }
+
+    static void releaseCopySession(CopyInput input) {
+        releaseRoleSession(input.roleSession(), input.spec().iamRoleArn(), input.iamService());
     }
 
     static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService) {
@@ -337,48 +343,52 @@ public final class S3CopySimulator {
             return true;
         }
 
-        OutputStream backendOut = backend.getOutputStream();
-        backendOut.write(PostgresWireDecoder.encodeQuery(copyBackendSql(spec)));
-        backendOut.flush();
-
-        PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
-        PostgresWireDecoder.FrontendMessage first;
         try {
-            first = nextNonAsync(backendDecoder, client);
-        } catch (IOException e) {
-            LOG.warnv(e, "backend read failed while awaiting CopyInResponse");
-            closeQuietly(backend);
-            sendError(client, null, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed or timed out", txStatus, onStatusChange);
-            closeQuietly(client);
-            return true;
-        }
-        if (first == null) {
-            LOG.warn("backend closed before answering the fabricated COPY");
-            closeQuietly(backend);
-            sendError(client, null, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed before COPY started", txStatus, onStatusChange);
-            closeQuietly(client);
-            return true;
-        }
-        if (first.type() != 'G') {
-            // Backend rejected the COPY itself (e.g. no such table). Its ErrorResponse and the
-            // ReadyForQuery that follows are the client's one response.
-            forward(client, first);
-            drainToReadyForQuery(backendDecoder, client, onStatusChange);
-            return true;
-        }
+            OutputStream backendOut = backend.getOutputStream();
+            backendOut.write(PostgresWireDecoder.encodeQuery(copyBackendSql(spec)));
+            backendOut.flush();
 
-        // The CopyIn stream is open. Any failure from here is resolved with exactly one response:
-        // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
-        // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
-        try {
-            streamCopyInput(input, backendOut);
-            writeCopyDone(backendOut);
-            drainToReadyForQuery(backendDecoder, client, onStatusChange);
-        } catch (RuntimeException | IOException e) {
-            LOG.warnv(e, "S3 COPY streaming failed; aborting the open CopyIn");
-            abortOpenCopyIn(client, backend, backendOut, backendDecoder, e, txStatus, onStatusChange);
+            PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
+            PostgresWireDecoder.FrontendMessage first;
+            try {
+                first = nextNonAsync(backendDecoder, client);
+            } catch (IOException e) {
+                LOG.warnv(e, "backend read failed while awaiting CopyInResponse");
+                closeQuietly(backend);
+                sendError(client, null, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed or timed out", txStatus, onStatusChange);
+                closeQuietly(client);
+                return true;
+            }
+            if (first == null) {
+                LOG.warn("backend closed before answering the fabricated COPY");
+                closeQuietly(backend);
+                sendError(client, null, SQLSTATE_INTERNAL, "S3 COPY failed: backend closed before COPY started", txStatus, onStatusChange);
+                closeQuietly(client);
+                return true;
+            }
+            if (first.type() != 'G') {
+                // Backend rejected the COPY itself (e.g. no such table). Its ErrorResponse and the
+                // ReadyForQuery that follows are the client's one response.
+                forward(client, first);
+                drainToReadyForQuery(backendDecoder, client, onStatusChange);
+                return true;
+            }
+
+            // The CopyIn stream is open. Any failure from here is resolved with exactly one response:
+            // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
+            // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
+            try {
+                streamCopyInput(input, backendOut);
+                writeCopyDone(backendOut);
+                drainToReadyForQuery(backendDecoder, client, onStatusChange);
+            } catch (RuntimeException | IOException e) {
+                LOG.warnv(e, "S3 COPY streaming failed; aborting the open CopyIn");
+                abortOpenCopyIn(client, backend, backendOut, backendDecoder, e, txStatus, onStatusChange);
+            }
+            return true;
+        } finally {
+            releaseCopySession(input);
         }
-        return true;
     }
 
     private static void abortOpenCopyIn(Socket client, Socket backend, OutputStream backendOut,
@@ -443,9 +453,14 @@ public final class S3CopySimulator {
     }
 
     private static void streamObjects(CopyStatementParser.S3CopyFrom spec, S3Service s3,
+                                      IamService iamService, RoleSession roleSession,
                                       List<String> keys, OutputStream backendOut) throws IOException {
         byte[] buffer = new byte[CHUNK];
         for (int i = 0; i < keys.size(); i++) {
+            if (roleSession != null) {
+                authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject", objectArn(spec.bucket(), keys.get(i)));
+                s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), keys.get(i));
+            }
             S3Object object = s3.getObject(spec.bucket(), keys.get(i));
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
             InputStream in = new ByteArrayInputStream(data);

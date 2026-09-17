@@ -217,7 +217,7 @@ class S3CopySimulatorTest {
         when(iamService.findRole(any(), any()))
                 .thenReturn(java.util.Optional.of(mock(io.github.hectorvent.floci.services.iam.model.IamRole.class)));
 
-        S3CopySimulator.prepareCopy(spec, s3, iamService);
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iamService);
 
         org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousGetObject(any(), any());
         org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousListBucket(any());
@@ -225,7 +225,26 @@ class S3CopySimulatorTest {
         org.mockito.Mockito.verify(s3).authorizeSignedGetObject(any(), any(), eq("b"), eq("k"));
         org.mockito.Mockito.verify(iamService).registerSessionForAccount(
                 eq("000000000000"), any(), any(), any(), eq(ROLE_ARN), any(), isNull());
-        org.mockito.Mockito.verify(iamService).unregisterSession(eq("000000000000"), any());
+        org.mockito.Mockito.verify(iamService, org.mockito.Mockito.never()).unregisterSession(any(), any());
+    }
+
+    @Test
+    void copyStreamingUsesRoleSessionForObjectAuthorization() throws Exception {
+        when(s3.objectExists("b", "k")).thenReturn(true);
+        when(s3.getObject("b", "k"))
+                .thenReturn(new S3Object("b", "k", "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(any(), any()))
+                .thenReturn(java.util.Optional.of(mock(io.github.hectorvent.floci.services.iam.model.IamRole.class)));
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iamService);
+        S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream());
+
+        org.mockito.Mockito.verify(s3, org.mockito.Mockito.times(2))
+                .authorizeSignedGetObject(any(), any(), eq("b"), eq("k"));
+        org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousGetObject(any(), any());
     }
 
     @Test

@@ -98,6 +98,8 @@ final class ExtendedS3Exchange {
             String detail = e.getMessage() != null ? e.getMessage() : e.toString();
             sendError(client, "XX000", "S3 COPY failed: " + detail);
             return new CopyResult(false, drainReadyForQuery(client, decoder, coordinator));
+        } finally {
+            S3CopySimulator.releaseCopySession(input);
         }
 
         forwardClientSyncToBackend(sync, backendOut, coordinator);
