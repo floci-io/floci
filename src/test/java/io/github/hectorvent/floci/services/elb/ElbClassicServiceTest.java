@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elb.model.ClassicHealthCheck;
 import io.github.hectorvent.floci.services.elb.model.ClassicListener;
@@ -150,6 +151,20 @@ class ElbClassicServiceTest {
         create("my-elb");
         assertTrue(service.hasLoadBalancer(REGION, "my-elb"));
         assertTrue(service.describeLoadBalancers("eu-west-1", null).isEmpty());
+    }
+
+    @Test
+    void createPopulatesTheSourceSecurityGroupFromTheFirstAttachedGroup() {
+        SecurityGroup sourceGroup = new SecurityGroup();
+        sourceGroup.setGroupId("sg-1");
+        sourceGroup.setGroupName("elb-sg");
+        sourceGroup.setOwnerId("333333333333");
+        when(ec2Service.describeSecurityGroups(
+                REGION, List.of("sg-1"), List.of(), Map.of())).thenReturn(List.of(sourceGroup));
+        ClassicLoadBalancer created = create("my-elb");
+
+        assertEquals("333333333333", created.getSourceSecurityGroupOwnerAlias());
+        assertEquals("elb-sg", created.getSourceSecurityGroupName());
     }
 
     @Test
