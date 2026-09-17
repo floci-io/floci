@@ -1,11 +1,8 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Cond;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.PVal;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Path;
-import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
 import java.math.BigDecimal;
@@ -16,73 +13,84 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 final class DynamoDbPartiQLKeyPlan {
 
+    private static final int MAX_BRANCHES = 1000;
+
     private final String partitionKey;
     private final String sortKey;
     private final TableDefinition table;
+    private final List<Cond.Leaf> keyConditions = new ArrayList<>();
     private final List<Branch> branches;
+    private boolean tooManyBranches;
 
-    private record Branch(List<Cond.Leaf> keyConditions, List<Cond> filters) {
+    private record Spread(List<Cond.Leaf> keyConditions, List<Cond> filters) {
 
-        Branch and(Branch other) {
-            return new Branch(Stream.concat(keyConditions.stream(), other.keyConditions.stream()).toList(),
+        static final Spread EMPTY = new Spread(List.of(), List.of());
+
+        Spread and(Spread other) {
+            return new Spread(Stream.concat(keyConditions.stream(), other.keyConditions.stream()).toList(),
                     Stream.concat(filters.stream(), other.filters.stream()).toList());
         }
     }
 
-    private DynamoDbPartiQLKeyPlan(List<Cond> where, DynamoDbAccessPath accessPath, TableDefinition table) {
+    private record Branch(Key partition, PVal partitionValue, Range sortRange, List<Cond> filters) {}
+
+    DynamoDbPartiQLKeyPlan(List<Cond> where, DynamoDbAccessPath accessPath, TableDefinition table) {
         this.partitionKey = accessPath.partitionKeyName();
         this.sortKey = accessPath.sortKeyName();
         this.table = table;
-        List<Branch> spread = List.of(new Branch(List.of(), List.of()));
-        for (Cond cond : where) {
-            spread = and(spread, spread(cond));
-        }
-        this.branches = spread;
-    }
-
-    static DynamoDbPartiQLKeyPlan of(List<Cond> where, DynamoDbAccessPath accessPath, TableDefinition table) {
-        return new DynamoDbPartiQLKeyPlan(where, accessPath, table);
+        List<Spread> spread = spread(new Cond.And(where));
+        this.branches = tooManyBranches
+                ? List.of(new Branch(null, null, Range.ALL, where))
+                : spread.stream().map(this::branchOf).toList();
     }
 
     void requireKeyTypesMatchSchema() {
-        for (Branch branch : branches) {
-            for (Cond.Leaf condition : branch.keyConditions()) {
-                String name = condition.path().root();
-                for (PVal value : values(condition)) {
-                    String type = DynamoDbPartiQLParser.typeCode(value);
-                    if (!Set.of("S", "N", "B").contains(type)) {
-                        throw validationEx("Key value must be of type S, N, or B. Key name: " + name + ", Key type: " + type);
-                    }
-                    if (!matchesKeyType(table, name, value)) {
-                        throw validationEx("Key attribute's data type should match its data type in table's schema: Key " + name);
-                    }
+        for (Cond.Leaf condition : keyConditions) {
+            String name = condition.path().root();
+            for (PVal value : values(condition)) {
+                String type = DynamoDbPartiQLParser.typeCode(value);
+                if (!DynamoDbPartiQLParser.ORDERED_TYPES.contains(type)) {
+                    throw DynamoDbPartiQLParser.validationEx(
+                            "Key value must be of type S, N, or B. Key name: " + name + ", Key type: " + type);
+                }
+                if (!matchesKeyType(table, name, value)) {
+                    throw DynamoDbPartiQLParser.validationEx(
+                            "Key attribute's data type should match its data type in table's schema: Key " + name);
                 }
             }
         }
     }
 
     static boolean matchesKeyType(TableDefinition table, String keyName, PVal value) {
-        return table.getAttributeDefinitions().stream()
-                .filter(definition -> definition.getAttributeName().equals(keyName))
-                .map(AttributeDefinition::getAttributeType)
-                .anyMatch(DynamoDbPartiQLParser.typeCode(value)::equals);
+        return DynamoDbAccessPathValidator.attributeType(table, keyName).equals(DynamoDbPartiQLParser.typeCode(value));
     }
 
     void requireNoOverlap() {
         if (!keyed()) {
             return;
         }
-        for (int i = 0; i < branches.size(); i++) {
-            for (int j = i + 1; j < branches.size(); j++) {
-                boolean samePartition = compare(partitionOf(branches.get(i)), partitionOf(branches.get(j))) == 0;
-                if (samePartition && sortRangeOf(branches.get(i)).overlaps(sortRangeOf(branches.get(j)))) {
-                    throw validationEx("Overlapping conditions with range keys are not supported in where clause");
+        Map<Key, List<Range>> rangesByPartition = new TreeMap<>();
+        for (Branch branch : branches) {
+            rangesByPartition.computeIfAbsent(branch.partition(), ignored -> new ArrayList<>()).add(branch.sortRange());
+        }
+        for (List<Range> ranges : rangesByPartition.values()) {
+            Range reach = null;
+            for (Range range : ranges.stream().filter(range -> !range.isEmpty()).sorted(Range.BY_LOWER).toList()) {
+                if (reach != null && range.startsBefore(reach)) {
+                    throw DynamoDbPartiQLParser.validationEx(
+                            "Overlapping conditions with range keys are not supported in where clause");
+                }
+                if (reach == null || range.endsAfter(reach)) {
+                    reach = range;
                 }
             }
         }
@@ -92,27 +100,27 @@ final class DynamoDbPartiQLKeyPlan {
         if (!keyed()) {
             return List.of();
         }
-        List<Set<String>> unprojected = new ArrayList<>();
-        for (Branch branch : branches.stream().sorted(Comparator.comparing(this::partitionOf, DynamoDbPartiQLKeyPlan::compare)).toList()) {
-            Set<String> names = new HashSet<>();
-            branch.filters().stream()
+        Set<String> last = Set.of();
+        for (Branch branch : branches.stream().sorted(Comparator.comparing(Branch::partition)).toList()) {
+            Set<String> names = branch.filters().stream()
                     .flatMap(DynamoDbPartiQLKeyPlan::attributePaths)
                     .map(Path::root)
                     .filter(root -> !projected.contains(root))
-                    .forEach(names::add);
+                    .collect(Collectors.toCollection(HashSet::new));
             if (names.isEmpty()) {
                 return List.of();
             }
-            unprojected.add(names);
+            last = names;
         }
-        return List.copyOf(unprojected.getLast());
+        return List.copyOf(last);
     }
 
     Optional<PVal> singlePartition() {
-        if (!keyed() || branches.stream().anyMatch(branch -> compare(partitionOf(branch), partitionOf(branches.getFirst())) != 0)) {
+        Key first = branches.getFirst().partition();
+        if (!keyed() || branches.stream().anyMatch(branch -> branch.partition().compareTo(first) != 0)) {
             return Optional.empty();
         }
-        return Optional.of(partitionOf(branches.getFirst()));
+        return Optional.of(branches.getFirst().partitionValue());
     }
 
     static Stream<Path> attributePaths(Cond cond) {
@@ -124,53 +132,72 @@ final class DynamoDbPartiQLKeyPlan {
         };
     }
 
+    static boolean isSortKeyRange(Cond cond, String sortKey) {
+        if (sortKey == null || cond.bareAttribute().filter(sortKey::equals).isEmpty()) {
+            return false;
+        }
+        return cond instanceof Cond.Cmp cmp ? !"<>".equals(cmp.op())
+                : cond instanceof Cond.Eq || cond instanceof Cond.Between || cond instanceof Cond.BeginsWith;
+    }
+
     private boolean keyed() {
-        return branches.stream().allMatch(branch -> partitionValues(branch).size() == 1);
+        return branches.stream().allMatch(branch -> branch.partition() != null);
     }
 
-    private PVal partitionOf(Branch branch) {
-        return partitionValues(branch).getFirst();
-    }
-
-    private List<PVal> partitionValues(Branch branch) {
-        List<PVal> distinct = new ArrayList<>();
-        branch.keyConditions().stream()
-                .filter(condition -> condition.path().root().equals(partitionKey))
-                .map(condition -> ((Cond.Eq) condition).val())
-                .filter(value -> distinct.stream().noneMatch(seen -> compare(seen, value) == 0))
-                .forEach(distinct::add);
-        return distinct;
-    }
-
-    private Range sortRangeOf(Branch branch) {
-        Range range = Range.ALL;
-        for (Cond.Leaf condition : branch.keyConditions()) {
-            if (condition.path().root().equals(sortKey)) {
-                range = range.intersect(rangeOf(condition));
+    private Branch branchOf(Spread spread) {
+        Key partition = null;
+        PVal partitionValue = null;
+        boolean conflicting = false;
+        Range sortRange = Range.ALL;
+        for (Cond.Leaf condition : spread.keyConditions()) {
+            if (condition.path().root().equals(partitionKey)) {
+                PVal value = ((Cond.Eq) condition).val();
+                Key key = Key.of(value);
+                conflicting |= partition != null && partition.compareTo(key) != 0;
+                if (partition == null) {
+                    partition = key;
+                    partitionValue = value;
+                }
+            } else {
+                sortRange = sortRange.intersect(rangeOf(condition));
             }
         }
-        return range;
+        return new Branch(conflicting ? null : partition, partitionValue, sortRange, spread.filters());
     }
 
-    private List<Branch> spread(Cond cond) {
+    private List<Spread> spread(Cond cond) {
         return switch (cond) {
-            case Cond.In in when isKeyCondition(in) -> in.values().stream()
-                    .map(value -> new Branch(List.of(new Cond.Eq(in.path(), value)), List.of()))
-                    .toList();
-            case Cond.Leaf leaf when isKeyCondition(leaf) -> List.of(new Branch(List.of(leaf), List.of()));
+            case Cond.In in when isKeyCondition(in) -> {
+                keyConditions.add(in);
+                yield in.values().stream()
+                        .map(value -> new Spread(List.of(new Cond.Eq(in.path(), value)), List.of()))
+                        .toList();
+            }
+            case Cond.Leaf leaf when isKeyCondition(leaf) -> {
+                keyConditions.add(leaf);
+                yield List.of(new Spread(List.of(leaf), List.of()));
+            }
             case Cond.And and -> {
-                List<Branch> spread = List.of(new Branch(List.of(), List.of()));
+                List<Spread> spread = List.of(Spread.EMPTY);
                 for (Cond operand : and.operands()) {
                     spread = and(spread, spread(operand));
                 }
                 yield spread;
             }
-            case Cond.Or or when namesKey(or) -> or.operands().stream().flatMap(operand -> spread(operand).stream()).toList();
-            default -> List.of(new Branch(List.of(), List.of(cond)));
+            case Cond.Or or when namesKey(or) -> {
+                List<Spread> spread = or.operands().stream().flatMap(operand -> spread(operand).stream()).toList();
+                tooManyBranches |= spread.size() > MAX_BRANCHES;
+                yield spread;
+            }
+            default -> List.of(new Spread(List.of(), List.of(cond)));
         };
     }
 
-    private static List<Branch> and(List<Branch> left, List<Branch> right) {
+    private List<Spread> and(List<Spread> left, List<Spread> right) {
+        if ((long) left.size() * right.size() > MAX_BRANCHES) {
+            tooManyBranches = true;
+            return left;
+        }
         return left.stream().flatMap(l -> right.stream().map(l::and)).toList();
     }
 
@@ -184,18 +211,11 @@ final class DynamoDbPartiQLKeyPlan {
     }
 
     private boolean isKeyCondition(Cond.Leaf leaf) {
-        Optional<String> attribute = leaf.bareAttribute();
-        if (attribute.filter(partitionKey::equals).isPresent()) {
+        if (leaf.bareAttribute().filter(partitionKey::equals).isPresent()) {
             return leaf instanceof Cond.Eq || leaf instanceof Cond.In;
         }
-        if (sortKey == null || attribute.filter(sortKey::equals).isEmpty()) {
-            return false;
-        }
-        if (leaf instanceof Cond.Cmp cmp) {
-            return !"<>".equals(cmp.op());
-        }
-        return leaf instanceof Cond.Eq || leaf instanceof Cond.Between || leaf instanceof Cond.BeginsWith
-                || leaf instanceof Cond.In;
+        return isSortKeyRange(leaf, sortKey)
+                || (leaf instanceof Cond.In && leaf.bareAttribute().filter(name -> name.equals(sortKey)).isPresent());
     }
 
     private static List<PVal> values(Cond.Leaf condition) {
@@ -209,84 +229,95 @@ final class DynamoDbPartiQLKeyPlan {
         };
     }
 
-    private Range rangeOf(Cond.Leaf condition) {
+    private static Range rangeOf(Cond.Leaf condition) {
         return switch (condition) {
-            case Cond.Eq eq -> new Range(eq.val(), true, eq.val(), true);
-            case Cond.Between between -> new Range(between.lo(), true, between.hi(), true);
-            case Cond.BeginsWith beginsWith -> new Range(beginsWith.prefix(), true, prefixEnd(beginsWith.prefix()), false);
+            case Cond.Eq eq -> new Range(Key.of(eq.val()), true, Key.of(eq.val()), true);
+            case Cond.Between between -> new Range(Key.of(between.lo()), true, Key.of(between.hi()), true);
+            case Cond.BeginsWith beginsWith -> new Range(Key.of(beginsWith.prefix()), true, prefixEnd(beginsWith.prefix()), false);
             case Cond.Cmp cmp -> switch (cmp.op()) {
-                case "<" -> new Range(null, false, cmp.val(), false);
-                case "<=" -> new Range(null, false, cmp.val(), true);
-                case ">" -> new Range(cmp.val(), false, null, false);
-                default -> new Range(cmp.val(), true, null, false);
+                case "<" -> new Range(null, false, Key.of(cmp.val()), false);
+                case "<=" -> new Range(null, false, Key.of(cmp.val()), true);
+                case ">" -> new Range(Key.of(cmp.val()), false, null, false);
+                default -> new Range(Key.of(cmp.val()), true, null, false);
             };
             default -> Range.ALL;
         };
     }
 
-    private static PVal prefixEnd(PVal prefix) {
-        if (!(prefix instanceof PVal.Str text)) {
-            return null;
-        }
-        byte[] bytes = text.v().getBytes(StandardCharsets.UTF_8);
+    private static Key prefixEnd(PVal prefix) {
+        byte[] bytes = Key.of(prefix).bytes();
         for (int i = bytes.length - 1; i >= 0; i--) {
             if (bytes[i] != (byte) 0xFF) {
                 byte[] end = Arrays.copyOf(bytes, i + 1);
                 end[i]++;
-                return new PVal.Av("B", JsonNodeFactory.instance.objectNode().put("B", Base64.getEncoder().encodeToString(end)));
+                return new Key(null, end);
             }
         }
         return null;
     }
 
-    private static int compare(PVal left, PVal right) {
-        if (left instanceof PVal.Num a && right instanceof PVal.Num b) {
-            return new BigDecimal(a.v()).compareTo(new BigDecimal(b.v()));
+    private record Key(BigDecimal number, byte[] bytes) implements Comparable<Key> {
+
+        static Key of(PVal value) {
+            return switch (value) {
+                case PVal.Num number -> new Key(new BigDecimal(number.v()), "N".getBytes(StandardCharsets.UTF_8));
+                case PVal.Str text -> new Key(null, text.v().getBytes(StandardCharsets.UTF_8));
+                case PVal.Av av when av.node().has("B") -> new Key(null, Base64.getDecoder().decode(av.node().get("B").asText()));
+                default -> new Key(null, DynamoDbPartiQLParser.typeCode(value).getBytes(StandardCharsets.UTF_8));
+            };
         }
-        return Arrays.compareUnsigned(bytesOf(left), bytesOf(right));
+
+        @Override
+        public int compareTo(Key other) {
+            if (number != null && other.number != null) {
+                return number.compareTo(other.number);
+            }
+            return Arrays.compareUnsigned(bytes, other.bytes);
+        }
     }
 
-    private static byte[] bytesOf(PVal value) {
-        return switch (value) {
-            case PVal.Str text -> text.v().getBytes(StandardCharsets.UTF_8);
-            case PVal.Av av when av.node().has("B") -> Base64.getDecoder().decode(av.node().get("B").asText());
-            default -> DynamoDbPartiQLParser.typeCode(value).getBytes(StandardCharsets.UTF_8);
-        };
-    }
-
-    private record Range(PVal lower, boolean lowerInclusive, PVal upper, boolean upperInclusive) {
+    private record Range(Key lower, boolean lowerInclusive, Key upper, boolean upperInclusive) {
 
         static final Range ALL = new Range(null, false, null, false);
 
+        static final Comparator<Range> BY_LOWER = Comparator
+                .comparing(Range::lower, Comparator.nullsFirst(Comparator.<Key>naturalOrder()))
+                .thenComparing(range -> !range.lowerInclusive());
+
         Range intersect(Range other) {
-            PVal newLower = lower;
-            boolean newLowerInclusive = lowerInclusive;
-            if (other.lower != null && (lower == null || compare(other.lower, lower) > 0
-                    || (compare(other.lower, lower) == 0 && !other.lowerInclusive))) {
-                newLower = other.lower;
-                newLowerInclusive = other.lowerInclusive;
-            }
-            PVal newUpper = upper;
-            boolean newUpperInclusive = upperInclusive;
-            if (other.upper != null && (upper == null || compare(other.upper, upper) < 0
-                    || (compare(other.upper, upper) == 0 && !other.upperInclusive))) {
-                newUpper = other.upper;
-                newUpperInclusive = other.upperInclusive;
-            }
-            return new Range(newLower, newLowerInclusive, newUpper, newUpperInclusive);
+            boolean raisesLower = other.lower != null && (lower == null || other.lower.compareTo(lower) > 0
+                    || (other.lower.compareTo(lower) == 0 && !other.lowerInclusive));
+            boolean dropsUpper = other.upper != null && (upper == null || other.upper.compareTo(upper) < 0
+                    || (other.upper.compareTo(upper) == 0 && !other.upperInclusive));
+            return new Range(raisesLower ? other.lower : lower, raisesLower ? other.lowerInclusive : lowerInclusive,
+                    dropsUpper ? other.upper : upper, dropsUpper ? other.upperInclusive : upperInclusive);
         }
 
-        boolean overlaps(Range other) {
-            Range both = intersect(other);
-            if (both.lower == null || both.upper == null) {
+        boolean isEmpty() {
+            if (lower == null || upper == null) {
+                return false;
+            }
+            int order = lower.compareTo(upper);
+            return order > 0 || (order == 0 && !(lowerInclusive && upperInclusive));
+        }
+
+        boolean startsBefore(Range reach) {
+            if (reach.upper == null || lower == null) {
                 return true;
             }
-            int order = compare(both.lower, both.upper);
-            return order < 0 || (order == 0 && both.lowerInclusive && both.upperInclusive);
+            int order = lower.compareTo(reach.upper);
+            return order < 0 || (order == 0 && lowerInclusive && reach.upperInclusive);
         }
-    }
 
-    private static AwsException validationEx(String message) {
-        return new AwsException("ValidationException", message, 400);
+        boolean endsAfter(Range reach) {
+            if (reach.upper == null) {
+                return false;
+            }
+            if (upper == null) {
+                return true;
+            }
+            int order = upper.compareTo(reach.upper);
+            return order > 0 || (order == 0 && upperInclusive && !reach.upperInclusive);
+        }
     }
 }

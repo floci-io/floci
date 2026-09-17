@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
@@ -481,6 +482,11 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .statusCode(400)
             .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key sk"));
         statement(select + "pk > 1").statusCode(200).body("Items.size()", equalTo(0));
+
+        String manyValues = IntStream.range(0, 60).mapToObj(i -> "'v" + i + "'").collect(Collectors.joining(","));
+        statement(select + "pk IN [" + manyValues + "] AND sk IN [" + manyValues + "]")
+            .statusCode(200)
+            .body("Items.size()", equalTo(0));
     }
 
     @Test

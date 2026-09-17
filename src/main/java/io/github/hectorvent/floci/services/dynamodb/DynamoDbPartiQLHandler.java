@@ -77,7 +77,7 @@ class DynamoDbPartiQLHandler {
             }
         }
 
-        DynamoDbPartiQLKeyPlan keys = DynamoDbPartiQLKeyPlan.of(stmt.where(), accessPath, table);
+        DynamoDbPartiQLKeyPlan keys = new DynamoDbPartiQLKeyPlan(stmt.where(), accessPath, table);
         keys.requireKeyTypesMatchSchema();
         keys.requireNoOverlap();
         requireFilterAttributesProjected(keys, accessPath, table);
@@ -131,12 +131,12 @@ class DynamoDbPartiQLHandler {
         Cond skCond = null;
         List<Cond> filterConds = new ArrayList<>();
         for (Cond c : where) {
-            Set<String> roots = DynamoDbPartiQLKeyPlan.attributePaths(c).map(Path::root).collect(Collectors.toSet());
             if (c instanceof Cond.Eq eq && isKeyCondition(eq, pkName)) {
                 pkEq = eq;
-            } else if (skCond == null && skName != null && isSortKeyRange(c, skName)) {
+            } else if (skCond == null && DynamoDbPartiQLKeyPlan.isSortKeyRange(c, skName)) {
                 skCond = c;
-            } else if (roots.contains(pkName) || roots.contains(skName)) {
+            } else if (DynamoDbPartiQLKeyPlan.attributePaths(c).map(Path::root)
+                    .anyMatch(root -> root.equals(pkName) || root.equals(skName))) {
                 return new Routing(null, null, where, partition.get());
             } else {
                 filterConds.add(c);
@@ -145,27 +145,19 @@ class DynamoDbPartiQLHandler {
         return new Routing(pkEq, skCond, filterConds, null);
     }
 
-    private static boolean isSortKeyRange(Cond cond, String skName) {
-        if (!isKeyCondition(cond, skName)) {
-            return false;
-        }
-        return cond instanceof Cond.Cmp cmp ? !"<>".equals(cmp.op())
-                : cond instanceof Cond.Eq || cond instanceof Cond.Between || cond instanceof Cond.BeginsWith;
-    }
-
     private record Page(List<JsonNode> items, JsonNode lastEvaluatedKey) {}
 
     private Page readPage(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                           Routing routing, Supplier<JsonNode> startKey, Integer limit, String region) {
+        if (routing.partition() != null) {
+            return readPartition(stmt, table, accessPath, routing, startKey, limit, region);
+        }
         String pkName = accessPath.partitionKeyName();
         String skName = accessPath.sortKeyName();
         Cond.Eq pkEq = routing.pkEq();
         Cond skCond = routing.skCond();
         List<Cond> filterConds = routing.filterConds();
 
-        if (routing.partition() != null) {
-            return readPartition(stmt, table, accessPath, routing.partition(), startKey, limit, region);
-        }
         if (pkEq == null) {
             // No equality on the selected source's partition key: AWS performs
             // a full scan of the table or index and applies the remaining
@@ -207,21 +199,21 @@ class DynamoDbPartiQLHandler {
     }
 
     private Page readPartition(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
-                               PVal partition, Supplier<JsonNode> startKey, Integer limit, String region) {
+                               Routing routing, Supplier<JsonNode> startKey, Integer limit, String region) {
         ExprAttrBuilder eav = new ExprAttrBuilder();
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-        String kce = ean.alias(accessPath.partitionKeyName()) + " = " + eav.add(toTypedNode(partition));
+        String kce = ean.alias(accessPath.partitionKeyName()) + " = " + eav.add(toTypedNode(routing.partition()));
         JsonNode exclusiveStartKey = startKey.get();
         DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
         DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
                 limit, null, accessPath.indexName(), exclusiveStartKey, ean.toNode(mapper), region);
         ExprAttrBuilder filterValues = new ExprAttrBuilder();
         ExprAttrNameBuilder filterNames = new ExprAttrNameBuilder();
-        String filter = buildFe(stmt.where(), filterValues, filterNames);
+        ExpressionEvaluator.Expr filter = ExpressionEvaluator.parse(buildFe(routing.filterConds(), filterValues, filterNames));
         JsonNode names = filterNames.isEmpty() ? null : filterNames.toNode(mapper);
         JsonNode values = filterValues.isEmpty() ? null : filterValues.toNode(mapper);
         List<JsonNode> matching = result.items().stream()
-                .filter(item -> ExpressionEvaluator.matches(filter, item, names, values))
+                .filter(item -> ExpressionEvaluator.evaluate(filter, item, names, values))
                 .toList();
         return new Page(matching, result.lastEvaluatedKey());
     }
@@ -706,7 +698,7 @@ class DynamoDbPartiQLHandler {
             throw new AwsException("ValidationException",
                     "Reads on indices are not supported within transactions.", 400);
         }
-        DynamoDbPartiQLKeyPlan.of(stmt.where(), DynamoDbAccessPath.resolve(table, null), table).requireNoOverlap();
+        new DynamoDbPartiQLKeyPlan(stmt.where(), DynamoDbAccessPath.resolve(table, null), table).requireNoOverlap();
         if (!namesOnlyTheKey(table, stmt.where())) {
             throw new AwsException("ValidationException",
                     "Select statements within ExecuteTransaction must specify the primary key in the where clause.", 400);

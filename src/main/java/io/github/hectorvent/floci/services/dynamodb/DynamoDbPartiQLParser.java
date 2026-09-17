@@ -639,7 +639,7 @@ public class DynamoDbPartiQLParser {
     }
 
     // S, N and B are the only types DynamoDB gives an ordering.
-    private static final Set<String> ORDERED_TYPES = Set.of("S", "N", "B");
+    static final Set<String> ORDERED_TYPES = Set.of("S", "N", "B");
 
     static String typeCode(PVal val) {
         return switch (val) {
