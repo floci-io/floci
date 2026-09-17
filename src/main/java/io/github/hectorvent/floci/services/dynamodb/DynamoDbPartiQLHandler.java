@@ -508,6 +508,7 @@ class DynamoDbPartiQLHandler {
     private JsonNode executeUpdate(Stmt.Update stmt, String region) {
         requireNoIndexQualifier(stmt.index());
         TableDefinition table = service.describeTable(stmt.table(), region);
+        requireOneValuePerKey(table, stmt.where());
         ObjectNode key = buildKey(table, stmt.where());
 
         ExprAttrBuilder eav = new ExprAttrBuilder();
@@ -556,6 +557,7 @@ class DynamoDbPartiQLHandler {
     private JsonNode executeDelete(Stmt.Delete stmt, String region) {
         requireNoIndexQualifier(stmt.index());
         TableDefinition table = service.describeTable(stmt.table(), region);
+        requireOneValuePerKey(table, stmt.where());
         ObjectNode key = buildKey(table, stmt.where());
 
         ExprAttrBuilder eav = new ExprAttrBuilder();
@@ -737,11 +739,13 @@ class DynamoDbPartiQLHandler {
         };
     }
 
+    // The first equality on a key attribute names the item, and a later one with another value
+    // is a condition (checked on real AWS, eu-west-2, 2026-09-17).
     private ObjectNode buildKey(TableDefinition table, List<Cond> where) {
         Set<String> keyNames = keyAttributeNames(table);
         ObjectNode key = mapper.createObjectNode();
         for (Cond c : where) {
-            if (isKeyEquality(c, keyNames)) {
+            if (isKeyEquality(c, keyNames) && !key.has(((Cond.Eq) c).path().root())) {
                 Cond.Eq eq = (Cond.Eq) c;
                 key.set(eq.path().root(), toTypedNode(eq.val()));
             }
@@ -786,7 +790,30 @@ class DynamoDbPartiQLHandler {
 
     private static List<Cond> nonKeyConditions(TableDefinition table, List<Cond> where) {
         Set<String> keyNames = keyAttributeNames(table);
-        return where.stream().filter(c -> !isKeyEquality(c, keyNames)).toList();
+        Map<String, PVal> firstValues = new HashMap<>();
+        List<Cond> conditions = new ArrayList<>();
+        for (Cond c : where) {
+            if (!(c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames) && matchesFirstValue(firstValues, eq))) {
+                conditions.add(c);
+            }
+        }
+        return conditions;
+    }
+
+    private static boolean matchesFirstValue(Map<String, PVal> firstValues, Cond.Eq eq) {
+        PVal first = firstValues.putIfAbsent(eq.path().root(), eq.val());
+        return first == null || first.equals(eq.val());
+    }
+
+    private static void requireOneValuePerKey(TableDefinition table, List<Cond> where) {
+        Set<String> keyNames = keyAttributeNames(table);
+        Map<String, PVal> firstValues = new HashMap<>();
+        for (Cond c : where) {
+            if (c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames) && !matchesFirstValue(firstValues, eq)) {
+                throw new AwsException("ValidationException", "Multiple conditions on same key " + eq.path().root()
+                        + ". Only single item Update/Insert/Delete are supported", 400);
+            }
+        }
     }
 
     // PartiQL UPDATE is not an upsert, so the key has to hold an item already.

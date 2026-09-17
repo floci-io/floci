@@ -534,6 +534,30 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Responses[2].Error.Message", equalTo(batchRefused));
     }
 
+    @Test
+    @Order(24)
+    void refusesTwoValuesForOneKeyOnAWriteAndReadsTheFirstInExists() {
+        putItem("conflict", "\"flag\":{\"S\":\"right\"}");
+        putItem("other", "\"flag\":{\"S\":\"right\"}");
+        String multiple = "Multiple conditions on same key pk. Only single item Update/Insert/Delete are supported";
+
+        statement("UPDATE \"" + TABLE + "\" SET a=1 WHERE pk='conflict' AND sk='1' AND pk='other'")
+            .statusCode(400)
+            .body("message", equalTo(multiple));
+        statement("DELETE FROM \"" + TABLE + "\" WHERE pk='conflict' AND sk='1' AND pk='other'")
+            .statusCode(400)
+            .body("message", equalTo(multiple));
+        statement("UPDATE \"" + TABLE + "\" SET a=2 WHERE pk='conflict' AND sk='1' AND pk='conflict'")
+            .statusCode(200);
+        getItem("conflict").body("Item.a.N", equalTo("2"));
+
+        transaction("EXISTS(SELECT * FROM \"" + TABLE + "\" WHERE pk='conflict' AND sk='1' AND pk='other' AND flag='right')",
+                "UPDATE \"" + TABLE + "\" SET b=1 WHERE pk='other' AND sk='1'")
+            .statusCode(400)
+            .body("CancellationReasons[0].Code", equalTo("ConditionalCheckFailed"))
+            .body("CancellationReasons[1].Code", equalTo("None"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
