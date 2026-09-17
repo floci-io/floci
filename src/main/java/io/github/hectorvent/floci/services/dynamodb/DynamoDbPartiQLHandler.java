@@ -17,7 +17,6 @@ import java.util.*;
 import java.util.Base64;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 class DynamoDbPartiQLHandler {
 
@@ -77,30 +76,12 @@ class DynamoDbPartiQLHandler {
             }
         }
 
-        requireFilterAttributesProjected(stmt, accessPath, table);
+        DynamoDbPartiQLKeyPlan keys = DynamoDbPartiQLKeyPlan.of(stmt.where(), accessPath, table);
+        keys.requireKeyTypesMatchSchema();
+        keys.requireNoOverlap();
+        requireFilterAttributesProjected(keys, accessPath, table);
 
-        String pkName = accessPath.partitionKeyName();
-        String skName = accessPath.sortKeyName();
-
-        Cond.Eq pkEq = null;
-        Cond skCond = null;
-        List<Cond> filterConds = new ArrayList<>();
-
-        for (Cond c : stmt.where()) {
-            if (isKeyCondition(c, pkName)) {
-                if (c instanceof Cond.Eq eq) {
-                    pkEq = eq;
-                } else {
-                    filterConds.add(c);
-                }
-            } else if (skName != null && isKeyCondition(c, skName)) {
-                skCond = c;
-            } else {
-                filterConds.add(c);
-            }
-        }
-
-        Routing routing = new Routing(pkEq, skCond, filterConds);
+        Routing routing = routingOf(stmt.where(), keys, accessPath.partitionKeyName(), accessPath.sortKeyName());
         Supplier<JsonNode> startKey = () -> decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
         Page page = stmt.orderBy().isEmpty()
                 ? readPage(stmt, table, accessPath, routing, startKey, ctx.limit(), region)
@@ -138,7 +119,39 @@ class DynamoDbPartiQLHandler {
         return resp;
     }
 
-    private record Routing(Cond.Eq pkEq, Cond skCond, List<Cond> filterConds) {}
+    // partition is set when the key conditions pin one partition but do not fit a KeyConditionExpression.
+    private record Routing(Cond.Eq pkEq, Cond skCond, List<Cond> filterConds, PVal partition) {}
+
+    private static Routing routingOf(List<Cond> where, DynamoDbPartiQLKeyPlan keys, String pkName, String skName) {
+        Optional<PVal> partition = keys.singlePartition();
+        if (partition.isEmpty()) {
+            return new Routing(null, null, where, null);
+        }
+        Cond.Eq pkEq = null;
+        Cond skCond = null;
+        List<Cond> filterConds = new ArrayList<>();
+        for (Cond c : where) {
+            Set<String> roots = DynamoDbPartiQLKeyPlan.attributePaths(c).map(Path::root).collect(Collectors.toSet());
+            if (c instanceof Cond.Eq eq && isKeyCondition(eq, pkName)) {
+                pkEq = eq;
+            } else if (skCond == null && skName != null && isSortKeyRange(c, skName)) {
+                skCond = c;
+            } else if (roots.contains(pkName) || roots.contains(skName)) {
+                return new Routing(null, null, where, partition.get());
+            } else {
+                filterConds.add(c);
+            }
+        }
+        return new Routing(pkEq, skCond, filterConds, null);
+    }
+
+    private static boolean isSortKeyRange(Cond cond, String skName) {
+        if (!isKeyCondition(cond, skName)) {
+            return false;
+        }
+        return cond instanceof Cond.Cmp cmp ? !"<>".equals(cmp.op())
+                : cond instanceof Cond.Eq || cond instanceof Cond.Between || cond instanceof Cond.BeginsWith;
+    }
 
     private record Page(List<JsonNode> items, JsonNode lastEvaluatedKey) {}
 
@@ -150,6 +163,9 @@ class DynamoDbPartiQLHandler {
         Cond skCond = routing.skCond();
         List<Cond> filterConds = routing.filterConds();
 
+        if (routing.partition() != null) {
+            return readPartition(stmt, table, accessPath, routing.partition(), startKey, limit, region);
+        }
         if (pkEq == null) {
             // No equality on the selected source's partition key: AWS performs
             // a full scan of the table or index and applies the remaining
@@ -188,6 +204,26 @@ class DynamoDbPartiQLHandler {
                 limit, null, accessPath.indexName(), exclusiveStartKey,
                 ean.isEmpty() ? null : ean.toNode(mapper), region);
         return new Page(result.items(), result.lastEvaluatedKey());
+    }
+
+    private Page readPartition(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
+                               PVal partition, Supplier<JsonNode> startKey, Integer limit, String region) {
+        ExprAttrBuilder eav = new ExprAttrBuilder();
+        ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+        String kce = ean.alias(accessPath.partitionKeyName()) + " = " + eav.add(toTypedNode(partition));
+        JsonNode exclusiveStartKey = startKey.get();
+        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
+        DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
+                limit, null, accessPath.indexName(), exclusiveStartKey, ean.toNode(mapper), region);
+        ExprAttrBuilder filterValues = new ExprAttrBuilder();
+        ExprAttrNameBuilder filterNames = new ExprAttrNameBuilder();
+        String filter = buildFe(stmt.where(), filterValues, filterNames);
+        JsonNode names = filterNames.isEmpty() ? null : filterNames.toNode(mapper);
+        JsonNode values = filterValues.isEmpty() ? null : filterValues.toNode(mapper);
+        List<JsonNode> matching = result.items().stream()
+                .filter(item -> ExpressionEvaluator.matches(filter, item, names, values))
+                .toList();
+        return new Page(matching, result.lastEvaluatedKey());
     }
 
     // Sorts every matching row, then pages the sorted rows. The NextToken names the last row returned.
@@ -397,22 +433,12 @@ class DynamoDbPartiQLHandler {
 
     // Unkeyed the read is a scan of the index, which matches nothing rather than
     // failing. The wording says Secondary index for both index kinds.
-    private static void requireFilterAttributesProjected(Stmt.Select stmt, DynamoDbAccessPath accessPath,
+    private static void requireFilterAttributesProjected(DynamoDbPartiQLKeyPlan keys, DynamoDbAccessPath accessPath,
                                                          TableDefinition table) {
         if (!accessPath.isIndex() || "ALL".equals(accessPath.projectionType())) {
             return;
         }
-        Set<String> indexKeys = accessPath.keyAttributeNames();
-        if (stmt.where().stream().noneMatch(c -> routesAsIndexKey(c, indexKeys))) {
-            return;
-        }
-        Set<String> projected = accessPath.projectedAttributeNames(table);
-        // AWS lists the names in Java HashSet order in every case checked (eu-west-2, 2026-09-17).
-        Set<String> unprojected = stmt.where().stream()
-                .flatMap(DynamoDbPartiQLHandler::attributePaths)
-                .map(Path::root)
-                .filter(root -> !projected.contains(root))
-                .collect(Collectors.toCollection(HashSet::new));
+        List<String> unprojected = keys.unprojectedFilterAttributes(accessPath.projectedAttributeNames(table));
         if (!unprojected.isEmpty()) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: Secondary index "
@@ -420,19 +446,6 @@ class DynamoDbPartiQLHandler {
                             + " does not project one or more filter attributes: ["
                             + String.join(", ", unprojected) + "]", 400);
         }
-    }
-
-    private static boolean routesAsIndexKey(Cond cond, Set<String> indexKeys) {
-        return cond.bareAttribute().filter(indexKeys::contains).isPresent();
-    }
-
-    private static Stream<Path> attributePaths(Cond cond) {
-        return switch (cond) {
-            case Cond.Leaf leaf -> Stream.of(leaf.path());
-            case Cond.Not not   -> attributePaths(not.operand());
-            case Cond.And and   -> and.operands().stream().flatMap(DynamoDbPartiQLHandler::attributePaths);
-            case Cond.Or or     -> or.operands().stream().flatMap(DynamoDbPartiQLHandler::attributePaths);
-        };
     }
 
     private static boolean isKeyCondition(Cond cond, String keyName) {
@@ -653,6 +666,7 @@ class DynamoDbPartiQLHandler {
         }
         TableDefinition table = tables.computeIfAbsent(stmt.table(),
                 name -> service.describeTable(name, region));
+        DynamoDbPartiQLKeyPlan.of(stmt.where(), DynamoDbAccessPath.resolve(table, null), table).requireNoOverlap();
         if (!namesOnlyTheKey(table, stmt.where())) {
             throw new AwsException("ValidationException",
                     "Select statements within ExecuteTransaction must specify the primary key in the where clause.", 400);

@@ -437,6 +437,76 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("message", equalTo("Incorrect operand type for operator or function; operator or function: >, operand type: BOOL"));
     }
 
+    @Test
+    @Order(20)
+    void readsSortKeyConditionsThatAQueryKeyCannotHold() {
+        putItem("ranges", "\"flag\":{\"S\":\"one\"}");
+        request("DynamoDB_20120810.PutItem", """
+                {"TableName":"%s","Item":{"pk":{"S":"ranges"},"sk":{"S":"2"},"flag":{"S":"two"}}}
+                """.formatted(TABLE))
+            .statusCode(200);
+        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE pk='ranges' AND ";
+
+        for (String both : List.of("(sk='1' OR sk='2')", "sk IN ['1','2']", "(sk < '1' OR sk > '1' OR sk='1')",
+                "attribute_exists(pk)")) {
+            statement(select + both).statusCode(200).body("Items.sk.S", containsInAnyOrder("1", "2"));
+        }
+        for (String second : List.of("NOT sk='1'", "sk <> '1'", "sk > '0' AND sk <> '1'")) {
+            statement(select + second).statusCode(200).body("Items.sk.S", containsInAnyOrder("2"));
+        }
+        statement(select + "sk='1' AND sk > '0'").statusCode(200).body("Items.sk.S", containsInAnyOrder("1"));
+    }
+
+    @Test
+    @Order(21)
+    void refusesOverlappingKeyConditionsAndMismatchedKeyTypes() {
+        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE ";
+        String overlapping = "Overlapping conditions with range keys are not supported in where clause";
+
+        for (String where : List.of("pk IN ['ranges','ranges']", "pk='ranges' OR pk='ranges'",
+                "pk='ranges' AND (sk > '0' OR sk < '5')", "pk='ranges' AND (sk='1' OR flag='two')",
+                "(pk='ranges' AND flag='one') OR (pk='ranges' AND flag='two')")) {
+            statement(select + where).statusCode(400).body("message", equalTo(overlapping));
+        }
+        transaction(select + "pk IN ['ranges','ranges'] AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: " + overlapping));
+        statement(select + "pk='ranges' OR sk='1'").statusCode(200);
+
+        statement(select + "pk = 1 OR pk = 'ranges'")
+            .statusCode(400)
+            .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key pk"));
+        statement(select + "pk = 'ranges' AND sk IN ['1', 2]")
+            .statusCode(400)
+            .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key sk"));
+        statement(select + "pk > 1").statusCode(200).body("Items.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(22)
+    void checksProjectionOnEachKeyedBranchOfAnIndexRead() {
+        String select = "SELECT pk FROM \"partiql-edge-cases-index\".\"gsi-inc\" WHERE ";
+        String refused = "One or more parameter values were invalid: Secondary index gsi-inc"
+                + " does not project one or more filter attributes: ";
+
+        statement(select + "(gsiPk='y' OR gsiPk='z') AND zz='1'")
+            .statusCode(400)
+            .body("message", equalTo(refused + "[zz]"));
+        statement(select + "(gsiPk='b' AND u1='1') OR (gsiPk='q' AND u2='1')")
+            .statusCode(400)
+            .body("message", equalTo(refused + "[u2]"));
+        statement(select + "(gsiPk='q' AND u1='1') OR (gsiPk='b' AND u2='1')")
+            .statusCode(400)
+            .body("message", equalTo(refused + "[u1]"));
+        for (String accepted : List.of("(gsiPk='y' AND projattr='1') OR (gsiPk='z' AND aa='1')",
+                "gsiPk > 'a' AND zz='1'", "gsiPk='y' AND (gsiPk='z' OR zz='1')", "(gsiPk='y' AND zz='1') OR aa='1'")) {
+            statement(select + accepted).statusCode(200);
+        }
+        statement(select + "(gsiPk='y' AND zz='1') OR (gsiPk='y' AND aa='1')")
+            .statusCode(400)
+            .body("message", equalTo("Overlapping conditions with range keys are not supported in where clause"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
