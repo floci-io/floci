@@ -428,19 +428,16 @@ public class DynamoDbPartiQLParser {
     }
 
     private Map<String, PVal> parseTupleFields(String literalPath) {
-        boolean literal = literalPath != null;
-        literalDepth += literal ? 1 : 0;
         Map<String, PVal> fields = new LinkedHashMap<>();
         while (peek().type() != TType.RBRACE && peek().type() != TType.EOF) {
             String key = expectStringOrIdent();
             consume(TType.COLON);
-            fields.put(key, parseValue(literal ? literalPath + "." + key : null));
+            fields.put(key, parseValue(literalPath == null ? null : literalPath + "." + key));
             if (peek().type() == TType.COMMA) {
                 advance();
             }
         }
         consume(TType.RBRACE);
-        literalDepth -= literal ? 1 : 0;
         return fields;
     }
 
@@ -585,8 +582,8 @@ public class DynamoDbPartiQLParser {
             List.of("begins_with", "contains", "attribute_type", "attribute_exists", "attribute_not_exists");
 
     private Cond parseComparison() {
-        TType afterBool = tokens.get(Math.min(pos + 1, tokens.size() - 1)).type();
-        if (peek().type() == TType.BOOL && (afterBool == TType.EQ || afterBool == TType.NE)) {
+        if (peek().type() == TType.BOOL
+                && (tokens.get(pos + 1).type() == TType.EQ || tokens.get(pos + 1).type() == TType.NE)) {
             boolean flag = Boolean.parseBoolean(advance().value());
             boolean equal = advance().type() == TType.EQ;
             Cond predicate = parseCond();
@@ -594,7 +591,7 @@ public class DynamoDbPartiQLParser {
         }
         Cond cond = parseCond();
         if (peek().type() == TType.BETWEEN) {
-            throw incorrectOperandType("BETWEEN", new PVal.Bool(true));
+            throw incorrectOperandType("BETWEEN", "BOOL");
         }
         if (peek().type() == TType.IN) {
             advance();
@@ -613,7 +610,7 @@ public class DynamoDbPartiQLParser {
         }
         String op = parseOp();
         if (!"=".equals(op) && !"<>".equals(op)) {
-            throw incorrectOperandType(op, new PVal.Bool(true));
+            throw incorrectOperandType(op, "BOOL");
         }
         Cond equal = conditionEquals(cond);
         return "=".equals(op) ? equal : new Cond.Not(equal);
@@ -624,18 +621,21 @@ public class DynamoDbPartiQLParser {
                 || PREDICATE_FUNCTIONS.stream().anyMatch(this::peekFunction);
         if (predicateNext) {
             Cond other = parseCond();
-            return new Cond.Or(List.of(new Cond.And(List.of(cond, other)),
-                    new Cond.And(List.of(new Cond.Not(cond), new Cond.Not(other)))));
+            return sameTruth(cond, other, new Cond.Not(other));
         }
         if (peek().type() == TType.IDENT) {
             Path path = parsePath();
-            return new Cond.Or(List.of(new Cond.And(List.of(cond, new Cond.Eq(path, new PVal.Bool(true)))),
-                    new Cond.And(List.of(new Cond.Not(cond), new Cond.Eq(path, new PVal.Bool(false))))));
+            return sameTruth(cond, new Cond.Eq(path, new PVal.Bool(true)), new Cond.Eq(path, new PVal.Bool(false)));
         }
         if (parseValue() instanceof PVal.Bool flag) {
             return flag.v() ? cond : new Cond.Not(cond);
         }
         return new Cond.And(List.of(cond, new Cond.Not(cond)));
+    }
+
+    private static Cond sameTruth(Cond cond, Cond whenTrue, Cond whenFalse) {
+        return new Cond.Or(List.of(new Cond.And(List.of(cond, whenTrue)),
+                new Cond.And(List.of(new Cond.Not(cond), whenFalse))));
     }
 
     // S, N and B are the only types DynamoDB gives an ordering.
@@ -661,8 +661,12 @@ public class DynamoDbPartiQLParser {
     }
 
     private static AwsException incorrectOperandType(String op, PVal val) {
+        return incorrectOperandType(op, typeCode(val));
+    }
+
+    private static AwsException incorrectOperandType(String op, String type) {
         return validationEx("Incorrect operand type for operator or function; "
-                + "operator or function: " + op + ", operand type: " + typeCode(val));
+                + "operator or function: " + op + ", operand type: " + type);
     }
 
     private Cond parseCond() {
@@ -776,10 +780,10 @@ public class DynamoDbPartiQLParser {
             List.of("N", "BS", "L", "B", "NULL", "M", "S", "SS", "NS", "BOOL");
 
     private static void requireAttributeTypeName(PVal type) {
-        if (!(type instanceof PVal.Str)) {
+        if (!(type instanceof PVal.Str name)) {
             throw incorrectOperandType("attribute_type", type);
         }
-        if (type instanceof PVal.Str name && !ATTRIBUTE_TYPE_NAMES.contains(name.v())) {
+        if (!ATTRIBUTE_TYPE_NAMES.contains(name.v())) {
             throw validationEx("Invalid attribute type name found; type: " + name.v()
                     + ", valid types: {" + String.join(",", ATTRIBUTE_TYPE_NAMES) + "}");
         }
@@ -890,13 +894,10 @@ public class DynamoDbPartiQLParser {
         if (t.type() == TType.NUMBER) {
             try {
                 long index = Long.parseLong(t.value());
-                if (index < 0) {
+                if (index < 0 || index > Integer.MAX_VALUE) {
+                    int sign = index < 0 ? 1 : 0;
                     throw validationEx("List index is not within the allowable range; index: [" + t.value() + "] at "
-                            + position(t.start() + 1, t.value().length() - 1));
-                }
-                if (index > Integer.MAX_VALUE) {
-                    throw validationEx("List index is not within the allowable range; index: [" + t.value() + "] at "
-                            + position(t.start(), t.value().length()));
+                            + position(t.start() + sign, t.value().length() - sign));
                 }
                 return index;
             } catch (NumberFormatException expected) {
@@ -911,8 +912,8 @@ public class DynamoDbPartiQLParser {
     }
 
     private PVal parseValue(String literalPath) {
-        if (literalDepth == 32) {
-            throw validationEx("Nesting Levels have exceeded supported limits under " + literalPath);
+        if (literalDepth == DynamoDbAttributeValueValidator.MAX_NESTING_LEVELS) {
+            throw validationEx(DynamoDbAttributeValueValidator.NESTING_EXCEEDED + " under " + literalPath);
         }
         Token t = advance();
         String nested = literalPath == null ? "root" : literalPath;
@@ -928,12 +929,21 @@ public class DynamoDbPartiQLParser {
                 }
                 yield resolveParam();
             }
-            case LBRACKET -> new PVal.ListOf(parseListItems(nested));
-            case LBRACE   -> new PVal.Tuple(parseTupleFields(nested));
-            case LBAG     -> parseBag(nested);
+            case LBRACKET, LBRACE, LBAG -> parseCollection(t, nested);
             case PLUS, MINUS -> parseSignedNumber(t);
             default -> throw validationEx("Expected value literal or ?, got: " + t.value());
         };
+    }
+
+    private PVal parseCollection(Token open, String literalPath) {
+        literalDepth++;
+        PVal collection = switch (open.type()) {
+            case LBRACKET -> new PVal.ListOf(parseListItems(literalPath));
+            case LBRACE -> new PVal.Tuple(parseTupleFields(literalPath));
+            default -> parseBag(literalPath);
+        };
+        literalDepth--;
+        return collection;
     }
 
     private PVal.Num parseSignedNumber(Token sign) {
@@ -950,7 +960,6 @@ public class DynamoDbPartiQLParser {
     }
 
     private List<PVal> parseListItems(String literalPath) {
-        literalDepth++;
         List<PVal> items = new ArrayList<>();
         while (peek().type() != TType.RBRACKET && peek().type() != TType.EOF) {
             items.add(parseValue(literalPath + "[" + items.size() + "]"));
@@ -959,12 +968,10 @@ public class DynamoDbPartiQLParser {
             }
         }
         consume(TType.RBRACKET);
-        literalDepth--;
         return List.copyOf(items);
     }
 
     private PVal.Bag parseBag(String literalPath) {
-        literalDepth++;
         List<PVal> members = new ArrayList<>();
         while (peek().type() != TType.RBAG && peek().type() != TType.EOF) {
             members.add(parseValue(literalPath));
@@ -973,7 +980,6 @@ public class DynamoDbPartiQLParser {
             }
         }
         consume(TType.RBAG);
-        literalDepth--;
         if (members.isEmpty()) {
             throw validationEx("Empty bags are not supported");
         }
