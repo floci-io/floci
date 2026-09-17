@@ -32,8 +32,8 @@ public class CodePipelineExecution {
     private List<ActionExecution> actionExecutions = new ArrayList<>();
     private Map<String, String> stageExecutionStatuses = new LinkedHashMap<>();
     private String currentStage;
-    private boolean stopRequested;
-    private boolean abandon;
+    private volatile boolean stopRequested;
+    private volatile boolean abandon;
     private String rollbackTargetPipelineExecutionId;
 
     public String getAccountId() {

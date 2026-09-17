@@ -516,8 +516,10 @@ public class CodePipelineService {
             throw new AwsException("PipelineExecutionNotStoppableException",
                     "Pipeline execution is already in a terminal state", 400);
         }
-        execution.setStopRequested(true);
+        // Publish the stop mode before the stop signal. The provider polling loop reads
+        // stopRequested first, so observing it also observes the matching abandon value.
         execution.setAbandon(request.path("abandon").asBoolean(false));
+        execution.setStopRequested(true);
         execution.setStatus("Stopping");
         execution.setStatusSummary(request.path("reason").asText("Stop requested."));
         execution.setLastUpdateTime(now());
