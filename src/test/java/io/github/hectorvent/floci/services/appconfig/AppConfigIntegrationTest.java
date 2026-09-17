@@ -436,6 +436,13 @@ class AppConfigIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("BadRequestException"));
+
+        given()
+                .queryParam("max_results", "not-a-number")
+                .when().get("/applications/" + appId + "/environments/" + envId + "/deployments")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
     }
 
     @Test @Order(42)

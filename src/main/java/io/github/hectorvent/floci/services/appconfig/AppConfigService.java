@@ -316,13 +316,13 @@ public class AppConfigService {
         }
 
         String scope = appId + "::" + envId;
-        int start = 0;
+        Integer afterDeploymentNumber = null;
         if (nextToken != null) {
             DeploymentPageToken token = deploymentPageTokens.get(nextToken);
             if (token == null || !token.scope().equals(scope)) {
                 throw new AwsException("BadRequestException", "Invalid next_token", 400);
             }
-            start = token.offset();
+            afterDeploymentNumber = token.lastDeploymentNumber();
         }
 
         List<Deployment> deployments = deploymentStore.scan(k -> true).stream()
@@ -330,8 +330,13 @@ public class AppConfigService {
                 .filter(deployment -> envId.equals(deployment.getEnvironmentId()))
                 .sorted(Comparator.comparingInt(Deployment::getDeploymentNumber).reversed())
                 .toList();
-        if (start > deployments.size()) {
-            throw new AwsException("BadRequestException", "Invalid next_token", 400);
+
+        int start = 0;
+        if (afterDeploymentNumber != null) {
+            while (start < deployments.size()
+                    && deployments.get(start).getDeploymentNumber() >= afterDeploymentNumber) {
+                start++;
+            }
         }
 
         int end = Math.min(start + pageSize, deployments.size());
@@ -340,7 +345,8 @@ public class AppConfigService {
                 .toList();
         String resultToken = null;
         if (end < deployments.size()) {
-            resultToken = createDeploymentPageToken(scope, end);
+            resultToken = createDeploymentPageToken(scope,
+                    items.get(items.size() - 1).getDeploymentNumber());
         } else if (nextToken != null) {
             deploymentPageTokens.remove(nextToken);
         }
@@ -368,16 +374,16 @@ public class AppConfigService {
         return summary;
     }
 
-    private String createDeploymentPageToken(String scope, int offset) {
+    private String createDeploymentPageToken(String scope, int lastDeploymentNumber) {
         while (deploymentPageTokens.size() >= MAX_DEPLOYMENT_PAGE_TOKENS) {
             deploymentPageTokens.keySet().stream().findFirst().ifPresent(deploymentPageTokens::remove);
         }
         String token = UUID.randomUUID().toString().replace("-", "");
-        deploymentPageTokens.put(token, new DeploymentPageToken(scope, offset));
+        deploymentPageTokens.put(token, new DeploymentPageToken(scope, lastDeploymentNumber));
         return token;
     }
 
-    private record DeploymentPageToken(String scope, int offset) {
+    private record DeploymentPageToken(String scope, int lastDeploymentNumber) {
     }
 
     public record DeploymentPage(List<DeploymentSummary> items, String nextToken) {

@@ -74,6 +74,22 @@ class AppConfigServiceTest {
     }
 
     @Test
+    void listDeploymentsCursorSurvivesNewDeployment() {
+        deploymentStore.put("app::env::1", deployment("app", "env", 1));
+        deploymentStore.put("app::env::2", deployment("app", "env", 2));
+        deploymentStore.put("app::env::3", deployment("app", "env", 3));
+
+        AppConfigService.DeploymentPage firstPage = service.listDeployments("app", "env", 1, null);
+        deploymentStore.put("app::env::4", deployment("app", "env", 4));
+
+        AppConfigService.DeploymentPage secondPage = service.listDeployments(
+                "app", "env", 1, firstPage.nextToken());
+
+        assertEquals(List.of(2), secondPage.items().stream()
+                .map(DeploymentSummary::getDeploymentNumber).toList());
+    }
+
+    @Test
     void listDeploymentsFiltersApplicationAndEnvironment() {
         deploymentStore.put("app::env::1", deployment("app", "env", 1));
         deploymentStore.put("other::env::2", deployment("other", "env", 2));

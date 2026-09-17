@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appconfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
 import io.github.hectorvent.floci.services.appconfig.model.Deployment;
@@ -241,9 +242,10 @@ public class AppConfigController {
     @Path("/applications/{appId}/environments/{envId}/deployments")
     public Response listDeployments(@PathParam("appId") String appId,
                                      @PathParam("envId") String envId,
-                                     @QueryParam("max_results") Integer maxResults,
+                                     @QueryParam("max_results") String maxResults,
                                      @QueryParam("next_token") String nextToken) {
-        AppConfigService.DeploymentPage page = service.listDeployments(appId, envId, maxResults, nextToken);
+        AppConfigService.DeploymentPage page = service.listDeployments(appId, envId,
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Items");
         page.items().forEach(items::addPOJO);
