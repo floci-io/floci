@@ -2633,9 +2633,9 @@ public class DynamoDbService implements ResourceProvider {
     private static final Map<String, String> OPERAND_TYPE_NAMES = Map.of(
             "S", "STRING", "N", "NUMBER", "B", "Binary", "BOOL", "BOOL", "NULL", "NULL", "L", "LIST", "M", "MAP");
 
-    Optional<String> addOrDeleteOperandTypeError(String updateExpression, JsonNode exprAttrValues) {
+    void requireAddOrDeleteOperandTypes(String updateExpression, JsonNode exprAttrValues, boolean inValidationEnvelope) {
         if (updateExpression == null || exprAttrValues == null) {
-            return Optional.empty();
+            return;
         }
         String remaining = updateExpression.trim().replaceAll("\\s+", " ");
         while (!remaining.isEmpty()) {
@@ -2659,13 +2659,13 @@ public class DynamoDbService implements ResourceProvider {
                 }
                 String type = DynamoDbAttributeValueValidator.typeOf(operand);
                 if (!allowed.contains(type)) {
-                    return Optional.of("Invalid UpdateExpression: Incorrect operand type for operator or function;"
+                    throw new AwsException("ValidationException", (inValidationEnvelope ? "1 validation error detected: " : "")
+                            + "Invalid UpdateExpression: Incorrect operand type for operator or function;"
                             + " operator: " + keyword + ", operand type: " + OPERAND_TYPE_NAMES.get(type)
-                            + ", typeSet: ALLOWED_FOR_ADD_OPERAND");
+                            + ", typeSet: ALLOWED_FOR_ADD_OPERAND", 400);
                 }
             }
         }
-        return Optional.empty();
     }
 
     private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {

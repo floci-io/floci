@@ -677,9 +677,7 @@ public class DynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, hashTokens);
             Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
             checkUnusedEav(exprAttrValues, colonTokensAll);
-            dynamoDbService.addOrDeleteOperandTypeError(updateExpression, exprAttrValues).ifPresent(message -> {
-                throw new AwsException("ValidationException", "1 validation error detected: " + message, 400);
-            });
+            dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
         }
 
         if (expectedUpd != null) {
@@ -1700,10 +1698,8 @@ public class DynamoDbJsonHandler {
                         op.get("ExpressionAttributeNames"),
                         op.get("ExpressionAttributeValues"));
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
-                dynamoDbService.addOrDeleteOperandTypeError(op.path("UpdateExpression").textValue(),
-                        op.get("ExpressionAttributeValues")).ifPresent(message -> {
-                            throw new AwsException("ValidationException", message, 400);
-                        });
+                dynamoDbService.requireAddOrDeleteOperandTypes(op.path("UpdateExpression").textValue(),
+                        op.get("ExpressionAttributeValues"), false);
             }
         }
 
@@ -2756,14 +2752,18 @@ public class DynamoDbJsonHandler {
     }
 
     private static List<JsonNode> cancelOnMemberReasons(List<DynamoDbPartiQLHandler.TransactMember> members) {
-        if (members.stream().anyMatch(member -> member.reason() != null)) {
-            throw new TransactionCanceledException(members.stream()
-                    .map(member -> member.reason() != null
-                            ? member.reason()
-                            : new TransactionCanceledException.CancellationReason("", null))
-                    .toList());
+        List<JsonNode> items = new ArrayList<>();
+        List<TransactionCanceledException.CancellationReason> reasons = new ArrayList<>();
+        boolean cancelled = false;
+        for (DynamoDbPartiQLHandler.TransactMember member : members) {
+            cancelled |= member.reason() != null;
+            items.add(member.item());
+            reasons.add(member.reason() != null ? member.reason() : new TransactionCanceledException.CancellationReason("", null));
         }
-        return members.stream().map(DynamoDbPartiQLHandler.TransactMember::item).toList();
+        if (cancelled) {
+            throw new TransactionCanceledException(reasons);
+        }
+        return items;
     }
 
     private void requireOneReadPerItem(List<JsonNode> getItems, String region) {
@@ -2830,7 +2830,7 @@ public class DynamoDbJsonHandler {
             err.put("Code", batchMemberErrorCode(e.getErrorCode()));
             err.put("Message", e.getMessage());
             slot.set("Error", err);
-            if (tableName != null && (e instanceof ItemNestingExceededException || batchMemberReachedItsTable(e.getErrorCode()))) {
+            if (tableName != null && batchMemberReachedItsTable(e)) {
                 slot.put("TableName", tableName);
             }
         }
@@ -2846,9 +2846,10 @@ public class DynamoDbJsonHandler {
                 : errorCode;
     }
 
-    private static boolean batchMemberReachedItsTable(String errorCode) {
-        return "ConditionalCheckFailedException".equals(errorCode)
-                || "DuplicateItemException".equals(errorCode);
+    private static boolean batchMemberReachedItsTable(AwsException e) {
+        return e instanceof ItemNestingExceededException
+                || "ConditionalCheckFailedException".equals(e.getErrorCode())
+                || "DuplicateItemException".equals(e.getErrorCode());
     }
 
     // BatchExecuteStatement only runs SELECT statements that resolve through
@@ -2873,11 +2874,11 @@ public class DynamoDbJsonHandler {
             return Collections.emptyList();
         }
         List<JsonNode> params = new ArrayList<>();
-        node.forEach(params::add);
-        params.forEach(parameter -> {
+        for (JsonNode parameter : node) {
             DynamoDbAttributeValueValidator.requireParameterNestingWithinLimit(parameter);
             checkAttrSets(parameter);
-        });
+            params.add(parameter);
+        }
         return params;
     }
 }
