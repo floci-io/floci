@@ -183,18 +183,44 @@ public class DynamoDbService implements ResourceProvider {
 
     private void loadPersistedItems() {
         if (itemStore == null) return;
+        Map<String, TableDefinition> persistedTables = persistedTablesByScopedKey();
         // No request scope at startup, so itemStore.keys() would only see the default account.
         // scanAllAccountsRaw() returns every account's items already in the "accountId/
         // region::tableName" key format itemsByTable expects.
         if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
             aware.scanAllAccountsRaw().forEach((rawKey, items) ->
-                itemsByTable.put(rawKey, new ConcurrentSkipListMap<>(items)));
+                itemsByTable.put(rawKey, rekeyPersistedItems(persistedTables.get(rawKey), items)));
             return;
         }
         for (String key : itemStore.keys()) {
-            itemStore.get(key).ifPresent(items ->
-                itemsByTable.put(scopedItemsKey(key), new ConcurrentSkipListMap<>(items)));
+            String scopedKey = scopedItemsKey(key);
+            itemStore.get(key).ifPresent(items -> itemsByTable.put(
+                    scopedKey, rekeyPersistedItems(persistedTables.get(scopedKey), items)));
         }
+    }
+
+    private Map<String, TableDefinition> persistedTablesByScopedKey() {
+        if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> aware) {
+            return aware.scanAllAccountsRaw();
+        }
+        Map<String, TableDefinition> persistedTables = new HashMap<>();
+        for (String key : tableStore.keys()) {
+            tableStore.get(key).ifPresent(table -> persistedTables.put(scopedItemsKey(key), table));
+        }
+        return persistedTables;
+    }
+
+    private ConcurrentSkipListMap<String, JsonNode> rekeyPersistedItems(
+            TableDefinition table, Map<String, JsonNode> persistedItems) {
+        if (table == null) {
+            return new ConcurrentSkipListMap<>(persistedItems);
+        }
+        ConcurrentSkipListMap<String, JsonNode> rekeyedItems = new ConcurrentSkipListMap<>();
+        for (JsonNode item : persistedItems.values()) {
+            rekeyedItems.put(buildItemKeyFromNode(
+                    item, table.getPartitionKeyName(), table.getSortKeyName()), item);
+        }
+        return rekeyedItems;
     }
 
     private void persistItems(String storageKey) {
@@ -1382,9 +1408,9 @@ public class DynamoDbService implements ResourceProvider {
         // prevents deadlock across concurrent transactions; ReentrantLock lets the inner
         // putItem/updateItem/deleteItem calls re-enter the same lock for free.
         //
-        // Ordering uses a tuple comparator — not a delimited string — so user-supplied
-        // bytes in an item's PK/SK value cannot collide two distinct participants
-        // into the same ordering key.
+        // Ordering compares storageKey and itemKey as separate tuple fields. The item key's
+        // PK/SK segments are escaped before they are joined, so delimiter bytes inside a
+        // user-supplied key cannot collapse distinct transaction participants.
         TreeMap<TransactParticipant, ReentrantLock> toAcquire = new TreeMap<>(PARTICIPANT_ORDER);
         Set<TransactParticipant> seenParticipants = new HashSet<>();
         for (JsonNode transactItem : transactItems) {
@@ -3223,7 +3249,7 @@ public class DynamoDbService implements ResourceProvider {
         validateKeyAttributeValue(table, pkAttr, pkName, surface);
         validateKeySize(pkAttr, true);
 
-        String pk = extractScalarValue(pkAttr);
+        String pk = encodeKeySegment(extractScalarValue(pkAttr));
         String skName = table.getSortKeyName();
         if (skName != null) {
             JsonNode skAttr = item.get(skName);
@@ -3232,9 +3258,21 @@ public class DynamoDbService implements ResourceProvider {
             }
             validateKeyAttributeValue(table, skAttr, skName, surface);
             validateKeySize(skAttr, false);
-            return pk + "#" + extractScalarValue(skAttr);
+            return pk + "#" + encodeKeySegment(extractScalarValue(skAttr));
         }
         return pk;
+    }
+
+    // '#' separates composite key segments in the in-memory map. Escape it and the escape
+    // character inside each segment so legal string key values cannot produce the same map key.
+    static String encodeKeySegment(String value) {
+        if (value == null) {
+            return "";
+        }
+        if (value.indexOf('#') < 0 && value.indexOf('\\') < 0) {
+            return value;
+        }
+        return value.replace("\\", "\\\\").replace("#", "\\#");
     }
 
     private void validateKeySize(JsonNode attr, boolean partitionKey) {
@@ -3384,12 +3422,11 @@ public class DynamoDbService implements ResourceProvider {
     private String buildItemKeyFromNode(JsonNode item, String pkName, List<String> skNames) {
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr == null) return "";
-        String pk = extractScalarValue(pkAttr);
-        StringBuilder key = new StringBuilder(pk != null ? pk : "");
+        StringBuilder key = new StringBuilder(encodeKeySegment(extractScalarValue(pkAttr)));
         for (String skName : skNames) {
             JsonNode skAttr = item.get(skName);
             if (skAttr != null) {
-                key.append("#").append(extractScalarValue(skAttr));
+                key.append("#").append(encodeKeySegment(extractScalarValue(skAttr)));
             }
         }
         return key.toString();
