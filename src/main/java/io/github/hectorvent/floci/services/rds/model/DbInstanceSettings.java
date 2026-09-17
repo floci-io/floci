@@ -25,6 +25,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  Integer performanceInsightsRetentionPeriod,
                                  String engineLifecycleSupport,
                                  List<String> enabledCloudwatchLogsExports,
+                                 LogExportChanges logExportChanges,
                                  Integer maxAllocatedStorage) {
 
     /** The settings a caller that touches none of the monitoring members gives. */
@@ -36,7 +37,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                               Boolean copyTagsToSnapshot) {
         this(storageEncrypted, kmsKeyId, backupRetentionPeriod, preferredBackupWindow,
                 preferredMaintenanceWindow, copyTagsToSnapshot, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     /** MonitoringInterval documents these as its valid values. */
@@ -98,16 +99,19 @@ public record DbInstanceSettings(Boolean storageEncrypted,
     }
 
     /**
-     * The two monitoring members are documented as a pair, in both directions and on both
-     * CreateDBInstance and ModifyDBInstance. An interval other than 0 needs a role, and a role
-     * needs an interval other than 0.
+     * The monitoring pair, as CreateDBInstance states it. An interval other than 0 needs a role and
+     * a role needs an interval other than 0, judged on what this request carries.
      *
-     * <p>It takes the values that will be in effect rather than the ones the request carried, since
-     * a modify may raise the interval on an instance that already holds a role, or attach a role to
-     * an instance whose interval is already non-zero. Judging the request alone would refuse both.
+     * <p>Create only, deliberately. The two messages word the rule differently and the difference
+     * is the whole point. CreateDBInstanceMessage says "you must supply a MonitoringRoleArn value"
+     * and "you must set MonitoringInterval to a value other than 0". ModifyDBInstanceMessage drops
+     * the "must" from both, and its MonitoringInterval adds "To disable collection of Enhanced
+     * Monitoring metrics, specify 0" with no mention of clearing the role. Enforcing the pair on a
+     * modify would refuse the documented way to turn monitoring off.
      */
-    public static void validateMonitoringPair(int effectiveInterval, String effectiveRoleArn) {
-        boolean roleGiven = effectiveRoleArn != null && !effectiveRoleArn.isBlank();
+    public static void validateMonitoringPairOnCreate(Integer interval, String roleArn) {
+        int effectiveInterval = interval != null ? interval : 0;
+        boolean roleGiven = roleArn != null && !roleArn.isBlank();
         if (effectiveInterval != 0 && !roleGiven) {
             throw new AwsException("InvalidParameterCombination",
                     "You must supply a MonitoringRoleArn value when MonitoringInterval is set to a "
@@ -170,7 +174,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 backupWindow, maintenanceWindow, copyTagsToSnapshot,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
-                enabledCloudwatchLogsExports, maxAllocatedStorage);
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage);
     }
 
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
@@ -178,7 +182,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
-                enabledCloudwatchLogsExports, maxAllocatedStorage);
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage);
     }
 
     public void applyTo(DbInstance instance) {
@@ -217,6 +221,11 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (enabledCloudwatchLogsExports != null) {
             instance.setEnabledCloudwatchLogsExports(List.copyOf(enabledCloudwatchLogsExports));
+        }
+        // A modify sends deltas rather than a replacement, so they fold into the stored set.
+        if (logExportChanges != null) {
+            instance.setEnabledCloudwatchLogsExports(
+                    logExportChanges.applyTo(instance.getEnabledCloudwatchLogsExports()));
         }
         if (maxAllocatedStorage != null) {
             instance.setMaxAllocatedStorage(maxAllocatedStorage);

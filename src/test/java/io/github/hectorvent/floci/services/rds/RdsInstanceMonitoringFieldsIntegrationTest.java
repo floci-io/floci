@@ -156,16 +156,60 @@ class RdsInstanceMonitoringFieldsIntegrationTest {
                 .body(containsString("You must set MonitoringInterval to a value other than 0"));
     }
 
+    // ModifyDBInstance.MonitoringInterval says "To disable collection of Enhanced Monitoring
+    // metrics, specify 0" and says nothing about clearing the role first. The pair rule is worded
+    // with "must" only on the create message, so a modify must not be held to it.
     @Test
-    void modifyDBInstance_turningMonitoringOffWhileARoleStandsIsRejected() {
+    void modifyDBInstance_turningMonitoringOffWhileARoleStandsIsAllowed() {
         create().formParam("MonitoringInterval", "30").formParam("MonitoringRoleArn", ROLE)
                 .when().post("/").then().statusCode(200);
 
         rds("ModifyDBInstance")
                 .formParam("DBInstanceIdentifier", ID)
                 .formParam("MonitoringInterval", "0")
-                .when().post("/").then().statusCode(400)
-                .body(containsString("You must set MonitoringInterval to a value other than 0"));
+                .when().post("/").then().statusCode(200);
+
+        describe().body(RESULT + "MonitoringInterval", equalTo("0"))
+                .body(RESULT + "MonitoringRoleArn", equalTo(ROLE));
+    }
+
+    // ModifyDBInstance carries no EnableCloudwatchLogsExports at all. It sends
+    // CloudwatchLogsExportConfiguration with EnableLogTypes and DisableLogTypes, applied to the
+    // stored set as deltas. Reading the create-only key made a real modify a silent no-op.
+    @Test
+    void modifyDBInstance_appliesLogExportEnableAndDisableDeltas() {
+        create()
+                .formParam("MonitoringInterval", "0")
+                .formParam("EnableCloudwatchLogsExports.member.1", "postgresql")
+                .formParam("EnableCloudwatchLogsExports.member.2", "upgrade")
+                .when().post("/").then().statusCode(200);
+
+        rds("ModifyDBInstance")
+                .formParam("DBInstanceIdentifier", ID)
+                .formParam("CloudwatchLogsExportConfiguration.EnableLogTypes.member.1", "audit")
+                .formParam("CloudwatchLogsExportConfiguration.DisableLogTypes.member.1", "upgrade")
+                .when().post("/").then().statusCode(200);
+
+        describe()
+                .body(RESULT + "EnabledCloudwatchLogsExports.member[0]", equalTo("postgresql"))
+                .body(RESULT + "EnabledCloudwatchLogsExports.member[1]", equalTo("audit"));
+
+        String body = rds("DescribeDBInstances").formParam("DBInstanceIdentifier", ID)
+                .when().post("/").then().extract().asString();
+        assertFalse(body.contains("upgrade"), "a disabled log type is dropped from the set");
+    }
+
+    @Test
+    void modifyDBInstance_withoutTheExportConfiguration_leavesTheSetAlone() {
+        create()
+                .formParam("EnableCloudwatchLogsExports.member.1", "postgresql")
+                .when().post("/").then().statusCode(200);
+
+        rds("ModifyDBInstance").formParam("DBInstanceIdentifier", ID)
+                .formParam("MaxAllocatedStorage", "500")
+                .when().post("/").then().statusCode(200);
+
+        describe().body(RESULT + "EnabledCloudwatchLogsExports.member[0]", equalTo("postgresql"));
     }
 
     @Test

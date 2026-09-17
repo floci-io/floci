@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
+import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -407,26 +408,38 @@ public class RdsQueryHandler {
                 optionalBoolean(params.getFirst("EnablePerformanceInsights")),
                 optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
                 params.getFirst("EngineLifecycleSupport"),
-                cloudwatchLogsExports(params),
+                includeEncryption ? cloudwatchLogsExports(params) : null,
+                includeEncryption ? null : cloudwatchLogsExportChanges(params),
                 optionalInt(params.getFirst("MaxAllocatedStorage")));
     }
 
     /**
-     * The request member is EnableCloudwatchLogsExports and the response member is
-     * EnabledCloudwatchLogsExports, so the two names never line up on the wire. An absent list is
-     * null (leave it alone) rather than empty (clear it).
+     * CreateDBInstance names the log types once, as EnableCloudwatchLogsExports.member.N. The
+     * response member is EnabledCloudwatchLogsExports, so the two never line up on the wire.
+     * An absent list is null (leave it alone) rather than empty (clear it).
      */
     private static List<String> cloudwatchLogsExports(MultivaluedMap<String, String> params) {
-        List<String> types = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String type = params.getFirst("EnableCloudwatchLogsExports.member." + i);
-            if (type == null) {
-                break;
-            }
-            types.add(type);
-        }
+        List<String> types = memberList(params, "EnableCloudwatchLogsExports");
         return types.isEmpty() ? null : types;
     }
+
+    /**
+     * ModifyDBInstance has no EnableCloudwatchLogsExports at all. It carries
+     * CloudwatchLogsExportConfiguration with an EnableLogTypes list and a DisableLogTypes list,
+     * which are applied to the stored set as deltas rather than as a replacement. Reading the
+     * create-only key here is why an SDK request to change exports on a live instance did nothing.
+     */
+    private static LogExportChanges cloudwatchLogsExportChanges(MultivaluedMap<String, String> params) {
+        List<String> enable = memberList(params,
+                "CloudwatchLogsExportConfiguration.EnableLogTypes");
+        List<String> disable = memberList(params,
+                "CloudwatchLogsExportConfiguration.DisableLogTypes");
+        if (enable.isEmpty() && disable.isEmpty()) {
+            return null;
+        }
+        return new LogExportChanges(enable, disable);
+    }
+
 
     private static Boolean optionalBoolean(String value) {
         return value == null ? null : Boolean.parseBoolean(value);
