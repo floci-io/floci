@@ -30,6 +30,9 @@ import static org.mockito.Mockito.when;
 
 class RedshiftProxyManagerTest {
 
+    private static final String KEY = "111111111111:c1";
+    private static final String SECOND_KEY = "111111111111:c2";
+
     private RedshiftProxyManager newManager() {
         return new RedshiftProxyManager(
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class),
@@ -58,8 +61,8 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         int port = availablePort();
         try {
-            start(manager, "111111111111:c1", port);
-            assertTrue(registry(manager).containsKey("111111111111:c1"));
+            start(manager, KEY, port);
+            assertTrue(registry(manager).containsKey(KEY));
             assertPortUnavailable(port);
         } finally {
             manager.stopAll();
@@ -70,11 +73,11 @@ class RedshiftProxyManagerTest {
     void stopProxyRemovesTheKeyAndReleasesThePort() throws Exception {
         RedshiftProxyManager manager = newManager();
         int port = availablePort();
-        start(manager, "k", port);
+        start(manager, KEY, port);
 
-        manager.stopProxy("k");
+        manager.stopProxy(KEY);
 
-        assertFalse(registry(manager).containsKey("k"));
+        assertFalse(registry(manager).containsKey(KEY));
         assertPortAvailable(port);
     }
 
@@ -83,10 +86,10 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         int firstPort = availablePort();
         try {
-            start(manager, "k", firstPort);
+            start(manager, KEY, firstPort);
             int replacementPort = availablePort();
 
-            start(manager, "k", replacementPort);
+            start(manager, KEY, replacementPort);
 
             assertPortAvailable(firstPort);
             assertPortUnavailable(replacementPort);
@@ -107,9 +110,9 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         int port = availablePort();
         try {
-            start(manager, "k", port);
-            manager.updateMasterPassword("k", "rotated");
-            assertEquals("rotated", masterPassword(registry(manager).get("k")));
+            start(manager, KEY, port);
+            manager.updateMasterPassword(KEY, "rotated");
+            assertEquals("rotated", masterPassword(registry(manager).get(KEY)));
         } finally {
             manager.stopAll();
         }
@@ -119,9 +122,9 @@ class RedshiftProxyManagerTest {
     void stopAllReleasesEveryListenerAndIsIdempotent() throws IOException {
         RedshiftProxyManager manager = newManager();
         int a = availablePort();
-        start(manager, "a", a);
+        start(manager, KEY, a);
         int b = availablePort();
-        start(manager, "b", b);
+        start(manager, SECOND_KEY, b);
 
         manager.stopAll();
 
@@ -135,8 +138,8 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         try (ServerSocket occupied = new ServerSocket(0)) {
             assertThrows(RuntimeException.class,
-                    () -> start(manager, "k", occupied.getLocalPort()));
-            assertFalse(registry(manager).containsKey("k"));
+                    () -> start(manager, KEY, occupied.getLocalPort()));
+            assertFalse(registry(manager).containsKey(KEY));
         } finally {
             manager.stopAll();
         }
@@ -147,12 +150,12 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         RedshiftAuthProxy badProxy = mock(RedshiftAuthProxy.class);
         doThrow(new RuntimeException("close failed")).when(badProxy).stop();
-        registry(manager).put("k", badProxy);
+        registry(manager).put(KEY, badProxy);
 
-        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+        assertThrows(RuntimeException.class, () -> manager.stopProxy(KEY));
 
         // Proxy stays registered so a later cleanup attempt can still reach it and retry.
-        assertSame(badProxy, registry(manager).get("k"));
+        assertSame(badProxy, registry(manager).get(KEY));
     }
 
     @Test
@@ -160,12 +163,12 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         RedshiftAuthProxy proxy = mock(RedshiftAuthProxy.class);
         doThrow(new RuntimeException("close failed")).doNothing().when(proxy).stop();
-        registry(manager).put("k", proxy);
+        registry(manager).put(KEY, proxy);
 
-        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
-        assertDoesNotThrow(() -> manager.stopProxy("k"));
+        assertThrows(RuntimeException.class, () -> manager.stopProxy(KEY));
+        assertDoesNotThrow(() -> manager.stopProxy(KEY));
 
-        assertFalse(registry(manager).containsKey("k"));
+        assertFalse(registry(manager).containsKey(KEY));
         verify(proxy, times(2)).stop();
     }
 
@@ -174,12 +177,12 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         RedshiftAuthProxy stuck = mock(RedshiftAuthProxy.class);
         doThrow(new RuntimeException("close failed")).when(stuck).stop();
-        unclosable(manager).put("k", stuck);
+        unclosable(manager).put(KEY, stuck);
 
-        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+        assertThrows(RuntimeException.class, () -> manager.stopProxy(KEY));
 
         // Reference retained so the next attempt can retry the close.
-        assertSame(stuck, unclosable(manager).get("k"));
+        assertSame(stuck, unclosable(manager).get(KEY));
     }
 
     @Test
@@ -187,13 +190,13 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         RedshiftAuthProxy stuck = mock(RedshiftAuthProxy.class);
         doThrow(new RuntimeException("close failed")).when(stuck).stop();
-        unclosable(manager).put("k", stuck);
+        unclosable(manager).put(KEY, stuck);
 
-        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
-        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
+        assertThrows(RuntimeException.class, () -> manager.stopProxy(KEY));
+        assertThrows(RuntimeException.class, () -> manager.stopProxy(KEY));
 
         verify(stuck, times(2)).stop();
-        assertTrue(unclosable(manager).containsKey("k"));
+        assertTrue(unclosable(manager).containsKey(KEY));
     }
 
     @Test
@@ -201,12 +204,12 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         RedshiftAuthProxy recovering = mock(RedshiftAuthProxy.class);
         doThrow(new RuntimeException("close failed")).doNothing().when(recovering).stop();
-        unclosable(manager).put("k", recovering);
+        unclosable(manager).put(KEY, recovering);
 
-        assertThrows(RuntimeException.class, () -> manager.stopProxy("k"));
-        assertDoesNotThrow(() -> manager.stopProxy("k"));
+        assertThrows(RuntimeException.class, () -> manager.stopProxy(KEY));
+        assertDoesNotThrow(() -> manager.stopProxy(KEY));
 
-        assertFalse(unclosable(manager).containsKey("k"));
+        assertFalse(unclosable(manager).containsKey(KEY));
     }
 
     @Test
@@ -214,12 +217,12 @@ class RedshiftProxyManagerTest {
         RedshiftProxyManager manager = newManager();
         RedshiftAuthProxy stuck = mock(RedshiftAuthProxy.class);
         doThrow(new RuntimeException("close failed")).when(stuck).stop();
-        unclosable(manager).put("k", stuck);
+        unclosable(manager).put(KEY, stuck);
         int port = availablePort();
         try {
             // A fresh start for the same key must not silently drop the leaked listener.
-            start(manager, "k", port);
-            assertSame(stuck, unclosable(manager).get("k"));
+            start(manager, KEY, port);
+            assertSame(stuck, unclosable(manager).get(KEY));
         } finally {
             manager.stopAll();
         }
@@ -231,13 +234,13 @@ class RedshiftProxyManagerTest {
         RedshiftAuthProxy recovered = mock(RedshiftAuthProxy.class);
         RedshiftAuthProxy stillStuck = mock(RedshiftAuthProxy.class);
         doThrow(new RuntimeException("close failed")).when(stillStuck).stop();
-        unclosable(manager).put("a", recovered);
-        unclosable(manager).put("b", stillStuck);
+        unclosable(manager).put(KEY, recovered);
+        unclosable(manager).put(SECOND_KEY, stillStuck);
 
         manager.stopAll();
 
-        assertFalse(unclosable(manager).containsKey("a"));
-        assertTrue(unclosable(manager).containsKey("b"));
+        assertFalse(unclosable(manager).containsKey(KEY));
+        assertTrue(unclosable(manager).containsKey(SECOND_KEY));
     }
 
     // --- reflection + port helpers copied from RdsProxyManagerTest ---
