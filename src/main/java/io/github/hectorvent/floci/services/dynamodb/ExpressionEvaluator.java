@@ -711,7 +711,7 @@ final class ExpressionEvaluator {
 
         JsonNode leftNode = resolveAttributeValue(cmp.left(), item, exprAttrNames, exprAttrValues);
         JsonNode rightNode = resolveAttributeValue(cmp.right(), item, exprAttrNames, exprAttrValues);
-        if (leftNode == null || rightNode == null) return false;
+        if (leftNode == null || rightNode == null || !sameType(leftNode, rightNode)) return false;
         int cmpResult = compareAttributeValues(leftNode, rightNode);
         return switch (cmp.op()) {
             case LT -> cmpResult < 0;
@@ -727,8 +727,13 @@ final class ExpressionEvaluator {
         JsonNode val = resolveAttributeValue(bet.value(), item, exprAttrNames, exprAttrValues);
         JsonNode low = resolveAttributeValue(bet.low(), item, exprAttrNames, exprAttrValues);
         JsonNode high = resolveAttributeValue(bet.high(), item, exprAttrNames, exprAttrValues);
-        if (val == null || low == null || high == null) return false;
+        if (val == null || low == null || high == null || !sameType(val, low) || !sameType(val, high)) return false;
         return compareAttributeValues(val, low) >= 0 && compareAttributeValues(val, high) <= 0;
+    }
+
+    // A value of another type is neither smaller nor larger (checked on real AWS, eu-west-2, 2026-09-17).
+    private static boolean sameType(JsonNode left, JsonNode right) {
+        return left.fieldNames().next().equals(right.fieldNames().next());
     }
 
     private static boolean evaluateIn(InExpr in, JsonNode item,
