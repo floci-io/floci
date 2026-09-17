@@ -15,6 +15,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.*;
+import java.util.function.Supplier;
 
 /**
  * DynamoDB JSON protocol handler.
@@ -2096,7 +2097,7 @@ public class DynamoDbJsonHandler {
      * Builds a ConsumedCapacity node if the request includes ReturnConsumedCapacity.
      * Uses simple estimates: 0.5 RCU per item read, 1.0 WCU per item written.
      */
-    private void validateItemSets(JsonNode item) {
+    static void validateItemSets(JsonNode item) {
         if (item == null || !item.isObject()) return;
         item.fields().forEachRemaining(entry -> {
             JsonNode attr = entry.getValue();
@@ -2104,7 +2105,7 @@ public class DynamoDbJsonHandler {
         });
     }
 
-    private void checkAttrSets(JsonNode attr) {
+    private static void checkAttrSets(JsonNode attr) {
         if (attr == null) return;
         if (attr.has("NULL") && !attr.get("NULL").asBoolean()) {
             throw new AwsException("ValidationException",
@@ -2140,7 +2141,7 @@ public class DynamoDbJsonHandler {
         } else if (attr.has("M")) {
             attr.get("M").fields().forEachRemaining(e -> checkAttrSets(e.getValue()));
         } else if (attr.has("L")) {
-            attr.get("L").forEach(this::checkAttrSets);
+            attr.get("L").forEach(DynamoDbJsonHandler::checkAttrSets);
         }
     }
 
@@ -2221,7 +2222,7 @@ public class DynamoDbJsonHandler {
         }
     }
 
-    private String formatSetForError(JsonNode arr) {
+    private static String formatSetForError(JsonNode arr) {
         StringBuilder sb = new StringBuilder("[");
         boolean first = true;
         for (JsonNode e : arr) {
@@ -2674,15 +2675,30 @@ public class DynamoDbJsonHandler {
         if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
             throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
         }
-        List<JsonNode> transactItems = new ArrayList<>();
         try {
             cancelOnTooDeepParameters(stmts);
-            for (JsonNode s : stmts) {
-                DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
-                        s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
-                transactItems.add(partiQLHandler.toTransactItem(stmt, region));
+            List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
+            for (int i = 0; i < stmts.size(); i++) {
+                JsonNode s = stmts.get(i);
+                statements.add(inTransactStatement(i, () -> parsePartiQLStatement(s)));
             }
-            dynamoDbService.transactWriteItems(transactItems, region);
+            long reads = statements.stream().filter(DynamoDbPartiQLParser.Stmt.Select.class::isInstance).count();
+            if (reads > 0 && reads < statements.size()) {
+                throw new AwsException("ValidationException",
+                        "ExecuteTransaction API does not support both read and write operations in the same request.", 400);
+            }
+            if (reads == statements.size()) {
+                return executeTransactionReads(statements.stream()
+                        .map(DynamoDbPartiQLParser.Stmt.Select.class::cast)
+                        .toList(), region);
+            }
+            List<JsonNode> transactItems = new ArrayList<>();
+            for (int i = 0; i < statements.size(); i++) {
+                DynamoDbPartiQLParser.Stmt stmt = statements.get(i);
+                transactItems.add(inTransactStatement(i, () -> partiQLHandler.toTransactItem(stmt, region)));
+            }
+            dynamoDbService.transactWriteItems(transactItems, region,
+                    request.path("ClientRequestToken").asText(null), request);
             ObjectNode resp = objectMapper.createObjectNode();
             resp.set("Responses", objectMapper.createArrayNode());
             return Response.ok(resp).build();
@@ -2694,14 +2710,52 @@ public class DynamoDbJsonHandler {
             for (TransactionCanceledException.CancellationReason reason : e.getCancellationReasons()) {
                 ObjectNode r = objectMapper.createObjectNode();
                 r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
-                r.put("Message", reason.code().isEmpty() ? ""
-                        : reason.message() != null ? reason.message() : "The conditional request failed");
+                // A statement that did not fail carries no Message (checked on real AWS, eu-west-2, 2026-09-17).
+                if (!reason.code().isEmpty()) {
+                    r.put("Message", reason.message() != null ? reason.message() : "The conditional request failed");
+                }
                 if (reason.item() != null) {
                     r.set("Item", reason.item());
                 }
                 reasons.add(r);
             }
             return Response.status(400).entity(body).build();
+        }
+    }
+
+    private Response executeTransactionReads(List<DynamoDbPartiQLParser.Stmt.Select> selects, String region) {
+        Map<String, TableDefinition> tables = new HashMap<>();
+        List<JsonNode> getItems = new ArrayList<>();
+        for (int i = 0; i < selects.size(); i++) {
+            DynamoDbPartiQLParser.Stmt.Select select = selects.get(i);
+            getItems.add(inTransactStatement(i, () -> partiQLHandler.toTransactGetItem(select, region, tables)));
+        }
+
+        List<JsonNode> results = dynamoDbService.transactGetItems(getItems, region);
+        ArrayNode responses = objectMapper.createArrayNode();
+        for (int i = 0; i < results.size(); i++) {
+            JsonNode item = partiQLHandler.projectSelected(selects.get(i), results.get(i));
+            ObjectNode entry = objectMapper.createObjectNode();
+            if (item != null) {
+                entry.set("Item", item);
+            }
+            responses.add(entry);
+        }
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.set("Responses", responses);
+        return Response.ok(resp).build();
+    }
+
+    // Only a validation error names its statement; a missing table comes back as it stands.
+    private <T> T inTransactStatement(int index, Supplier<T> member) {
+        try {
+            return member.get();
+        } catch (AwsException e) {
+            if (!"ValidationException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("ValidationException",
+                    "Validation failed in TransactStatements[" + index + "]: " + e.getMessage(), 400);
         }
     }
 
@@ -2732,35 +2786,56 @@ public class DynamoDbJsonHandler {
         }
         ArrayNode responses = objectMapper.createArrayNode();
         for (JsonNode s : stmts) {
-            try {
-                DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
-                        s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
-                if (stmt instanceof DynamoDbPartiQLParser.Stmt.Select select
-                        && !batchSelectResolvesThroughPrimaryKey(select, region)) {
-                    throw new AwsException("ValidationError",
-                            "Select statements within BatchExecuteStatement must specify the primary key "
-                                    + "in the where clause.", 400);
-                }
-                JsonNode result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
-                        .consistentRead(s.path("ConsistentRead").asBoolean(false)), region);
-                ObjectNode slot = objectMapper.createObjectNode();
-                JsonNode firstItem = result.path("Items").path(0);
-                if (!firstItem.isMissingNode()) {
-                    slot.set("Item", firstItem);
-                }
-                responses.add(slot);
-            } catch (AwsException e) {
-                ObjectNode slot = objectMapper.createObjectNode();
-                ObjectNode err = objectMapper.createObjectNode();
-                err.put("Code", e.getErrorCode());
-                err.put("Message", e.getMessage());
-                slot.set("Error", err);
-                responses.add(slot);
-            }
+            responses.add(batchMemberResponse(s, region));
         }
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("Responses", responses);
         return Response.ok(resp).build();
+    }
+
+    private ObjectNode batchMemberResponse(JsonNode statement, String region) {
+        ObjectNode slot = objectMapper.createObjectNode();
+        String tableName = null;
+        try {
+            DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement);
+            tableName = stmt.table();
+            if (stmt instanceof DynamoDbPartiQLParser.Stmt.Select select
+                    && !batchSelectResolvesThroughPrimaryKey(select, region)) {
+                throw new AwsException("ValidationException",
+                        "Select statements within BatchExecuteStatement must specify the primary key "
+                                + "in the where clause.", 400);
+            }
+            JsonNode result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
+                    .consistentRead(statement.path("ConsistentRead").asBoolean(false)), region);
+            JsonNode firstItem = result.path("Items").path(0);
+            if (!firstItem.isMissingNode()) {
+                slot.set("Item", firstItem);
+            }
+            slot.put("TableName", tableName);
+        } catch (AwsException e) {
+            ObjectNode err = objectMapper.createObjectNode();
+            err.put("Code", batchMemberErrorCode(e.getErrorCode()));
+            err.put("Message", e.getMessage());
+            slot.set("Error", err);
+            if (tableName != null && batchMemberReachedItsTable(e.getErrorCode())) {
+                slot.put("TableName", tableName);
+            }
+        }
+        return slot;
+    }
+
+    private static String batchMemberErrorCode(String errorCode) {
+        if ("ValidationException".equals(errorCode)) {
+            return "ValidationError";
+        }
+        return errorCode.endsWith("Exception")
+                ? errorCode.substring(0, errorCode.length() - "Exception".length())
+                : errorCode;
+    }
+
+    private static boolean batchMemberReachedItsTable(String errorCode) {
+        return "ConditionalCheckFailedException".equals(errorCode)
+                || "DuplicateItemException".equals(errorCode);
     }
 
     // BatchExecuteStatement only runs SELECT statements that resolve through
@@ -2772,20 +2847,12 @@ public class DynamoDbJsonHandler {
             return false;
         }
         TableDefinition table = dynamoDbService.describeTable(select.table(), region);
-        String pkName = table.getPartitionKeyName();
-        String skName = table.getSortKeyName();
-        boolean pkEq = false;
-        boolean skEq = skName == null;
-        for (DynamoDbPartiQLParser.Cond c : select.where()) {
-            if (c instanceof DynamoDbPartiQLParser.Cond.Eq eq) {
-                if (eq.attr().equals(pkName)) {
-                    pkEq = true;
-                } else if (skName != null && eq.attr().equals(skName)) {
-                    skEq = true;
-                }
-            }
-        }
-        return pkEq && skEq;
+        return DynamoDbPartiQLHandler.pinsFullKey(table, select.where());
+    }
+
+    private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(JsonNode statement) {
+        return DynamoDbPartiQLParser.parse(statement.path("Statement").asText(),
+                toPartiQLParams(statement.path("Parameters")));
     }
 
     private List<JsonNode> toPartiQLParams(JsonNode node) {

@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Cond;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.PVal;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Path;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Seg;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Stmt;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -12,11 +14,13 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DynamoDbPartiQLParserTest {
 
@@ -159,5 +163,84 @@ class DynamoDbPartiQLParserTest {
         var cond = firstCond(SELECT + "< ?", param);
 
         assertEquals("<", assertInstanceOf(Cond.Cmp.class, cond).op());
+    }
+
+    @Test
+    void parsesADocumentPathInASelectColumn() {
+        Stmt stmt = DynamoDbPartiQLParser.parse("SELECT a.b[2].c FROM \"t\" WHERE pk = 'p'", List.of());
+
+        Path column = assertInstanceOf(Stmt.Select.class, stmt).columns().getFirst();
+        assertEquals(List.of(new Seg.Name("a"), new Seg.Name("b"), new Seg.Index(2), new Seg.Name("c")),
+                column.segments());
+        assertEquals("a", column.root());
+        assertEquals("c", column.leafName());
+    }
+
+    @Test
+    void parsesADocumentPathInAnUpdateTarget() {
+        Stmt stmt = DynamoDbPartiQLParser.parse(
+                "UPDATE \"t\" SET profile.sub = 'x' REMOVE tags[0] WHERE pk = 'p'", List.of());
+
+        Stmt.Update update = assertInstanceOf(Stmt.Update.class, stmt);
+        assertEquals(List.of(new Seg.Name("profile"), new Seg.Name("sub")),
+                update.sets().getFirst().path().segments());
+        assertEquals(List.of(new Seg.Name("tags"), new Seg.Index(0)),
+                update.removes().getFirst().segments());
+    }
+
+    @Test
+    void keepsABareAttributeNameAsARootOnlyPath() {
+        Path path = assertInstanceOf(Cond.Eq.class, firstCond(SELECT + "= 'x'")).path();
+
+        assertTrue(path.isRootOnly());
+        assertEquals("val", path.root());
+    }
+
+    @Test
+    void parsesAnInListAsOneCondition() {
+        Cond.In in = assertInstanceOf(Cond.In.class, firstCond(SELECT + "IN ['a', 'b']"));
+
+        assertEquals(2, in.values().size());
+        assertEquals("val", in.path().root());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"IS MISSING, false", "IS NOT MISSING, true"})
+    void parsesTheMissingPredicateWithItsNegation(String predicate, boolean negated) {
+        Cond.Missing missing = assertInstanceOf(Cond.Missing.class, firstCond(SELECT + predicate));
+
+        assertEquals(negated, missing.negated());
+    }
+
+    @Test
+    void parsesNotAheadOfThePredicateItNegates() {
+        Stmt stmt = DynamoDbPartiQLParser.parse(
+                "SELECT pk FROM \"t\" WHERE NOT begins_with(val, 'a')", List.of());
+
+        Cond.Not not = assertInstanceOf(Cond.Not.class,
+                assertInstanceOf(Stmt.Select.class, stmt).where().getFirst());
+        assertInstanceOf(Cond.BeginsWith.class, not.operand());
+    }
+
+    // OR binds looser than AND, so the whole clause is one top-level condition
+    // rather than a key equality standing beside a filter.
+    @Test
+    void parsesAGroupedOrAsASingleTopLevelCondition() {
+        Stmt stmt = DynamoDbPartiQLParser.parse(
+                "SELECT pk FROM \"t\" WHERE (pk = 'a' AND v = 1) OR (pk = 'b')", List.of());
+
+        List<Cond> where = assertInstanceOf(Stmt.Select.class, stmt).where();
+        assertEquals(1, where.size());
+        Cond.Or or = assertInstanceOf(Cond.Or.class, where.getFirst());
+        assertEquals(2, or.operands().size());
+        assertInstanceOf(Cond.And.class, or.operands().getFirst());
+    }
+
+    @Test
+    void rejectsAListIndexThatIsNotAWholeNumber() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> DynamoDbPartiQLParser.parse("SELECT a[1.5] FROM \"t\" WHERE pk = 'p'", List.of()));
+
+        assertEquals("ValidationException", e.getErrorCode());
     }
 }

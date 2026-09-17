@@ -13,19 +13,95 @@ public class DynamoDbPartiQLParser {
         IDENT, STRING, NUMBER, BOOL, NULL, QUESTION,
         EQ, NE, LT, LE, GT, GE,
         LPAREN, RPAREN, LBRACE, RBRACE, COMMA, COLON, DOT,
+        OR, NOT, IN, IS, MISSING, RETURNING, ALL, MODIFIED, OLD, NEW,
+        PLUS, MINUS, LBRACKET, RBRACKET,
+        LBAG, RBAG,
+        ORDER, BY, ASC, DESC,
         EOF
     }
 
-    record Token(TType type, String value) {}
+    // start is the offset in the statement, kept only where an error message quotes it.
+    record Token(TType type, String value, int start) {
+        Token(TType type, String value) {
+            this(type, value, -1);
+        }
+    }
 
     // --- AST node types ---
 
-    public sealed interface Stmt permits Stmt.Select, Stmt.Insert, Stmt.Update, Stmt.Delete {
+    public sealed interface Seg permits Seg.Name, Seg.Index {
+        record Name(String value)  implements Seg {}
+        record Index(long value)   implements Seg {}
+    }
+
+    public record Path(List<Seg> segments) {
+
+        public String root() {
+            return ((Seg.Name) segments.getFirst()).value();
+        }
+
+        public boolean isRootOnly() {
+            return segments.size() == 1;
+        }
+
+        // PartiQL reports a document path from its last named component on, list indexes
+        // included, so SELECT a.b[0] answers b[0] (checked on real AWS, eu-west-2, 2026-09-17).
+        String leafName() {
+            int last = segments.size() - 1;
+            while (segments.get(last) instanceof Seg.Index) {
+                last--;
+            }
+            StringBuilder name = new StringBuilder(((Seg.Name) segments.get(last)).value());
+            for (Seg trailing : segments.subList(last + 1, segments.size())) {
+                name.append('[').append(((Seg.Index) trailing).value()).append(']');
+            }
+            return name.toString();
+        }
+    }
+
+    /**
+     * A RETURNING clause, named after the PartiQL words so {@link #clause()} can quote
+     * the statement back. The classic ReturnValues parameter calls the same MODIFIED
+     * projection UPDATED, which is what {@link #returnValues()} answers.
+     */
+    public enum Returning {
+        NONE("NONE"),
+        ALL_OLD("ALL_OLD"),
+        ALL_NEW("ALL_NEW"),
+        MODIFIED_OLD("UPDATED_OLD"),
+        MODIFIED_NEW("UPDATED_NEW");
+
+        private final String returnValues;
+
+        Returning(String returnValues) {
+            this.returnValues = returnValues;
+        }
+
+        String returnValues() {
+            return returnValues;
+        }
+
+        String clause() {
+            return "RETURNING " + name().replace('_', ' ') + " *";
+        }
+    }
+
+    record OrderTerm(String attribute, boolean descending) {}
+
+    public sealed interface Stmt permits Stmt.Select, Stmt.Insert, Stmt.Update, Stmt.Delete, Stmt.Exists {
         String table();
-        record Select(String table, String index, List<String> columns, List<Cond> where) implements Stmt {}
+        record Select(String table, String index, List<Path> columns, List<Cond> where,
+                      List<OrderTerm> orderBy)                              implements Stmt {}
         record Insert(String table, Map<String, PVal> item)                 implements Stmt {}
-        record Update(String table, List<Assign> sets, List<String> removes, List<Cond> where) implements Stmt {}
-        record Delete(String table, List<Cond> where)                       implements Stmt {}
+        record Update(String table, String index, List<SetClause> sets, List<Path> removes,
+                      List<Cond> where, Returning returning)                implements Stmt {}
+        record Delete(String table, String index, List<Cond> where, Returning returning) implements Stmt {}
+        record Exists(Select select) implements Stmt {
+            @Override
+            public String table() {
+                return select.table();
+            }
+        }
     }
 
     /**
@@ -58,23 +134,67 @@ public class DynamoDbPartiQLParser {
         }
     }
 
-    sealed interface PVal permits PVal.Str, PVal.Num, PVal.Bool, PVal.Null, PVal.Av {
+    sealed interface PVal permits PVal.Str, PVal.Num, PVal.Bool, PVal.Null, PVal.Av,
+            PVal.ListOf, PVal.Tuple, PVal.Bag {
         record Str(String v)       implements PVal {}
         record Num(String v)       implements PVal {}
         record Bool(boolean v)     implements PVal {}
         record Null()              implements PVal {}
         // A parameter of a type with no literal syntax, kept as its wire node.
         record Av(String type, JsonNode node) implements PVal {}
+        record ListOf(List<PVal> items)          implements PVal {}
+        record Tuple(Map<String, PVal> fields)   implements PVal {}
+        // A string or number set, written <<...>>.
+        record Bag(String type, List<PVal> members) implements PVal {}
     }
 
-    sealed interface Cond permits Cond.Eq, Cond.Cmp, Cond.Between, Cond.BeginsWith {
-        record Eq(String attr, PVal val)                        implements Cond {}
-        record Cmp(String attr, String op, PVal val)            implements Cond {}
-        record Between(String attr, PVal lo, PVal hi)           implements Cond {}
-        record BeginsWith(String attr, PVal prefix)             implements Cond {}
+    sealed interface Cond permits Cond.Leaf, Cond.And, Cond.Or, Cond.Not {
+
+        /** The attribute the condition names outright. A nested path or a composite names none. */
+        default Optional<String> bareAttribute() {
+            return Optional.empty();
+        }
+
+        /** A condition reading one attribute. The composites below reach several. */
+        sealed interface Leaf extends Cond permits Eq, Cmp, Between, BeginsWith, In, Missing,
+                Contains, AttributeType, SizeCmp, IsNull {
+            Path path();
+
+            @Override
+            default Optional<String> bareAttribute() {
+                return path().isRootOnly() ? Optional.of(path().root()) : Optional.empty();
+            }
+        }
+
+        record Eq(Path path, PVal val)                          implements Leaf {}
+        record Cmp(Path path, String op, PVal val)              implements Leaf {}
+        record Between(Path path, PVal lo, PVal hi)             implements Leaf {}
+        record BeginsWith(Path path, PVal prefix)               implements Leaf {}
+        record In(Path path, List<PVal> values)                 implements Leaf {}
+        record Missing(Path path, boolean negated)              implements Leaf {}
+        record Contains(Path path, PVal operand)                implements Leaf {}
+        record AttributeType(Path path, PVal type)              implements Leaf {}
+        record SizeCmp(Path path, String op, PVal val)          implements Leaf {}
+        record IsNull(Path path, boolean negated)               implements Leaf {}
+        record And(List<Cond> operands)                         implements Cond {}
+        record Or(List<Cond> operands)                          implements Cond {}
+        record Not(Cond operand)                                implements Cond {}
     }
 
-    record Assign(String attr, PVal val) {}
+    sealed interface Operand permits Operand.Value, Operand.Attribute, Operand.ListAppend {
+        record Value(PVal val)      implements Operand {}
+        record Attribute(Path path) implements Operand {}
+        record ListAppend(Operand first, Operand second) implements Operand {}
+    }
+
+    sealed interface SetClause permits Assign, SetAdd, SetDelete {
+        Path path();
+    }
+
+    // op is null for a plain assignment, + or - for arithmetic.
+    record Assign(Path path, Operand left, String op, Operand right) implements SetClause {}
+    record SetAdd(Path path, PVal bag)                               implements SetClause {}
+    record SetDelete(Path path, PVal bag)                            implements SetClause {}
 
     // --- Tokenizer ---
 
@@ -85,9 +205,14 @@ public class DynamoDbPartiQLParser {
             char c = input.charAt(i);
             if (Character.isWhitespace(c)) { i++; continue; }
             if (c == '\'') {
-                int start = ++i;
-                while (i < n && input.charAt(i) != '\'') i++;
-                tokens.add(new Token(TType.STRING, input.substring(start, i)));
+                StringBuilder text = new StringBuilder();
+                i++;
+                // Two single quotes in a row stand for one.
+                while (i < n && (input.charAt(i) != '\'' || (i + 1 < n && input.charAt(i + 1) == '\''))) {
+                    text.append(input.charAt(i));
+                    i += input.charAt(i) == '\'' ? 2 : 1;
+                }
+                tokens.add(new Token(TType.STRING, text.toString()));
                 i++;
                 continue;
             }
@@ -101,6 +226,9 @@ public class DynamoDbPartiQLParser {
             if (c == '?') { tokens.add(new Token(TType.QUESTION, "?")); i++; continue; }
             if (c == '*') { tokens.add(new Token(TType.IDENT, "*")); i++; continue; }
             if (c == '=') { tokens.add(new Token(TType.EQ, "=")); i++; continue; }
+            if (c == '!' && i + 1 < n && input.charAt(i + 1) == '=') { tokens.add(new Token(TType.NE, "!=")); i += 2; continue; }
+            if (c == '<' && i + 1 < n && input.charAt(i + 1) == '<') { tokens.add(new Token(TType.LBAG, "<<")); i += 2; continue; }
+            if (c == '>' && i + 1 < n && input.charAt(i + 1) == '>') { tokens.add(new Token(TType.RBAG, ">>")); i += 2; continue; }
             if (c == '<') {
                 if (i + 1 < n && input.charAt(i + 1) == '>') { tokens.add(new Token(TType.NE, "<>")); i += 2; }
                 else if (i + 1 < n && input.charAt(i + 1) == '=') { tokens.add(new Token(TType.LE, "<=")); i += 2; }
@@ -116,6 +244,8 @@ public class DynamoDbPartiQLParser {
             if (c == ')') { tokens.add(new Token(TType.RPAREN, ")")); i++; continue; }
             if (c == '{') { tokens.add(new Token(TType.LBRACE, "{")); i++; continue; }
             if (c == '}') { tokens.add(new Token(TType.RBRACE, "}")); i++; continue; }
+            if (c == '[') { tokens.add(new Token(TType.LBRACKET, "[")); i++; continue; }
+            if (c == ']') { tokens.add(new Token(TType.RBRACKET, "]")); i++; continue; }
             if (c == ',') { tokens.add(new Token(TType.COMMA, ",")); i++; continue; }
             if (c == ':') { tokens.add(new Token(TType.COLON, ":")); i++; continue; }
             if (c == '.') { tokens.add(new Token(TType.DOT, ".")); i++; continue; }
@@ -123,9 +253,12 @@ public class DynamoDbPartiQLParser {
                 int start = i;
                 if (c == '-') i++;
                 while (i < n && (Character.isDigit(input.charAt(i)) || input.charAt(i) == '.')) i++;
+                i = skipExponent(input, i);
                 tokens.add(new Token(TType.NUMBER, input.substring(start, i)));
                 continue;
             }
+            if (c == '+') { tokens.add(new Token(TType.PLUS, "+")); i++; continue; }
+            if (c == '-') { tokens.add(new Token(TType.MINUS, "-")); i++; continue; }
             if (Character.isLetter(c) || c == '_') {
                 int start = i;
                 while (i < n && (Character.isLetterOrDigit(input.charAt(i)) || input.charAt(i) == '_')) i++;
@@ -142,12 +275,26 @@ public class DynamoDbPartiQLParser {
                     case "REMOVE"        -> TType.REMOVE;
                     case "DELETE"        -> TType.DELETE;
                     case "AND"           -> TType.AND;
+                    case "OR"            -> TType.OR;
+                    case "NOT"           -> TType.NOT;
+                    case "IN"            -> TType.IN;
+                    case "IS"            -> TType.IS;
+                    case "MISSING"       -> TType.MISSING;
                     case "BETWEEN"       -> TType.BETWEEN;
+                    case "RETURNING"     -> TType.RETURNING;
+                    case "ALL"           -> TType.ALL;
+                    case "MODIFIED"      -> TType.MODIFIED;
+                    case "OLD"           -> TType.OLD;
+                    case "NEW"           -> TType.NEW;
+                    case "ORDER"         -> TType.ORDER;
+                    case "BY"            -> TType.BY;
+                    case "ASC"           -> TType.ASC;
+                    case "DESC"          -> TType.DESC;
                     case "TRUE", "FALSE" -> TType.BOOL;
                     case "NULL"          -> TType.NULL;
                     default              -> TType.IDENT;
                 };
-                tokens.add(new Token(type, word));
+                tokens.add(new Token(type, word, start));
                 continue;
             }
             throw validationEx("Unexpected character '" + c + "' in PartiQL statement");
@@ -156,80 +303,138 @@ public class DynamoDbPartiQLParser {
         return tokens;
     }
 
+    private static int skipExponent(String input, int i) {
+        int n = input.length();
+        if (i >= n || (input.charAt(i) != 'e' && input.charAt(i) != 'E')) {
+            return i;
+        }
+        int digits = i + 1;
+        if (digits < n && (input.charAt(digits) == '+' || input.charAt(digits) == '-')) {
+            digits++;
+        }
+        if (digits >= n || !Character.isDigit(input.charAt(digits))) {
+            return i;
+        }
+        while (digits < n && Character.isDigit(input.charAt(digits))) {
+            digits++;
+        }
+        return digits;
+    }
+
     // --- Recursive-descent parser ---
 
+    private final String statement;
     private final List<Token> tokens;
     private final List<JsonNode> parameters;
     private int pos = 0;
     private int paramIdx = 0;
 
-    private DynamoDbPartiQLParser(List<Token> tokens, List<JsonNode> parameters) {
-        this.tokens = tokens;
+    private DynamoDbPartiQLParser(String statement, List<JsonNode> parameters) {
+        this.statement = statement;
+        this.tokens = tokenize(statement);
         this.parameters = parameters;
     }
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         parameters.forEach(DynamoDbAttributeValueValidator::requireParameterNestingWithinLimit);
-        return new DynamoDbPartiQLParser(tokenize(statement.trim()), parameters).parseStmt();
+        return new DynamoDbPartiQLParser(statement, parameters).parseStmt();
     }
 
     private Stmt parseStmt() {
+        if (peekFunction("exists")) {
+            advance();
+            consume(TType.LPAREN);
+            Stmt.Select select = parseSelect();
+            consume(TType.RPAREN);
+            return new Stmt.Exists(select);
+        }
         return switch (peek().type()) {
             case SELECT -> parseSelect();
             case INSERT -> parseInsert();
             case UPDATE -> parseUpdate();
             case DELETE -> parseDelete();
-            default -> throw validationEx("Unsupported PartiQL statement: " + peek().value());
+            default -> throw validationEx(
+                    "Statement wasn't well formed, can't be processed: Expected data manipulation");
         };
     }
 
     // SELECT col [, col …] | * FROM "Table"["." "Index"] [WHERE cond [AND cond …]]
     private Stmt.Select parseSelect() {
         consume(TType.SELECT);
-        List<String> cols = new ArrayList<>();
+        List<Path> cols = new ArrayList<>();
         if (peek().type() == TType.IDENT && "*".equals(peek().value())) {
             advance();
         } else {
-            cols.add(expectIdent());
-            while (peek().type() == TType.COMMA) { advance(); cols.add(expectIdent()); }
+            cols.add(parsePath());
+            while (peek().type() == TType.COMMA) { advance(); cols.add(parsePath()); }
         }
         consume(TType.FROM);
-        String table = expectIdent();
-        String index = null;
-        if (peek().type() == TType.DOT) {
-            advance();
-            index = expectIdent();
-        }
+        String table = expectTableName();
+        String index = parseIndexQualifier();
         List<Cond> where = new ArrayList<>();
         if (peek().type() == TType.WHERE) { advance(); where = parseConditions(); }
-        return new Stmt.Select(table, index, cols, where);
+        return new Stmt.Select(table, index, cols, where, parseOrderBy());
+    }
+
+    // ORDER BY key [ASC | DESC] [, …]
+    private List<OrderTerm> parseOrderBy() {
+        if (peek().type() != TType.ORDER) {
+            return List.of();
+        }
+        advance();
+        consume(TType.BY);
+        List<OrderTerm> terms = new ArrayList<>();
+        do {
+            if (!terms.isEmpty()) {
+                advance();
+            }
+            String attribute = expectIdent();
+            boolean descending = peek().type() == TType.DESC;
+            if (descending || peek().type() == TType.ASC) {
+                advance();
+            }
+            terms.add(new OrderTerm(attribute, descending));
+        } while (peek().type() == TType.COMMA);
+        return List.copyOf(terms);
     }
 
     // INSERT INTO "Table" VALUE {'key': val, …}
     private Stmt.Insert parseInsert() {
         consume(TType.INSERT);
         consume(TType.INTO);
-        String table = expectIdent();
+        String table = expectTableName();
+        // An index qualifier is ungrammatical here, unlike on UPDATE and DELETE.
+        if (peek().type() == TType.DOT) {
+            throw validationEx("FROM clause may only contain a single table name");
+        }
         consume(TType.VALUE);
         consume(TType.LBRACE);
-        Map<String, PVal> item = new LinkedHashMap<>();
+        return new Stmt.Insert(table, parseTupleFields());
+    }
+
+    // Called with the opening brace already consumed.
+    private Map<String, PVal> parseTupleFields() {
+        Map<String, PVal> fields = new LinkedHashMap<>();
         while (peek().type() != TType.RBRACE && peek().type() != TType.EOF) {
             String key = expectStringOrIdent();
             consume(TType.COLON);
-            item.put(key, parseValue());
-            if (peek().type() == TType.COMMA) advance();
+            fields.put(key, parseValue());
+            if (peek().type() == TType.COMMA) {
+                advance();
+            }
         }
         consume(TType.RBRACE);
-        return new Stmt.Insert(table, item);
+        return fields;
     }
 
     // UPDATE "Table" SET attr=val [, …] [REMOVE attr [, …]] WHERE …
     private Stmt.Update parseUpdate() {
         consume(TType.UPDATE);
-        String table = expectIdent();
-        List<Assign> sets = new ArrayList<>();
-        List<String> removes = new ArrayList<>();
+        String table = expectTableName();
+        String index = parseIndexQualifier();
+        List<SetClause> sets = new ArrayList<>();
+        List<Path> removes = new ArrayList<>();
         while (peek().type() == TType.SET || peek().type() == TType.REMOVE) {
             if (peek().type() == TType.SET) {
                 advance();
@@ -237,28 +442,120 @@ public class DynamoDbPartiQLParser {
                 while (peek().type() == TType.COMMA) { advance(); sets.add(parseAssign()); }
             } else {
                 advance();
-                removes.add(expectIdent());
-                while (peek().type() == TType.COMMA) { advance(); removes.add(expectIdent()); }
+                removes.add(parsePath());
+                while (peek().type() == TType.COMMA) { advance(); removes.add(parsePath()); }
             }
         }
         consume(TType.WHERE);
-        return new Stmt.Update(table, sets, removes, parseConditions());
+        List<Cond> where = parseConditions();
+        return new Stmt.Update(table, index, sets, removes, where, parseReturning());
     }
 
-    // DELETE FROM "Table" WHERE …
+    // DELETE FROM "Table" WHERE … [RETURNING ALL OLD *]
     private Stmt.Delete parseDelete() {
         consume(TType.DELETE);
         consume(TType.FROM);
-        String table = expectIdent();
+        String table = expectTableName();
+        String index = parseIndexQualifier();
         consume(TType.WHERE);
-        return new Stmt.Delete(table, parseConditions());
+        List<Cond> where = parseConditions();
+        Returning returning = parseReturning();
+        if (returning != Returning.NONE && returning != Returning.ALL_OLD) {
+            throw validationEx("Invalid returning clause: " + returning.clause()
+                    + ". Only RETURNING ALL OLD * is allowed in DELETE statements.");
+        }
+        return new Stmt.Delete(table, index, where, returning);
     }
 
+    private String expectTableName() {
+        String table = expectIdent();
+        requireNonEmptyPathComponent(table);
+        return table;
+    }
+
+    private String parseIndexQualifier() {
+        if (peek().type() != TType.DOT) {
+            return null;
+        }
+        advance();
+        String index = expectIdent();
+        requireNonEmptyPathComponent(index);
+        if (peek().type() == TType.DOT) {
+            throw validationEx("A path may contain at most 2 components in the FROM clause");
+        }
+        return index;
+    }
+
+    private static void requireNonEmptyPathComponent(String component) {
+        if (component.isEmpty()) {
+            throw validationEx("Path component cannot be an empty string");
+        }
+    }
+
+    // RETURNING (ALL | MODIFIED) (OLD | NEW) *
+    private Returning parseReturning() {
+        if (peek().type() != TType.RETURNING) {
+            return Returning.NONE;
+        }
+        advance();
+        TType scope = advance().type();
+        TType age = advance().type();
+        Returning returning = returningOf(scope, age);
+        Token star = advance();
+        if (!"*".equals(star.value())) {
+            throw validationEx("Expected * in the RETURNING clause, got: '" + star.value() + "'");
+        }
+        return returning;
+    }
+
+    private static Returning returningOf(TType scope, TType age) {
+        if (scope == TType.ALL && age == TType.OLD) {
+            return Returning.ALL_OLD;
+        }
+        if (scope == TType.ALL && age == TType.NEW) {
+            return Returning.ALL_NEW;
+        }
+        if (scope == TType.MODIFIED && age == TType.OLD) {
+            return Returning.MODIFIED_OLD;
+        }
+        if (scope == TType.MODIFIED && age == TType.NEW) {
+            return Returning.MODIFIED_NEW;
+        }
+        throw validationEx("Expected ALL or MODIFIED and OLD or NEW in the RETURNING clause");
+    }
+
+    /** The top-level AND operands, which is where a key equality can appear. */
     private List<Cond> parseConditions() {
-        List<Cond> conds = new ArrayList<>();
-        conds.add(parseCond());
-        while (peek().type() == TType.AND) { advance(); conds.add(parseCond()); }
-        return conds;
+        Cond cond = parseOr();
+        return cond instanceof Cond.And and ? and.operands() : List.of(cond);
+    }
+
+    private Cond parseOr() {
+        List<Cond> operands = new ArrayList<>();
+        operands.add(parseAnd());
+        while (peek().type() == TType.OR) {
+            advance();
+            operands.add(parseAnd());
+        }
+        return operands.size() == 1 ? operands.getFirst() : new Cond.Or(List.copyOf(operands));
+    }
+
+    private Cond parseAnd() {
+        List<Cond> operands = new ArrayList<>();
+        operands.add(parseNot());
+        while (peek().type() == TType.AND) {
+            advance();
+            operands.add(parseNot());
+        }
+        return operands.size() == 1 ? operands.getFirst() : new Cond.And(List.copyOf(operands));
+    }
+
+    private Cond parseNot() {
+        if (peek().type() == TType.NOT) {
+            advance();
+            return new Cond.Not(parseNot());
+        }
+        return parseCond();
     }
 
     // S, N and B are the only types DynamoDB gives an ordering.
@@ -271,6 +568,9 @@ public class DynamoDbPartiQLParser {
             case PVal.Bool ignored -> "BOOL";
             case PVal.Null ignored -> "NULL";
             case PVal.Av av        -> av.type();
+            case PVal.ListOf ignored -> "L";
+            case PVal.Tuple ignored  -> "M";
+            case PVal.Bag bag        -> bag.type();
         };
     }
 
@@ -283,16 +583,53 @@ public class DynamoDbPartiQLParser {
     }
 
     private Cond parseCond() {
+        if (peek().type() == TType.LPAREN) {
+            advance();
+            Cond grouped = parseOr();
+            consume(TType.RPAREN);
+            return grouped;
+        }
         if (peek().type() == TType.IDENT && "begins_with".equalsIgnoreCase(peek().value())) {
             advance();
             consume(TType.LPAREN);
-            String attr = expectIdent();
+            Path path = parsePath();
             consume(TType.COMMA);
             PVal prefix = parseValue();
             consume(TType.RPAREN);
-            return new Cond.BeginsWith(attr, prefix);
+            return new Cond.BeginsWith(path, prefix);
         }
-        String attr = expectIdent();
+        if (peekFunction("contains")) {
+            advance();
+            consume(TType.LPAREN);
+            Path path = parsePath();
+            consume(TType.COMMA);
+            PVal operand = parseValue();
+            consume(TType.RPAREN);
+            return new Cond.Contains(path, operand);
+        }
+        if (peekFunction("attribute_type")) {
+            advance();
+            consume(TType.LPAREN);
+            Path path = parsePath();
+            consume(TType.COMMA);
+            PVal type = parseValue();
+            consume(TType.RPAREN);
+            requireAttributeTypeName(type);
+            return new Cond.AttributeType(path, type);
+        }
+        if (peekFunction("size")) {
+            advance();
+            consume(TType.LPAREN);
+            Path path = parsePath();
+            consume(TType.RPAREN);
+            String op = parseOp();
+            PVal val = parseValue();
+            if (!"=".equals(op) && !"<>".equals(op)) {
+                requireOrdered(op, val);
+            }
+            return new Cond.SizeCmp(path, op, val);
+        }
+        Path path = parsePath();
         if (peek().type() == TType.BETWEEN) {
             advance();
             PVal lo = parseValue();
@@ -300,17 +637,57 @@ public class DynamoDbPartiQLParser {
             PVal hi = parseValue();
             requireOrdered("BETWEEN", lo);
             requireOrdered("BETWEEN", hi);
-            return new Cond.Between(attr, lo, hi);
+            return new Cond.Between(path, lo, hi);
+        }
+        if (peek().type() == TType.IN) {
+            advance();
+            consume(TType.LBRACKET);
+            List<PVal> values = new ArrayList<>();
+            values.add(parseValue());
+            while (peek().type() == TType.COMMA) {
+                advance();
+                values.add(parseValue());
+            }
+            consume(TType.RBRACKET);
+            return new Cond.In(path, List.copyOf(values));
+        }
+        if (peek().type() == TType.IS) {
+            advance();
+            boolean negated = peek().type() == TType.NOT;
+            if (negated) {
+                advance();
+            }
+            if (peek().type() == TType.NULL) {
+                advance();
+                return new Cond.IsNull(path, negated);
+            }
+            consume(TType.MISSING);
+            return new Cond.Missing(path, negated);
         }
         String op = parseOp();
         PVal val = parseValue();
         if ("=".equals(op)) {
-            return new Cond.Eq(attr, val);
+            return new Cond.Eq(path, val);
         }
         if (!"<>".equals(op)) {
             requireOrdered(op, val);
         }
-        return new Cond.Cmp(attr, op, val);
+        return new Cond.Cmp(path, op, val);
+    }
+
+    private boolean peekFunction(String name) {
+        return peek().type() == TType.IDENT && name.equalsIgnoreCase(peek().value())
+                && tokens.get(pos + 1).type() == TType.LPAREN;
+    }
+
+    private static final List<String> ATTRIBUTE_TYPE_NAMES =
+            List.of("N", "BS", "L", "B", "NULL", "M", "S", "SS", "NS", "BOOL");
+
+    private static void requireAttributeTypeName(PVal type) {
+        if (type instanceof PVal.Str name && !ATTRIBUTE_TYPE_NAMES.contains(name.v())) {
+            throw validationEx("Invalid attribute type name found; type: " + name.v()
+                    + ", valid types: {" + String.join(",", ATTRIBUTE_TYPE_NAMES) + "}");
+        }
     }
 
     private String parseOp() {
@@ -323,10 +700,88 @@ public class DynamoDbPartiQLParser {
         };
     }
 
-    private Assign parseAssign() {
-        String attr = expectIdent();
+    private SetClause parseAssign() {
+        Path path = parsePath();
         consume(TType.EQ);
-        return new Assign(attr, parseValue());
+        if (peekFunction("set_add") || peekFunction("set_delete")) {
+            return parseSetMutation(path);
+        }
+        Operand left = parseOperand();
+        if (peek().type() == TType.PLUS || peek().type() == TType.MINUS) {
+            String op = advance().value();
+            return new Assign(path, left, op, parseOperand());
+        }
+        return new Assign(path, left, null, null);
+    }
+
+    // SET path = set_add(path, <<...>>), where both paths must be the same one.
+    private SetClause parseSetMutation(Path target) {
+        Token function = advance();
+        consume(TType.LPAREN);
+        if (!parsePath().equals(target)) {
+            throw validationEx("The first argument to " + function.value().toUpperCase(Locale.ROOT)
+                    + " must equal the assignment value at " + position(function));
+        }
+        consume(TType.COMMA);
+        PVal bag = parseValue();
+        consume(TType.RPAREN);
+        return "set_add".equalsIgnoreCase(function.value()) ? new SetAdd(target, bag) : new SetDelete(target, bag);
+    }
+
+    // line:column:length, as AWS quotes a token back (checked on real AWS, eu-west-2, 2026-09-17).
+    private String position(Token token) {
+        int lineStart = statement.lastIndexOf('\n', token.start() - 1) + 1;
+        long line = statement.substring(0, token.start()).chars().filter(c -> c == '\n').count() + 1;
+        return line + ":" + (token.start() - lineStart + 1) + ":" + token.value().length();
+    }
+
+    private Operand parseOperand() {
+        if (peekFunction("list_append")) {
+            advance();
+            consume(TType.LPAREN);
+            Operand first = parseOperand();
+            consume(TType.COMMA);
+            Operand second = parseOperand();
+            consume(TType.RPAREN);
+            return new Operand.ListAppend(first, second);
+        }
+        if (peek().type() == TType.IDENT) {
+            return new Operand.Attribute(parsePath());
+        }
+        return new Operand.Value(parseValue());
+    }
+
+    private Path parsePath() {
+        List<Seg> segments = new ArrayList<>();
+        segments.add(new Seg.Name(expectIdent()));
+        while (true) {
+            switch (peek().type()) {
+                case DOT -> {
+                    advance();
+                    segments.add(new Seg.Name(expectIdent()));
+                }
+                case LBRACKET -> {
+                    advance();
+                    segments.add(new Seg.Index(expectListIndex()));
+                    consume(TType.RBRACKET);
+                }
+                default -> {
+                    return new Path(List.copyOf(segments));
+                }
+            }
+        }
+    }
+
+    private long expectListIndex() {
+        Token t = advance();
+        if (t.type() == TType.NUMBER) {
+            try {
+                return Long.parseLong(t.value());
+            } catch (NumberFormatException expected) {
+                // Falls through to the shared rejection below.
+            }
+        }
+        throw validationEx("Expected a list index, got: '" + t.value() + "'");
     }
 
     private PVal parseValue() {
@@ -337,8 +792,46 @@ public class DynamoDbPartiQLParser {
             case BOOL     -> new PVal.Bool(Boolean.parseBoolean(t.value()));
             case NULL     -> new PVal.Null();
             case QUESTION -> resolveParam();
+            case LBRACKET -> new PVal.ListOf(parseListItems());
+            case LBRACE   -> new PVal.Tuple(parseTupleFields());
+            case LBAG     -> parseBag();
             default -> throw validationEx("Expected value literal or ?, got: " + t.value());
         };
+    }
+
+    // Called with the opening bracket already consumed.
+    private List<PVal> parseListItems() {
+        List<PVal> items = new ArrayList<>();
+        while (peek().type() != TType.RBRACKET && peek().type() != TType.EOF) {
+            items.add(parseValue());
+            if (peek().type() == TType.COMMA) {
+                advance();
+            }
+        }
+        consume(TType.RBRACKET);
+        return List.copyOf(items);
+    }
+
+    // A bag holds strings or numbers, never both (checked on real AWS, eu-west-2, 2026-09-17).
+    private PVal.Bag parseBag() {
+        List<PVal> members = new ArrayList<>();
+        while (peek().type() != TType.RBAG && peek().type() != TType.EOF) {
+            members.add(parseValue());
+            if (peek().type() == TType.COMMA) {
+                advance();
+            }
+        }
+        consume(TType.RBAG);
+        if (members.isEmpty()) {
+            throw validationEx("Empty bags are not supported");
+        }
+        String memberType = typeCode(members.getFirst());
+        boolean uniform = members.stream().allMatch(m -> typeCode(m).equals(memberType));
+        if (!uniform || !(memberType.equals("S") || memberType.equals("N"))) {
+            throw validationEx(
+                    "Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags");
+        }
+        return new PVal.Bag(memberType + "S", List.copyOf(members));
     }
 
     private PVal resolveParam() {
