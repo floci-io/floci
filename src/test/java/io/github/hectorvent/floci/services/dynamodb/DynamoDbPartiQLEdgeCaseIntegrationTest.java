@@ -30,6 +30,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String TABLE = "partiql-edge-cases";
+    private static final String QUOTED_TABLE = "\"" + TABLE + "\"";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -62,16 +63,16 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         putItem("grouped", "\"flag\":{\"S\":\"x\"}");
         putItem("grouped-other", "\"flag\":{\"S\":\"x\"}");
 
-        statement("UPDATE \"" + TABLE + "\" SET a=2 WHERE (pk='grouped' AND sk='1') AND flag='x'")
+        statement("UPDATE " + QUOTED_TABLE + " SET a=2 WHERE (pk='grouped' AND sk='1') AND flag='x'")
             .statusCode(200);
         getItem("grouped").body("Item.a.N", equalTo("2"));
 
-        transaction("EXISTS(SELECT * FROM \"" + TABLE + "\" WHERE (pk='grouped' AND sk='1') AND nope IS MISSING)",
-                "UPDATE \"" + TABLE + "\" SET b=1 WHERE pk='grouped-other' AND sk='1'")
+        transaction("EXISTS(SELECT * FROM " + QUOTED_TABLE + " WHERE (pk='grouped' AND sk='1') AND nope IS MISSING)",
+                "UPDATE " + QUOTED_TABLE + " SET b=1 WHERE pk='grouped-other' AND sk='1'")
             .statusCode(200);
         getItem("grouped-other").body("Item.b.N", equalTo("1"));
 
-        statement("DELETE FROM \"" + TABLE + "\" WHERE (pk='grouped' AND sk='1') AND flag='x'")
+        statement("DELETE FROM " + QUOTED_TABLE + " WHERE (pk='grouped' AND sk='1') AND flag='x'")
             .statusCode(200);
         getItem("grouped").body("Item", nullValue());
     }
@@ -81,13 +82,13 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     void subtractsWithoutSpacesAndRefusesTrailingTokens() {
         putItem("minus", "\"n\":{\"N\":\"5\"}");
 
-        statement("UPDATE \"" + TABLE + "\" SET n=n-1 WHERE pk='minus' AND sk='1'").statusCode(200);
+        statement("UPDATE " + QUOTED_TABLE + " SET n=n-1 WHERE pk='minus' AND sk='1'").statusCode(200);
         getItem("minus").body("Item.n.N", equalTo("4"));
 
-        statement("SELECT sk FROM \"" + TABLE + "\" WHERE pk='minus' AND n>-5;")
+        statement("SELECT sk FROM " + QUOTED_TABLE + " WHERE pk='minus' AND n>-5;")
             .statusCode(200)
             .body("Items.size()", equalTo(1));
-        statement("UPDATE \"" + TABLE + "\" SET t=1 WHERE pk='minus' AND sk='1' garbage")
+        statement("UPDATE " + QUOTED_TABLE + " SET t=1 WHERE pk='minus' AND sk='1' garbage")
             .statusCode(400)
             .body("message", equalTo(
                     "Statement wasn't well formed, can't be processed: Unexpected token after expression"));
@@ -98,12 +99,12 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(4)
     void refusesANegativeListIndex() {
         putItem("index", "\"l\":{\"L\":[{\"S\":\"a\"},{\"S\":\"b\"}]}");
-        String select = "SELECT l[-1] FROM \"" + TABLE + "\" WHERE pk='index' AND sk='1'";
+        String select = "SELECT l[-1] FROM " + QUOTED_TABLE + " WHERE pk='index' AND sk='1'";
 
         statement(select)
             .statusCode(400)
             .body("message", equalTo("List index is not within the allowable range; index: [-1] at 1:11:1"));
-        statement("SELECT l[-0] FROM \"" + TABLE + "\" WHERE pk='index' AND sk='1'")
+        statement("SELECT l[-0] FROM " + QUOTED_TABLE + " WHERE pk='index' AND sk='1'")
             .statusCode(200)
             .body("Items[0].'l[0]'.S", equalTo("a"));
     }
@@ -111,12 +112,12 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Test
     @Order(15)
     void refusesAListIndexAboveTheIntegerRange() {
-        statement("SELECT l[2147483648] FROM \"" + TABLE + "\" WHERE pk='index' AND sk='1'")
+        statement("SELECT l[2147483648] FROM " + QUOTED_TABLE + " WHERE pk='index' AND sk='1'")
             .statusCode(400)
             .body("message", equalTo("List index is not within the allowable range; index: [2147483648] at 1:10:10"));
-        statement("UPDATE \"" + TABLE + "\" REMOVE l[2147483648] WHERE pk='index' AND sk='1'")
+        statement("UPDATE " + QUOTED_TABLE + " REMOVE l[2147483648] WHERE pk='index' AND sk='1'")
             .statusCode(400);
-        statement("SELECT l[2147483647] FROM \"" + TABLE + "\" WHERE pk='index' AND sk='1'")
+        statement("SELECT l[2147483647] FROM " + QUOTED_TABLE + " WHERE pk='index' AND sk='1'")
             .statusCode(200);
         getItem("index").body("Item.l.L.size()", equalTo(2));
     }
@@ -124,11 +125,11 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Test
     @Order(5)
     void refusesANonStringTypeInAttributeType() {
-        statement("SELECT sk FROM \"" + TABLE + "\" WHERE pk='index' AND attribute_type(l, 1)")
+        statement("SELECT sk FROM " + QUOTED_TABLE + " WHERE pk='index' AND attribute_type(l, 1)")
             .statusCode(400)
             .body("message", equalTo("Incorrect operand type for operator or function;"
                     + " operator or function: attribute_type, operand type: N"));
-        statement("SELECT sk FROM \"" + TABLE + "\" WHERE pk='index' AND attribute_type(l, true)")
+        statement("SELECT sk FROM " + QUOTED_TABLE + " WHERE pk='index' AND attribute_type(l, true)")
             .statusCode(400)
             .body("message", equalTo("Incorrect operand type for operator or function;"
                     + " operator or function: attribute_type, operand type: BOOL"));
@@ -138,12 +139,12 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(6)
     void refusesAValueThatIsNotASetInSetAdd() {
         putItem("sets", "\"BandMembers\":{\"SS\":[\"member1\",\"member2\"]}");
-        String prefix = "UPDATE \"" + TABLE + "\"\nSET BandMembers = set_add(";
+        String prefix = "UPDATE " + QUOTED_TABLE + "\nSET BandMembers = set_add(";
 
         statement(prefix + "BandMembers, 'x')\nWHERE pk='sets' AND sk='1'")
             .statusCode(400)
             .body("message", equalTo("The second argument to SET_ADD must be a value with type SET at 2:27:11"));
-        String quotedPrefix = "UPDATE \"" + TABLE + "\" SET \"BandMembers\" = set_delete(";
+        String quotedPrefix = "UPDATE " + QUOTED_TABLE + " SET \"BandMembers\" = set_delete(";
         statement(quotedPrefix + "\"BandMembers\", ['x']) WHERE pk='sets' AND sk='1'")
             .statusCode(400)
             .body("message", equalTo("The second argument to SET_DELETE must be a value with type SET at 1:"
@@ -155,7 +156,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(7)
     void refusesDuplicateMembersInABag() {
         putItem("bags", "\"s\":{\"SS\":[\"a\"]},\"n\":{\"NS\":[\"1\"]}");
-        String update = "UPDATE \"" + TABLE + "\" SET ";
+        String update = "UPDATE " + QUOTED_TABLE + " SET ";
         String where = " WHERE pk='bags' AND sk='1'";
 
         statement(update + "s = set_add(s, <<'b','b'>>)" + where)
@@ -166,11 +167,11 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .statusCode(400)
             .body("message", equalTo(
                     "One or more parameter values were invalid: Input collection [2, 2.0] contains duplicates! under root"));
-        statement("SELECT sk FROM \"" + TABLE + "\"" + where + " AND s = <<'a','a'>>")
+        statement("SELECT sk FROM " + QUOTED_TABLE + where + " AND s = <<'a','a'>>")
             .statusCode(400)
             .body("message", equalTo(
                     "One or more parameter values were invalid: Input collection [a, a] contains duplicates."));
-        transaction("INSERT INTO \"" + TABLE + "\" VALUE {'pk':'bags-tx','sk':'1','x':[<<'a','a'>>]}")
+        transaction("INSERT INTO " + QUOTED_TABLE + " VALUE {'pk':'bags-tx','sk':'1','x':[<<'a','a'>>]}")
             .statusCode(400)
             .body("message", equalTo("Validation failed in TransactStatements[0]:"
                     + " One or more parameter values were invalid: Input collection [a, a] contains duplicates."));
@@ -186,14 +187,13 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(8)
     void refusesAnInvalidParameterBeforeReadingTheStatement() {
         String duplicates = "One or more parameter values were invalid: Input collection [a, a] contains duplicates.";
-        String insert = "INSERT INTO \"" + TABLE + "\" VALUE {'pk':'params','sk':'1','x':?}";
-        String update = "UPDATE \"" + TABLE + "\" SET y = ? WHERE pk='params' AND sk='1'";
+        String insert = "INSERT INTO " + QUOTED_TABLE + " VALUE {'pk':'params','sk':'1','x':?}";
+        String update = "UPDATE " + QUOTED_TABLE + " SET y = ? WHERE pk='params' AND sk='1'";
 
-        request("DynamoDB_20120810.ExecuteStatement",
-                member("UPDATE \"" + TABLE + "\" SET WHERE", "[{\"SS\":[\"a\",\"a\"]}]"))
+        statement("UPDATE " + QUOTED_TABLE + " SET WHERE", "[{\"SS\":[\"a\",\"a\"]}]")
             .statusCode(400)
             .body("message", equalTo(duplicates));
-        request("DynamoDB_20120810.ExecuteStatement", member(insert, "[{\"NULL\":false}]"))
+        statement(insert, "[{\"NULL\":false}]")
             .statusCode(400)
             .body("message", equalTo(
                     "One or more parameter values were invalid: Null attribute value types must have the value of true"));
@@ -214,16 +214,16 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(9)
     void refusesTwoReadsOfOneItemInATransaction() {
         putItem("reads", "\"a\":{\"S\":\"x\"}");
-        String select = "SELECT * FROM \"" + TABLE + "\" WHERE pk='reads' AND sk='1'";
+        String select = "SELECT * FROM " + QUOTED_TABLE + " WHERE pk='reads' AND sk='1'";
 
-        transaction(select, "SELECT a FROM \"" + TABLE + "\" WHERE sk='1' AND pk='reads'")
+        transaction(select, "SELECT a FROM " + QUOTED_TABLE + " WHERE sk='1' AND pk='reads'")
             .statusCode(400)
             .body("message", equalTo("Transaction request cannot include multiple operations on one item"));
-        transaction(select, select, "SELECT * FROM \"" + TABLE + "\" WHERE pk=1 AND sk='1'")
+        transaction(select, select, "SELECT * FROM " + QUOTED_TABLE + " WHERE pk=1 AND sk='1'")
             .statusCode(400)
             .body("message", equalTo("Transaction cancelled, please refer cancellation reasons for specific reasons"
                     + " [None, None, ValidationError]"));
-        transaction(select, "SELECT * FROM \"" + TABLE + "\" WHERE pk='reads' AND sk='2'")
+        transaction(select, "SELECT * FROM " + QUOTED_TABLE + " WHERE pk='reads' AND sk='2'")
             .statusCode(200)
             .body("Responses[0].Item.a.S", equalTo("x"));
     }
@@ -232,7 +232,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(10)
     void readsOnlyByTheKeyInATransaction() {
         putItem("keyed", "\"flag\":{\"S\":\"right\"}");
-        String select = "SELECT * FROM \"" + TABLE + "\" WHERE ";
+        String select = "SELECT * FROM " + QUOTED_TABLE + " WHERE ";
         String refused = "Validation failed in TransactStatements[0]:"
                 + " Select statements within ExecuteTransaction must specify the primary key in the where clause.";
 
@@ -299,15 +299,15 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         putItem("comments", "\"n\":{\"N\":\"1\"},\"note\":{\"S\":\"a--b /*c*/\"}");
         String key = "pk='comments' AND sk='1'";
 
-        statement("SELECT/**/* FROM \"" + TABLE + "\" -- the table\nWHERE pk/* key */='comments' AND sk='1' --")
+        statement("SELECT/**/* FROM " + QUOTED_TABLE + " -- the table\nWHERE pk/* key */='comments' AND sk='1' --")
             .statusCode(200)
             .body("Items[0].note.S", equalTo("a--b /*c*/"));
-        statement("SELECT note FROM \"" + TABLE + "\" WHERE " + key + " AND note = 'a--b /*c*/'; -- done")
+        statement("SELECT note FROM " + QUOTED_TABLE + " WHERE " + key + " AND note = 'a--b /*c*/'; -- done")
             .statusCode(200)
             .body("Items.size()", equalTo(1));
-        statement("UPDATE \"" + TABLE + "\" SET n=n--1 WHERE " + key)
+        statement("UPDATE " + QUOTED_TABLE + " SET n=n--1 WHERE " + key)
             .statusCode(400);
-        statement("SELECT * FROM \"" + TABLE + "\" WHERE " + key + " /* open")
+        statement("SELECT * FROM " + QUOTED_TABLE + " WHERE " + key + " /* open")
             .statusCode(400);
         getItem("comments").body("Item.n.N", equalTo("1"));
     }
@@ -316,7 +316,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(13)
     void appliesASignToANumberLiteral() {
         putItem("signs", "\"n\":{\"N\":\"1\"}");
-        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE pk='signs' AND sk='1' AND ";
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE pk='signs' AND sk='1' AND ";
 
         statement(select + "n = - - 1").statusCode(200).body("Items.size()", equalTo(1));
         statement(select + "n > -/* c */-1").statusCode(200).body("Items.size()", equalTo(0));
@@ -324,7 +324,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         statement(select + "n > -?").statusCode(400);
         statement(select + "n > -n").statusCode(400);
 
-        statement("UPDATE \"" + TABLE + "\" SET n = n - - 2, l = [- 1] WHERE pk='signs' AND sk='1'").statusCode(200);
+        statement("UPDATE " + QUOTED_TABLE + " SET n = n - - 2, l = [- 1] WHERE pk='signs' AND sk='1'").statusCode(200);
         getItem("signs")
             .body("Item.n.N", equalTo("3"))
             .body("Item.l.L[0].N", equalTo("-1"));
@@ -333,24 +333,22 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Test
     @Order(14)
     void refusesAParameterInsideACollectionLiteral() {
-        String prefix = "UPDATE \"" + TABLE + "\" SET x = ";
+        String prefix = "UPDATE " + QUOTED_TABLE + " SET x = ";
 
-        request("DynamoDB_20120810.ExecuteStatement", member(prefix + "[?] WHERE pk='literals' AND sk='1'", "[{\"S\":\"v\"}]"))
+        statement(prefix + "[?] WHERE pk='literals' AND sk='1'", "[{\"S\":\"v\"}]")
             .statusCode(400)
             .body("message", equalTo("Unsupported data type: Parameter under key root[0] at 1:"
                     + (prefix.length() + 2) + ":1"));
-        String insert = "INSERT INTO \"" + TABLE + "\" VALUE {'pk':'literals','sk':'1','m':{'k':?}}";
-        request("DynamoDB_20120810.ExecuteStatement", member(insert, "[{\"S\":\"v\"}]"))
+        String insert = "INSERT INTO " + QUOTED_TABLE + " VALUE {'pk':'literals','sk':'1','m':{'k':?}}";
+        statement(insert, "[{\"S\":\"v\"}]")
             .statusCode(400)
             .body("message", equalTo("Unsupported data type: Parameter under key root.k at 1:"
                     + (insert.indexOf('?') + 1) + ":1"));
         getItem("literals").body("Item", nullValue());
 
-        request("DynamoDB_20120810.ExecuteStatement",
-                member("INSERT INTO \"" + TABLE + "\" VALUE {'pk':?,'sk':'1','n':1}", "[{\"S\":\"literals\"}]"))
+        statement("INSERT INTO " + QUOTED_TABLE + " VALUE {'pk':?,'sk':'1','n':1}", "[{\"S\":\"literals\"}]")
             .statusCode(200);
-        request("DynamoDB_20120810.ExecuteStatement",
-                member("SELECT sk FROM \"" + TABLE + "\" WHERE pk='literals' AND n IN [?, 2]", "[{\"N\":\"1\"}]"))
+        statement("SELECT sk FROM " + QUOTED_TABLE + " WHERE pk='literals' AND n IN [?, 2]", "[{\"N\":\"1\"}]")
             .statusCode(200)
             .body("Items.size()", equalTo(1));
     }
@@ -358,7 +356,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Test
     @Order(16)
     void refusesALiteralNested32LevelsDeep() {
-        String update = "UPDATE \"" + TABLE + "\" SET d = ";
+        String update = "UPDATE " + QUOTED_TABLE + " SET d = ";
         String where = " WHERE pk='nested' AND sk='1'";
 
         statement(update + "{'a':".repeat(32) + "1" + "}".repeat(32) + where)
@@ -372,7 +370,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("message", equalTo("Validation failed in TransactStatements[0]:"
                     + " Nesting Levels have exceeded supported limits under root" + "[0]".repeat(32)));
 
-        statement("INSERT INTO \"" + TABLE + "\" VALUE {'pk':'nested','sk':'1','d':"
+        statement("INSERT INTO " + QUOTED_TABLE + " VALUE {'pk':'nested','sk':'1','d':"
                 + "{'a':".repeat(31) + "1" + "}".repeat(31) + "}")
             .statusCode(200);
         getItem("nested").body("Item.d.M.a.M.a.M", notNullValue());
@@ -382,7 +380,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(17)
     void refusesANonNumberLiteralInArithmeticBeforeTheCondition() {
         putItem("arithmetic", "\"n\":{\"N\":\"1\"}");
-        String update = "UPDATE \"" + TABLE + "\" SET n = ";
+        String update = "UPDATE " + QUOTED_TABLE + " SET n = ";
         String failingCondition = " WHERE pk='arithmetic' AND sk='1' AND nope='x'";
 
         statement(update + "'a' + 1" + failingCondition)
@@ -402,7 +400,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(18)
     void readsAttributeExistsAndAttributeNotExists() {
         putItem("exists", "\"m\":{\"M\":{\"x\":{\"S\":\"y\"}}},\"l\":{\"L\":[{\"S\":\"a\"}]}");
-        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE pk='exists' AND sk='1' AND ";
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE pk='exists' AND sk='1' AND ";
 
         statement(select + "attribute_exists(m.x) AND ATTRIBUTE_NOT_EXISTS (nope) AND attribute_exists(l[0])")
             .statusCode(200)
@@ -412,7 +410,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Items.size()", equalTo(0));
         statement(select + "attribute_exists('m')").statusCode(400);
 
-        statement("UPDATE \"" + TABLE + "\" SET t=1 WHERE pk='exists' AND sk='1' AND attribute_exists(nope)")
+        statement("UPDATE " + QUOTED_TABLE + " SET t=1 WHERE pk='exists' AND sk='1' AND attribute_exists(nope)")
             .statusCode(400)
             .body("__type", equalTo("ConditionalCheckFailedException"));
         getItem("exists").body("Item.t", nullValue());
@@ -422,7 +420,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(19)
     void comparesAConditionWithABoolean() {
         putItem("booleans", "\"n\":{\"N\":\"1\"},\"flag\":{\"S\":\"right\"},\"yes\":{\"BOOL\":true}");
-        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE pk='booleans' AND sk='1' AND ";
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE pk='booleans' AND sk='1' AND ";
 
         for (String holds : List.of("attribute_exists(nope) = false", "true = attribute_exists(n)",
                 "attribute_exists(n) <> 1", "contains(nope, 'z') = false", "(n BETWEEN 0 AND 5) = true",
@@ -443,11 +441,8 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(20)
     void readsSortKeyConditionsThatAQueryKeyCannotHold() {
         putItem("ranges", "\"flag\":{\"S\":\"one\"}");
-        request("DynamoDB_20120810.PutItem", """
-                {"TableName":"%s","Item":{"pk":{"S":"ranges"},"sk":{"S":"2"},"flag":{"S":"two"}}}
-                """.formatted(TABLE))
-            .statusCode(200);
-        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE pk='ranges' AND ";
+        putItem("ranges", "2", "\"flag\":{\"S\":\"two\"}");
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE pk='ranges' AND ";
 
         for (String both : List.of("(sk='1' OR sk='2')", "sk IN ['1','2']", "(sk < '1' OR sk > '1' OR sk='1')",
                 "attribute_exists(pk)")) {
@@ -462,7 +457,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Test
     @Order(21)
     void refusesOverlappingKeyConditionsAndMismatchedKeyTypes() {
-        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE ";
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
         String overlapping = "Overlapping conditions with range keys are not supported in where clause";
 
         for (String where : List.of("pk IN ['ranges','ranges']", "pk='ranges' OR pk='ranges'",
@@ -517,7 +512,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Test
     @Order(23)
     void readsByAOneValueInAndRefusesAnythingBesideTheKeyInTransactionAndBatchReads() {
-        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE ";
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
         String batchRefused = "Select statements within BatchExecuteStatement must specify the primary key in the where clause.";
 
         transaction(select + "pk IN ['ranges'] AND sk IN ['1']")
@@ -531,7 +526,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("message", equalTo("Validation failed in TransactStatements[0]:"
                     + " Select statements within ExecuteTransaction must specify the primary key in the where clause."));
         transaction("EXISTS(" + select + "pk IN ['ranges'] AND sk='1' AND flag='one')",
-                "UPDATE \"" + TABLE + "\" SET b=1 WHERE pk='ranges' AND sk='2'")
+                "UPDATE " + QUOTED_TABLE + " SET b=1 WHERE pk='ranges' AND sk='2'")
             .statusCode(400)
             .body("message", equalTo("Validation failed in TransactStatements[0]:"
                     + " EXISTS() must contain a single item read with additional condition"));
@@ -553,18 +548,18 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         putItem("other", "\"flag\":{\"S\":\"right\"}");
         String multiple = "Multiple conditions on same key pk. Only single item Update/Insert/Delete are supported";
 
-        statement("UPDATE \"" + TABLE + "\" SET a=1 WHERE pk='conflict' AND sk='1' AND pk='other'")
+        statement("UPDATE " + QUOTED_TABLE + " SET a=1 WHERE pk='conflict' AND sk='1' AND pk='other'")
             .statusCode(400)
             .body("message", equalTo(multiple));
-        statement("DELETE FROM \"" + TABLE + "\" WHERE pk='conflict' AND sk='1' AND pk='other'")
+        statement("DELETE FROM " + QUOTED_TABLE + " WHERE pk='conflict' AND sk='1' AND pk='other'")
             .statusCode(400)
             .body("message", equalTo(multiple));
-        statement("UPDATE \"" + TABLE + "\" SET a=2 WHERE pk='conflict' AND sk='1' AND pk='conflict'")
+        statement("UPDATE " + QUOTED_TABLE + " SET a=2 WHERE pk='conflict' AND sk='1' AND pk='conflict'")
             .statusCode(200);
         getItem("conflict").body("Item.a.N", equalTo("2"));
 
-        transaction("EXISTS(SELECT * FROM \"" + TABLE + "\" WHERE pk='conflict' AND sk='1' AND pk='other' AND flag='right')",
-                "UPDATE \"" + TABLE + "\" SET b=1 WHERE pk='other' AND sk='1'")
+        transaction("EXISTS(SELECT * FROM " + QUOTED_TABLE + " WHERE pk='conflict' AND sk='1' AND pk='other' AND flag='right')",
+                "UPDATE " + QUOTED_TABLE + " SET b=1 WHERE pk='other' AND sk='1'")
             .statusCode(400)
             .body("CancellationReasons[0].Code", equalTo("ConditionalCheckFailed"))
             .body("CancellationReasons[1].Code", equalTo("None"));
@@ -575,7 +570,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     void cancelsATransactionThatNamesAMissingTable() {
         putItem("missing", "\"flag\":{\"S\":\"right\"}");
         String missingUpdate = "UPDATE \"partiql-edge-cases-missing\" SET a=1 WHERE pk='x' AND sk='1'";
-        String select = "SELECT * FROM \"" + TABLE + "\" WHERE pk='missing' AND sk='1'";
+        String select = "SELECT * FROM " + QUOTED_TABLE + " WHERE pk='missing' AND sk='1'";
 
         transaction(missingUpdate + " RETURNING ALL NEW *", "DELETE FROM \"partiql-edge-cases-missing\" WHERE pk='x' AND sk='1'")
             .statusCode(400)
@@ -587,10 +582,10 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("CancellationReasons.Code", contains("None", "ResourceNotFound"))
             .body("CancellationReasons[0].Message", nullValue());
 
-        transaction(missingUpdate, "UPDATE \"" + TABLE + "\" SET a=1 WHERE pk='missing' AND sk='1' RETURNING ALL NEW *")
+        transaction(missingUpdate, "UPDATE " + QUOTED_TABLE + " SET a=1 WHERE pk='missing' AND sk='1' RETURNING ALL NEW *")
             .statusCode(400)
             .body("message", equalTo("Validation failed in TransactStatements[1]: RETURNING clause is not supported in ExecuteTransaction."));
-        transaction("SELECT * FROM \"partiql-edge-cases-missing\" WHERE pk='x' AND sk='1'", "SELECT * FROM \"" + TABLE + "\".\"idx\" WHERE pk='x' AND sk='1'")
+        transaction("SELECT * FROM \"partiql-edge-cases-missing\" WHERE pk='x' AND sk='1'", "SELECT * FROM " + QUOTED_TABLE + ".\"idx\" WHERE pk='x' AND sk='1'")
             .statusCode(400)
             .body("message", equalTo("Validation failed in TransactStatements[1]: Reads on indices are not supported within transactions."));
         getItem("missing").body("Item.a", nullValue());
@@ -600,7 +595,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(26)
     void cancelsATransactionWhoseWriteDoesNotNameOneItem() {
         putItem("keys", "\"flag\":{\"S\":\"right\"}");
-        String update = "UPDATE \"" + TABLE + "\" SET a=1 WHERE ";
+        String update = "UPDATE " + QUOTED_TABLE + " SET a=1 WHERE ";
         String mismatch = "The provided key element does not match the schema";
 
         transaction(update + "pk='keys'", update + "pk IN ['keys'] AND sk='1'", update + "pk='keys' AND sk='1' AND pk='other'",
@@ -610,11 +605,11 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                     "ValidationError", "None"))
             .body("CancellationReasons[0].Message", equalTo(mismatch))
             .body("CancellationReasons[3].Message", equalTo(mismatch));
-        transaction("INSERT INTO \"" + TABLE + "\" VALUE {'pk':'keys-insert'}", "DELETE FROM \"" + TABLE + "\" WHERE sk='1'")
+        transaction("INSERT INTO " + QUOTED_TABLE + " VALUE {'pk':'keys-insert'}", "DELETE FROM " + QUOTED_TABLE + " WHERE sk='1'")
             .statusCode(400)
             .body("CancellationReasons[0].Message", equalTo("One or more parameter values were invalid: Missing the key sk in the item"))
             .body("CancellationReasons[1].Message", equalTo(mismatch));
-        transaction("SELECT * FROM \"" + TABLE + "\" WHERE pk='keys' AND sk=1")
+        transaction("SELECT * FROM " + QUOTED_TABLE + " WHERE pk='keys' AND sk=1")
             .statusCode(400)
             .body("CancellationReasons[0].Message", equalTo(mismatch));
         getItem("keys").body("Item.a", nullValue());
@@ -624,11 +619,11 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     @Order(27)
     void refusesAWriteThatLeavesTheItemTooDeep() {
         putItem("deep-path", "\"m\":{\"M\":{}}");
-        String update = "UPDATE \"" + TABLE + "\" SET m.deep = ? WHERE pk='deep-path' AND sk='1'";
+        String update = "UPDATE " + QUOTED_TABLE + " SET m.deep = ? WHERE pk='deep-path' AND sk='1'";
         String parameters = "[" + "{\"M\":{\"a\":".repeat(31) + "{\"S\":\"x\"}" + "}}".repeat(31) + "]";
         String tooDeep = "Nesting Levels have exceeded supported limits";
 
-        request("DynamoDB_20120810.ExecuteStatement", member(update, parameters))
+        statement(update, parameters)
             .statusCode(400)
             .body("message", equalTo(tooDeep));
         request("DynamoDB_20120810.ExecuteTransaction", "{\"TransactStatements\":[" + member(update, parameters) + "]}")
@@ -647,7 +642,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     void namesAPathColumnFromItsLastNamedComponent() {
         putItem("columns", "\"m\":{\"M\":{\"k\":{\"L\":[{\"S\":\"c\"}]}}}");
 
-        statement("SELECT m.k[0] FROM \"" + TABLE + "\" WHERE pk='columns' AND sk='1'")
+        statement("SELECT m.k[0] FROM " + QUOTED_TABLE + " WHERE pk='columns' AND sk='1'")
             .statusCode(200)
             .body("Items[0].'k[0]'.S", equalTo("c"));
     }
@@ -660,14 +655,22 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     }
 
     private static void putItem(String pk, String attributes) {
+        putItem(pk, "1", attributes);
+    }
+
+    private static void putItem(String pk, String sk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
-                {"TableName":"%s","Item":{"pk":{"S":"%s"},"sk":{"S":"1"},%s}}
-                """.formatted(TABLE, pk, attributes))
+                {"TableName":"%s","Item":{"pk":{"S":"%s"},"sk":{"S":"%s"},%s}}
+                """.formatted(TABLE, pk, sk, attributes))
             .statusCode(200);
     }
 
     private static ValidatableResponse statement(String partiql) {
         return request("DynamoDB_20120810.ExecuteStatement", "{\"Statement\":" + json(partiql) + "}");
+    }
+
+    private static ValidatableResponse statement(String partiql, String parameters) {
+        return request("DynamoDB_20120810.ExecuteStatement", member(partiql, parameters));
     }
 
     private static ValidatableResponse transaction(String... statements) {
