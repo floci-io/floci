@@ -235,6 +235,10 @@ public class EcsContainerManager {
                         .withEmbeddedDns()
                         .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                                 "ecs", taskId, regionResolver.getAccountId(), region));
+                if (protectedNetwork != null) {
+                    specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
+                    specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+                }
 
                 boolean awsFirelens = isAwsFirelens(def);
                 if (awsFirelens) {
@@ -260,7 +264,7 @@ public class EcsContainerManager {
                 // local Docker host (#1778) — awsvpc mappings always get a dynamic
                 // host port in native mode, or expose-only in Docker mode where ECS
                 // consumers reach containers via the docker network IP.
-                if (def.getPortMappings() != null) {
+                if (protectedNetwork == null && def.getPortMappings() != null) {
                     boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
                     boolean publishToHost = !containerDetector.isRunningInContainer();
                     for (PortMapping pm : def.getPortMappings()) {
@@ -341,7 +345,8 @@ public class EcsContainerManager {
                 LOG.infov("Created ECS container {0} for task {1} container {2}", dockerId, taskId, def.getName());
 
                 // Resolve network bindings for ECS-specific model
-                List<NetworkBinding> networkBindings = resolveNetworkBindings(dockerId, def);
+                List<NetworkBinding> networkBindings = resolveNetworkBindings(
+                        protectedNetwork == null ? dockerId : protectedNetwork.namespace().helperId(), def);
 
                 // Build ECS container model
                 Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
