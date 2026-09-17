@@ -219,7 +219,7 @@ public class DynamoDbPartiQLParser {
             if (c == '"') {
                 int start = ++i;
                 while (i < n && input.charAt(i) != '"') i++;
-                tokens.add(new Token(TType.IDENT, input.substring(start, i)));
+                tokens.add(new Token(TType.IDENT, input.substring(start, i), start - 1));
                 i++;
                 continue;
             }
@@ -711,6 +711,8 @@ public class DynamoDbPartiQLParser {
                 && tokens.get(pos + 1).type() == TType.LPAREN;
     }
 
+    private static final Set<String> SET_TYPES = Set.of("SS", "NS", "BS");
+
     private static final List<String> ATTRIBUTE_TYPE_NAMES =
             List.of("N", "BS", "L", "B", "NULL", "M", "S", "SS", "NS", "BOOL");
 
@@ -751,20 +753,27 @@ public class DynamoDbPartiQLParser {
     // SET path = set_add(path, <<...>>), where both paths must be the same one.
     private SetClause parseSetMutation(Path target) {
         Token function = advance();
+        String name = function.value().toUpperCase(Locale.ROOT);
         consume(TType.LPAREN);
+        Token firstArgument = peek();
         if (!parsePath().equals(target)) {
-            throw validationEx("The first argument to " + function.value().toUpperCase(Locale.ROOT)
-                    + " must equal the assignment value at " + position(function));
+            throw validationEx("The first argument to " + name + " must equal the assignment value at "
+                    + position(function));
         }
         consume(TType.COMMA);
         PVal bag = parseValue();
         consume(TType.RPAREN);
+        if (!SET_TYPES.contains(typeCode(bag))) {
+            throw validationEx("The second argument to " + name + " must be a value with type SET at "
+                    + position(firstArgument));
+        }
         return "set_add".equalsIgnoreCase(function.value()) ? new SetAdd(target, bag) : new SetDelete(target, bag);
     }
 
     // line:column:length, as AWS quotes a token back (checked on real AWS, eu-west-2, 2026-09-17).
     private String position(Token token) {
-        return position(token.start(), token.value().length());
+        boolean quoted = statement.charAt(token.start()) == '"';
+        return position(token.start(), token.value().length() + (quoted ? 2 : 0));
     }
 
     private String position(int start, int length) {

@@ -13,6 +13,7 @@ import java.util.Arrays;
 import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -114,6 +115,23 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .statusCode(400)
             .body("message", equalTo("Incorrect operand type for operator or function;"
                     + " operator or function: attribute_type, operand type: BOOL"));
+    }
+
+    @Test
+    @Order(6)
+    void refusesAValueThatIsNotASetInSetAdd() {
+        putItem("sets", "\"BandMembers\":{\"SS\":[\"member1\",\"member2\"]}");
+        String prefix = "UPDATE \"" + TABLE + "\"\nSET BandMembers = set_add(";
+
+        statement(prefix + "BandMembers, 'x')\nWHERE pk='sets' AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("The second argument to SET_ADD must be a value with type SET at 2:27:11"));
+        String quotedPrefix = "UPDATE \"" + TABLE + "\" SET \"BandMembers\" = set_delete(";
+        statement(quotedPrefix + "\"BandMembers\", ['x']) WHERE pk='sets' AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("The second argument to SET_DELETE must be a value with type SET at 1:"
+                    + (quotedPrefix.length() + 1) + ":13"));
+        getItem("sets").body("Item.BandMembers.SS", containsInAnyOrder("member1", "member2"));
     }
 
     private static ValidatableResponse getItem(String pk) {
