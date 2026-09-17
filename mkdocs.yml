@@ -149,6 +149,7 @@ nav:
     - Athena: services/athena.md
     - Redshift: services/redshift.md
     - Redshift Data API: services/redshift-data.md
+    - Redshift Serverless: services/redshift-serverless.md
     - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md
     - EventBridge Pipes: services/pipes.md

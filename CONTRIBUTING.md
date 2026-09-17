@@ -166,12 +166,20 @@ you add or change; leave unrelated cleanups for their own PR.
 6. Add `floci.services.<key>.enabled` to both `src/main/resources/application.yml` and `src/test/resources/application.yml`
 7. Wire controller/handler dispatch for the service (JSON 1.1 handlers are injected into `AwsJson11Controller`)
 8. Obtain storage through `StorageFactory` and implement `Resettable`; list any static `Random` or `SecureRandom` field under `--initialize-at-run-time` in `application.yml`
-9. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
-10. Document it: `docs/services/<service>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in `docs/services/index.md`, and a row in the README category table
-11. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and `make docs-check`
-12. Add a client factory in the compat suite's `TestFixtures` and a `<Svc>Test` under `compatibility-tests/sdk-test-java`
+9. Check every timestamp member you emit for a `TimestampFormatTrait` before reaching for the
+   epoch-seconds idiom. It is the awsJson1.1 default, but a model can override it per member,
+   and a mismatch is invisible to the AWS CLI because botocore coerces the value, while strict
+   SDKs (Go, Java) reject the whole response. `javap -c` on the SDK model class shows the
+   traits attached to each `SdkField`. In Redshift Serverless, for instance,
+   `Namespace.creationDate` is `ISO_8601` while roughly half the model's other timestamp
+   members carry no trait and use the epoch default. The trait is per member, so check each
+   one you emit
+10. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
+11. Document it: `docs/services/<service>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in `docs/services/index.md`, and a row in the README category table
+12. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and `make docs-check`
+13. Add a client factory in the compat suite's `TestFixtures` and a `<Svc>Test` under `compatibility-tests/sdk-test-java`
 
-`ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` resolve service metadata from the descriptor catalog. Adding a service should not require new service-keyed switch statements in those consumers. `make docs-check` gates steps 10 and 11: a registered service with no matrix row, a `docs/services` page with no matrix row, and a stale action table all fail CI.
+`ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` resolve service metadata from the descriptor catalog. Adding a service should not require new service-keyed switch statements in those consumers. `make docs-check` gates steps 11 and 12: a registered service with no matrix row, a `docs/services` page with no matrix row, and a stale action table all fail CI.
 
 Always implement the **real AWS wire protocol**. Never invent custom endpoints. The AWS SDK must work against Floci without modification.
 
