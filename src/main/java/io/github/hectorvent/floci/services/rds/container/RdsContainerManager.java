@@ -475,33 +475,33 @@ public class RdsContainerManager {
         switch (engine) {
             case POSTGRES -> initializePostgresIamRole(containerName, containerId, masterUsername);
             case SQLSERVER -> initializeSqlServerMaster(containerName, containerId,
-                    masterUsername, masterPassword, dbName);
+                    masterUsername, masterPassword);
             case MYSQL, MARIADB -> {
             }
         }
     }
 
     private void initializeSqlServerMaster(String containerName, String containerId,
-                                           String masterUsername, String masterPassword, String dbName) {
+                                           String masterUsername, String masterPassword) {
         String effectiveUser = (masterUsername == null || masterUsername.isBlank()) ? "sa" : masterUsername;
-        if ("sa".equalsIgnoreCase(effectiveUser) && (dbName == null || dbName.isBlank())) {
+        if ("sa".equalsIgnoreCase(effectiveUser)) {
             return;
         }
-        String databaseSql = dbName == null || dbName.isBlank()
-                ? ""
-                : "IF DB_ID(N'" + sqlServerLiteral(dbName) + "') IS NULL CREATE DATABASE "
-                        + sqlServerIdentifier(dbName) + ";";
-        String loginSql = "sa".equalsIgnoreCase(effectiveUser)
-                ? ""
-                : "IF SUSER_ID(N'" + sqlServerLiteral(effectiveUser) + "') IS NULL BEGIN "
-                        + "CREATE LOGIN " + sqlServerIdentifier(effectiveUser)
-                        + " WITH PASSWORD = N'" + sqlServerLiteral(masterPassword) + "'; END;"
-                        + " ALTER SERVER ROLE sysadmin ADD MEMBER " + sqlServerIdentifier(effectiveUser) + ";";
         String[] cmd = {
                 "/opt/mssql-tools18/bin/sqlcmd", "-S", "127.0.0.1", "-C",
-                "-U", "sa", "-P", masterPassword, "-Q", databaseSql + loginSql
+                "-U", "sa", "-P", masterPassword, "-Q",
+                sqlServerMasterLoginSql(effectiveUser, masterPassword)
         };
         execUntilSuccess(containerName, containerId, cmd, "SQL Server master login");
+    }
+
+    static String sqlServerMasterLoginSql(String masterUsername, String masterPassword) {
+        if ("sa".equalsIgnoreCase(masterUsername)) {
+            return "";
+        }
+        return "IF SUSER_ID(N'" + sqlServerLiteral(masterUsername) + "') IS NULL BEGIN "
+                + "CREATE LOGIN " + sqlServerIdentifier(masterUsername)
+                + " WITH PASSWORD = N'" + sqlServerLiteral(masterPassword) + "'; END;";
     }
 
     private static String sqlServerIdentifier(String value) {
@@ -548,8 +548,10 @@ public class RdsContainerManager {
      * container, so the backend's stored credential matches what clients (and the auth proxy) use
      * from now on. For MySQL/MariaDB this runs as the master user itself with the old password —
      * changing your own password needs no extra privileges, and the container's root password is
-     * the creation-time one, not reliably known after earlier rotations. PostgreSQL's official
-     * image trusts local socket connections, so psql needs no password at all.
+     * the creation-time one, not reliably known after earlier rotations. SQL Server uses the
+     * effective master login and its old password, so repeated rotations do not depend on the
+     * unrelated {@code sa} credential. PostgreSQL's official image trusts local socket
+     * connections, so psql needs no password at all.
      */
     public void rotateMasterPassword(String containerName, String containerId, DatabaseEngine engine,
                                      String masterUsername, String oldPassword, String newPassword) {
@@ -571,7 +573,7 @@ public class RdsContainerManager {
                     ? masterUsername : "sa";
             return new String[]{
                     "/opt/mssql-tools18/bin/sqlcmd", "-S", "127.0.0.1", "-C",
-                    "-U", "sa", "-P", oldPassword, "-Q",
+                    "-U", effectiveUser, "-P", oldPassword, "-Q",
                     "ALTER LOGIN " + sqlServerIdentifier(effectiveUser)
                             + " WITH PASSWORD = N'" + sqlServerLiteral(newPassword)
                             + "' OLD_PASSWORD = N'" + sqlServerLiteral(oldPassword) + "';"};

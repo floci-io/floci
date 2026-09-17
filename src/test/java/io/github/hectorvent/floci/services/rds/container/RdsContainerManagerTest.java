@@ -114,6 +114,15 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void sqlServerMasterLoginDoesNotCreateDatabaseOrGrantSysadmin() {
+        String sql = RdsContainerManager.sqlServerMasterLoginSql("admin", "Password123!");
+
+        assertTrue(sql.contains("CREATE LOGIN [admin]"));
+        assertFalse(sql.contains("CREATE DATABASE"));
+        assertFalse(sql.contains("sysadmin"));
+    }
+
+    @Test
     void defersToServerAuthenticationForMysql9AndUnversionedImages() {
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.MYSQL, "mysql:9.0").isEmpty());
@@ -166,6 +175,12 @@ class RdsContainerManagerTest {
                 DatabaseEngine.POSTGRES, "admin", "old-pass", "new-pass");
         assertEquals("psql", postgres[0]);
         assertEquals("ALTER ROLE \"admin\" WITH PASSWORD 'new-pass';", postgres[postgres.length - 1]);
+
+        String[] sqlServer = RdsContainerManager.passwordRotationCommand(
+                DatabaseEngine.SQLSERVER, "admin", "old-pass", "new-pass");
+        assertEquals("admin", sqlServer[5]);
+        assertEquals("old-pass", sqlServer[7]);
+        assertTrue(sqlServer[9].contains("ALTER LOGIN [admin]"));
     }
 
     @Test
