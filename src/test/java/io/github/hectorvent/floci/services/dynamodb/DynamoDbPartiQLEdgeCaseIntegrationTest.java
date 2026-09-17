@@ -211,6 +211,28 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Responses[0].Item.a.S", equalTo("x"));
     }
 
+    @Test
+    @Order(10)
+    void readsOnlyByTheKeyInATransaction() {
+        putItem("keyed", "\"flag\":{\"S\":\"right\"}");
+        String select = "SELECT * FROM \"" + TABLE + "\" WHERE ";
+        String refused = "Validation failed in TransactStatements[0]:"
+                + " Select statements within ExecuteTransaction must specify the primary key in the where clause.";
+
+        transaction(select + "pk='keyed' AND sk='1' AND flag='right'")
+            .statusCode(400)
+            .body("message", equalTo(refused));
+        transaction(select + "pk='keyed' AND sk='1' AND pk='reads'")
+            .statusCode(400)
+            .body("message", equalTo(refused));
+        transaction(select + "pk='keyed'")
+            .statusCode(400)
+            .body("message", equalTo(refused));
+        transaction(select + "(sk='1') AND pk='keyed' AND pk='keyed'")
+            .statusCode(200)
+            .body("Responses[0].Item.flag.S", equalTo("right"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

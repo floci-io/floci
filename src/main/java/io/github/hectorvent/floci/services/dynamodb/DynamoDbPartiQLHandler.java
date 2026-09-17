@@ -654,6 +654,10 @@ class DynamoDbPartiQLHandler {
         }
         TableDefinition table = tables.computeIfAbsent(stmt.table(),
                 name -> service.describeTable(name, region));
+        if (!namesOnlyTheKey(table, stmt.where())) {
+            throw new AwsException("ValidationException",
+                    "Select statements within ExecuteTransaction must specify the primary key in the where clause.", 400);
+        }
         ObjectNode get = mapper.createObjectNode();
         get.put("TableName", stmt.table());
         get.set("Key", buildKey(table, stmt.where()));
@@ -743,6 +747,12 @@ class DynamoDbPartiQLHandler {
                 .map(c -> ((Cond.Eq) c).path().root())
                 .distinct()
                 .count() == keyNames.size();
+    }
+
+    // A key named twice with one value still counts (checked on real AWS, eu-west-2, 2026-09-17).
+    private static boolean namesOnlyTheKey(TableDefinition table, List<Cond> where) {
+        return nonKeyConditions(table, where).isEmpty()
+                && where.stream().distinct().count() == keyAttributeNames(table).size();
     }
 
     private static Set<String> keyAttributeNames(TableDefinition table) {
