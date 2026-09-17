@@ -31,6 +31,8 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -40,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 
 import static io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbValidation.conflict;
@@ -1148,11 +1151,11 @@ public class TimestreamInfluxDbService implements Resettable {
     private Map<String, String> tagsOf(String arn) {
         ArnReference reference = parseArn(arn);
         return switch (reference.type()) {
-            case "db-instance" -> new java.util.LinkedHashMap<>(requireInstance(reference.region(), reference.id()).getTags());
-            case "db-cluster" -> new java.util.LinkedHashMap<>(requireCluster(reference.region(), reference.id()).getTags());
-            case "db-parameter-group" -> new java.util.LinkedHashMap<>(
+            case "db-instance" -> new LinkedHashMap<>(requireInstance(reference.region(), reference.id()).getTags());
+            case "db-cluster" -> new LinkedHashMap<>(requireCluster(reference.region(), reference.id()).getTags());
+            case "db-parameter-group" -> new LinkedHashMap<>(
                     requireParameterGroup(reference.region(), reference.id()).getTags());
-            default -> new java.util.LinkedHashMap<>(requireBackup(reference.region(), reference.id()).getTags());
+            default -> new LinkedHashMap<>(requireBackup(reference.region(), reference.id()).getTags());
         };
     }
 
@@ -1245,7 +1248,7 @@ public class TimestreamInfluxDbService implements Resettable {
     private List<DbInstance> clusterMembers(String region, String clusterId) {
         return instances.scan(regionPrefix(region)).stream()
                 .filter(instance -> clusterId.equals(instance.getDbClusterId()))
-                .sorted(java.util.Comparator.comparing(DbInstance::getName))
+                .sorted(Comparator.comparing(DbInstance::getName))
                 .toList();
     }
 
@@ -1309,7 +1312,7 @@ public class TimestreamInfluxDbService implements Resettable {
         return region + ":" + id;
     }
 
-    private static java.util.function.Predicate<String> regionPrefix(String region) {
+    private static Predicate<String> regionPrefix(String region) {
         return storageKey -> storageKey.startsWith(region + ":");
     }
 

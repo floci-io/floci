@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -79,7 +80,7 @@ class EmulatorLifecycleTest {
     @Mock private io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager rabbitMqManager;
     @Mock private io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager flinkContainerManager;
     @Mock private RdsService rdsService;
-    @Mock private io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService timestreamInfluxDbService;
+    @Mock private TimestreamInfluxDbService timestreamInfluxDbService;
     @Mock private EmulatorConfig.TimestreamInfluxDbServiceConfig timestreamInfluxDbServiceConfig;
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private io.github.hectorvent.floci.services.elb.ElbClassicService elbClassicService;
