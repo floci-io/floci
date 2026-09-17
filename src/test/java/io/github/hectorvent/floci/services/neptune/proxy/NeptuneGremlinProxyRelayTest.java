@@ -64,4 +64,33 @@ class NeptuneGremlinProxyRelayTest {
             }
         }
     }
+
+    @Test
+    void clientHalfCloseClosesRelayWhenBackendStaysOpenAfterResponse() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket freePort = new ServerSocket(0)) {
+            int proxyPort = freePort.getLocalPort();
+            NeptuneGremlinProxy proxy = new NeptuneGremlinProxy(
+                    "cluster", "127.0.0.1", backendServer.getLocalPort());
+            freePort.close();
+            proxy.start(proxyPort);
+
+            try (Socket client = new Socket("127.0.0.1", proxyPort);
+                 Socket backend = backendServer.accept()) {
+                client.setSoTimeout(3_000);
+                client.shutdownOutput();
+                while (backend.getInputStream().read() != -1) {
+                    // Drain until the client half-close reaches the backend.
+                }
+                backend.getOutputStream().write("response".getBytes(StandardCharsets.US_ASCII));
+                backend.getOutputStream().flush();
+
+                assertEquals("response", new String(client.getInputStream().readNBytes(8),
+                        StandardCharsets.US_ASCII));
+                assertEquals(-1, client.getInputStream().read());
+            } finally {
+                proxy.stop();
+            }
+        }
+    }
 }

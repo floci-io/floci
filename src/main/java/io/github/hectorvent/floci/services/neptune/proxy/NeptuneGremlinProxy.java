@@ -18,6 +18,7 @@ import java.net.Socket;
  * <p>Uses Java virtual threads for non-blocking I/O.
  */
 public class NeptuneGremlinProxy {
+    private static final long RELAY_JOIN_TIMEOUT_MILLIS = 1_000;
 
     private static final Logger LOG = Logger.getLogger(NeptuneGremlinProxy.class);
 
@@ -89,8 +90,8 @@ public class NeptuneGremlinProxy {
         Thread t2 = Thread.ofPlatform().daemon(true).name("neptune-relay-b2c-" + clusterId)
                 .start(() -> pipe(backend, client));
         try {
-            t2.join();
-            t1.join(1_000);
+            t1.join(RELAY_JOIN_TIMEOUT_MILLIS);
+            t2.join(RELAY_JOIN_TIMEOUT_MILLIS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {

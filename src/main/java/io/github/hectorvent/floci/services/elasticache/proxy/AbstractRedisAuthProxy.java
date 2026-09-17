@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
  * <p>Uses Java virtual threads to accept connections and run the AUTH handshake.
  */
 public abstract class AbstractRedisAuthProxy {
+    private static final long RELAY_JOIN_TIMEOUT_MILLIS = 1_000;
 
     private static final byte[] OK_RESPONSE = "+OK\r\n".getBytes(StandardCharsets.UTF_8);
     private static final byte[] NOAUTH_RESPONSE =
@@ -169,8 +170,8 @@ public abstract class AbstractRedisAuthProxy {
         Thread t2 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-b2c-" + resourceId)
                 .start(() -> relay(backend, client));
         try {
-            t2.join();
-            t1.join(1_000);
+            t1.join(RELAY_JOIN_TIMEOUT_MILLIS);
+            t2.join(RELAY_JOIN_TIMEOUT_MILLIS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
