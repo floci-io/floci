@@ -524,6 +524,11 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .statusCode(400)
             .body("message", equalTo("Validation failed in TransactStatements[0]:"
                     + " Select statements within ExecuteTransaction must specify the primary key in the where clause."));
+        transaction("EXISTS(" + select + "pk IN ['ranges'] AND sk='1' AND flag='one')",
+                "UPDATE \"" + TABLE + "\" SET b=1 WHERE pk='ranges' AND sk='2'")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]:"
+                    + " EXISTS() must contain a single item read with additional condition"));
 
         request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":["
                 + "{\"Statement\":" + json(select + "pk IN ['ranges'] AND sk='1'") + "},"
@@ -573,7 +578,8 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("CancellationReasons[0].Message", equalTo("Requested resource not found"));
         transaction(select, "SELECT * FROM \"partiql-edge-cases-missing\".\"idx\" WHERE pk='x' AND sk='1'")
             .statusCode(400)
-            .body("CancellationReasons.Code", contains("None", "ResourceNotFound"));
+            .body("CancellationReasons.Code", contains("None", "ResourceNotFound"))
+            .body("CancellationReasons[0].Message", nullValue());
 
         transaction(missingUpdate, "UPDATE \"" + TABLE + "\" SET a=1 WHERE pk='missing' AND sk='1' RETURNING ALL NEW *")
             .statusCode(400)
@@ -628,6 +634,16 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Responses[0].Error.Message", equalTo(tooDeep))
             .body("Responses[0].TableName", equalTo(TABLE));
         getItem("deep-path").body("Item.m.M.deep", nullValue());
+    }
+
+    @Test
+    @Order(28)
+    void namesAPathColumnFromItsLastNamedComponent() {
+        putItem("columns", "\"m\":{\"M\":{\"k\":{\"L\":[{\"S\":\"c\"}]}}}");
+
+        statement("SELECT m.k[0] FROM \"" + TABLE + "\" WHERE pk='columns' AND sk='1'")
+            .statusCode(200)
+            .body("Items[0].'k[0]'.S", equalTo("c"));
     }
 
     private static ValidatableResponse getItem(String pk) {

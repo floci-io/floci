@@ -731,7 +731,6 @@ final class ExpressionEvaluator {
         return compareAttributeValues(val, low) >= 0 && compareAttributeValues(val, high) <= 0;
     }
 
-    // A value of another type is neither smaller nor larger (checked on real AWS, eu-west-2, 2026-09-17).
     private static boolean sameType(JsonNode left, JsonNode right) {
         return left.fieldNames().next().equals(right.fieldNames().next());
     }

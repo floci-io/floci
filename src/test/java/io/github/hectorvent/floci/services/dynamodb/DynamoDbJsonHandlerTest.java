@@ -1690,6 +1690,17 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void executeStatementReadsAParameterWithALeafAtLevel33() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode request = mapper.createObjectNode();
+        request.put("Statement", "SELECT * FROM \"Users\" WHERE userId=? AND deep=?");
+        request.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "u1")).add(nestedMaps(32)));
+
+        Response response = handler.handle("ExecuteStatement", request, "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
     void executeTransactionCancelsOnAnItemLeftTooDeepWithThatStatementsReason() throws Exception {
         createUsersTable("eu-west-1");
         service.putItem("Users", item("userId", "u1"), "eu-west-1");

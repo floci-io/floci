@@ -120,7 +120,6 @@ class DynamoDbPartiQLHandler {
         return resp;
     }
 
-    // partition is set when the key conditions pin one partition but do not fit a KeyConditionExpression.
     private record Routing(Cond.Eq pkEq, Cond skCond, List<Cond> filterConds, PVal partition) {}
 
     private static Routing routingOf(List<Cond> where, DynamoDbPartiQLKeyPlan keys, String pkName, String skName) {
@@ -227,7 +226,6 @@ class DynamoDbPartiQLHandler {
         return new Page(matching, result.lastEvaluatedKey());
     }
 
-    // Sorts every matching row, then pages the sorted rows. The NextToken names the last row returned.
     private Page readOrdered(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                              Routing routing, JsonNode after, Integer limit, String region) {
         requireOrderByShape(stmt, accessPath);
@@ -253,7 +251,6 @@ class DynamoDbPartiQLHandler {
         return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter);
     }
 
-    // The rules and their wording were checked on real AWS (eu-west-2, 2026-09-17).
     private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath) {
         if (stmt.where().isEmpty()) {
             throw new AwsException("ValidationException",
@@ -291,8 +288,6 @@ class DynamoDbPartiQLHandler {
         };
     }
 
-    // Without its own term the partition key sorts ascending and the sort key descending, even
-    // under ORDER BY pk ASC (checked on real AWS, eu-west-2, 2026-09-17).
     private static Comparator<JsonNode> orderByComparator(List<OrderTerm> terms, DynamoDbAccessPath accessPath,
                                                           TableDefinition table) {
         String pkName = accessPath.partitionKeyName();
@@ -415,8 +410,6 @@ class DynamoDbPartiQLHandler {
                 "attribute_type(" + ean.alias(at.path()) + ", " + eav.add(toTypedNode(at.type())) + ")";
             case Cond.SizeCmp sc ->
                 "size(" + ean.alias(sc.path()) + ") " + sc.op() + " " + eav.add(toTypedNode(sc.val()));
-            // IS NULL holds only for a stored NULL, so a missing attribute IS NOT NULL
-            // (checked on real AWS, eu-west-2, 2026-09-17).
             case Cond.IsNull isNull -> (isNull.negated() ? "NOT " : "") + "attribute_type(" + ean.alias(isNull.path())
                     + ", " + eav.add(mapper.createObjectNode().put("S", "NULL")) + ")";
             case Cond.And and -> joinOperands(and.operands(), " AND ", eav, ean);
@@ -432,8 +425,6 @@ class DynamoDbPartiQLHandler {
                 .collect(Collectors.joining(separator)) + ")";
     }
 
-    // Unkeyed the read is a scan of the index, which matches nothing rather than
-    // failing. The wording says Secondary index for both index kinds.
     private static void requireFilterAttributesProjected(DynamoDbPartiQLKeyPlan keys, DynamoDbAccessPath accessPath,
                                                          TableDefinition table) {
         if (!accessPath.isIndex() || "ALL".equals(accessPath.projectionType())) {
@@ -541,8 +532,6 @@ class DynamoDbPartiQLHandler {
         };
     }
 
-    // MODIFIED reports the paths the update touched, so it holds neither the key
-    // nor an attribute the statement left alone.
     private JsonNode returnedAttributes(Returning returning, DynamoDbService.UpdateResult result) {
         return switch (returning) {
             case NONE -> null;
@@ -573,7 +562,6 @@ class DynamoDbPartiQLHandler {
 
     // --- Transaction item builder ---
 
-    /** A statement of a transaction, as the item it runs or as the reason it cancels the transaction. */
     record TransactMember(JsonNode item, TransactionCanceledException.CancellationReason reason) {
 
         static TransactMember cancels(String code, String message) {
@@ -581,8 +569,6 @@ class DynamoDbPartiQLHandler {
         }
     }
 
-    // A missing table cancels the transaction instead of failing it, and it is found before the
-    // RETURNING clause is checked (checked on real AWS, eu-west-2, 2026-09-17).
     TransactMember toTransactItem(Stmt stmt, String region) {
         if (stmt instanceof Stmt.Update upd) {
             requireNoIndexQualifier(upd.index());
@@ -656,8 +642,6 @@ class DynamoDbPartiQLHandler {
         return new TransactMember(txItem, null);
     }
 
-    // EXISTS needs the full key and at least one more condition, and IN does not count as
-    // naming the key (checked on real AWS, eu-west-2, 2026-09-17).
     private ObjectNode conditionCheck(Stmt.Select select, TableDefinition table) {
         List<Cond> conditions = nonKeyConditions(table, select.where());
         if (!pinsFullKey(table, select.where()) || conditions.isEmpty()) {
@@ -679,8 +663,6 @@ class DynamoDbPartiQLHandler {
         return check;
     }
 
-    // A write that does not name exactly one item cancels the transaction instead of failing it
-    // (checked on real AWS, eu-west-2, 2026-09-17).
     private static Optional<TransactMember> keyProblemOf(Stmt stmt, TableDefinition table) {
         return switch (stmt) {
             case Stmt.Insert ins -> table.getKeySchema().stream()
@@ -714,7 +696,6 @@ class DynamoDbPartiQLHandler {
                 .allMatch(key -> DynamoDbPartiQLKeyPlan.matchesKeyType(table, key.getKey(), key.getValue()));
     }
 
-    // A read of a missing table cancels too, and it is found before the index qualifier is checked.
     TransactMember toTransactGetItem(Stmt.Select stmt, String region) {
         Optional<TableDefinition> found = service.findTable(stmt.table(), region);
         if (found.isEmpty()) {
@@ -750,8 +731,6 @@ class DynamoDbPartiQLHandler {
 
     // --- Shared helpers ---
 
-    // set_add and set_delete run as the ADD and DELETE actions, which is also where a set
-    // on an absent attribute is created or left alone (checked on real AWS, eu-west-2, 2026-09-17).
     private String buildUpdateExpression(List<SetClause> sets, List<Path> removes,
                                          ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
         List<String> assignments = new ArrayList<>();
@@ -799,8 +778,6 @@ class DynamoDbPartiQLHandler {
         };
     }
 
-    // The first equality on a key attribute names the item, and a later one with another value
-    // is a condition (checked on real AWS, eu-west-2, 2026-09-17).
     private ObjectNode buildKey(TableDefinition table, List<Cond> where) {
         Set<String> keyNames = keyAttributeNames(table);
         ObjectNode key = mapper.createObjectNode();
@@ -826,8 +803,6 @@ class DynamoDbPartiQLHandler {
                 .count() == keyNames.size();
     }
 
-    // A key named twice with one value, or by an IN with one value, still counts
-    // (checked on real AWS, eu-west-2, 2026-09-17).
     static boolean namesOnlyTheKey(TableDefinition table, List<Cond> where) {
         List<Cond> equalities = asEqualities(where);
         return nonKeyConditions(table, equalities).isEmpty()
@@ -876,7 +851,6 @@ class DynamoDbPartiQLHandler {
         }
     }
 
-    // PartiQL UPDATE is not an upsert, so the key has to hold an item already.
     private String updateCondition(TableDefinition table, List<Cond> where,
                                    ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
         String exists = "attribute_exists(" + ean.alias(table.getPartitionKeyName()) + ")";
@@ -884,8 +858,6 @@ class DynamoDbPartiQLHandler {
         return filters.isEmpty() ? exists : exists + " AND " + joinOperands(filters, " AND ", eav, ean);
     }
 
-    // A DELETE on a key holding no item is a no-op rather than a failure, so an
-    // absent item satisfies the condition.
     private String deleteCondition(TableDefinition table, List<Cond> where,
                                    ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
         List<Cond> filters = nonKeyConditions(table, where);
@@ -924,7 +896,6 @@ class DynamoDbPartiQLHandler {
         };
     }
 
-    // A RETURNING clause answers one row, and an empty projection answers none.
     private ObjectNode itemsResponse(JsonNode returned) {
         ObjectNode resp = mapper.createObjectNode();
         ArrayNode items = mapper.createArrayNode();

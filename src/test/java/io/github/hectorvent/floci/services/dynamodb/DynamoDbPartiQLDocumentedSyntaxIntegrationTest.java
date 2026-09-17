@@ -231,7 +231,6 @@ class DynamoDbPartiQLDocumentedSyntaxIntegrationTest {
 
         assertOrder("pk = 'o' ORDER BY sk DESC", "o/3", "o/2", "o/1");
         assertOrder("pk = 'o' ORDER BY sk", "o/1", "o/2", "o/3");
-        // Without its own term the sort key comes back descending, even under pk ASC.
         assertOrder("pk = 'o' ORDER BY pk ASC", "o/3", "o/2", "o/1");
         assertOrder("pk IN ['o', 'p'] ORDER BY pk DESC, sk ASC", "p/1", "p/2", "p/3", "o/1", "o/2", "o/3");
 

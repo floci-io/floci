@@ -20,7 +20,6 @@ public class DynamoDbPartiQLParser {
         EOF
     }
 
-    // start is the offset in the statement, kept only where an error message quotes it.
     record Token(TType type, String value, int start) {
         Token(TType type, String value) {
             this(type, value, -1);
@@ -44,8 +43,6 @@ public class DynamoDbPartiQLParser {
             return segments.size() == 1;
         }
 
-        // PartiQL reports a document path from its last named component on, list indexes
-        // included, so SELECT a.b[0] answers b[0] (checked on real AWS, eu-west-2, 2026-09-17).
         String leafName() {
             int last = segments.size() - 1;
             while (segments.get(last) instanceof Seg.Index) {
@@ -59,11 +56,6 @@ public class DynamoDbPartiQLParser {
         }
     }
 
-    /**
-     * A RETURNING clause, named after the PartiQL words so {@link #clause()} can quote
-     * the statement back. The classic ReturnValues parameter calls the same MODIFIED
-     * projection UPDATED, which is what {@link #returnValues()} answers.
-     */
     public enum Returning {
         NONE("NONE"),
         ALL_OLD("ALL_OLD"),
@@ -144,18 +136,15 @@ public class DynamoDbPartiQLParser {
         record Av(String type, JsonNode node) implements PVal {}
         record ListOf(List<PVal> items)          implements PVal {}
         record Tuple(Map<String, PVal> fields)   implements PVal {}
-        // A string or number set, written <<...>>.
         record Bag(String type, List<PVal> members) implements PVal {}
     }
 
     sealed interface Cond permits Cond.Leaf, Cond.And, Cond.Or, Cond.Not {
 
-        /** The attribute the condition names outright. A nested path or a composite names none. */
         default Optional<String> bareAttribute() {
             return Optional.empty();
         }
 
-        /** A condition reading one attribute. The composites below reach several. */
         sealed interface Leaf extends Cond permits Eq, Cmp, Between, BeginsWith, In, Missing,
                 Contains, AttributeType, SizeCmp, IsNull {
             Path path();
@@ -191,7 +180,6 @@ public class DynamoDbPartiQLParser {
         Path path();
     }
 
-    // op is null for a plain assignment, + or - for arithmetic.
     record Assign(Path path, Operand left, String op, Operand right) implements SetClause {}
     record SetAdd(Path path, PVal bag)                               implements SetClause {}
     record SetDelete(Path path, PVal bag)                            implements SetClause {}
@@ -219,7 +207,6 @@ public class DynamoDbPartiQLParser {
             if (c == '\'') {
                 StringBuilder text = new StringBuilder();
                 i++;
-                // Two single quotes in a row stand for one.
                 while (i < n && (input.charAt(i) != '\'' || (i + 1 < n && input.charAt(i + 1) == '\''))) {
                     text.append(input.charAt(i));
                     i += input.charAt(i) == '\'' ? 2 : 1;
@@ -262,7 +249,6 @@ public class DynamoDbPartiQLParser {
             if (c == ':') { tokens.add(new Token(TType.COLON, ":")); i++; continue; }
             if (c == ';') { tokens.add(new Token(TType.SEMICOLON, ";")); i++; continue; }
             if (c == '.') { tokens.add(new Token(TType.DOT, ".")); i++; continue; }
-            // A minus right after an operand subtracts, so n-1 is n minus 1 and not n followed by -1.
             if (Character.isDigit(c)
                     || (c == '-' && i + 1 < n && Character.isDigit(input.charAt(i + 1)) && !endsOperand(tokens))) {
                 int start = i;
@@ -407,7 +393,6 @@ public class DynamoDbPartiQLParser {
         return new Stmt.Select(table, index, cols, where, parseOrderBy());
     }
 
-    // ORDER BY key [ASC | DESC] [, …]
     private List<OrderTerm> parseOrderBy() {
         if (peek().type() != TType.ORDER) {
             return List.of();
@@ -434,7 +419,6 @@ public class DynamoDbPartiQLParser {
         consume(TType.INSERT);
         consume(TType.INTO);
         String table = expectTableName();
-        // An index qualifier is ungrammatical here, unlike on UPDATE and DELETE.
         if (peek().type() == TType.DOT) {
             throw validationEx("FROM clause may only contain a single table name");
         }
@@ -443,7 +427,6 @@ public class DynamoDbPartiQLParser {
         return new Stmt.Insert(table, parseTupleFields(null));
     }
 
-    // Called with the opening brace already consumed.
     private Map<String, PVal> parseTupleFields(String literalPath) {
         boolean literal = literalPath != null;
         literalDepth += literal ? 1 : 0;
@@ -484,7 +467,6 @@ public class DynamoDbPartiQLParser {
         return new Stmt.Update(table, index, sets, removes, where, parseReturning());
     }
 
-    // DELETE FROM "Table" WHERE … [RETURNING ALL OLD *]
     private Stmt.Delete parseDelete() {
         consume(TType.DELETE);
         consume(TType.FROM);
@@ -525,7 +507,6 @@ public class DynamoDbPartiQLParser {
         }
     }
 
-    // RETURNING (ALL | MODIFIED) (OLD | NEW) *
     private Returning parseReturning() {
         if (peek().type() != TType.RETURNING) {
             return Returning.NONE;
@@ -557,7 +538,6 @@ public class DynamoDbPartiQLParser {
         throw validationEx("Expected ALL or MODIFIED and OLD or NEW in the RETURNING clause");
     }
 
-    /** The top-level AND operands, which is where a key equality can appear. */
     private List<Cond> parseConditions() {
         Cond cond = parseOr();
         return cond instanceof Cond.And and ? and.operands() : List.of(cond);
@@ -573,8 +553,6 @@ public class DynamoDbPartiQLParser {
         return operands.size() == 1 ? operands.getFirst() : new Cond.Or(List.copyOf(operands));
     }
 
-    // A parenthesised AND inside an AND is spliced in, so (pk = 'a' AND sk = 'b') AND x = 1
-    // still shows its key equalities at the top level.
     private Cond parseAnd() {
         List<Cond> operands = new ArrayList<>();
         addAndOperand(operands, parseNot());
@@ -606,8 +584,6 @@ public class DynamoDbPartiQLParser {
     private static final List<String> PREDICATE_FUNCTIONS =
             List.of("begins_with", "contains", "attribute_type", "attribute_exists", "attribute_not_exists");
 
-    // A condition compared with a value reads as a boolean, so attribute_exists(a) = false holds
-    // for a missing a and attribute_exists(a) = 1 holds for nothing (checked on real AWS, eu-west-2, 2026-09-17).
     private Cond parseComparison() {
         TType afterBool = tokens.get(Math.min(pos + 1, tokens.size() - 1)).type();
         if (peek().type() == TType.BOOL && (afterBool == TType.EQ || afterBool == TType.NE)) {
@@ -842,7 +818,6 @@ public class DynamoDbPartiQLParser {
         }
     }
 
-    // SET path = set_add(path, <<...>>), where both paths must be the same one.
     private SetClause parseSetMutation(Path target) {
         Token function = advance();
         String name = function.value().toUpperCase(Locale.ROOT);
@@ -862,7 +837,6 @@ public class DynamoDbPartiQLParser {
         return "set_add".equalsIgnoreCase(function.value()) ? new SetAdd(target, bag) : new SetDelete(target, bag);
     }
 
-    // line:column:length, as AWS quotes a token back (checked on real AWS, eu-west-2, 2026-09-17).
     private String position(Token token) {
         boolean quoted = statement.charAt(token.start()) == '"';
         return position(token.start(), token.value().length() + (quoted ? 2 : 0));
@@ -917,7 +891,6 @@ public class DynamoDbPartiQLParser {
             try {
                 long index = Long.parseLong(t.value());
                 if (index < 0) {
-                    // AWS points past the minus sign at the digits (checked on real AWS, eu-west-2, 2026-09-17).
                     throw validationEx("List index is not within the allowable range; index: [" + t.value() + "] at "
                             + position(t.start() + 1, t.value().length() - 1));
                 }
@@ -937,10 +910,7 @@ public class DynamoDbPartiQLParser {
         return parseValue(null);
     }
 
-    // AWS takes a parameter as an INSERT item field, but not inside a list, map or set literal
-    // (checked on real AWS, eu-west-2, 2026-09-17).
     private PVal parseValue(String literalPath) {
-        // A literal member 32 levels down is refused (checked on real AWS, eu-west-2, 2026-09-17).
         if (literalDepth == 32) {
             throw validationEx("Nesting Levels have exceeded supported limits under " + literalPath);
         }
@@ -966,7 +936,6 @@ public class DynamoDbPartiQLParser {
         };
     }
 
-    // A sign applies only to a number literal, never to a parameter or a path.
     private PVal.Num parseSignedNumber(Token sign) {
         Token operand = advance();
         PVal.Num number = switch (operand.type()) {
@@ -980,7 +949,6 @@ public class DynamoDbPartiQLParser {
         return new PVal.Num(number.v().startsWith("-") ? number.v().substring(1) : "-" + number.v());
     }
 
-    // Called with the opening bracket already consumed.
     private List<PVal> parseListItems(String literalPath) {
         literalDepth++;
         List<PVal> items = new ArrayList<>();
@@ -995,7 +963,6 @@ public class DynamoDbPartiQLParser {
         return List.copyOf(items);
     }
 
-    // A bag holds strings or numbers, never both (checked on real AWS, eu-west-2, 2026-09-17).
     private PVal.Bag parseBag(String literalPath) {
         literalDepth++;
         List<PVal> members = new ArrayList<>();

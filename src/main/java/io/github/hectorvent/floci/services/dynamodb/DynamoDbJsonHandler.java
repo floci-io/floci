@@ -1700,7 +1700,6 @@ public class DynamoDbJsonHandler {
                         op.get("ExpressionAttributeNames"),
                         op.get("ExpressionAttributeValues"));
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
-                // Unlike UpdateItem, the message carries no error count (checked on real AWS, eu-west-2, 2026-09-17).
                 dynamoDbService.addOrDeleteOperandTypeError(op.path("UpdateExpression").textValue(),
                         op.get("ExpressionAttributeValues")).ifPresent(message -> {
                             throw new AwsException("ValidationException", message, 400);
@@ -2687,7 +2686,6 @@ public class DynamoDbJsonHandler {
             List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
             for (int i = 0; i < stmts.size(); i++) {
                 JsonNode s = stmts.get(i);
-                // A bad parameter names no statement (checked on real AWS, eu-west-2, 2026-09-17).
                 List<JsonNode> parameters = toPartiQLParams(s.path("Parameters"));
                 statements.add(inTransactStatement(i,
                         () -> DynamoDbPartiQLParser.parse(s.path("Statement").asText(), parameters)));
@@ -2721,7 +2719,6 @@ public class DynamoDbJsonHandler {
             for (TransactionCanceledException.CancellationReason reason : e.getCancellationReasons()) {
                 ObjectNode r = objectMapper.createObjectNode();
                 r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
-                // A statement that did not fail carries no Message (checked on real AWS, eu-west-2, 2026-09-17).
                 if (!reason.code().isEmpty()) {
                     r.put("Message", reason.message() != null ? reason.message() : "The conditional request failed");
                 }
@@ -2743,8 +2740,6 @@ public class DynamoDbJsonHandler {
         List<JsonNode> getItems = cancelOnMemberReasons(members);
 
         List<JsonNode> results = dynamoDbService.transactGetItems(getItems, region);
-        // A bad key cancels the transaction before a repeated item is refused
-        // (checked on real AWS, eu-west-2, 2026-09-17).
         requireOneReadPerItem(getItems, region);
         ArrayNode responses = objectMapper.createArrayNode();
         for (int i = 0; i < results.size(); i++) {
@@ -2785,7 +2780,6 @@ public class DynamoDbJsonHandler {
         }
     }
 
-    // Only a validation error names its statement.
     private <T> T inTransactStatement(int index, Supplier<T> member) {
         try {
             return member.get();

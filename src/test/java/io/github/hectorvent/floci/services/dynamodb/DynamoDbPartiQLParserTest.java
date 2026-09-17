@@ -222,8 +222,6 @@ class DynamoDbPartiQLParserTest {
         assertInstanceOf(Cond.BeginsWith.class, not.operand());
     }
 
-    // OR binds looser than AND, so the whole clause is one top-level condition
-    // rather than a key equality standing beside a filter.
     @Test
     void parsesAGroupedOrAsASingleTopLevelCondition() {
         Stmt stmt = DynamoDbPartiQLParser.parse(

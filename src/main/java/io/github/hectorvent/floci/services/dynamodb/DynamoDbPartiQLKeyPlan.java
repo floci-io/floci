@@ -20,11 +20,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
-/**
- * The key conditions of a PartiQL WHERE clause, spread over every OR and IN that names a key, so each
- * branch reads at most one partition and one sort key range. The rules below were checked on real AWS
- * (eu-west-2, 2026-09-17).
- */
 final class DynamoDbPartiQLKeyPlan {
 
     private final String partitionKey;
@@ -93,8 +88,6 @@ final class DynamoDbPartiQLKeyPlan {
         }
     }
 
-    // A branch whose filters are all projected lets the read through. Otherwise AWS names the
-    // attributes of the branch with the highest partition value, in Java HashSet order.
     List<String> unprojectedFilterAttributes(Set<String> projected) {
         if (!keyed()) {
             return List.of();
@@ -115,7 +108,6 @@ final class DynamoDbPartiQLKeyPlan {
         return List.copyOf(unprojected.getLast());
     }
 
-    /** The one partition every branch reads, when there is one. */
     Optional<PVal> singlePartition() {
         if (!keyed() || branches.stream().anyMatch(branch -> compare(partitionOf(branch), partitionOf(branches.getFirst())) != 0)) {
             return Optional.empty();
@@ -132,7 +124,6 @@ final class DynamoDbPartiQLKeyPlan {
         };
     }
 
-    // A branch without a partition equality, or with two different ones, is read by a scan.
     private boolean keyed() {
         return branches.stream().allMatch(branch -> partitionValues(branch).size() == 1);
     }
@@ -233,7 +224,6 @@ final class DynamoDbPartiQLKeyPlan {
         };
     }
 
-    // The smallest string above every string that starts with the prefix, or no bound at all.
     private static PVal prefixEnd(PVal prefix) {
         if (!(prefix instanceof PVal.Str text)) {
             return null;

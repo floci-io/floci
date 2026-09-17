@@ -67,6 +67,12 @@ class DynamoDbAddDeleteOperandIntegrationTest {
         updateItem("\"UpdateExpression\":\"DELETE s :v\",\"ExpressionAttributeValues\":{\":v\":{\"N\":\"1\"}}")
             .statusCode(400)
             .body("message", equalTo("1 validation error detected: " + REFUSED.formatted("DELETE", "NUMBER")));
+        request("DynamoDB_20120810.UpdateItem", """
+                {"TableName":"add-delete-operands-missing","Key":%s,"UpdateExpression":"ADD n :v",
+                 "ExpressionAttributeValues":{":v":{"S":"x"}}}
+                """.formatted(KEY))
+            .statusCode(400)
+            .body("message", equalTo("1 validation error detected: " + REFUSED.formatted("ADD", "STRING")));
         assertItemUnchanged();
     }
 

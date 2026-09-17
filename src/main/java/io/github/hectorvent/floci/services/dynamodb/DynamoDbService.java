@@ -1586,8 +1586,6 @@ public class DynamoDbService implements ResourceProvider {
         }
     }
 
-    // A value that fits the request can still leave the stored item too deep, as when it is
-    // written under a nested path (checked on real AWS, eu-west-2, 2026-09-17).
     private static void requireItemNestingWithinLimit(JsonNode item) {
         if (!DynamoDbAttributeValueValidator.nestingWithinLimit(item)) {
             throw new ItemNestingExceededException();
@@ -2635,8 +2633,6 @@ public class DynamoDbService implements ResourceProvider {
     private static final Map<String, String> OPERAND_TYPE_NAMES = Map.of(
             "S", "STRING", "N", "NUMBER", "B", "Binary", "BOOL", "BOOL", "NULL", "NULL", "L", "LIST", "M", "MAP");
 
-    // AWS refuses the operand before it reads the table or the item, and names the ADD
-    // type set for DELETE too (checked on real AWS, eu-west-2, 2026-09-17).
     Optional<String> addOrDeleteOperandTypeError(String updateExpression, JsonNode exprAttrValues) {
         if (updateExpression == null || exprAttrValues == null) {
             return Optional.empty();
@@ -2672,8 +2668,6 @@ public class DynamoDbService implements ResourceProvider {
         return Optional.empty();
     }
 
-    // ADD and DELETE refuse an operand whose type differs from the stored attribute
-    // (checked on real AWS, eu-west-2, 2026-09-17).
     private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {
         for (String type : types) {
             if (operand.has(type) && existingValue != null && !existingValue.has(type)) {
