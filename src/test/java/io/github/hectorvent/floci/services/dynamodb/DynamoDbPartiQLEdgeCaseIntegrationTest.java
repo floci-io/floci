@@ -71,6 +71,24 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("grouped").body("Item", nullValue());
     }
 
+    @Test
+    @Order(3)
+    void subtractsWithoutSpacesAndRefusesTrailingTokens() {
+        putItem("minus", "\"n\":{\"N\":\"5\"}");
+
+        statement("UPDATE \"" + TABLE + "\" SET n=n-1 WHERE pk='minus' AND sk='1'").statusCode(200);
+        getItem("minus").body("Item.n.N", equalTo("4"));
+
+        statement("SELECT sk FROM \"" + TABLE + "\" WHERE pk='minus' AND n>-5;")
+            .statusCode(200)
+            .body("Items.size()", equalTo(1));
+        statement("UPDATE \"" + TABLE + "\" SET t=1 WHERE pk='minus' AND sk='1' garbage")
+            .statusCode(400)
+            .body("message", equalTo(
+                    "Statement wasn't well formed, can't be processed: Unexpected token after expression"));
+        getItem("minus").body("Item.t", nullValue());
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

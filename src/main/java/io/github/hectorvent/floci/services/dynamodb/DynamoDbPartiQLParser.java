@@ -15,7 +15,7 @@ public class DynamoDbPartiQLParser {
         LPAREN, RPAREN, LBRACE, RBRACE, COMMA, COLON, DOT,
         OR, NOT, IN, IS, MISSING, RETURNING, ALL, MODIFIED, OLD, NEW,
         PLUS, MINUS, LBRACKET, RBRACKET,
-        LBAG, RBAG,
+        LBAG, RBAG, SEMICOLON,
         ORDER, BY, ASC, DESC,
         EOF
     }
@@ -248,13 +248,16 @@ public class DynamoDbPartiQLParser {
             if (c == ']') { tokens.add(new Token(TType.RBRACKET, "]")); i++; continue; }
             if (c == ',') { tokens.add(new Token(TType.COMMA, ",")); i++; continue; }
             if (c == ':') { tokens.add(new Token(TType.COLON, ":")); i++; continue; }
+            if (c == ';') { tokens.add(new Token(TType.SEMICOLON, ";")); i++; continue; }
             if (c == '.') { tokens.add(new Token(TType.DOT, ".")); i++; continue; }
-            if (Character.isDigit(c) || (c == '-' && i + 1 < n && Character.isDigit(input.charAt(i + 1)))) {
+            // A minus right after an operand subtracts, so n-1 is n minus 1 and not n followed by -1.
+            if (Character.isDigit(c)
+                    || (c == '-' && i + 1 < n && Character.isDigit(input.charAt(i + 1)) && !endsOperand(tokens))) {
                 int start = i;
                 if (c == '-') i++;
                 while (i < n && (Character.isDigit(input.charAt(i)) || input.charAt(i) == '.')) i++;
                 i = skipExponent(input, i);
-                tokens.add(new Token(TType.NUMBER, input.substring(start, i)));
+                tokens.add(new Token(TType.NUMBER, input.substring(start, i), start));
                 continue;
             }
             if (c == '+') { tokens.add(new Token(TType.PLUS, "+")); i++; continue; }
@@ -338,7 +341,22 @@ public class DynamoDbPartiQLParser {
     static Stmt parse(String statement, List<JsonNode> parameters) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         parameters.forEach(DynamoDbAttributeValueValidator::requireParameterNestingWithinLimit);
-        return new DynamoDbPartiQLParser(statement, parameters).parseStmt();
+        DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
+        Stmt stmt = parser.parseStmt();
+        if (parser.peek().type() == TType.SEMICOLON) {
+            parser.advance();
+        }
+        if (parser.peek().type() != TType.EOF) {
+            throw validationEx("Statement wasn't well formed, can't be processed: Unexpected token after expression");
+        }
+        return stmt;
+    }
+
+    private static final Set<TType> OPERAND_ENDS = EnumSet.of(TType.IDENT, TType.NUMBER, TType.STRING,
+            TType.BOOL, TType.NULL, TType.QUESTION, TType.RPAREN, TType.RBRACKET, TType.RBRACE, TType.RBAG);
+
+    private static boolean endsOperand(List<Token> tokens) {
+        return !tokens.isEmpty() && OPERAND_ENDS.contains(tokens.getLast().type());
     }
 
     private Stmt parseStmt() {
