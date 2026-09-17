@@ -10,6 +10,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -247,5 +248,82 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
         .when().post("/")
         .then().statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidRouteTableId.Malformed"));
+    }
+
+    @Test
+    @Order(6)
+    void routeTableFiltersNarrowTheListing() {
+        given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", transitGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeTransitGatewayRouteTablesResponse.transitGatewayRouteTables.item.transitGatewayId",
+                    everyItem(equalTo(transitGatewayId)));
+
+        String otherGateway = given()
+            .formParam("Action", "CreateTransitGateway")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        String otherRouteTableId = extract(otherGateway, "associationDefaultRouteTableId");
+
+        String ours = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", transitGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(ours, containsString(defaultRouteTableId));
+        assertThat(ours, not(containsString(otherRouteTableId)));
+
+        String unmatched = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", "tgw-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(unmatched, not(containsString("<item>")));
+
+        String defaultOnly = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", transitGatewayId)
+            .formParam("Filter.2.Name", "default-association-route-table")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(defaultOnly, containsString(defaultRouteTableId));
+        assertThat(defaultOnly, not(containsString(routeTableId)));
+    }
+
+    @Test
+    @Order(7)
+    void associationFiltersPickOutASingleAttachment() {
+        given()
+            .formParam("Action", "GetTransitGatewayRouteTableAssociations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "transit-gateway-attachment-id")
+            .formParam("Filter.1.Value.1", attachmentId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("GetTransitGatewayRouteTableAssociationsResponse.associations.item.transitGatewayAttachmentId",
+                    equalTo(attachmentId));
+
+        String unmatched = given()
+            .formParam("Action", "GetTransitGatewayRouteTableAssociations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "transit-gateway-attachment-id")
+            .formParam("Filter.1.Value.1", "tgw-attach-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(unmatched, not(containsString("<item>")));
     }
 }

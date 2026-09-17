@@ -2003,11 +2003,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
-    /** The attachments associated with a route table, which is where an association is recorded. */
     public List<TransitGatewayVpcAttachment> associationsOf(String region, String routeTableId) {
+        return associationsOf(region, routeTableId, Map.of());
+    }
+
+    /** The attachments associated with a route table, which is where an association is recorded. */
+    public List<TransitGatewayVpcAttachment> associationsOf(
+            String region, String routeTableId, Map<String, List<String>> filters) {
         return transitGatewayVpcAttachments.scan(k -> true).stream()
                 .filter(attachment -> region.equals(attachment.getRegion()))
                 .filter(attachment -> routeTableId.equals(attachment.getAssociationRouteTableId()))
+                .filter(attachment -> matchesFilters(attachment, filters, region))
                 .collect(Collectors.toList());
     }
 
@@ -7306,6 +7312,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "prefix-list-id" -> matchesValue(values, prefixList.getPrefixListId());
                 case "prefix-list-name" -> matchesValue(values, prefixList.getPrefixListName());
                 case "owner-id" -> matchesValue(values, prefixList.getOwnerId());
+                default -> true;
+            };
+        }
+        if (resource instanceof TransitGatewayRouteTable routeTable) {
+            return switch (filterName) {
+                case "transit-gateway-route-table-id" ->
+                        matchesValue(values, routeTable.getTransitGatewayRouteTableId());
+                case "transit-gateway-id" -> matchesValue(values, routeTable.getTransitGatewayId());
+                case "state" -> matchesValue(values, routeTable.getState());
+                case "default-association-route-table" ->
+                        matchesValue(values, String.valueOf(routeTable.isDefaultAssociationRouteTable()));
+                case "default-propagation-route-table" ->
+                        matchesValue(values, String.valueOf(routeTable.isDefaultPropagationRouteTable()));
                 default -> true;
             };
         }
