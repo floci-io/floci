@@ -162,7 +162,7 @@ public class CloudFrontService {
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
-        dist.setDomainName(id + "." + domainSuffix);
+        dist.setDomainName(domainNameFor(id));
         dist.setStatus("Deployed");
         dist.setLastModifiedTime(Instant.now());
         dist.setEtag(UUID.randomUUID().toString());
@@ -365,6 +365,15 @@ public class CloudFrontService {
             }
         }
         return best;
+    }
+
+    /**
+     * The domain name a new distribution is served under. AWS assigns a lower-case host, and a
+     * browser lower-cases the authority it sends, so an upper-case id in the host would never match
+     * the resource a signed URL was signed for.
+     */
+    private String domainNameFor(String id) {
+        return id.toLowerCase(Locale.ROOT) + "." + domainSuffix;
     }
 
     /**
@@ -1637,7 +1646,7 @@ public class CloudFrontService {
         String id = generateDistributionId();
         sd.setId(id);
         sd.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "streaming-distribution/" + id).toString());
-        sd.setDomainName(id + "." + domainSuffix);
+        sd.setDomainName(domainNameFor(id));
         sd.setStatus("Deployed");
         sd.setLastModifiedTime(Instant.now());
         sd.setEtag(UUID.randomUUID().toString());

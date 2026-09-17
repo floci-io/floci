@@ -233,6 +233,18 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void createDistributionLowerCasesTheDomainNameId() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        Distribution dist = service.createDistribution(new Distribution(), Map.of());
+
+        // A browser lower-cases the host it sends, so an upper-case id here would break every
+        // signed URL built from the domain name.
+        assertEquals(dist.getId().toLowerCase(Locale.ROOT) + ".cloudfront.net", dist.getDomainName());
+        assertEquals(dist.getId(), service.findByHost(dist.getDomainName()).getId());
+    }
+
+    @Test
     void createDistributionHonorsConfiguredDomainSuffix() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.local");
 
