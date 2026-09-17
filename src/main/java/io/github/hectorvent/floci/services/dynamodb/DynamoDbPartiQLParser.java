@@ -860,8 +860,23 @@ public class DynamoDbPartiQLParser {
             case LBRACKET -> new PVal.ListOf(parseListItems());
             case LBRACE   -> new PVal.Tuple(parseTupleFields());
             case LBAG     -> parseBag();
+            case PLUS, MINUS -> parseSignedNumber(t);
             default -> throw validationEx("Expected value literal or ?, got: " + t.value());
         };
+    }
+
+    // A sign applies only to a number literal, never to a parameter or a path.
+    private PVal.Num parseSignedNumber(Token sign) {
+        Token operand = advance();
+        PVal.Num number = switch (operand.type()) {
+            case NUMBER -> new PVal.Num(operand.value());
+            case PLUS, MINUS -> parseSignedNumber(operand);
+            default -> throw validationEx("Unsupported operator in Condition Expression. Operator: " + sign.value());
+        };
+        if (sign.type() == TType.PLUS) {
+            return number;
+        }
+        return new PVal.Num(number.v().startsWith("-") ? number.v().substring(1) : "-" + number.v());
     }
 
     // Called with the opening bracket already consumed.

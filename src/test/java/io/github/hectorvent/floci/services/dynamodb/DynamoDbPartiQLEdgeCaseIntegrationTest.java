@@ -295,6 +295,24 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("comments").body("Item.n.N", equalTo("1"));
     }
 
+    @Test
+    @Order(13)
+    void appliesASignToANumberLiteral() {
+        putItem("signs", "\"n\":{\"N\":\"1\"}");
+        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE pk='signs' AND sk='1' AND ";
+
+        statement(select + "n = - - 1").statusCode(200).body("Items.size()", equalTo(1));
+        statement(select + "n > -/* c */-1").statusCode(200).body("Items.size()", equalTo(0));
+        statement(select + "n BETWEEN - 2 AND +5 AND n IN [- 1, 1]").statusCode(200).body("Items.size()", equalTo(1));
+        statement(select + "n > -?").statusCode(400);
+        statement(select + "n > -n").statusCode(400);
+
+        statement("UPDATE \"" + TABLE + "\" SET n = n - - 2, l = [- 1] WHERE pk='signs' AND sk='1'").statusCode(200);
+        getItem("signs")
+            .body("Item.n.N", equalTo("3"))
+            .body("Item.l.L[0].N", equalTo("-1"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
