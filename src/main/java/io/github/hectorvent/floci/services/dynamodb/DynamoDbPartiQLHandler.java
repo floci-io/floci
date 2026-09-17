@@ -556,21 +556,23 @@ class DynamoDbPartiQLHandler {
 
     record TransactMember(JsonNode item, TransactionCanceledException.CancellationReason reason) {
 
+        static final TransactMember TABLE_NOT_FOUND = cancels("ResourceNotFound", "Requested resource not found");
+        static final TransactMember KEY_MISMATCH = cancels("ValidationError", "The provided key element does not match the schema");
+
         static TransactMember cancels(String code, String message) {
             return new TransactMember(null, new TransactionCanceledException.CancellationReason(code, null, message));
         }
     }
 
     TransactMember toTransactItem(Stmt stmt, String region) {
-        if (stmt instanceof Stmt.Update upd) {
-            requireNoIndexQualifier(upd.index());
-        }
-        if (stmt instanceof Stmt.Delete del) {
-            requireNoIndexQualifier(del.index());
-        }
+        requireNoIndexQualifier(switch (stmt) {
+            case Stmt.Update upd -> upd.index();
+            case Stmt.Delete del -> del.index();
+            default -> null;
+        });
         Optional<TableDefinition> found = service.findTable(stmt.table(), region);
         if (found.isEmpty()) {
-            return TransactMember.cancels("ResourceNotFound", "Requested resource not found");
+            return TransactMember.TABLE_NOT_FOUND;
         }
         TableDefinition table = found.get();
         if (returningOf(stmt) != Returning.NONE) {
@@ -670,28 +672,20 @@ class DynamoDbPartiQLHandler {
     }
 
     private static Optional<TransactMember> wrongKey(TableDefinition table, List<Cond> where) {
-        if (namesOneItem(table, where)) {
-            return Optional.empty();
-        }
-        return Optional.of(TransactMember.cancels("ValidationError", "The provided key element does not match the schema"));
+        boolean namesOneItem = secondKeyValue(table, where).isEmpty() && pinsFullKey(table, where)
+                && keyTypesMatch(table, where);
+        return namesOneItem ? Optional.empty() : Optional.of(TransactMember.KEY_MISMATCH);
     }
 
-    private static boolean namesOneItem(TableDefinition table, List<Cond> where) {
-        Set<String> keyNames = keyAttributeNames(table);
-        Map<String, PVal> firstValues = new HashMap<>();
-        for (Cond c : where) {
-            if (c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames) && !matchesFirstValue(firstValues, eq)) {
-                return false;
-            }
-        }
-        return firstValues.size() == keyNames.size() && firstValues.entrySet().stream()
+    private static boolean keyTypesMatch(TableDefinition table, List<Cond> where) {
+        return firstKeyValues(table, where).entrySet().stream()
                 .allMatch(key -> DynamoDbPartiQLKeyPlan.matchesKeyType(table, key.getKey(), key.getValue()));
     }
 
     TransactMember toTransactGetItem(Stmt.Select stmt, String region) {
         Optional<TableDefinition> found = service.findTable(stmt.table(), region);
         if (found.isEmpty()) {
-            return TransactMember.cancels("ResourceNotFound", "Requested resource not found");
+            return TransactMember.TABLE_NOT_FOUND;
         }
         TableDefinition table = found.get();
         if (stmt.index() != null) {
@@ -703,12 +697,13 @@ class DynamoDbPartiQLHandler {
             throw new AwsException("ValidationException",
                     "Select statements within ExecuteTransaction must specify the primary key in the where clause.", 400);
         }
-        if (!namesOneItem(table, asEqualities(stmt.where()))) {
-            return TransactMember.cancels("ValidationError", "The provided key element does not match the schema");
+        List<Cond> equalities = asEqualities(stmt.where());
+        if (!keyTypesMatch(table, equalities)) {
+            return TransactMember.KEY_MISMATCH;
         }
         ObjectNode get = mapper.createObjectNode();
         get.put("TableName", stmt.table());
-        get.set("Key", buildKey(table, asEqualities(stmt.where())));
+        get.set("Key", buildKey(table, equalities));
         ObjectNode txItem = mapper.createObjectNode();
         txItem.set("Get", get);
         return new TransactMember(txItem, null);
@@ -771,34 +766,22 @@ class DynamoDbPartiQLHandler {
     }
 
     private ObjectNode buildKey(TableDefinition table, List<Cond> where) {
-        Set<String> keyNames = keyAttributeNames(table);
-        ObjectNode key = mapper.createObjectNode();
-        for (Cond c : where) {
-            if (isKeyEquality(c, keyNames) && !key.has(((Cond.Eq) c).path().root())) {
-                Cond.Eq eq = (Cond.Eq) c;
-                key.set(eq.path().root(), toTypedNode(eq.val()));
-            }
-        }
-        if (key.size() != keyNames.size()) {
+        if (!pinsFullKey(table, where)) {
             throw new AwsException("ValidationException",
                     "Where clause does not contain a mandatory equality on all key attributes", 400);
         }
+        ObjectNode key = mapper.createObjectNode();
+        firstKeyValues(table, where).forEach((name, value) -> key.set(name, toTypedNode(value)));
         return key;
     }
 
     private static boolean pinsFullKey(TableDefinition table, List<Cond> where) {
-        Set<String> keyNames = keyAttributeNames(table);
-        return where.stream()
-                .filter(c -> isKeyEquality(c, keyNames))
-                .map(c -> ((Cond.Eq) c).path().root())
-                .distinct()
-                .count() == keyNames.size();
+        return firstKeyValues(table, where).size() == keyAttributeNames(table).size();
     }
 
     static boolean namesOnlyTheKey(TableDefinition table, List<Cond> where) {
         List<Cond> equalities = asEqualities(where);
-        return nonKeyConditions(table, equalities).isEmpty()
-                && equalities.stream().distinct().count() == keyAttributeNames(table).size();
+        return nonKeyConditions(table, equalities).isEmpty() && pinsFullKey(table, equalities);
     }
 
     private static List<Cond> asEqualities(List<Cond> where) {
@@ -815,32 +798,40 @@ class DynamoDbPartiQLHandler {
         return cond instanceof Cond.Eq eq && eq.bareAttribute().filter(keyNames::contains).isPresent();
     }
 
-    private static List<Cond> nonKeyConditions(TableDefinition table, List<Cond> where) {
+    private static Map<String, PVal> firstKeyValues(TableDefinition table, List<Cond> where) {
         Set<String> keyNames = keyAttributeNames(table);
-        Map<String, PVal> firstValues = new HashMap<>();
-        List<Cond> conditions = new ArrayList<>();
+        Map<String, PVal> firstValues = new LinkedHashMap<>();
         for (Cond c : where) {
-            if (!(c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames) && matchesFirstValue(firstValues, eq))) {
-                conditions.add(c);
+            if (c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames)) {
+                firstValues.putIfAbsent(eq.path().root(), eq.val());
             }
         }
-        return conditions;
+        return firstValues;
     }
 
-    private static boolean matchesFirstValue(Map<String, PVal> firstValues, Cond.Eq eq) {
-        PVal first = firstValues.putIfAbsent(eq.path().root(), eq.val());
-        return first == null || first.equals(eq.val());
+    private static Optional<Cond.Eq> secondKeyValue(TableDefinition table, List<Cond> where) {
+        Map<String, PVal> firstValues = firstKeyValues(table, where);
+        return where.stream()
+                .filter(c -> c instanceof Cond.Eq eq
+                        && eq.bareAttribute().map(firstValues::get).filter(first -> !first.equals(eq.val())).isPresent())
+                .map(Cond.Eq.class::cast)
+                .findFirst();
+    }
+
+    private static List<Cond> nonKeyConditions(TableDefinition table, List<Cond> where) {
+        Set<String> keyNames = keyAttributeNames(table);
+        Map<String, PVal> firstValues = firstKeyValues(table, where);
+        return where.stream()
+                .filter(c -> !(c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames)
+                        && firstValues.get(eq.path().root()).equals(eq.val())))
+                .toList();
     }
 
     private static void requireOneValuePerKey(TableDefinition table, List<Cond> where) {
-        Set<String> keyNames = keyAttributeNames(table);
-        Map<String, PVal> firstValues = new HashMap<>();
-        for (Cond c : where) {
-            if (c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames) && !matchesFirstValue(firstValues, eq)) {
-                throw new AwsException("ValidationException", "Multiple conditions on same key " + eq.path().root()
-                        + ". Only single item Update/Insert/Delete are supported", 400);
-            }
-        }
+        secondKeyValue(table, where).ifPresent(eq -> {
+            throw new AwsException("ValidationException", "Multiple conditions on same key " + eq.path().root()
+                    + ". Only single item Update/Insert/Delete are supported", 400);
+        });
     }
 
     private String updateCondition(TableDefinition table, List<Cond> where,
