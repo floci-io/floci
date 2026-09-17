@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.DeviceRequest;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
@@ -102,6 +103,17 @@ public class ContainerBuilder {
      * Fluent builder for constructing ContainerSpec instances.
      */
     public static class Builder {
+        /** Docker's capability name for a GPU, as used by {@code docker run --gpus}. */
+        private static final List<List<String>> GPU_CAPABILITY = List.of(List.of("gpu"));
+        /** Count understood by the daemon as "every device it has", i.e. {@code --gpus all}. */
+        private static final int ALL_DEVICES = -1;
+        /**
+         * Device-request driver that selects a Container Device Interface device by name.
+         * Podman resolves this on its Docker-compatible create API (containers/podman#19338);
+         * Docker's own NVIDIA path uses the count/id form instead.
+         */
+        private static final String CDI_DRIVER = "cdi";
+
         private final String image;
         private final EmulatorConfig config;
         private final DockerHostResolver dockerHostResolver;
@@ -128,6 +140,7 @@ public class ContainerBuilder {
         private String user;
         private final List<String> groupAdd = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
+        private final List<DeviceRequest> deviceRequests = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -420,6 +433,118 @@ public class ContainerBuilder {
         }
 
         /**
+         * Requests {@code count} GPUs, the equivalent of {@code docker run --gpus <count>}.
+         * The daemon chooses which devices. Prefer {@link #withGpuDeviceIds(List)} or
+         * {@link #withCdiDevices(List)} when the caller has to pin specific hardware.
+         *
+         * <p>Docker only. Podman accepts this form on its Docker-compatible API and then
+         * starts the container with no device attached (containers/podman#22645), so a
+         * caller that may be talking to Podman should use {@link #withCdiDevices(List)},
+         * whose failure mode is a refused start rather than a silent CPU-only container.
+         *
+         * @param count how many GPUs to request; must be at least one
+         * @throws IllegalArgumentException if {@code count} is below one
+         * @throws IllegalStateException if a device request was already made
+         */
+        public Builder withGpuCount(int count) {
+            if (count < 1) {
+                throw new IllegalArgumentException(
+                        "GPU count must be at least 1, or use withAllGpus(); got " + count);
+            }
+            requireNoExistingDeviceRequest();
+            deviceRequests.add(new DeviceRequest()
+                    .withCount(count)
+                    .withCapabilities(GPU_CAPABILITY));
+            return this;
+        }
+
+        /**
+         * Requests every GPU the daemon exposes, the equivalent of {@code docker run --gpus all}.
+         * Docker only, with the same Podman caveat as {@link #withGpuCount(int)}.
+         *
+         * @throws IllegalStateException if a device request was already made
+         */
+        public Builder withAllGpus() {
+            requireNoExistingDeviceRequest();
+            deviceRequests.add(new DeviceRequest()
+                    .withCount(ALL_DEVICES)
+                    .withCapabilities(GPU_CAPABILITY));
+            return this;
+        }
+
+        /**
+         * Requests specific GPUs by daemon-assigned id, the equivalent of
+         * {@code docker run --gpus '"device=0,GPU-<uuid>"'}. Ids are indices or vendor UUIDs.
+         *
+         * <p>Indices are not stable across hosts or reboots, so a caller pinning hardware
+         * should prefer a UUID.
+         *
+         * @param deviceIds device ids to request; must be non-empty and individually non-blank
+         * @throws IllegalArgumentException if the list is empty or holds a blank id
+         * @throws IllegalStateException if a device request was already made
+         */
+        public Builder withGpuDeviceIds(List<String> deviceIds) {
+            requireUsableIds(deviceIds, "GPU device id");
+            requireNoExistingDeviceRequest();
+            // Count and ids are alternatives in Docker's API, and sending both is rejected
+            // by the daemon, so this form deliberately leaves the count unset.
+            deviceRequests.add(new DeviceRequest()
+                    .withDeviceIds(List.copyOf(deviceIds))
+                    .withCapabilities(GPU_CAPABILITY));
+            return this;
+        }
+
+        /**
+         * Requests devices by Container Device Interface name, such as
+         * {@code nvidia.com/gpu=GPU-<uuid>}. CDI is how a Podman daemon exposes accelerators
+         * over its Docker-compatible API, and it is not GPU-specific: the name identifies
+         * whatever device the host's CDI specs describe.
+         *
+         * <p>No capability is attached, because the CDI name already selects the device;
+         * the daemon resolves it against the host's CDI specs and fails the container start
+         * if it cannot.
+         *
+         * @param cdiDeviceNames fully-qualified CDI names, each {@code <vendor>/<class>=<name>}
+         * @throws IllegalArgumentException if the list is empty, or a name is blank or unqualified
+         * @throws IllegalStateException if a device request was already made
+         */
+        public Builder withCdiDevices(List<String> cdiDeviceNames) {
+            requireUsableIds(cdiDeviceNames, "CDI device name");
+            for (String name : cdiDeviceNames) {
+                // Catches the common mistake of passing a device path such as /dev/nvidia0,
+                // which the daemon would otherwise reject with an unresolvable-device error
+                // that does not say what was actually wrong with the value.
+                if (!name.contains("/") || !name.contains("=")) {
+                    throw new IllegalArgumentException(
+                            "CDI device name must be fully qualified as <vendor>/<class>=<name>; got " + name);
+                }
+            }
+            requireNoExistingDeviceRequest();
+            deviceRequests.add(new DeviceRequest()
+                    .withDriver(CDI_DRIVER)
+                    .withDeviceIds(List.copyOf(cdiDeviceNames)));
+            return this;
+        }
+
+        private void requireNoExistingDeviceRequest() {
+            if (!deviceRequests.isEmpty()) {
+                throw new IllegalStateException(
+                        "A device request is already set; count, device ids and CDI names are alternatives");
+            }
+        }
+
+        private static void requireUsableIds(List<String> ids, String description) {
+            if (ids == null || ids.isEmpty()) {
+                throw new IllegalArgumentException("At least one " + description + " is required");
+            }
+            for (String id : ids) {
+                if (id == null || id.isBlank()) {
+                    throw new IllegalArgumentException("A " + description + " must not be blank");
+                }
+            }
+        }
+
+        /**
          * Injects Floci's embedded DNS server into the container so virtual-hosted
          * S3 hostnames (my-bucket.localhost.floci.io) resolve to Floci's Docker
          * network IP. No-op when the embedded DNS server is not running.
@@ -467,7 +592,8 @@ public class ContainerBuilder {
                     List.copyOf(dnsServers),
                     workingDir,
                     user,
-                    List.copyOf(groupAdd)
+                    List.copyOf(groupAdd),
+                    List.copyOf(deviceRequests)
             );
         }
     }

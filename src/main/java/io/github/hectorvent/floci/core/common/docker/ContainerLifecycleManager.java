@@ -953,6 +953,13 @@ public class ContainerLifecycleManager {
             hostConfig.withDns(spec.dnsServers().toArray(new String[0]));
         }
 
+        // Device requests (GPUs). Only set when a caller asked: a daemon configured with an
+        // accelerator runtime as its default must not start handing devices to every
+        // container Floci launches.
+        if (spec.hasDeviceRequests()) {
+            hostConfig.withDeviceRequests(spec.deviceRequests());
+        }
+
         return hostConfig;
     }
 
