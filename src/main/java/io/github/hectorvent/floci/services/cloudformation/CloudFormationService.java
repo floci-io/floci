@@ -39,8 +39,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -57,11 +60,21 @@ public class CloudFormationService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CloudFormationService.class);
 
+    private static final int MAX_OPERATION_THREADS = 16;
+    private static final int MAX_QUEUED_OPERATIONS = 128;
+
     private final ConcurrentHashMap<String, Stack> stacks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DeletedStackEntry> deletedStacks = new ConcurrentHashMap<>();
     // Account-scoped exports registry: account:region:exportName -> exportValue
     private final ConcurrentHashMap<String, String> exports = new ConcurrentHashMap<>();
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final ExecutorService executor = newOperationExecutor();
+
+    static ThreadPoolExecutor newOperationExecutor() {
+        return new ThreadPoolExecutor(
+                MAX_OPERATION_THREADS, MAX_OPERATION_THREADS, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(MAX_QUEUED_OPERATIONS),
+                new ThreadPoolExecutor.AbortPolicy());
+    }
 
     private final CloudFormationResourceProvisioner provisioner;
     private final S3Service s3Service;
@@ -643,6 +656,13 @@ public class CloudFormationService implements ResourceProvider {
 
     private record ClaimedExecution(ChangeSet changeSet, boolean isCreate) {}
 
+    private record ChangeSetState(String status, String executionStatus) {}
+
+    private record StackMutationSnapshot(String status, Instant lastUpdatedTime,
+                                         List<StackEvent> events,
+                                         Map<String, ChangeSet> changeSets,
+                                         Map<ChangeSet, ChangeSetState> changeSetStates) {}
+
     // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
     private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
                                               String accountId, boolean requireAvailable) {
@@ -650,6 +670,7 @@ public class CloudFormationService implements ResourceProvider {
         String resolvedChangeSetName = resolveChangeSetName(changeSetName, region, accountId);
 
         ClaimedExecution[] claimed = new ClaimedExecution[1];
+        StackMutationSnapshot[] snapshot = new StackMutationSnapshot[1];
         Stack stack = stacks.compute(stackKey(accountId, canonicalStackName, region), (k, existing) -> {
             if (existing == null) {
                 throw new AwsException("ValidationError",
@@ -667,6 +688,7 @@ public class CloudFormationService implements ResourceProvider {
             if (!eligible) {
                 throw invalidChangeSetStatus(cs);
             }
+            snapshot[0] = snapshot(existing);
             boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
                     "CREATE_IN_PROGRESS".equals(existing.getStatus());
             cs.setExecutionStatus("EXECUTE_IN_PROGRESS");
@@ -687,9 +709,18 @@ public class CloudFormationService implements ResourceProvider {
             claimed[0] = new ClaimedExecution(cs, isCreate);
             return existing;
         });
-        persistStack(stack);
-
-        return submitExecution(stack, claimed[0].changeSet(), claimed[0].isCreate(), region, accountId);
+        try {
+            persistStack(stack);
+            return submitExecution(stack, claimed[0].changeSet(), claimed[0].isCreate(), region, accountId);
+        } catch (AwsException e) {
+            if ("LimitExceeded".equals(e.getErrorCode())) {
+                Stack restored = restoreStack(accountId, canonicalStackName, region, snapshot[0]);
+                if (restored != null) {
+                    persistStack(restored);
+                }
+            }
+            throw e;
+        }
     }
 
     private AwsException invalidChangeSetStatus(ChangeSet cs) {
@@ -704,11 +735,11 @@ public class CloudFormationService implements ResourceProvider {
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
-        return executor.submit(() -> runUnderAccount(accountId, () -> {
+        return submitOperation(() -> runUnderAccount(accountId, () -> {
             executeTemplate(stack, templateBody, params, isCreate, region, accountId);
             String status = stack.getStatus();
             cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
-                    ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
+                ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
             persistStack(stack);
         }));
     }
@@ -796,11 +827,68 @@ public class CloudFormationService implements ResourceProvider {
                     "Stack [" + stack.getStackId()
                             + "] cannot be deleted while TerminationProtection is enabled", 400);
         }
+        StackMutationSnapshot snapshot = snapshot(stack);
         stack.setStatus("DELETE_IN_PROGRESS");
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
-        return executor.submit(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
+        try {
+            return submitOperation(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
+        } catch (AwsException e) {
+            if ("LimitExceeded".equals(e.getErrorCode())) {
+                Stack restored = restoreStack(accountId, stack.getStackName(), region, snapshot);
+                if (restored != null) {
+                    persistStack(restored);
+                }
+            }
+            throw e;
+        }
+    }
+
+    private StackMutationSnapshot snapshot(Stack stack) {
+        Map<ChangeSet, ChangeSetState> states = new IdentityHashMap<>();
+        for (ChangeSet changeSet : stack.getChangeSets().values()) {
+            states.put(changeSet, new ChangeSetState(changeSet.getStatus(), changeSet.getExecutionStatus()));
+        }
+        return new StackMutationSnapshot(stack.getStatus(), stack.getLastUpdatedTime(),
+                new ArrayList<>(stack.getEvents()), new LinkedHashMap<>(stack.getChangeSets()), states);
+    }
+
+    private void restore(Stack stack, StackMutationSnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        stack.setStatus(snapshot.status());
+        stack.setLastUpdatedTime(snapshot.lastUpdatedTime());
+        stack.setEvents(new ArrayList<>(snapshot.events()));
+        stack.setChangeSets(new LinkedHashMap<>(snapshot.changeSets()));
+        snapshot.changeSetStates().forEach((changeSet, state) -> {
+            changeSet.setStatus(state.status());
+            changeSet.setExecutionStatus(state.executionStatus());
+        });
+    }
+
+    private Stack restoreStack(String accountId, String stackName, String region,
+                               StackMutationSnapshot snapshot) {
+        return stacks.compute(stackKey(accountId, stackName, region), (key, current) -> {
+            if (current != null) {
+                restore(current, snapshot);
+            }
+            return current;
+        });
+    }
+
+    private Future<?> submitOperation(Runnable operation) {
+        try {
+            return executor.submit(operation);
+        } catch (RejectedExecutionException e) {
+            throw operationLimitExceeded();
+        }
+    }
+
+    static AwsException operationLimitExceeded() {
+        return new AwsException("LimitExceeded",
+                "Too many CloudFormation operations are in progress.", 400);
     }
 
     // ── GetTemplate ───────────────────────────────────────────────────────────
