@@ -540,14 +540,24 @@ public class DynamoDbPartiQLParser {
         return operands.size() == 1 ? operands.getFirst() : new Cond.Or(List.copyOf(operands));
     }
 
+    // A parenthesised AND inside an AND is spliced in, so (pk = 'a' AND sk = 'b') AND x = 1
+    // still shows its key equalities at the top level.
     private Cond parseAnd() {
         List<Cond> operands = new ArrayList<>();
-        operands.add(parseNot());
+        addAndOperand(operands, parseNot());
         while (peek().type() == TType.AND) {
             advance();
-            operands.add(parseNot());
+            addAndOperand(operands, parseNot());
         }
         return operands.size() == 1 ? operands.getFirst() : new Cond.And(List.copyOf(operands));
+    }
+
+    private static void addAndOperand(List<Cond> operands, Cond operand) {
+        if (operand instanceof Cond.And and) {
+            operands.addAll(and.operands());
+        } else {
+            operands.add(operand);
+        }
     }
 
     private Cond parseNot() {
