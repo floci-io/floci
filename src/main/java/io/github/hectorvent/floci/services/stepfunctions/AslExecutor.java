@@ -3203,15 +3203,33 @@ public class AslExecutor {
                     "ReaderConfig.MaxItemsPath is not supported by JSONata state machines", "MaxItemsPath");
         }
 
+        boolean jsonataExpression = hasMaxItems
+                && jsonata
+                && readerConfig.get("MaxItems").isTextual()
+                && JsonataEvaluator.isExpression(readerConfig.get("MaxItems").asText());
+        if (hasMaxItemsPath) {
+            JsonNode value = resolvePath(readerConfig.get("MaxItemsPath").asText(), mapInput);
+            if (!value.isIntegralNumber()) {
+                throw new FailStateException("States.Runtime",
+                        "MaxItems must resolve to an integer of 0 or more", "MaxItems");
+            }
+            if (value.bigIntegerValue().signum() < 0) {
+                throw new FailStateException(
+                        "States.ItemReaderFailed", "field MaxItems must be positive", true);
+            }
+            return value.bigIntegerValue().compareTo(BigInteger.valueOf(ITEM_READER_MAX_ITEMS)) > 0
+                    ? ITEM_READER_MAX_ITEMS
+                    : value.intValue();
+        }
+
         int maxItems = resolveMapIntegerField(
                 readerConfig, "MaxItems", 0, mapInput, jsonata, context, variables);
         if (maxItems > ITEM_READER_MAX_ITEMS) {
-            JsonNode maxItemsNode = readerConfig.path("MaxItems");
-            boolean jsonataExpression = jsonata
-                    && maxItemsNode.isTextual()
-                    && JsonataEvaluator.isExpression(maxItemsNode.asText());
+            if (jsonataExpression) {
+                return ITEM_READER_MAX_ITEMS;
+            }
             throw new FailStateException(
-                    jsonataExpression ? "States.QueryEvaluationError" : "States.Runtime",
+                    "States.Runtime",
                     "MaxItems must resolve to an integer of " + ITEM_READER_MAX_ITEMS + " or less",
                     "MaxItems");
         }

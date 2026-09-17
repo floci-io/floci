@@ -150,10 +150,11 @@ iterations.
 fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`. An empty prefix
 gives zero iterations and the Map succeeds.
 
-`ReaderConfig.MaxItems` applies to every reader and cannot exceed 100,000,000. JSONPath state
-machines may resolve the limit from the Map input with `MaxItemsPath`, while JSONata state machines
-may use a `{% %}` expression in `MaxItems`. `MaxItems` and `MaxItemsPath` are mutually exclusive,
-and `MaxItemsPath` is rejected for JSONata state machines.
+`ReaderConfig.MaxItems` applies to every reader. Literal values cannot exceed 100,000,000; a
+larger value resolved by `MaxItemsPath` or a JSONata expression is capped at that reader limit.
+JSONPath state machines may resolve the limit from the Map input with `MaxItemsPath`, while
+JSONata state machines may use a `{% %}` expression in `MaxItems`. `MaxItems` and `MaxItemsPath`
+are mutually exclusive, and `MaxItemsPath` is rejected for JSONata state machines.
 
 ## Distributed Map ItemBatcher
 

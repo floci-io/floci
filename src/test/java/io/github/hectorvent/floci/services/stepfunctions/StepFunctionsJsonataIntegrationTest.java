@@ -1200,6 +1200,57 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithS3CsvItemReader_maxItemsPathLimitsDataset() throws Exception {
+        createBucket("map-inputs-csv-max-items-path");
+        putObject("map-inputs-csv-max-items-path", "workers.csv",
+                "workerId,team\nw1,alpha\nw2,beta\nw3,gamma\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV",
+                                    "MaxItemsPath": "$.limit"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv-max-items-path",
+                                    "Key": "workers.csv"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-max-items-path-test", definition);
+        String execArn = startExecution(smArn, "{\"limit\":2}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+        assertFalse(output.contains("\"workerId\":\"w3\"") || output.contains("\"workerId\": \"w3\""));
+    }
+
+    @Test
     void distributedMapWithS3CsvItemReader_givenHeadersReadEveryRow() throws Exception {
         createBucket("map-inputs-csv-given");
         putObject("map-inputs-csv-given", "workers.csv", "w1,alpha\nw2,gamma\n");
@@ -3748,39 +3799,65 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
-    void distributedMapWithItemReader_rejectsMaxItemsPathAboveOneHundredMillion() throws Exception {
+    void distributedMapWithItemReader_capsMaxItemsPathAboveOneHundredMillion() throws Exception {
+        createBucket("map-inputs-max-items-path-over-limit");
+        putObject("map-inputs-max-items-path-over-limit", "workers/a.json", "[]");
         String definition = listObjectsDefinition("""
                 "ReaderConfig": {
                     "MaxItemsPath": "$.limit"
                 },
                 "Parameters": {
-                    "Bucket": "map-inputs-max-items-path-over-limit"
+                    "Bucket": "map-inputs-max-items-path-over-limit",
+                    "Prefix": "workers/"
                 }
                 """);
 
         String smArn = createStateMachine("map-itemreader-max-items-path-over-limit-test", definition);
-        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":100000001}"));
+        JsonNode items = objectMapper.readTree(waitForExecution(
+                startExecution(smArn, "{\"limit\":100000001}")));
 
-        assertEquals("States.Runtime", failure.jsonPath().getString("error"));
-        assertTrue(failure.jsonPath().getString("cause").contains("100000000 or less"));
+        assertEquals(1, items.size());
+        assertEquals("workers/a.json", items.get(0).path("Key").asText());
     }
 
     @Test
-    void distributedMapWithItemReader_rejectsJsonataMaxItemsAboveOneHundredMillion() throws Exception {
+    void distributedMapWithItemReader_capsJsonataMaxItemsAboveOneHundredMillion() throws Exception {
+        createBucket("map-inputs-jsonata-max-items-over-limit");
+        putObject("map-inputs-jsonata-max-items-over-limit", "workers/a.json", "[]");
         String definition = listObjectsDefinition("\"QueryLanguage\": \"JSONata\",", """
                 "ReaderConfig": {
                     "MaxItems": "{% $states.input.limit %}"
                 },
                 "Arguments": {
-                    "Bucket": "map-inputs-jsonata-max-items-over-limit"
+                    "Bucket": "map-inputs-jsonata-max-items-over-limit",
+                    "Prefix": "workers/"
                 }
                 """);
 
         String smArn = createStateMachine("map-itemreader-jsonata-max-items-over-limit-test", definition);
-        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":100000001}"));
+        JsonNode items = objectMapper.readTree(waitForExecution(
+                startExecution(smArn, "{\"limit\":100000001}")));
 
-        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
-        assertTrue(failure.jsonPath().getString("cause").contains("100000000 or less"));
+        assertEquals(1, items.size());
+        assertEquals("workers/a.json", items.get(0).path("Key").asText());
+    }
+
+    @Test
+    void distributedMapWithItemReader_rejectsNegativeMaxItemsPathAsItemReaderFailure() throws Exception {
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItemsPath": "$.limit"
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-negative-max-items-path"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-negative-max-items-path-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":-1}"));
+
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+        assertEquals("field MaxItems must be positive", failure.jsonPath().getString("cause"));
     }
 
     private static String listObjectsDefinition(String itemReaderFields) {
