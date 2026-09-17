@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -191,8 +192,10 @@ public class RedshiftQueryHandler {
         case "RestoreFromClusterSnapshot" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
+            String snapshotArn = params.getFirst("SnapshotArn");
             String nodeType = params.getFirst("NodeType");
-            Cluster cluster = service.restoreFromClusterSnapshot(clusterIdentifier, snapshotIdentifier, nodeType);
+            Cluster cluster = service.restoreFromClusterSnapshot(
+                    clusterIdentifier, resolveSnapshotIdentifier(snapshotIdentifier, snapshotArn), nodeType);
             String xml = new XmlBuilder()
                     .start("RestoreFromClusterSnapshotResponse")
                       .start("RestoreFromClusterSnapshotResult")
@@ -832,6 +835,26 @@ public class RedshiftQueryHandler {
             case "failed" -> "Failed";
             default -> "Modifying";
         };
+    }
+
+    // RestoreFromClusterSnapshot accepts SnapshotIdentifier OR SnapshotArn — real AWS lets
+    // callers restore from a snapshot ARN (needed for cross-account/cross-region snapshots)
+    // without knowing its bare identifier. Terraform's aws_redshift_cluster sends only
+    // snapshot_arn when that's the field the caller populated, so falling back to
+    // SnapshotIdentifier alone left every such restore with a null identifier.
+    private String resolveSnapshotIdentifier(String snapshotIdentifier, String snapshotArn) {
+        if (snapshotIdentifier != null && !snapshotIdentifier.isBlank()) {
+            return snapshotIdentifier;
+        }
+        if (snapshotArn != null && !snapshotArn.isBlank()) {
+            // arn:aws:redshift:<region>:<account>:snapshot:<clusterIdentifier>/<snapshotIdentifier>
+            String resource = AwsArnUtils.parse(snapshotArn).resource();
+            int slash = resource.lastIndexOf('/');
+            if (slash >= 0 && slash < resource.length() - 1) {
+                return resource.substring(slash + 1);
+            }
+        }
+        return snapshotIdentifier;
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {
