@@ -758,9 +758,13 @@ public class DynamoDbPartiQLParser {
 
     // line:column:length, as AWS quotes a token back (checked on real AWS, eu-west-2, 2026-09-17).
     private String position(Token token) {
-        int lineStart = statement.lastIndexOf('\n', token.start() - 1) + 1;
-        long line = statement.substring(0, token.start()).chars().filter(c -> c == '\n').count() + 1;
-        return line + ":" + (token.start() - lineStart + 1) + ":" + token.value().length();
+        return position(token.start(), token.value().length());
+    }
+
+    private String position(int start, int length) {
+        int lineStart = statement.lastIndexOf('\n', start - 1) + 1;
+        long line = statement.substring(0, start).chars().filter(c -> c == '\n').count() + 1;
+        return line + ":" + (start - lineStart + 1) + ":" + length;
     }
 
     private Operand parseOperand() {
@@ -804,7 +808,13 @@ public class DynamoDbPartiQLParser {
         Token t = advance();
         if (t.type() == TType.NUMBER) {
             try {
-                return Long.parseLong(t.value());
+                long index = Long.parseLong(t.value());
+                if (index < 0) {
+                    // AWS points past the minus sign at the digits (checked on real AWS, eu-west-2, 2026-09-17).
+                    throw validationEx("List index is not within the allowable range; index: [" + t.value() + "] at "
+                            + position(t.start() + 1, t.value().length() - 1));
+                }
+                return index;
             } catch (NumberFormatException expected) {
                 // Falls through to the shared rejection below.
             }

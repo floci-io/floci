@@ -89,6 +89,20 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("minus").body("Item.t", nullValue());
     }
 
+    @Test
+    @Order(4)
+    void refusesANegativeListIndex() {
+        putItem("index", "\"l\":{\"L\":[{\"S\":\"a\"},{\"S\":\"b\"}]}");
+        String select = "SELECT l[-1] FROM \"" + TABLE + "\" WHERE pk='index' AND sk='1'";
+
+        statement(select)
+            .statusCode(400)
+            .body("message", equalTo("List index is not within the allowable range; index: [-1] at 1:11:1"));
+        statement("SELECT l[-0] FROM \"" + TABLE + "\" WHERE pk='index' AND sk='1'")
+            .statusCode(200)
+            .body("Items[0].'l[0]'.S", equalTo("a"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
