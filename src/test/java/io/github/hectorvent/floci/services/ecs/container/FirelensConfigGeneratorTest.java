@@ -235,4 +235,97 @@ class FirelensConfigGeneratorTest {
 
                 """), config);
     }
+    @Test
+    void fluentdConfigMatchesEcsAgentShape() {
+        LinkedHashMap<String, String> options = new LinkedHashMap<>();
+        options.put("@type", "kinesis_firehose");
+        options.put("region", "us-east-1");
+        options.put("delivery_stream_name", "demo-stream");
+        options.put("include-pattern", "*failure*");
+        options.put("exclude-pattern", "*success*");
+        options.put("log-driver-buffer-limit", "123");
+
+        LinkedHashMap<String, Map<String, String>> byContainer = new LinkedHashMap<>();
+        byContainer.put("app", options);
+
+        String config = FirelensConfigGenerator.fluentdConfig(new FirelensConfigGenerator.Context(
+                "awsvpc", true, "mycluster",
+                "arn:aws:ecs:us-east-1:000000000000:task/mycluster/abc",
+                "taskdefinition:1", 100, "/fluentd/etc/extra.conf",
+                "http://host.docker.internal:4566", byContainer));
+
+        assertEquals("""
+                <source>
+                    @type unix
+                    path /var/run/fluent.sock
+                </source>
+
+                <source>
+                    @type forward
+                    bind 0.0.0.0
+                    port 24224
+                </source>
+
+                <filter app-firelens**>
+                    @type grep
+                    <regexp>
+                        key log
+                        pattern *failure*
+                    </regexp>
+                </filter>
+
+                <filter app-firelens**>
+                    @type grep
+                    <exclude>
+                        key log
+                        pattern *success*
+                    </exclude>
+                </filter>
+
+                <filter **>
+                    @type record_transformer
+                    <record>
+                        ecs_cluster mycluster
+                        ecs_task_arn arn:aws:ecs:us-east-1:000000000000:task/mycluster/abc
+                        ecs_task_definition taskdefinition:1
+                    </record>
+                </filter>
+
+                @include /fluentd/etc/extra.conf
+
+                <match app-firelens**>
+                    @type kinesis_firehose
+                    region us-east-1
+                    delivery_stream_name demo-stream
+                </match>
+
+                """, config);
+        assertTrue(!config.contains("Endpoint"));
+        assertTrue(!config.contains("firelens-healthcheck"));
+    }
+
+    @Test
+    void fluentdSkipsGeneratedOutputWhenOnlyCustomFileIsUsed() {
+        LinkedHashMap<String, Map<String, String>> byContainer = new LinkedHashMap<>();
+        byContainer.put("app", Map.of());
+
+        String config = FirelensConfigGenerator.fluentdConfig(new FirelensConfigGenerator.Context(
+                "bridge", false, "c", "arn", "fam:1", 0, null, null, byContainer));
+
+        assertTrue(config.contains("@type unix"));
+        assertTrue(config.contains("@type forward"));
+        assertTrue(!config.contains("record_transformer"));
+        assertTrue(!config.contains("<match app-firelens**>"));
+    }
+
+    @Test
+    void fluentdRejectsPluginOptionsWithoutType() {
+        LinkedHashMap<String, Map<String, String>> byContainer = new LinkedHashMap<>();
+        byContainer.put("app", Map.of("region", "us-east-1"));
+
+        assertThrows(IllegalArgumentException.class, () -> FirelensConfigGenerator.fluentdConfig(
+                new FirelensConfigGenerator.Context(
+                        "bridge", false, "c", "arn", "fam:1", 0, null, null, byContainer)));
+    }
+
 }

@@ -160,6 +160,35 @@ public final class AwsArnUtils {
     }
 
     /**
+     * The bucket and key named by an S3 object ARN ({@code arn:aws:s3:::bucket/key}, or the
+     * region/account-bearing form {@code arn:aws:s3:region:account:bucket/key}).
+     *
+     * <p>Returns {@code null} rather than throwing when the value is not one: not an ARN, not
+     * the {@code s3} service, or a resource without both a bucket and a key. Callers decide
+     * whether that is a registration error (ECS rejecting a FireLens {@code config-file-value})
+     * or a launch error.
+     */
+    public static S3ObjectRef parseS3ObjectArn(String value) {
+        if (!isArn(value)) {
+            return null;
+        }
+        Arn arn = parse(value);
+        if (!"s3".equals(arn.service())) {
+            return null;
+        }
+        String resource = arn.resource();
+        int slash = resource.indexOf('/');
+        if (slash <= 0 || slash == resource.length() - 1) {
+            return null;
+        }
+        return new S3ObjectRef(resource.substring(0, slash), resource.substring(slash + 1));
+    }
+
+    /** The bucket and key of an S3 object ARN, as returned by {@link #parseS3ObjectArn}. */
+    public record S3ObjectRef(String bucket, String key) {
+    }
+
+    /**
      * Converts an SQS ARN to a queue URL using the given base URL.
      * Example: arn:aws:sqs:us-east-1:000000000000:my-queue → http://localhost:4566/000000000000/my-queue
      */

@@ -27,6 +27,8 @@ import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.github.dockerjava.api.DockerClient;
@@ -76,6 +78,7 @@ public class EcsContainerManager {
     private final LaunchedContainerAwsEnv awsEnv;
     private final SsmService ssmService;
     private final SecretsManagerService secretsManagerService;
+    private final S3Service s3Service;
     private final EcrRegistryManager ecrRegistryManager;
     private final HostVolumePolicy hostVolumePolicy;
 
@@ -89,6 +92,7 @@ public class EcsContainerManager {
                                LaunchedContainerAwsEnv awsEnv,
                                SsmService ssmService,
                                SecretsManagerService secretsManagerService,
+                               S3Service s3Service,
                                EcrRegistryManager ecrRegistryManager,
                                HostVolumePolicy hostVolumePolicy) {
         this.containerBuilder = containerBuilder;
@@ -100,6 +104,7 @@ public class EcsContainerManager {
         this.awsEnv = awsEnv;
         this.ssmService = ssmService;
         this.secretsManagerService = secretsManagerService;
+        this.s3Service = s3Service;
         this.hostVolumePolicy = hostVolumePolicy;
         this.ecrRegistryManager = ecrRegistryManager;
     }
@@ -143,20 +148,21 @@ public class EcsContainerManager {
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
 
-        ContainerDefinition firelensRouter = findFluentBitRouter(taskDef.getContainerDefinitions());
+        ContainerDefinition firelensRouter = findFirelensRouter(taskDef.getContainerDefinitions());
         Map<String, Map<String, String>> firelensLogOptions =
                 awsFirelensLogOptions(taskDef.getContainerDefinitions());
         if (!firelensLogOptions.isEmpty() && firelensRouter == null) {
             throw new AwsException("ClientException",
-                    "awsfirelens log driver requires a fluentbit firelensConfiguration container", 400);
+                    "awsfirelens log driver requires a firelensConfiguration container", 400);
         }
 
         String firelensVolumeName = null;
         String firelensSocketAddress = null;
         String firelensConfig = null;
+        String firelensExternalConfig = null;
         if (firelensRouter != null) {
-            firelensConfig = FirelensConfigGenerator.fluentBitConfig(firelensContext(
-                    task, taskDef, firelensRouter, firelensLogOptions));
+            firelensConfig = firelensConfig(task, taskDef, firelensRouter, firelensLogOptions);
+            firelensExternalConfig = s3ExternalConfig(firelensRouter);
             firelensVolumeName = ContainerStorageHelper.dockerName(config, "floci-ecs-firelens-" + taskId);
             lifecycleManager.ensureVolume(firelensVolumeName);
             firelensSocketAddress = unixSocketAddress(firelensVolumeName);
@@ -287,7 +293,8 @@ public class EcsContainerManager {
                 if (def == firelensRouter) {
                     dockerId = lifecycleManager.create(spec);
                     try {
-                        copyFirelensConfig(dockerId, firelensConfig);
+                        copyFirelensConfig(dockerId, firelensConfig, isFluentdRouter(firelensRouter),
+                                firelensExternalConfig);
                         lifecycleManager.startCreated(dockerId, spec);
                     } catch (RuntimeException e) {
                         lifecycleManager.removeIfExists(dockerId);
@@ -411,17 +418,23 @@ public class EcsContainerManager {
         lifecycleManager.removeVolume(handle.getFirelensVolumeName());
     }
 
-    private static ContainerDefinition findFluentBitRouter(List<ContainerDefinition> defs) {
+    private static ContainerDefinition findFirelensRouter(List<ContainerDefinition> defs) {
         if (defs == null) {
             return null;
         }
         for (ContainerDefinition def : defs) {
             FirelensConfiguration firelens = def.getFirelensConfiguration();
-            if (firelens != null && "fluentbit".equals(firelens.type())) {
+            if (firelens != null && ("fluentbit".equals(firelens.type()) || "fluentd".equals(firelens.type()))) {
                 return def;
             }
         }
         return null;
+    }
+
+    private static boolean isFluentdRouter(ContainerDefinition router) {
+        return router != null
+                && router.getFirelensConfiguration() != null
+                && "fluentd".equals(router.getFirelensConfiguration().type());
     }
 
     private static Map<String, Map<String, String>> awsFirelensLogOptions(List<ContainerDefinition> defs) {
@@ -466,8 +479,15 @@ public class EcsContainerManager {
         Map<String, String> options = firelens.options() != null ? firelens.options() : Map.of();
         boolean metadata = !"false".equalsIgnoreCase(options.get("enable-ecs-log-metadata"));
         String external = null;
-        if ("file".equals(options.get("config-file-type"))) {
+        String externalType = options.get("config-file-type");
+        if ("file".equals(externalType)) {
             external = options.get("config-file-value");
+        } else if ("s3".equals(externalType)) {
+            // The agent downloads the object to this fixed path and @INCLUDEs it; Floci
+            // writes it there directly with the generated config.
+            external = isFluentdRouter(router)
+                    ? "/fluentd/etc/external.conf"
+                    : "/fluent-bit/etc/external.conf";
         }
         int memoryMb = 0;
         if (router.getMemoryReservation() != null) {
@@ -483,6 +503,15 @@ public class EcsContainerManager {
         return new FirelensConfigGenerator.Context(
                 networkMode, metadata, cluster, task.getTaskArn(), familyRevision,
                 memoryMb, external, awsEnv.flociEndpoint(), logOptions);
+    }
+
+    private String firelensConfig(
+            EcsTask task, TaskDefinition taskDef, ContainerDefinition router,
+            Map<String, Map<String, String>> logOptions) {
+        FirelensConfigGenerator.Context ctx = firelensContext(task, taskDef, router, logOptions);
+        return isFluentdRouter(router)
+                ? FirelensConfigGenerator.fluentdConfig(ctx)
+                : FirelensConfigGenerator.fluentBitConfig(ctx);
     }
 
     private static String clusterName(String clusterArn) {
@@ -526,23 +555,73 @@ public class EcsContainerManager {
         return new LogConfig(LogConfig.LoggingType.FLUENTD, opts);
     }
 
-    private void copyFirelensConfig(String containerId, String configText) {
+    /**
+     * Reads a {@code config-file-type=s3} external config from Floci's S3, before any container is
+     * created, so a missing object stops the task without leaking a started router.
+     *
+     * <p>Wording is the ECS agent's, and the error code is ResourceInitializationError so that
+     * EcsService passes the message through verbatim as the task's stoppedReason rather than
+     * wrapping it in its generic start-failure prefix.
+     */
+    private String s3ExternalConfig(ContainerDefinition router) {
+        FirelensConfiguration firelens = router.getFirelensConfiguration();
+        Map<String, String> options = firelens.options() != null ? firelens.options() : Map.of();
+        if (!"s3".equals(options.get("config-file-type"))) {
+            return null;
+        }
+        String value = options.get("config-file-value");
+        // Registration already rejected a value that is not an S3 object ARN; this covers task
+        // definitions stored before that check existed.
+        AwsArnUtils.S3ObjectRef ref = AwsArnUtils.parseS3ObjectArn(value);
+        if (ref == null) {
+            throw firelensS3Failure("unable to parse s3 arn: " + value, 400);
+        }
+        try {
+            S3Object object = s3Service.getObject(ref.bucket(), ref.key());
+            return new String(object.getData(), StandardCharsets.UTF_8);
+        } catch (AwsException e) {
+            throw firelensS3Failure("unable to download s3 config " + ref.key()
+                    + " from bucket " + ref.bucket() + ": " + e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    /**
+     * A task-resource failure that never reaches a client: EcsService catches it and uses the
+     * message as the task's stoppedReason, keying off the ResourceInitializationError code to
+     * skip its generic "Failed to start:" prefix. The prefix on the message itself is the agent's.
+     */
+    private static AwsException firelensS3Failure(String detail, int httpStatus) {
+        return new AwsException("ResourceInitializationError",
+                "Unable to download firelens s3 config file: " + detail, httpStatus);
+    }
+
+    private void copyFirelensConfig(
+            String containerId, String configText, boolean fluentd, String externalConfig) {
         byte[] content = configText.getBytes(StandardCharsets.UTF_8);
+        String fileName = fluentd ? "fluent.conf" : "fluent-bit.conf";
+        String remotePath = fluentd ? "/fluentd/etc" : "/fluent-bit/etc";
         ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
         try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
-            TarArchiveEntry entry = new TarArchiveEntry("fluent-bit.conf");
-            entry.setSize(content.length);
-            tar.putArchiveEntry(entry);
-            tar.write(content);
-            tar.closeArchiveEntry();
+            putTarEntry(tar, fileName, content);
+            if (externalConfig != null) {
+                putTarEntry(tar, "external.conf", externalConfig.getBytes(StandardCharsets.UTF_8));
+            }
         } catch (IOException e) {
             throw new AwsException("ClientException",
                     "unable to write FireLens config: " + e.getMessage(), 500);
         }
         lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
-                .withRemotePath("/fluent-bit/etc")
+                .withRemotePath(remotePath)
                 .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
                 .exec();
+    }
+
+    private static void putTarEntry(TarArchiveOutputStream tar, String name, byte[] content) throws IOException {
+        TarArchiveEntry entry = new TarArchiveEntry(name);
+        entry.setSize(content.length);
+        tar.putArchiveEntry(entry);
+        tar.write(content);
+        tar.closeArchiveEntry();
     }
 
     private String inspectContainerIp(String dockerId) {

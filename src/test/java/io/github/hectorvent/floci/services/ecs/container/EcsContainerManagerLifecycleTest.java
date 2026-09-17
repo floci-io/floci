@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.Test;
 
@@ -117,7 +118,7 @@ class EcsContainerManagerLifecycleTest {
         return new EcsContainerManager(
                 mock(ContainerBuilder.class), lifecycleManager, mock(ContainerLogStreamer.class),
                 mock(ContainerDetector.class), mock(EmulatorConfig.class), mock(RegionResolver.class),
-                mock(LaunchedContainerAwsEnv.class), mock(SsmService.class), mock(SecretsManagerService.class),
+                mock(LaunchedContainerAwsEnv.class), mock(SsmService.class), mock(SecretsManagerService.class), mock(S3Service.class),
                 mock(EcrRegistryManager.class), mock(HostVolumePolicy.class));
     }
 }

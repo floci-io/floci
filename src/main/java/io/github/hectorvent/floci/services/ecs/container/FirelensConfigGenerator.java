@@ -5,11 +5,13 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Generates the Fluent Bit config FireLens would write for a task.
+ * Generates the FireLens config ECS would write for a task.
  *
- * <p>Shape is taken from amazon-ecs-agent {@code firelensconfig_unix.go}: unix-socket input,
- * optional TCP forward + healthcheck, ECS metadata {@code record_modifier}, optional
+ * <p>Fluent Bit shape is taken from amazon-ecs-agent {@code firelensconfig_unix.go}: unix-socket
+ * input, optional TCP forward + healthcheck, ECS metadata {@code record_modifier}, optional
  * {@code @INCLUDE}, then one {@code [OUTPUT]} per {@code awsfirelens} container.
+ * {@link #fluentdConfig} is the Fluentd equivalent ({@code unix}/{@code forward} sources,
+ * {@code record_transformer}, {@code @include}, {@code <match>}; no healthcheck).
  */
 final class FirelensConfigGenerator {
 
@@ -123,6 +125,72 @@ final class FirelensConfigGenerator {
     }
 
     /**
+     * Fluentd FireLens config. Output plugin type comes from log option {@code @type}.
+     * AWS plugins here are Ruby gems, not the Fluent Bit Go/C plugins, so Floci does
+     * not inject an {@code Endpoint} line.
+     */
+    static String fluentdConfig(Context ctx) {
+        StringBuilder out = new StringBuilder();
+        appendFluentdBlock(out, "source", null, "unix", options("path", SOCKET_PATH));
+
+        if (addsTcpForward(ctx.networkMode())) {
+            appendFluentdBlock(out, "source", null, "forward", options(
+                    "bind", tcpListen(ctx.networkMode()),
+                    "port", String.valueOf(FORWARD_PORT)));
+        }
+
+        if (ctx.containerLogOptions() != null) {
+            for (Map.Entry<String, Map<String, String>> entry : ctx.containerLogOptions().entrySet()) {
+                String tag = entry.getKey() + "-firelens**";
+                Map<String, String> options = entry.getValue();
+                if (options == null) {
+                    continue;
+                }
+                String include = options.get("include-pattern");
+                if (include != null) {
+                    appendFluentdGrep(out, tag, "regexp", include);
+                }
+                String exclude = options.get("exclude-pattern");
+                if (exclude != null) {
+                    appendFluentdGrep(out, tag, "exclude", exclude);
+                }
+            }
+        }
+
+        if (ctx.ecsMetadataEnabled()) {
+            out.append("<filter **>\n");
+            out.append("    @type record_transformer\n");
+            out.append("    <record>\n");
+            appendFluentdRecord(out, "ecs_cluster", ctx.cluster());
+            appendFluentdRecord(out, "ecs_task_arn", ctx.taskArn());
+            appendFluentdRecord(out, "ecs_task_definition", ctx.taskDefinition());
+            out.append("    </record>\n");
+            out.append("</filter>\n\n");
+        }
+
+        if (ctx.externalConfigPath() != null && !ctx.externalConfigPath().isBlank()) {
+            out.append("@include ").append(ctx.externalConfigPath()).append("\n\n");
+        }
+
+        if (ctx.containerLogOptions() != null) {
+            for (Map.Entry<String, Map<String, String>> entry : ctx.containerLogOptions().entrySet()) {
+                Map<String, String> options = entry.getValue() == null ? Map.of() : entry.getValue();
+                String plugin = options.get("@type");
+                Map<String, String> pluginOptions = pluginOptions(options);
+                if (plugin == null) {
+                    if (!pluginOptions.isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "missing output key @type which is required for firelens configuration of type fluentd");
+                    }
+                    continue;
+                }
+                appendFluentdBlock(out, "match", entry.getKey() + "-firelens**", plugin, pluginOptions);
+            }
+        }
+        return out.toString();
+    }
+
+    /**
      * Points an AWS output at Floci. The Fluent Bit AWS plugins read a custom endpoint only
      * from their own configuration, so the {@code AWS_ENDPOINT_URL} Floci injects into the
      * container does not reach them and the output would otherwise go to the real service.
@@ -189,7 +257,7 @@ final class FirelensConfigGenerator {
         LinkedHashMap<String, String> pluginOptions = new LinkedHashMap<>();
         for (Map.Entry<String, String> option : options.entrySet()) {
             String key = option.getKey();
-            if ("Name".equals(key) || "include-pattern".equals(key)
+            if ("Name".equals(key) || "@type".equals(key) || "include-pattern".equals(key)
                     || "exclude-pattern".equals(key) || "log-driver-buffer-limit".equals(key)) {
                 continue;
             }
@@ -240,5 +308,35 @@ final class FirelensConfigGenerator {
             out.append("    ").append(option.getKey()).append(' ').append(option.getValue()).append('\n');
         }
         out.append('\n');
+    }
+
+    private static void appendFluentdBlock(
+            StringBuilder out, String kind, String tag, String type, Map<String, String> options) {
+        out.append('<').append(kind);
+        if (tag != null) {
+            out.append(' ').append(tag);
+        }
+        out.append(">\n");
+        out.append("    @type ").append(type).append('\n');
+        for (Map.Entry<String, String> option : options.entrySet()) {
+            out.append("    ").append(option.getKey()).append(' ').append(option.getValue()).append('\n');
+        }
+        out.append("</").append(kind).append(">\n\n");
+    }
+
+    private static void appendFluentdGrep(StringBuilder out, String tag, String kind, String pattern) {
+        out.append("<filter ").append(tag).append(">\n");
+        out.append("    @type grep\n");
+        out.append("    <").append(kind).append(">\n");
+        out.append("        key log\n");
+        out.append("        pattern ").append(pattern).append('\n');
+        out.append("    </").append(kind).append(">\n");
+        out.append("</filter>\n\n");
+    }
+
+    private static void appendFluentdRecord(StringBuilder out, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            out.append("        ").append(key).append(' ').append(value).append('\n');
+        }
     }
 }

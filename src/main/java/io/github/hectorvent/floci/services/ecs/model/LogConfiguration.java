@@ -10,7 +10,7 @@ import java.util.Map;
  * {@code {"logDriver": "awslogs", "options": {...}, "secretOptions": [{"name": ..., "valueFrom": ...}]}}.
  *
  * <p>Stored and returned for RegisterTaskDefinition/DescribeTaskDefinition round-trip. At launch,
- * {@code awsfirelens} is routed through the task's Fluent Bit FireLens container. Other drivers
+ * {@code awsfirelens} is routed through the task's FireLens container. Other drivers
  * (including {@code awslogs}) stay with the Docker container and Floci's CloudWatch log streamer.
  */
 @RegisterForReflection

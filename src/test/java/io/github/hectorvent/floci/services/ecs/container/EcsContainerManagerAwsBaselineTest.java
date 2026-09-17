@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -79,7 +80,7 @@ class EcsContainerManagerAwsBaselineTest {
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, config, regionResolver, awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class), ecrRegistryManager, mock(HostVolumePolicy.class));
+                mock(SecretsManagerService.class), mock(S3Service.class), ecrRegistryManager, mock(HostVolumePolicy.class));
     }
 
     @Test

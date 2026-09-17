@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
@@ -60,7 +62,6 @@ import java.util.stream.Stream;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 
 @ApplicationScoped
 public class EcsService implements ContainerTeardown, ResourceProvider {
@@ -342,7 +343,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                                                   String taskRoleArn, String executionRoleArn,
                                                   List<String> requiresCompatibilities,
                                                   Map<String, String> tags, String region) {
-        if (requiresCompatibilities != null && requiresCompatibilities.contains("FARGATE")) {
+        boolean fargate = requiresCompatibilities != null && requiresCompatibilities.contains("FARGATE");
+        if (fargate) {
             if (networkMode != NetworkMode.awsvpc) {
                 throw new AwsException("ClientException", "Fargate only supports network mode 'awsvpc'.", 400);
             }
@@ -356,6 +358,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
                 throw new AwsException("ClientException", "No Fargate configuration exists for given values.", 400);
             }
         }
+        validateFirelensS3Config(containerDefs, fargate);
         int revision = latestRevisions.merge(family, 1, Integer::sum);
 
         TaskDefinition td = new TaskDefinition();
@@ -385,6 +388,40 @@ public class EcsService implements ContainerTeardown, ResourceProvider {
         taskDefinitions.put(family + ":" + revision, td);
         LOG.infov("Registered task definition: {0}:{1}", family, revision);
         return td;
+    }
+
+    /**
+     * RegisterTaskDefinition-time validation of a FireLens config that comes from S3, in the
+     * order ECS applies it.
+     *
+     * <p>The Fargate platform cannot pull the object itself, so ECS rejects the combination
+     * outright with this exact wording. A Fargate task can still take its config from S3 the way
+     * AWS documents, by giving the aws-for-fluent-bit init process its
+     * {@code aws_fluent_bit_init_s3_*} environment variables, which ECS never inspects. An
+     * EC2-compatible task definition keeps {@code s3}: the agent pulls it, and Floci reads the
+     * object from its own S3 at launch.
+     *
+     * <p>A {@code config-file-value} that does not name an S3 object is rejected as an ARN syntax
+     * error, which is what the RegisterTaskDefinition API returns for this field.
+     */
+    private static void validateFirelensS3Config(List<ContainerDefinition> containerDefs, boolean fargate) {
+        if (containerDefs == null) {
+            return;
+        }
+        for (ContainerDefinition def : containerDefs) {
+            FirelensConfiguration firelens = def.getFirelensConfiguration();
+            if (firelens == null || firelens.options() == null
+                    || !"s3".equals(firelens.options().get("config-file-type"))) {
+                continue;
+            }
+            if (fargate) {
+                throw new AwsException("ClientException",
+                        "Fargate launch type does not support FirelensConfiguration config file from 's3'", 400);
+            }
+            if (AwsArnUtils.parseS3ObjectArn(firelens.options().get("config-file-value")) == null) {
+                throw new AwsException("ClientException", "Invalid arn syntax", 400);
+            }
+        }
     }
 
     private boolean isValidFargateCpuMemory(String cpuStr, String memStr) {

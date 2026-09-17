@@ -35,10 +35,10 @@ registered, so a client that reads back what it wrote (Terraform, or a deploy to
 own `RegisterTaskDefinition`) sees no drift. `runtimePlatform` does not change where a local task
 runs: Floci launches every task on the host's own architecture.
 
-`firelensConfiguration` is stored and returned the same way. A `fluentbit` FireLens container is
-acted on at launch: Floci generates the Fluent Bit config (unix socket input, TCP forward on
-bridge/awsvpc, ECS metadata, optional `@INCLUDE` of a `config-file-type=file` extra config, and
-one `[OUTPUT]` per `awsfirelens` container), starts that router first, and points application
+`firelensConfiguration` is stored and returned the same way. A `fluentbit` or `fluentd` FireLens
+container is acted on at launch: Floci generates the router config (unix socket input, TCP forward
+on bridge/awsvpc, ECS metadata, optional include of a `config-file-type=file` or `s3` extra
+config, and one output per `awsfirelens` container), starts that router first, and points application
 containers with `logDriver: awsfirelens` at the generated unix socket. Other log drivers,
 including `awslogs`, still stream to CloudWatch via Floci rather than the configured driver.
 An `[OUTPUT]` for an AWS destination whose plugin reads a URL from `endpoint` (`s3`,
@@ -63,8 +63,24 @@ TLS context; the scheme alone is not enough. A `tls` the task definition already
 alone.
 The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci does not
 share a network namespace, so the injected `FLUENT_HOST` (the router's container IP) must be
-reachable. `fluentd` FireLens, `config-file-type=s3`, and shared network namespaces (AppConfig
-agent on `127.0.0.1:2772`) are not implemented.
+reachable. Fluent Bit config is written to `/fluent-bit/etc/fluent-bit.conf`. Fluentd config is
+written to `/fluentd/etc/fluent.conf` and uses `@type` (not `Name`) for output plugins; Floci
+does not inject an `endpoint` into Fluentd outputs.
+`config-file-type=s3` follows where ECS itself draws the line. `RegisterTaskDefinition` rejects
+it for a Fargate-compatible task definition, with `Fargate launch type does not support
+FirelensConfiguration config file from 's3'`, and rejects a `config-file-value` that is not an S3
+object ARN with `Invalid arn syntax`. A Fargate task can still take its config from S3 the way AWS
+documents, by giving the aws-for-fluent-bit init process its `aws_fluent_bit_init_s3_*`
+environment variables. ECS never inspects those and Floci passes them through, so that
+registration is accepted here too; it fetches nothing locally either, because Floci serves no ECS
+task metadata endpoint, which the init process reads before downloading.
+On an EC2-compatible task definition Floci reads the object from its own S3, writes it to the
+fixed `external.conf` path next to the generated config (`/fluent-bit/etc/external.conf` or
+`/fluentd/etc/external.conf`), and includes it from there, matching the paths the ECS agent uses.
+The object is read before any container is created, so a missing bucket or key stops the task with
+the agent's reason, `Unable to download firelens s3 config file: unable to download s3 config
+<key> from bucket <bucket>: <detail>`, instead of leaking a started router. Shared network
+namespaces (AppConfig agent on `127.0.0.1:2772`) are not implemented.
 
 ### Tasks
 

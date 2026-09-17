@@ -7,6 +7,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -198,6 +199,29 @@ class AwsArnUtilsTest {
                 "dynamodb"));
         assertFalse(AwsArnUtils.isArnFor("my-table", "dynamodb"));
         assertFalse(AwsArnUtils.isArnFor(null, "dynamodb"));
+    }
+
+    @Test
+    void s3ObjectArnSplitsBucketAndKey() {
+        assertEquals(new AwsArnUtils.S3ObjectRef("logs", "firelens/extra.conf"),
+                AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs/firelens/extra.conf"));
+        assertEquals(new AwsArnUtils.S3ObjectRef("logs", "extra.conf"),
+                AwsArnUtils.parseS3ObjectArn("arn:aws:s3:us-east-1:000000000000:logs/extra.conf"));
+    }
+
+    /**
+     * Everything ECS rejects as "Invalid arn syntax" for a FireLens {@code config-file-value}:
+     * not an ARN at all (the {@code s3://bucket/key} form users try), another service's ARN, and
+     * an ARN with no key or no bucket. Null rather than an exception, because the same helper
+     * backs the defensive path at task launch.
+     */
+    @Test
+    void s3ObjectArnIsNullForAnythingThatIsNotAnS3Object() {
+        assertNull(AwsArnUtils.parseS3ObjectArn("s3://logs/extra.conf"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs/"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:sqs:us-east-1:000000000000:my-queue"));
+        assertNull(AwsArnUtils.parseS3ObjectArn(null));
     }
 
     @Test
