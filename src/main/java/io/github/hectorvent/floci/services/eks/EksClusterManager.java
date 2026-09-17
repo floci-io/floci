@@ -44,6 +44,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
@@ -714,21 +715,27 @@ public class EksClusterManager {
     /**
      * Writes the cluster's RSA signing key and public key PEM files to Floci's local filesystem
      * under the account- and region-qualified EKS data path with restrictive permissions (0600 for
-     * files, 0700 for directories). Returns the paths or null if writing failed.
+     * files, 0700 for directories). Files are created with owner-only permissions atomically from
+     * creation, avoiding any window with default umask permissions. Returns the paths or null if
+     * writing failed.
      */
     SigningKeyFiles writeSigningKeyFiles(Cluster cluster, ClusterOidcKey oidcKey) {
         Path keysDir = resolveKeysDir(cluster);
         try {
-            Files.createDirectories(keysDir);
+            if (!Files.isDirectory(keysDir)) {
+                if (Files.getFileAttributeView(keysDir.getParent(), PosixFileAttributeView.class) != null) {
+                    Files.createDirectories(keysDir, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+                } else {
+                    Files.createDirectories(keysDir);
+                }
+            }
             setRestrictivePermissions(keysDir, true);
 
             Path signingKeyPath = keysDir.resolve(SA_SIGNING_KEY_FILE);
-            Files.writeString(signingKeyPath, oidcService.exportSigningKeyPem(oidcKey));
-            setRestrictivePermissions(signingKeyPath, false);
+            writeSecureFile(signingKeyPath, oidcService.exportSigningKeyPem(oidcKey), "rw-------");
 
             Path publicKeyPath = keysDir.resolve(SA_PUBLIC_KEY_FILE);
-            Files.writeString(publicKeyPath, oidcService.exportPublicKeyPem(oidcKey));
-            setRestrictivePermissions(publicKeyPath, false);
+            writeSecureFile(publicKeyPath, oidcService.exportPublicKeyPem(oidcKey), "rw-------");
 
             return new SigningKeyFiles(signingKeyPath, publicKeyPath);
         } catch (IOException e) {
@@ -736,6 +743,17 @@ public class EksClusterManager {
                     cluster.getName(), e.getMessage());
             return null;
         }
+    }
+
+    private static void writeSecureFile(Path path, String content, String posixPerms) throws IOException {
+        Files.deleteIfExists(path);
+        if (Files.getFileAttributeView(path.getParent(), PosixFileAttributeView.class) != null) {
+            Files.createFile(path, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString(posixPerms)));
+        } else {
+            Files.createFile(path);
+        }
+        Files.writeString(path, content);
+        setRestrictivePermissions(path, false);
     }
 
     private static void setRestrictivePermissions(Path path, boolean isDirectory) {
