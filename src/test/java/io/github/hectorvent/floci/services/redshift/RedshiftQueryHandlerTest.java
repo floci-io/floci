@@ -15,6 +15,7 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -228,6 +229,10 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<Port>5439</Port>"));
         assertTrue(xml.contains("<MasterUsername>admin</MasterUsername>"));
         assertTrue(xml.contains("<RequestId>test-req-id</RequestId>"));
+        // A Snapshot built via this constructor carries no ARN/CreateTime; the elements
+        // must be omitted rather than serialized as empty or "null".
+        assertFalse(xml.contains("<SnapshotArn>"));
+        assertFalse(xml.contains("<SnapshotCreateTime>"));
     }
 
     @Test
@@ -237,6 +242,8 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "test-cluster");
 
         Snapshot snapshot = new Snapshot("test-snapshot", "test-cluster", "available", 5439, "admin");
+        snapshot.setSnapshotArn("arn:aws:redshift:us-east-1:111111111111:snapshot:test-cluster/test-snapshot");
+        snapshot.setSnapshotCreateTime(Instant.parse("2026-09-16T04:00:00Z"));
         when(service.describeSnapshots("test-snapshot", "test-cluster")).thenReturn(List.of(snapshot));
 
         Response response = handler.handle("DescribeClusterSnapshots", params);
@@ -244,6 +251,9 @@ class RedshiftQueryHandlerTest {
         String xml = (String) response.getEntity();
         assertTrue(xml.contains("<Snapshots>"));
         assertTrue(xml.contains("<SnapshotIdentifier>test-snapshot</SnapshotIdentifier>"));
+        assertTrue(xml.contains(
+                "<SnapshotArn>arn:aws:redshift:us-east-1:111111111111:snapshot:test-cluster/test-snapshot</SnapshotArn>"));
+        assertTrue(xml.contains("<SnapshotCreateTime>2026-09-16T04:00:00Z</SnapshotCreateTime>"));
         assertTrue(xml.contains("</Snapshots>"));
     }
 

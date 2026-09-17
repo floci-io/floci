@@ -850,6 +850,8 @@ public class RedshiftService {
         snapshot.setStatus("available");
         snapshot.setMasterUsername(cluster.getMasterUsername());
         snapshot.setMasterPassword(cluster.getMasterPassword());
+        snapshot.setSnapshotArn(snapshotArn(clusterIdentifier, snapshotIdentifier));
+        snapshot.setSnapshotCreateTime(Instant.now());
         if (cluster.getEndpoint() != null) {
             snapshot.setPort(cluster.getEndpoint().getPort());
         } else {

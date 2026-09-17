@@ -775,14 +775,22 @@ public class RedshiftQueryHandler {
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {
+        // SnapshotArn/SnapshotCreateTime are absent on a snapshot created before this
+        // field existed (an on-disk store surviving an upgrade) — omit rather than fail,
+        // the same graceful-degradation the other optional elements below already use.
+        String createTime = snapshot.getSnapshotCreateTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(snapshot.getSnapshotCreateTime())
+                : null;
         XmlBuilder builder = new XmlBuilder()
             .start("Snapshot")
             .elem("SnapshotIdentifier", snapshot.getSnapshotIdentifier())
             .elem("ClusterIdentifier", snapshot.getClusterIdentifier())
+            .elem("SnapshotArn", snapshot.getSnapshotArn())
+            .elem("SnapshotCreateTime", createTime)
             .elem("Status", snapshot.getStatus())
             .elem("Port", String.valueOf(snapshot.getPort()))
             .elem("MasterUsername", snapshot.getMasterUsername());
-        
+
         return builder.end("Snapshot").build();
     }
 

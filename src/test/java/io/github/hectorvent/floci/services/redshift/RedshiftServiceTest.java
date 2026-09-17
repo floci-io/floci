@@ -718,6 +718,9 @@ class RedshiftServiceTest {
         // Password captured at snapshot time so restore can recover it after the source cluster is gone
         assertEquals("secret-pw", snapshot.getMasterPassword());
         assertEquals(5439, snapshot.getPort());
+        assertEquals("arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/my-snapshot",
+                snapshot.getSnapshotArn());
+        assertNotNull(snapshot.getSnapshotCreateTime());
         // sqlDump is now an absolute path scoped by account to avoid collisions across accounts
         assertTrue(snapshot.getSqlDump().contains("111111111111"));
         assertTrue(snapshot.getSqlDump().endsWith("my-snapshot.sql"));
