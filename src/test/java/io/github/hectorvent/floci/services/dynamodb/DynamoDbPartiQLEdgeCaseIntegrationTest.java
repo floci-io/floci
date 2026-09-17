@@ -330,10 +330,10 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("literals").body("Item", nullValue());
 
         request("DynamoDB_20120810.ExecuteStatement",
-                member("INSERT INTO \"" + TABLE + "\" VALUE {'pk':?,'sk':'1'}", "[{\"S\":\"literals\"}]"))
+                member("INSERT INTO \"" + TABLE + "\" VALUE {'pk':?,'sk':'1','n':1}", "[{\"S\":\"literals\"}]"))
             .statusCode(200);
         request("DynamoDB_20120810.ExecuteStatement",
-                member("SELECT sk FROM \"" + TABLE + "\" WHERE pk='literals' AND sk IN [?, '2']", "[{\"S\":\"1\"}]"))
+                member("SELECT sk FROM \"" + TABLE + "\" WHERE pk='literals' AND n IN [?, 2]", "[{\"N\":\"1\"}]"))
             .statusCode(200)
             .body("Items.size()", equalTo(1));
     }
