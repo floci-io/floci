@@ -65,7 +65,7 @@ class ExtendedS3ExchangeTest {
         when(s3.getObject("b", "in/data")).thenReturn(
                 new S3Object("b", "in/data", "1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         CopyStatementParser.S3CopyFrom copy = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "b", "in/data", "|", 0, false, false, null);
+                "t", List.of(), "b", "in/data", "|", 0, false, false, null, null);
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
@@ -94,7 +94,7 @@ class ExtendedS3ExchangeTest {
         });
         CopyStatementParser.S3Unload unload = new CopyStatementParser.S3Unload(
                 "select a from t", "b", "out/", "|", false, false, false,
-                false, null, false, true, false, 0);
+                false, null, false, true, false, 0, null);
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
@@ -116,7 +116,7 @@ class ExtendedS3ExchangeTest {
     @Test
     void missingCopyInputSendsCopyFailAndWaitsForSyncRecovery() throws Exception {
         CopyStatementParser.S3CopyFrom copy = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "b", "missing", "|", 0, false, false, null);
+                "t", List.of(), "b", "missing", "|", 0, false, false, null, null);
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);

@@ -140,7 +140,7 @@ class S3CopySimulatorTest {
     private CopyStatementParser.S3Unload unloadSpec(String bucket, String prefix,
             boolean gzip, boolean manifest, boolean allowOverwrite, boolean parallel, long maxFileSize) {
         return new CopyStatementParser.S3Unload("select a,b from t", bucket, prefix,
-                "|", false, gzip, false, false, null, manifest, allowOverwrite, parallel, maxFileSize);
+                "|", false, gzip, false, false, null, manifest, allowOverwrite, parallel, maxFileSize, null);
     }
 
     @Test
@@ -154,7 +154,7 @@ class S3CopySimulatorTest {
                                 new S3Object("b", "prefix/a", new byte[0], "text/plain")),
                         List.of(), false, null));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "b", "prefix/", null, 0, false, true, null);
+                "t", List.of(), "b", "prefix/", null, 0, false, true, null, null);
 
         S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3);
 
@@ -166,7 +166,7 @@ class S3CopySimulatorTest {
     @Test
     void preparedCopyReportsMissingObject() {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "b", "missing", "|", 0, false, false, null);
+                "t", List.of(), "b", "missing", "|", 0, false, false, null, null);
 
         S3CopySimulator.S3TransferException error = assertThrows(
                 S3CopySimulator.S3TransferException.class,
@@ -236,7 +236,7 @@ class S3CopySimulatorTest {
 
             CopyStatementParser.S3Unload spec = new CopyStatementParser.S3Unload(
                     "select a,b from t", "wh", "out/", "|", true, false, true, false, null,
-                    false, false, true, 0);
+                    false, false, true, 0, null);
             // The fake backend stands in for PostgreSQL: the first CopyData frame is the header row.
             Thread backend = backendThread(() -> playUnloadBackend("h1|h2\n", "1|a\n", "2|b\n", "3|c\n"));
             S3CopySimulator.runUnload(simClient, simBackend, spec, s3, 'I');
@@ -547,7 +547,7 @@ class S3CopySimulatorTest {
         when(s3.listObjectsWithPrefixes(eq("wh"), eq("out/"), isNull(), anyInt(), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
         CopyStatementParser.S3Unload spec = new CopyStatementParser.S3Unload(
-                "select a from t", "wh", "out/", "\t", true, false, false, true, "\\N", false, true, true, 0);
+                "select a from t", "wh", "out/", "\t", true, false, false, true, "\\N", false, true, true, 0, null);
 
         AtomicReference<String> seenSql = new AtomicReference<>();
         Thread backend = backendThread(() -> {
@@ -809,7 +809,7 @@ class S3CopySimulatorTest {
                 new S3Object("wh", "d/a.txt", "1|alice\n2|bob\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
 
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "people", List.of(), "wh", "d/a.txt", "|", 0, false, false, null);
+                "people", List.of(), "wh", "d/a.txt", "|", 0, false, false, null, null);
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
         Thread backend = backendThread(() -> playHappyBackend(copyData));
@@ -830,7 +830,7 @@ class S3CopySimulatorTest {
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", "x\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of("a", "b"), "wh", "k", "|", 0, false, false, null);
+                "t", List.of("a", "b"), "wh", "k", "|", 0, false, false, null, null);
 
         AtomicReference<String> fabricated = new AtomicReference<>();
         Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
@@ -851,7 +851,7 @@ class S3CopySimulatorTest {
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", "x\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of("a", "b"), "wh", "k", null, 0, false, true, null);
+                "t", List.of("a", "b"), "wh", "k", null, 0, false, true, null, null);
 
         AtomicReference<String> fabricated = new AtomicReference<>();
         Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
@@ -871,7 +871,7 @@ class S3CopySimulatorTest {
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", "x\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "k", "|", 0, false, false, "\\N");
+                "t", List.of(), "wh", "k", "|", 0, false, false, "\\N", null);
 
         AtomicReference<String> fabricated = new AtomicReference<>();
         Thread backend = backendThread(() -> fabricated.set(captureFabricatedThenComplete()));
@@ -898,7 +898,7 @@ class S3CopySimulatorTest {
                 new S3Object("wh", "p/2", "2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
 
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "p/", "|", 1, false, false, null);
+                "t", List.of(), "wh", "p/", "|", 1, false, false, null, null);
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
         Thread backend = backendThread(() -> playHappyBackend(copyData));
@@ -914,7 +914,7 @@ class S3CopySimulatorTest {
         when(s3.getObject("wh", "k.gz")).thenReturn(
                 new S3Object("wh", "k.gz", gzip("1|a\n2|b\n"), "application/gzip"));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "k.gz", "|", 0, true, false, null);
+                "t", List.of(), "wh", "k.gz", "|", 0, true, false, null, null);
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
         Thread backend = backendThread(() -> playHappyBackend(copyData));
@@ -929,7 +929,7 @@ class S3CopySimulatorTest {
         doThrow(new AwsException("AccessDenied", "no", 403))
                 .when(s3).authorizeAnonymousListBucket("wh");
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "k", "|", 0, false, false, null);
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null);
 
         boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
         assertTrue(handled);
@@ -947,7 +947,7 @@ class S3CopySimulatorTest {
         when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
                 new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "missing", "|", 0, false, false, null);
+                "t", List.of(), "wh", "missing", "|", 0, false, false, null, null);
 
         boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, 'I');
         assertTrue(handled);
@@ -965,7 +965,7 @@ class S3CopySimulatorTest {
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", "1\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "nosuch", List.of(), "wh", "k", "|", 0, false, false, null);
+                "nosuch", List.of(), "wh", "k", "|", 0, false, false, null, null);
 
         Thread backend = backendThread(() -> {
             new PostgresWireDecoder(testBackend.getInputStream()).nextMessage();
@@ -992,7 +992,7 @@ class S3CopySimulatorTest {
         when(s3.objectExists("wh", "k")).thenReturn(true);
         when(s3.getObject("wh", "k")).thenThrow(new AwsException("InternalError", "boom", 500));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "k", "|", 0, false, false, null);
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null);
 
         Thread backend = backendThread(() -> {
             OutputStream out = testBackend.getOutputStream();
@@ -1031,7 +1031,7 @@ class S3CopySimulatorTest {
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", "1\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "k", "|", 0, false, false, null);
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null);
 
         Thread backend = backendThread(() -> {
             new PostgresWireDecoder(testBackend.getInputStream()).nextMessage();
@@ -1053,7 +1053,7 @@ class S3CopySimulatorTest {
         when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
                 new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "missing", "|", 0, false, false, null);
+                "t", List.of(), "wh", "missing", "|", 0, false, false, null, null);
 
         Thread backend = backendThread(() -> {
             PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
@@ -1097,7 +1097,7 @@ class S3CopySimulatorTest {
                 new S3Object("wh", "multi/2", "2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
 
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "multi/", "|", 0, false, false, null);
+                "t", List.of(), "wh", "multi/", "|", 0, false, false, null, null);
 
         ByteArrayOutputStream copyData = new ByteArrayOutputStream();
         Thread backend = backendThread(() -> playHappyBackend(copyData));
@@ -1113,7 +1113,7 @@ class S3CopySimulatorTest {
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", "1\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "k", "|", 0, false, false, null);
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null);
 
         simBackend.setSoTimeout(100);
 
@@ -1143,7 +1143,7 @@ class S3CopySimulatorTest {
         when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
                 new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "missing", "|", 0, false, false, null);
+                "t", List.of(), "wh", "missing", "|", 0, false, false, null, null);
 
         // Backend closes socket when abort query arrives, simulating dropped connection
         Thread backend = backendThread(() -> {
@@ -1172,7 +1172,7 @@ class S3CopySimulatorTest {
         when(s3.listObjectsWithPrefixes(eq("wh"), eq("missing"), isNull(), anyInt(), any(), any())).thenReturn(
                 new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "wh", "missing", "|", 0, false, false, null);
+                "t", List.of(), "wh", "missing", "|", 0, false, false, null, null);
 
         // Fake backend returns ReadyForQuery with 'T' (e.g. abort query unexpectedly succeeded)
         Thread backend = backendThread(() -> {
