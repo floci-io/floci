@@ -225,10 +225,19 @@ class CloudWatchLogsMetricFilterTest {
         try {
             JsonNode extraction = fixture.get("extraction");
             put(isolated, "extraction", extraction, null, List.of());
+            List<Instant> minutes = new ArrayList<>();
             for (JsonNode scenario : extraction.get("cases")) {
+                minutes.add(minute);
                 ingest(isolated, minute, List.of(scenario.get("message").toString()));
-                assertSeries("extraction", minute, List.of(), scenario.get("expected"));
                 minute = minute.plusSeconds(60);
+            }
+            // The publisher writes batches in order: once the last scenario's control is visible,
+            // the earlier scenarios, including the one that must publish nothing, are settled.
+            List<JsonNode> cases = new ArrayList<>();
+            extraction.get("cases").forEach(cases::add);
+            assertSeries("extraction", minutes.getLast(), List.of(), cases.getLast().get("expected"));
+            for (int i = 0; i < cases.size(); i++) {
+                assertSeries("extraction", minutes.get(i), List.of(), cases.get(i).get("expected"));
             }
             JsonNode dimensions = fixture.get("ordinaryDimensions");
             put(isolated, "dimensions", dimensions, Map.of("A", "$.a", "B", "$.b"), List.of());
@@ -348,35 +357,67 @@ class CloudWatchLogsMetricFilterTest {
         return dimensions;
     }
 
+    /**
+     * A present series is awaited: the publisher writes it shortly after PutLogEvents returns, as
+     * AWS does. An absent series is asserted once; callers await a later positive control first.
+     * The window ends at second 59 so a sample stamped on the next minute is never in scope.
+     */
     private static void assertSeries(String metric, Instant minute, List<Dimension> dimensions, JsonNode expected)
             throws Exception {
         boolean present = expected != null && expected.has("Sum");
-        List<Datapoint> points = cloudWatch.getMetricStatistics(r -> r.namespace(namespace).metricName(metric)
-                .dimensions(dimensions).startTime(minute).endTime(minute.plusSeconds(60)).period(60)
-                .statistics(Statistic.SUM, Statistic.SAMPLE_COUNT)).datapoints();
+        List<Statistic> statistics = MetricFilterQueryAssertions.STATISTICS.stream().map(Statistic::fromValue).toList();
+        List<Datapoint> points = statistics(metric, minute, dimensions, statistics);
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (present && points.isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+            points = statistics(metric, minute, dimensions, statistics);
+        }
         assertThat(points).as(metric + " at " + minute + " " + dimensions).hasSize(present ? 1 : 0);
+        List<String> recorded = present ? MetricFilterQueryAssertions.recorded(expected) : List.of();
         if (present) {
-            assertThat(points.get(0).timestamp()).isEqualTo(minute);
-            assertThat(points.get(0).sum()).isEqualTo(expected.get("Sum").asDouble());
-            assertThat(points.get(0).sampleCount()).isEqualTo(expected.get("SampleCount").asDouble());
-            assertThat(points.get(0).unitAsString()).isEqualTo("Count");
+            Datapoint point = points.get(0);
+            assertThat(point.timestamp()).isEqualTo(minute);
+            for (String stat : recorded) {
+                assertThat(value(point, stat)).as(stat).isEqualTo(expected.get(stat).asDouble());
+            }
+            assertThat(point.unitAsString()).isEqualTo("Count");
         }
         List<MetricDataQuery> queries = new ArrayList<>();
-        for (String stat : List.of("Sum", "SampleCount")) {
+        for (String stat : present ? recorded : MetricFilterQueryAssertions.STATISTICS) {
             queries.add(MetricDataQuery.builder().id(stat.toLowerCase()).returnData(true).metricStat(
                     MetricStat.builder().period(60).stat(stat).metric(Metric.builder().namespace(namespace)
                             .metricName(metric).dimensions(dimensions).build()).build()).build());
         }
         List<MetricDataResult> results = cloudWatch.getMetricData(r -> r.startTime(minute)
-                .endTime(minute.plusSeconds(60)).metricDataQueries(queries)).metricDataResults();
-        assertThat(results).extracting(MetricDataResult::id).containsExactlyInAnyOrder("sum", "samplecount");
+                .endTime(minute.plusSeconds(59)).metricDataQueries(queries)).metricDataResults();
+        assertThat(results).extracting(MetricDataResult::id)
+                .containsExactlyInAnyOrderElementsOf(queries.stream().map(MetricDataQuery::id).toList());
         for (MetricDataResult result : results) {
-            String stat = result.id().equals("sum") ? "Sum" : "SampleCount";
             assertThat(result.statusCodeAsString()).isEqualTo("Complete");
             assertThat(result.timestamps()).containsExactlyElementsOf(present ? List.of(minute) : List.of());
-            assertThat(result.values()).containsExactlyElementsOf(
-                    present ? List.of(expected.get(stat).asDouble()) : List.of());
+            if (present) {
+                String stat = recorded.stream().filter(name -> name.toLowerCase().equals(result.id())).findFirst().orElseThrow();
+                assertThat(result.values()).containsExactly(expected.get(stat).asDouble());
+            } else {
+                assertThat(result.values()).isEmpty();
+            }
         }
         MetricFilterQueryAssertions.assertSeries(namespace, metric, minute, dimensions, expected);
+    }
+
+    private static List<Datapoint> statistics(String metric, Instant minute, List<Dimension> dimensions,
+                                              List<Statistic> statistics) {
+        return cloudWatch.getMetricStatistics(r -> r.namespace(namespace).metricName(metric).dimensions(dimensions)
+                .startTime(minute).endTime(minute.plusSeconds(59)).period(60).statistics(statistics)).datapoints();
+    }
+
+    private static double value(Datapoint point, String stat) {
+        return switch (stat) {
+            case "Sum" -> point.sum();
+            case "SampleCount" -> point.sampleCount();
+            case "Minimum" -> point.minimum();
+            case "Maximum" -> point.maximum();
+            default -> throw new IllegalArgumentException(stat);
+        };
     }
 }

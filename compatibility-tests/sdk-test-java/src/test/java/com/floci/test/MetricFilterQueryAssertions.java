@@ -33,7 +33,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 final class MetricFilterQueryAssertions {
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
+    /** Every statistic the AWS oracle can record for a series; a fixture asserts the ones it has. */
+    static final List<String> STATISTICS = List.of("Sum", "SampleCount", "Minimum", "Maximum");
+
     private MetricFilterQueryAssertions() {}
+
+    static List<String> recorded(JsonNode expected) {
+        return STATISTICS.stream().filter(expected::has).toList();
+    }
 
     static void assertSeries(String namespace, String metric, Instant minute,
                              List<Dimension> dimensions, JsonNode expected) throws Exception {
@@ -42,20 +49,22 @@ final class MetricFilterQueryAssertions {
         params.put("Namespace", namespace);
         params.put("MetricName", metric);
         params.put("Period", "60");
-        params.put("Statistics.member.1", "Sum");
-        params.put("Statistics.member.2", "SampleCount");
+        for (int i = 0; i < STATISTICS.size(); i++) {
+            params.put("Statistics.member." + (i + 1), STATISTICS.get(i));
+        }
         dimensions(params, "Dimensions", dimensions);
         Document stats = query("GetMetricStatistics", params);
         NodeList points = stats.getElementsByTagNameNS("*", "Timestamp");
         assertThat(points.getLength()).isEqualTo(present ? 1 : 0);
         if (present) {
             assertThat(Instant.parse(points.item(0).getTextContent())).isEqualTo(minute);
-            assertThat(Double.parseDouble(text(stats.getDocumentElement(), "Sum"))).isEqualTo(expected.get("Sum").asDouble());
-            assertThat(Double.parseDouble(text(stats.getDocumentElement(), "SampleCount")))
-                    .isEqualTo(expected.get("SampleCount").asDouble());
+            for (String stat : recorded(expected)) {
+                assertThat(Double.parseDouble(text(stats.getDocumentElement(), stat))).as(stat)
+                        .isEqualTo(expected.get(stat).asDouble());
+            }
             assertThat(text(stats.getDocumentElement(), "Unit")).isEqualTo("Count");
         }
-        for (String stat : List.of("Sum", "SampleCount")) {
+        for (String stat : present ? recorded(expected) : STATISTICS) {
             params = window(minute);
             String prefix = "MetricDataQueries.member.1.";
             params.put(prefix + "Id", "probe");
@@ -82,7 +91,7 @@ final class MetricFilterQueryAssertions {
     private static Map<String, String> window(Instant minute) {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("StartTime", minute.toString());
-        params.put("EndTime", minute.plusSeconds(60).toString());
+        params.put("EndTime", minute.plusSeconds(59).toString());
         return params;
     }
 

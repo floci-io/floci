@@ -42,7 +42,7 @@ def parse_args(argv=None):
     if args.aws:
         if not args.profile or not args.region or not args.ack_live_writes:
             parser.error("AWS requires explicit profile, region and acknowledgement")
-        if args.region not in botocore.session.get_session().get_available_regions("logs"):
+        if args.region not in botocore.session.get_session().get_available_regions("logs", partition_name="aws"):
             parser.error("Only known commercial AWS regions are supported")
         if args.stable_seconds < 30 or args.timeout < 120:
             parser.error("AWS observations require at least 120 seconds and a 30-second stable window")

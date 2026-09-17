@@ -92,6 +92,9 @@ def test_idle_window_is_distinct_unwritten_and_checked_through_convergence(monke
     ["--endpoint", "http://localhost:4566", "--profile", "synthetic"],
     ["--endpoint", "http://127.0.0.1:4566/path"],
     ["--endpoint", "http://[malformed-private-endpoint"],
+    # GovCloud and China are real botocore Regions but not the commercial partition the endpoints pin.
+    ["--aws", "--profile", "synthetic", "--region", "us-gov-west-1", "--ack-live-writes", "I_ACCEPT_AWS_WRITES"],
+    ["--aws", "--profile", "synthetic", "--region", "cn-north-1", "--ack-live-writes", "I_ACCEPT_AWS_WRITES"],
 ])
 def test_rejects_unguarded_or_remote_writes_before_creating_clients(args):
     with pytest.raises(SystemExit):
