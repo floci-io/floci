@@ -326,4 +326,29 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
         .then().statusCode(200).extract().asString();
         assertThat(unmatched, not(containsString("<item>")));
     }
+
+    @Test
+    @Order(8)
+    void theAssociationStateFilterComparesTheAssociationState() {
+        given()
+            .formParam("Action", "GetTransitGatewayRouteTableAssociations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "state")
+            .formParam("Filter.1.Value.1", "associated")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("GetTransitGatewayRouteTableAssociationsResponse.associations.item.transitGatewayAttachmentId",
+                    equalTo(attachmentId));
+
+        String attachmentLifecycleState = given()
+            .formParam("Action", "GetTransitGatewayRouteTableAssociations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "state")
+            .formParam("Filter.1.Value.1", "available")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(attachmentLifecycleState, not(containsString("<item>")));
+    }
 }

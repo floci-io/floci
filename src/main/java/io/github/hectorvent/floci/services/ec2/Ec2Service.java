@@ -2010,10 +2010,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /** The attachments associated with a route table, which is where an association is recorded. */
     public List<TransitGatewayVpcAttachment> associationsOf(
             String region, String routeTableId, Map<String, List<String>> filters) {
+        Map<String, List<String>> attachmentFilters = new LinkedHashMap<>(filters);
+        List<String> associationStates = attachmentFilters.remove("state");
         return transitGatewayVpcAttachments.scan(k -> true).stream()
                 .filter(attachment -> region.equals(attachment.getRegion()))
                 .filter(attachment -> routeTableId.equals(attachment.getAssociationRouteTableId()))
-                .filter(attachment -> matchesFilters(attachment, filters, region))
+                .filter(attachment -> associationStates == null
+                        || matchesValue(associationStates, attachment.getAssociationState()))
+                .filter(attachment -> matchesFilters(attachment, attachmentFilters, region))
                 .collect(Collectors.toList());
     }
 
