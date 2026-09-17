@@ -197,11 +197,13 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   a comma default delimiter.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
-- S3 access is authorized as an unsigned request: with `FLOCI_SERVICES_S3_ENFORCE_AUTH` off it is
-  unrestricted; with it on, bucket policy and public access settings apply.
+- `IAM_ROLE '<role-arn>'` is supported. The role must exist in the local IAM service. With
+  `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, the role only needs to exist. With it on, the role's
+  identity policy and the bucket policy must allow the required S3 actions. `IAM_ROLE default`
+  is not supported.
 - Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `AVRO`, `ORC`, `MANIFEST`, `MAXERROR`,
   `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
-  `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, credentials clauses, and so on) is not
+  `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, `CREDENTIALS`, and so on) is not
   recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.
 - A multi-statement query whose COPY is followed by another statement is not intercepted; send the
   COPY on its own.
@@ -248,8 +250,11 @@ the result to S3 as one or more objects under `<prefix>`.
   `ALLOWOVERWRITE` a failed UNLOAD leaves its objects in place (they may have replaced prior data,
   so they are not deleted); a `MANIFEST` request that fails this way can leave data objects without
   a manifest, and rerunning the same statement overwrites them.
-- S3 access is authorized as an unsigned request, like COPY from S3.
-- Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `IAM_ROLE` / `CREDENTIALS`,
+- `IAM_ROLE '<role-arn>'` is supported. The role must exist in the local IAM service. With
+  `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, the role only needs to exist. With it on, the role's
+  identity policy and the bucket policy must allow the required S3 actions. `IAM_ROLE default`
+  is not supported.
+- Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `CREDENTIALS`,
   `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
 - Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no
@@ -287,5 +292,6 @@ These views expose the documented Redshift column names, types, and ordering map
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
 - Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.
+- `IAM_ROLE default` and cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
 - IAM database authentication over the wire, and `sslmode=verify-full` against the self-signed proxy certificate.
