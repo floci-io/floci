@@ -2812,11 +2812,8 @@ public class DynamoDbJsonHandler {
         try {
             DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement);
             tableName = stmt.table();
-            if (stmt instanceof DynamoDbPartiQLParser.Stmt.Select select
-                    && !batchSelectResolvesThroughPrimaryKey(select, region)) {
-                throw new AwsException("ValidationException",
-                        "Select statements within BatchExecuteStatement must specify the primary key "
-                                + "in the where clause.", 400);
+            if (stmt instanceof DynamoDbPartiQLParser.Stmt.Select select) {
+                requireBatchSelectReadsByKey(select, region);
             }
             JsonNode result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
                     .consistentRead(statement.path("ConsistentRead").asBoolean(false)), region);
@@ -2856,12 +2853,20 @@ public class DynamoDbJsonHandler {
     // the table's primary key: index-qualified statements and partial-key
     // WHERE clauses are rejected per statement (characterised on real AWS,
     // eu-west-1, 2026-09-02).
-    private boolean batchSelectResolvesThroughPrimaryKey(DynamoDbPartiQLParser.Stmt.Select select, String region) {
+    private void requireBatchSelectReadsByKey(DynamoDbPartiQLParser.Stmt.Select select, String region) {
         if (select.index() != null) {
-            return false;
+            throw batchSelectNeedsKey();
         }
         TableDefinition table = dynamoDbService.describeTable(select.table(), region);
-        return DynamoDbPartiQLHandler.namesOnlyTheKey(table, select.where());
+        DynamoDbPartiQLHandler.requireReadsWithinLimit(table, select.where());
+        if (!DynamoDbPartiQLHandler.namesOnlyTheKey(table, select.where())) {
+            throw batchSelectNeedsKey();
+        }
+    }
+
+    private static AwsException batchSelectNeedsKey() {
+        return new AwsException("ValidationException",
+                "Select statements within BatchExecuteStatement must specify the primary key in the where clause.", 400);
     }
 
     private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(JsonNode statement) {

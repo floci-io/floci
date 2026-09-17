@@ -13,12 +13,16 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
 import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -240,5 +244,29 @@ class DynamoDbPartiQLParserTest {
                 () -> DynamoDbPartiQLParser.parse("SELECT a[1.5] FROM \"t\" WHERE pk = 'p'", List.of()));
 
         assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void rejectsAnInOperatorWithMoreThan100Operands() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> DynamoDbPartiQLParser.parse("SELECT a FROM \"t\" WHERE pk IN [" + inValues(101) + "]", List.of()));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals("The IN operator is provided with too many operands; number of operands: 101", e.getMessage());
+        assertDoesNotThrow(() -> DynamoDbPartiQLParser.parse(
+                "SELECT a FROM \"t\" WHERE pk IN [" + inValues(100) + "]", List.of()));
+    }
+
+    @Test
+    void readsTheWholeStatementBeforeItCountsInOperands() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> DynamoDbPartiQLParser.parse("SELECT a FROM \"t\" WHERE pk IN [" + inValues(101) + "] AND", List.of()));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertNotEquals("The IN operator is provided with too many operands; number of operands: 101", e.getMessage());
+    }
+
+    private static String inValues(int count) {
+        return IntStream.range(0, count).mapToObj(i -> "'v" + i + "'").collect(Collectors.joining(","));
     }
 }

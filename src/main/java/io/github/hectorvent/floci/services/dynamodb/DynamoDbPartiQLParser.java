@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.*;
+import java.util.stream.Stream;
 
 public class DynamoDbPartiQLParser {
 
@@ -82,9 +83,15 @@ public class DynamoDbPartiQLParser {
 
     public sealed interface Stmt permits Stmt.Select, Stmt.Insert, Stmt.Update, Stmt.Delete, Stmt.Exists {
         String table();
+        List<Cond> where();
         record Select(String table, String index, List<Path> columns, List<Cond> where,
                       List<OrderTerm> orderBy)                              implements Stmt {}
-        record Insert(String table, Map<String, PVal> item)                 implements Stmt {}
+        record Insert(String table, Map<String, PVal> item)                 implements Stmt {
+            @Override
+            public List<Cond> where() {
+                return List.of();
+            }
+        }
         record Update(String table, String index, List<SetClause> sets, List<Path> removes,
                       List<Cond> where, Returning returning)                implements Stmt {}
         record Delete(String table, String index, List<Cond> where, Returning returning) implements Stmt {}
@@ -92,6 +99,11 @@ public class DynamoDbPartiQLParser {
             @Override
             public String table() {
                 return select.table();
+            }
+
+            @Override
+            public List<Cond> where() {
+                return select.where();
             }
         }
     }
@@ -347,7 +359,28 @@ public class DynamoDbPartiQLParser {
         if (parser.peek().type() != TType.EOF) {
             throw validationEx("Statement wasn't well formed, can't be processed: Unexpected token after expression");
         }
+        stmt.where().stream()
+                .flatMap(DynamoDbPartiQLParser::leaves)
+                .filter(Cond.In.class::isInstance)
+                .map(Cond.In.class::cast)
+                .filter(in -> in.values().size() > MAX_IN_OPERANDS)
+                .findFirst()
+                .ifPresent(in -> {
+                    throw validationEx("The IN operator is provided with too many operands; number of operands: "
+                            + in.values().size());
+                });
         return stmt;
+    }
+
+    private static final int MAX_IN_OPERANDS = 100;
+
+    static Stream<Cond.Leaf> leaves(Cond cond) {
+        return switch (cond) {
+            case Cond.Leaf leaf -> Stream.of(leaf);
+            case Cond.Not not   -> leaves(not.operand());
+            case Cond.And and   -> and.operands().stream().flatMap(DynamoDbPartiQLParser::leaves);
+            case Cond.Or or     -> or.operands().stream().flatMap(DynamoDbPartiQLParser::leaves);
+        };
     }
 
     private static final Set<TType> OPERAND_ENDS = EnumSet.of(TType.IDENT, TType.NUMBER, TType.STRING,

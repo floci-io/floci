@@ -80,6 +80,7 @@ class DynamoDbPartiQLHandler {
         DynamoDbPartiQLKeyPlan keys = new DynamoDbPartiQLKeyPlan(stmt.where(), accessPath, table);
         keys.requireKeyTypesMatchSchema();
         keys.requireNoOverlap();
+        keys.requireReadsWithinLimit();
         requireFilterAttributesProjected(keys, accessPath, table);
 
         Routing routing = routingOf(stmt.where(), keys, accessPath.partitionKeyName(), accessPath.sortKeyName());
@@ -777,6 +778,10 @@ class DynamoDbPartiQLHandler {
 
     private static boolean pinsFullKey(TableDefinition table, List<Cond> where) {
         return firstKeyValues(table, where).size() == keyAttributeNames(table).size();
+    }
+
+    static void requireReadsWithinLimit(TableDefinition table, List<Cond> where) {
+        new DynamoDbPartiQLKeyPlan(where, DynamoDbAccessPath.resolve(table, null), table).requireReadsWithinLimit();
     }
 
     static boolean namesOnlyTheKey(TableDefinition table, List<Cond> where) {

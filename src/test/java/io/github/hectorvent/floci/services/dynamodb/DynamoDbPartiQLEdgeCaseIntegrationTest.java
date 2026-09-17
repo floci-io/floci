@@ -477,11 +477,6 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .statusCode(400)
             .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key sk"));
         statement(select + "pk > 1").statusCode(200).body("Items.size()", equalTo(0));
-
-        String manyValues = IntStream.range(0, 60).mapToObj(i -> "'v" + i + "'").collect(Collectors.joining(","));
-        statement(select + "pk IN [" + manyValues + "] AND sk IN [" + manyValues + "]")
-            .statusCode(200)
-            .body("Items.size()", equalTo(0));
     }
 
     @Test
@@ -647,6 +642,39 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Items[0].'k[0]'.S", equalTo("c"));
     }
 
+    @Test
+    @Order(29)
+    void refusesTooManyInOperandsAndTooManyDecomposedReads() {
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
+        String tooManyReads = "Too many decomposed read operations for a given query.";
+        String tooManyOperands = "The IN operator is provided with too many operands; number of operands: 101";
+
+        for (String where : List.of("pk IN [" + inValues(51) + "]",
+                "pk='ranges' AND sk IN [" + inValues(51) + "]",
+                "pk IN [" + inValues(26) + "] AND sk IN ['1','2']")) {
+            statement(select + where).statusCode(400).body("message", equalTo(tooManyReads));
+        }
+        for (String where : List.of("pk IN [" + inValues(50) + "] AND flag IN [" + inValues(100) + "]",
+                "pk IN [" + inValues(51) + "] OR flag='one'")) {
+            statement(select + where).statusCode(200);
+        }
+        request("DynamoDB_20120810.BatchExecuteStatement",
+                "{\"Statements\":[{\"Statement\":" + json(select + "pk IN [" + inValues(51) + "] AND sk='1'") + "}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Message", equalTo(tooManyReads));
+
+        statement(select + "pk='ranges' AND flag IN [" + inValues(101) + "]")
+            .statusCode(400)
+            .body("message", equalTo(tooManyOperands));
+        statement("UPDATE " + QUOTED_TABLE + " SET t=1 WHERE pk='ranges' AND sk='1' AND flag IN [" + inValues(101) + "]")
+            .statusCode(400)
+            .body("message", equalTo(tooManyOperands));
+        transaction("SELECT * FROM " + QUOTED_TABLE + " WHERE pk IN [" + inValues(101) + "] AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: " + tooManyOperands));
+        getItem("ranges").body("Item.t", nullValue());
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
@@ -682,6 +710,10 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
 
     private static String member(String partiql, String parameters) {
         return "{\"Statement\":" + json(partiql) + ",\"Parameters\":" + parameters + "}";
+    }
+
+    private static String inValues(int count) {
+        return IntStream.range(0, count).mapToObj(i -> "'v" + i + "'").collect(Collectors.joining(","));
     }
 
     private static String json(String text) {

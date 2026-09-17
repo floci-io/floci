@@ -23,10 +23,12 @@ import java.util.stream.Stream;
 final class DynamoDbPartiQLKeyPlan {
 
     private static final int MAX_BRANCHES = 1000;
+    private static final int MAX_DECOMPOSED_READS = 50;
 
     private final String partitionKey;
     private final String sortKey;
     private final TableDefinition table;
+    private final boolean everyBranchPinsPartition;
     private final List<Cond.Leaf> keyConditions = new ArrayList<>();
     private final List<Branch> branches;
     private boolean tooManyBranches;
@@ -47,7 +49,9 @@ final class DynamoDbPartiQLKeyPlan {
         this.partitionKey = accessPath.partitionKeyName();
         this.sortKey = accessPath.sortKeyName();
         this.table = table;
-        List<Spread> spread = spread(new Cond.And(where));
+        Cond conditions = new Cond.And(where);
+        this.everyBranchPinsPartition = everyBranchPinsPartition(conditions);
+        List<Spread> spread = spread(conditions);
         this.branches = tooManyBranches
                 ? List.of(new Branch(null, null, Range.ALL, where))
                 : spread.stream().map(this::branchOf).toList();
@@ -72,6 +76,21 @@ final class DynamoDbPartiQLKeyPlan {
 
     static boolean matchesKeyType(TableDefinition table, String keyName, PVal value) {
         return DynamoDbAccessPathValidator.attributeType(table, keyName).equals(DynamoDbPartiQLParser.typeCode(value));
+    }
+
+    void requireReadsWithinLimit() {
+        if (everyBranchPinsPartition && (tooManyBranches || branches.size() > MAX_DECOMPOSED_READS)) {
+            throw DynamoDbPartiQLParser.validationEx("Too many decomposed read operations for a given query.");
+        }
+    }
+
+    private boolean everyBranchPinsPartition(Cond cond) {
+        return switch (cond) {
+            case Cond.Leaf leaf -> pinsPartition(leaf);
+            case Cond.And and -> and.operands().stream().anyMatch(this::everyBranchPinsPartition);
+            case Cond.Or or   -> or.operands().stream().allMatch(this::everyBranchPinsPartition);
+            case Cond.Not ignored -> false;
+        };
     }
 
     void requireNoOverlap() {
@@ -124,12 +143,7 @@ final class DynamoDbPartiQLKeyPlan {
     }
 
     static Stream<Path> attributePaths(Cond cond) {
-        return switch (cond) {
-            case Cond.Leaf leaf -> Stream.of(leaf.path());
-            case Cond.Not not   -> attributePaths(not.operand());
-            case Cond.And and   -> and.operands().stream().flatMap(DynamoDbPartiQLKeyPlan::attributePaths);
-            case Cond.Or or     -> or.operands().stream().flatMap(DynamoDbPartiQLKeyPlan::attributePaths);
-        };
+        return DynamoDbPartiQLParser.leaves(cond).map(Cond.Leaf::path);
     }
 
     static boolean isSortKeyRange(Cond cond, String sortKey) {
@@ -210,9 +224,14 @@ final class DynamoDbPartiQLKeyPlan {
         };
     }
 
+    private boolean pinsPartition(Cond.Leaf leaf) {
+        return leaf.bareAttribute().filter(partitionKey::equals).isPresent()
+                && (leaf instanceof Cond.Eq || leaf instanceof Cond.In);
+    }
+
     private boolean isKeyCondition(Cond.Leaf leaf) {
         if (leaf.bareAttribute().filter(partitionKey::equals).isPresent()) {
-            return leaf instanceof Cond.Eq || leaf instanceof Cond.In;
+            return pinsPartition(leaf);
         }
         return isSortKeyRange(leaf, sortKey)
                 || (leaf instanceof Cond.In && leaf.bareAttribute().filter(name -> name.equals(sortKey)).isPresent());
