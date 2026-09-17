@@ -841,6 +841,10 @@ public class DynamoDbPartiQLParser {
                     throw validationEx("List index is not within the allowable range; index: [" + t.value() + "] at "
                             + position(t.start() + 1, t.value().length() - 1));
                 }
+                if (index > Integer.MAX_VALUE) {
+                    throw validationEx("List index is not within the allowable range; index: [" + t.value() + "] at "
+                            + position(t.start(), t.value().length()));
+                }
                 return index;
             } catch (NumberFormatException expected) {
                 // Falls through to the shared rejection below.

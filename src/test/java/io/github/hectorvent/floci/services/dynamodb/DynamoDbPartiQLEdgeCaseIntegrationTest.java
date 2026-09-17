@@ -105,6 +105,19 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     }
 
     @Test
+    @Order(15)
+    void refusesAListIndexAboveTheIntegerRange() {
+        statement("SELECT l[2147483648] FROM \"" + TABLE + "\" WHERE pk='index' AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("List index is not within the allowable range; index: [2147483648] at 1:10:10"));
+        statement("UPDATE \"" + TABLE + "\" REMOVE l[2147483648] WHERE pk='index' AND sk='1'")
+            .statusCode(400);
+        statement("SELECT l[2147483647] FROM \"" + TABLE + "\" WHERE pk='index' AND sk='1'")
+            .statusCode(200);
+        getItem("index").body("Item.l.L.size()", equalTo(2));
+    }
+
+    @Test
     @Order(5)
     void refusesANonStringTypeInAttributeType() {
         statement("SELECT sk FROM \"" + TABLE + "\" WHERE pk='index' AND attribute_type(l, 1)")
