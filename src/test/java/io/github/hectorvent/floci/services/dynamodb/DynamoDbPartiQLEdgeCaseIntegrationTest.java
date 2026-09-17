@@ -165,6 +165,34 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Item.n.NS", containsInAnyOrder("1", "10"));
     }
 
+    @Test
+    @Order(8)
+    void refusesAnInvalidParameterBeforeReadingTheStatement() {
+        String duplicates = "One or more parameter values were invalid: Input collection [a, a] contains duplicates.";
+        String insert = "INSERT INTO \"" + TABLE + "\" VALUE {'pk':'params','sk':'1','x':?}";
+        String update = "UPDATE \"" + TABLE + "\" SET y = ? WHERE pk='params' AND sk='1'";
+
+        request("DynamoDB_20120810.ExecuteStatement",
+                member("UPDATE \"" + TABLE + "\" SET WHERE", "[{\"SS\":[\"a\",\"a\"]}]"))
+            .statusCode(400)
+            .body("message", equalTo(duplicates));
+        request("DynamoDB_20120810.ExecuteStatement", member(insert, "[{\"NULL\":false}]"))
+            .statusCode(400)
+            .body("message", equalTo(
+                    "One or more parameter values were invalid: Null attribute value types must have the value of true"));
+        request("DynamoDB_20120810.ExecuteTransaction", "{\"TransactStatements\":["
+                + member(update, "[{\"N\":\"1\"}]") + "," + member(insert, "[{\"SS\":[\"a\",\"a\"]}]") + "]}")
+            .statusCode(400)
+            .body("message", equalTo(duplicates));
+        request("DynamoDB_20120810.BatchExecuteStatement",
+                "{\"Statements\":[" + member(update, "[{\"SS\":[]}]") + "]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(
+                    "One or more parameter values were invalid: An string set  may not be empty"));
+        getItem("params").body("Item", nullValue());
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
@@ -188,6 +216,10 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                 .map(s -> "{\"Statement\":" + json(s) + "}")
                 .collect(Collectors.joining(","));
         return request("DynamoDB_20120810.ExecuteTransaction", "{\"TransactStatements\":[" + members + "]}");
+    }
+
+    private static String member(String partiql, String parameters) {
+        return "{\"Statement\":" + json(partiql) + ",\"Parameters\":" + parameters + "}";
     }
 
     private static String json(String text) {

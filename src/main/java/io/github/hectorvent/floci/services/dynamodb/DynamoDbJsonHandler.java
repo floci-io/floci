@@ -2097,7 +2097,7 @@ public class DynamoDbJsonHandler {
      * Builds a ConsumedCapacity node if the request includes ReturnConsumedCapacity.
      * Uses simple estimates: 0.5 RCU per item read, 1.0 WCU per item written.
      */
-    static void validateItemSets(JsonNode item) {
+    private void validateItemSets(JsonNode item) {
         if (item == null || !item.isObject()) return;
         item.fields().forEachRemaining(entry -> {
             JsonNode attr = entry.getValue();
@@ -2105,7 +2105,7 @@ public class DynamoDbJsonHandler {
         });
     }
 
-    private static void checkAttrSets(JsonNode attr) {
+    private void checkAttrSets(JsonNode attr) {
         if (attr == null) return;
         if (attr.has("NULL") && !attr.get("NULL").asBoolean()) {
             throw new AwsException("ValidationException",
@@ -2141,7 +2141,7 @@ public class DynamoDbJsonHandler {
         } else if (attr.has("M")) {
             attr.get("M").fields().forEachRemaining(e -> checkAttrSets(e.getValue()));
         } else if (attr.has("L")) {
-            attr.get("L").forEach(DynamoDbJsonHandler::checkAttrSets);
+            attr.get("L").forEach(this::checkAttrSets);
         }
     }
 
@@ -2222,7 +2222,7 @@ public class DynamoDbJsonHandler {
         }
     }
 
-    private static String formatSetForError(JsonNode arr) {
+    private String formatSetForError(JsonNode arr) {
         StringBuilder sb = new StringBuilder("[");
         boolean first = true;
         for (JsonNode e : arr) {
@@ -2680,7 +2680,10 @@ public class DynamoDbJsonHandler {
             List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
             for (int i = 0; i < stmts.size(); i++) {
                 JsonNode s = stmts.get(i);
-                statements.add(inTransactStatement(i, () -> parsePartiQLStatement(s)));
+                // A bad parameter names no statement (checked on real AWS, eu-west-2, 2026-09-17).
+                List<JsonNode> parameters = toPartiQLParams(s.path("Parameters"));
+                statements.add(inTransactStatement(i,
+                        () -> DynamoDbPartiQLParser.parse(s.path("Statement").asText(), parameters)));
             }
             long reads = statements.stream().filter(DynamoDbPartiQLParser.Stmt.Select.class::isInstance).count();
             if (reads > 0 && reads < statements.size()) {
@@ -2861,6 +2864,7 @@ public class DynamoDbJsonHandler {
         }
         List<JsonNode> params = new ArrayList<>();
         node.forEach(params::add);
+        params.forEach(this::checkAttrSets);
         return params;
     }
 }

@@ -482,7 +482,6 @@ class DynamoDbPartiQLHandler {
 
         ObjectNode item = mapper.createObjectNode();
         stmt.item().forEach((k, v) -> item.set(k, toTypedNode(v)));
-        DynamoDbJsonHandler.validateItemSets(item);
 
         try {
             service.putItem(stmt.table(), item, "attribute_not_exists(" + pkName + ")", null, null, region, "NONE");
