@@ -36,6 +36,10 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class S3CopySimulatorTest {
@@ -190,7 +194,7 @@ class S3CopySimulatorTest {
                 () -> S3CopySimulator.prepareCopy(spec, s3, iamService));
 
         assertEquals("42501", error.sqlState());
-        org.mockito.Mockito.verifyNoInteractions(s3);
+        verifyNoInteractions(s3);
     }
 
     @Test
@@ -205,7 +209,7 @@ class S3CopySimulatorTest {
                 () -> S3CopySimulator.prepareCopy(spec, s3, iamService));
 
         assertEquals("42501", error.sqlState());
-        org.mockito.Mockito.verifyNoInteractions(s3);
+        verifyNoInteractions(s3);
     }
 
     @Test
@@ -219,13 +223,13 @@ class S3CopySimulatorTest {
 
         S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iamService);
 
-        org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousGetObject(any(), any());
-        org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousListBucket(any());
-        org.mockito.Mockito.verify(s3).authorizeSignedListBucket(any(), any(), eq("b"));
-        org.mockito.Mockito.verify(s3).authorizeSignedGetObject(any(), any(), eq("b"), eq("k"));
-        org.mockito.Mockito.verify(iamService).registerSessionForAccount(
+        verify(s3, never()).authorizeAnonymousGetObject(any(), any());
+        verify(s3, never()).authorizeAnonymousListBucket(any());
+        verify(s3).authorizeSignedListBucket(any(), any(), eq("b"));
+        verify(s3).authorizeSignedGetObject(any(), any(), eq("b"), eq("k"));
+        verify(iamService).registerSessionForAccount(
                 eq("000000000000"), any(), any(), any(), eq(ROLE_ARN), any(), isNull());
-        org.mockito.Mockito.verify(iamService, org.mockito.Mockito.never()).unregisterSession(any(), any());
+        verify(iamService, never()).unregisterSession(any(), any());
     }
 
     @Test
@@ -242,9 +246,9 @@ class S3CopySimulatorTest {
         S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iamService);
         S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream());
 
-        org.mockito.Mockito.verify(s3, org.mockito.Mockito.times(2))
+        verify(s3, times(2))
                 .authorizeSignedGetObject(any(), any(), eq("b"), eq("k"));
-        org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousGetObject(any(), any());
+        verify(s3, never()).authorizeAnonymousGetObject(any(), any());
     }
 
     @Test
