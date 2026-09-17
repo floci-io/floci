@@ -235,7 +235,8 @@ class CloudWatchLogsMetricFilterTest {
             // the earlier scenarios, including the one that must publish nothing, are settled.
             List<JsonNode> cases = new ArrayList<>();
             extraction.get("cases").forEach(cases::add);
-            assertSeries("extraction", minutes.getLast(), List.of(), cases.getLast().get("expected"));
+            int last = cases.size() - 1;
+            assertSeries("extraction", minutes.get(last), List.of(), cases.get(last).get("expected"));
             for (int i = 0; i < cases.size(); i++) {
                 assertSeries("extraction", minutes.get(i), List.of(), cases.get(i).get("expected"));
             }
