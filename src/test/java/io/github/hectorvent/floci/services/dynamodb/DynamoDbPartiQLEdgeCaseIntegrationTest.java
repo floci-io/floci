@@ -375,6 +375,26 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         getItem("nested").body("Item.d.M.a.M.a.M", notNullValue());
     }
 
+    @Test
+    @Order(17)
+    void refusesANonNumberLiteralInArithmeticBeforeTheCondition() {
+        putItem("arithmetic", "\"n\":{\"N\":\"1\"}");
+        String update = "UPDATE \"" + TABLE + "\" SET n = ";
+        String failingCondition = " WHERE pk='arithmetic' AND sk='1' AND nope='x'";
+
+        statement(update + "'a' + 1" + failingCondition)
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function; operator or function: +, operand type: S"));
+        statement(update + "n - null" + failingCondition)
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function; operator or function: -, operand type: NULL"));
+        transaction(update + "n + [1] WHERE pk='arithmetic' AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]:"
+                    + " Incorrect operand type for operator or function; operator or function: +, operand type: L"));
+        getItem("arithmetic").body("Item.n.N", equalTo("1"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

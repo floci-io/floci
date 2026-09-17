@@ -761,9 +761,18 @@ public class DynamoDbPartiQLParser {
         Operand left = parseOperand();
         if (peek().type() == TType.PLUS || peek().type() == TType.MINUS) {
             String op = advance().value();
-            return new Assign(path, left, op, parseOperand());
+            Operand right = parseOperand();
+            requireNumberLiteral(op, left);
+            requireNumberLiteral(op, right);
+            return new Assign(path, left, op, right);
         }
         return new Assign(path, left, null, null);
+    }
+
+    private static void requireNumberLiteral(String op, Operand operand) {
+        if (operand instanceof Operand.Value value && !(value.val() instanceof PVal.Num)) {
+            throw incorrectOperandType(op, value.val());
+        }
     }
 
     // SET path = set_add(path, <<...>>), where both paths must be the same one.
