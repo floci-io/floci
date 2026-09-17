@@ -353,7 +353,6 @@ public class DynamoDbPartiQLParser {
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
-        parameters.forEach(DynamoDbAttributeValueValidator::requireParameterNestingWithinLimit);
         DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
         Stmt stmt = parser.parseStmt();
         if (parser.peek().type() == TType.SEMICOLON) {

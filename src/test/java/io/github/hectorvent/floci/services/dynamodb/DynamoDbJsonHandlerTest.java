@@ -1680,17 +1680,19 @@ class DynamoDbJsonHandlerTest {
         createUsersTable("eu-west-1");
         var request = mapper.createObjectNode();
         request.put("Statement", "UPDATE \"Users\" SET deep=? WHERE userId=?");
-        request.set("Parameters", mapper.createArrayNode().add(nestedMaps(32)).add(attributeValue("S", "u1")));
+        request.set("Parameters", mapper.createArrayNode().add(nestedMaps(33)).add(attributeValue("S", "u1")));
 
         var ex = assertThrows(AwsException.class,
                 () -> handler.handle("ExecuteStatement", request, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
-        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
     }
 
     @Test
-    void executeTransactionCancelsOnATooDeepParameterWithThatStatementsReason() throws Exception {
+    void executeTransactionCancelsOnAnItemLeftTooDeepWithThatStatementsReason() throws Exception {
         createUsersTable("eu-west-1");
+        service.putItem("Users", item("userId", "u1"), "eu-west-1");
         var fine = mapper.createObjectNode();
         fine.put("Statement", "UPDATE \"Users\" SET x=? WHERE userId=?");
         fine.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "x")).add(attributeValue("S", "u1")));

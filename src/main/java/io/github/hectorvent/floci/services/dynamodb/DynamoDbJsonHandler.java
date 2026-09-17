@@ -2684,7 +2684,6 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
         }
         try {
-            cancelOnTooDeepParameters(stmts);
             List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
             for (int i = 0; i < stmts.size(); i++) {
                 JsonNode s = stmts.get(i);
@@ -2799,26 +2798,6 @@ public class DynamoDbJsonHandler {
         }
     }
 
-    // AWS cancels the transaction, with that statement's reason, when a parameter is too deep.
-    private void cancelOnTooDeepParameters(JsonNode stmts) {
-        var reasons = new ArrayList<TransactionCanceledException.CancellationReason>();
-        var cancelled = false;
-        for (JsonNode s : stmts) {
-            var tooDeep = false;
-            for (var parameter : s.path("Parameters")) {
-                tooDeep |= !DynamoDbAttributeValueValidator.valueNestingWithinLimit(parameter);
-            }
-            cancelled |= tooDeep;
-            reasons.add(tooDeep
-                    ? new TransactionCanceledException.CancellationReason("ValidationError", null,
-                            DynamoDbAttributeValueValidator.NESTING_EXCEEDED)
-                    : new TransactionCanceledException.CancellationReason("", null));
-        }
-        if (cancelled) {
-            throw new TransactionCanceledException(reasons);
-        }
-    }
-
     private Response handleBatchExecuteStatement(JsonNode request, String region) {
         JsonNode stmts = request.path("Statements");
         if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
@@ -2901,7 +2880,10 @@ public class DynamoDbJsonHandler {
         }
         List<JsonNode> params = new ArrayList<>();
         node.forEach(params::add);
-        params.forEach(this::checkAttrSets);
+        params.forEach(parameter -> {
+            DynamoDbAttributeValueValidator.requireParameterNestingWithinLimit(parameter);
+            checkAttrSets(parameter);
+        });
         return params;
     }
 }
