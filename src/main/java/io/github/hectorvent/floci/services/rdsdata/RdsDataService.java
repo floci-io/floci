@@ -506,16 +506,18 @@ public class RdsDataService implements Resettable {
     private Credentials credentials(JsonNode request, RdsDataResourceResolver.DatabaseTarget target, String region) {
         String secretArn = textOrNull(request, "secretArn");
         if (secretArn != null && !secretArn.isBlank()) {
+            SecretVersion secret;
             try {
-                SecretVersion secret = secretsManagerService.getSecretValue(secretArn, null, null, region);
-                Credentials fromSecret = parseSecretCredentials(secret.getSecretString());
-                if (fromSecret != null) {
-                    return fromSecret;
-                }
+                secret = secretsManagerService.getSecretValue(secretArn, null, null, region);
             } catch (AwsException e) {
-                LOG.debugv("Falling back to RDS master credentials for Data API secret {0}: {1}",
-                        secretArn, e.getMessage());
+                throw new AwsException("SecretsErrorException", e.getMessage(), 400);
             }
+            Credentials fromSecret = parseSecretCredentials(secret.getSecretString());
+            if (fromSecret != null) {
+                return fromSecret;
+            }
+            throw new AwsException("InvalidSecretException",
+                    "The secret must contain username and password fields.", 400);
         }
         String username = target.username() != null && !target.username().isBlank() ? target.username() : "root";
         return new Credentials(username, target.password());
@@ -536,9 +538,11 @@ public class RdsDataService implements Resettable {
                 return new Credentials(username, password);
             }
         } catch (Exception e) {
-            LOG.debugv("Could not parse RDS Data API secret credentials: {0}", e.getMessage());
+            throw new AwsException("InvalidSecretException",
+                    "The secret must contain valid JSON credentials.", 400);
         }
-        return null;
+        throw new AwsException("InvalidSecretException",
+                "The secret must contain username and password fields.", 400);
     }
 
     private String databaseName(JsonNode request, RdsDataResourceResolver.DatabaseTarget target) {

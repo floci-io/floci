@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -672,6 +673,46 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void doesNotUseMasterCredentialsWhenSecretLookupFails() {
+        TestHarness harness = new TestHarness(missingSecrets());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(harness.request("select 1"), REGION));
+
+        assertEquals("SecretsErrorException", error.getErrorCode());
+    }
+
+    @Test
+    void rejectsMalformedSecretInsteadOfUsingMasterCredentials() {
+        TestHarness harness = new TestHarness(secretWith("not-json"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(harness.request("select 1"), REGION));
+
+        assertEquals("InvalidSecretException", error.getErrorCode());
+    }
+
+    @Test
+    void rejectsEmptySecretInsteadOfUsingMasterCredentials() {
+        TestHarness harness = new TestHarness(secretWith(" "));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(harness.request("select 1"), REGION));
+
+        assertEquals("InvalidSecretException", error.getErrorCode());
+    }
+
+    @Test
+    void rejectsSecretMissingCredentialsInsteadOfUsingMasterCredentials() {
+        TestHarness harness = new TestHarness(secretWith("{\"username\":\"sa\"}"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(harness.request("select 1"), REGION));
+
+        assertEquals("InvalidSecretException", error.getErrorCode());
+    }
+
+    @Test
     void rejectsUnsupportedExecuteOptions() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();
@@ -735,7 +776,7 @@ class RdsDataServiceTest {
     @Test
     void closesConnectionWhenTransactionSetupFails() {
         RdsDataResourceResolver resolver = mock(RdsDataResourceResolver.class);
-        SecretsManagerService secrets = fallbackSecrets();
+        SecretsManagerService secrets = defaultSecrets();
         RdsDataResourceResolver.DatabaseTarget target = target();
         when(resolver.resolve(RESOURCE_ARN, REGION)).thenReturn(target);
         AtomicBoolean closed = new AtomicBoolean(false);
@@ -806,11 +847,27 @@ class RdsDataServiceTest {
         return param;
     }
 
-    private static SecretsManagerService fallbackSecrets() {
+    private static SecretsManagerService defaultSecrets() {
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        SecretVersion version = new SecretVersion();
+        version.setSecretString("{\"username\":\"sa\",\"password\":\"\"}");
+        when(secrets.getSecretValue(any(), any(), any(), any())).thenReturn(version);
+        return secrets;
+    }
+
+    private static SecretsManagerService missingSecrets() {
         SecretsManagerService secrets = mock(SecretsManagerService.class);
         when(secrets.getSecretValue(any(), any(), any(), any()))
                 .thenThrow(new AwsException("ResourceNotFoundException",
                         "Secrets Manager can't find the specified secret.", 400));
+        return secrets;
+    }
+
+    private static SecretsManagerService secretWith(String value) {
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        SecretVersion version = new SecretVersion();
+        version.setSecretString(value);
+        when(secrets.getSecretValue(any(), any(), any(), any())).thenReturn(version);
         return secrets;
     }
 
@@ -873,6 +930,10 @@ class RdsDataServiceTest {
             this(DatabaseEngine.MYSQL, Duration.ofSeconds(60));
         }
 
+        private TestHarness(SecretsManagerService secrets) {
+            this(secrets, DatabaseEngine.MYSQL, Duration.ofSeconds(60));
+        }
+
         private TestHarness(DatabaseEngine engine) {
             this(engine, Duration.ofSeconds(60));
         }
@@ -882,10 +943,13 @@ class RdsDataServiceTest {
         }
 
         private TestHarness(DatabaseEngine engine, Duration transactionTtl) {
+            this(defaultSecrets(), engine, transactionTtl);
+        }
+
+        private TestHarness(SecretsManagerService secrets, DatabaseEngine engine, Duration transactionTtl) {
             jdbcUrl = "jdbc:h2:mem:rdsdata_" + UUID.randomUUID() + ";MODE=" + h2Mode(engine)
                     + ";DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
             resolver = mock(RdsDataResourceResolver.class);
-            SecretsManagerService secrets = fallbackSecrets();
             target = target(RESOURCE_ARN, engine);
             when(resolver.resolve(RESOURCE_ARN, REGION)).thenReturn(target);
             when(resolver.resolve(FALLBACK_RESOURCE_ARN, REGION)).thenReturn(target);
