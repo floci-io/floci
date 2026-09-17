@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.AfterEach;
@@ -174,6 +175,57 @@ class S3CopySimulatorTest {
 
         assertEquals("XX000", error.sqlState());
         assertEquals("S3 object s3://b/missing not found", error.getMessage());
+    }
+
+    private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/CopyRole";
+
+    @Test
+    void prepareCopyWithMalformedIamRoleArnFailsBeforeTouchingS3() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, "not-an-arn");
+        IamService iamService = mock(IamService.class);
+
+        S3CopySimulator.S3TransferException error = assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(spec, s3, iamService));
+
+        assertEquals("42501", error.sqlState());
+        org.mockito.Mockito.verifyNoInteractions(s3);
+    }
+
+    @Test
+    void prepareCopyWithUnknownRoleFailsBeforeTouchingS3() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(any(), any())).thenReturn(java.util.Optional.empty());
+
+        S3CopySimulator.S3TransferException error = assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(spec, s3, iamService));
+
+        assertEquals("42501", error.sqlState());
+        org.mockito.Mockito.verifyNoInteractions(s3);
+    }
+
+    @Test
+    void prepareCopyWithValidRoleCallsSignedAuthorization() {
+        when(s3.objectExists("b", "k")).thenReturn(true);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(any(), any()))
+                .thenReturn(java.util.Optional.of(mock(io.github.hectorvent.floci.services.iam.model.IamRole.class)));
+
+        S3CopySimulator.prepareCopy(spec, s3, iamService);
+
+        org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousGetObject(any(), any());
+        org.mockito.Mockito.verify(s3, org.mockito.Mockito.never()).authorizeAnonymousListBucket(any());
+        org.mockito.Mockito.verify(s3).authorizeSignedListBucket(any(), eq("b"));
+        org.mockito.Mockito.verify(s3).authorizeSignedGetObject(any(), eq("b"), eq("k"));
+        org.mockito.Mockito.verify(iamService).registerSessionForAccount(
+                eq("000000000000"), any(), any(), eq(ROLE_ARN), any(), isNull());
+        org.mockito.Mockito.verify(iamService).unregisterSession(eq("000000000000"), any());
     }
 
     @Test
