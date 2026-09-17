@@ -233,6 +233,49 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Responses[0].Item.flag.S", equalTo("right"));
     }
 
+    @Test
+    @Order(11)
+    void refusesUnprojectedAttributesInsideGroupedConditionsOnAKeyedIndexRead() {
+        request("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName": "partiql-edge-cases-index",
+                  "AttributeDefinitions": [
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"gsiPk","AttributeType":"S"}
+                  ],
+                  "KeySchema": [{"AttributeName":"pk","KeyType":"HASH"}],
+                  "GlobalSecondaryIndexes": [{
+                    "IndexName": "gsi-inc",
+                    "KeySchema": [{"AttributeName":"gsiPk","KeyType":"HASH"}],
+                    "Projection": {"ProjectionType":"INCLUDE","NonKeyAttributes":["projattr"]}
+                  }],
+                  "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+            .statusCode(200);
+        request("DynamoDB_20120810.PutItem", """
+                {"TableName":"partiql-edge-cases-index",
+                 "Item":{"pk":{"S":"p"},"gsiPk":{"S":"y"},"projattr":{"S":"proj1"},"nonproj":{"S":"np1"}}}
+                """)
+            .statusCode(200);
+        String select = "SELECT pk FROM \"partiql-edge-cases-index\".\"gsi-inc\" WHERE gsiPk='y' AND ";
+        String refused = "One or more parameter values were invalid: Secondary index gsi-inc"
+                + " does not project one or more filter attributes: ";
+
+        statement(select + "NOT (nonproj='np1' OR projattr='x')")
+            .statusCode(400)
+            .body("message", equalTo(refused + "[nonproj]"));
+        statement(select + "b='1' AND (a='2' OR projattr='3')")
+            .statusCode(400)
+            .body("message", equalTo(refused + "[a, b]"));
+        statement(select + "(zz='1' OR aa='2' OR mm='3')")
+            .statusCode(400)
+            .body("message", equalTo(refused + "[zz, aa, mm]"));
+        statement(select + "(projattr='proj1' OR projattr='proj2')")
+            .statusCode(200)
+            .body("Items[0].pk.S", equalTo("p"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

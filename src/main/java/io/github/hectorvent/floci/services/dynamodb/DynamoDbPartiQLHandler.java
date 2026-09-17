@@ -17,6 +17,7 @@ import java.util.*;
 import java.util.Base64;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 class DynamoDbPartiQLHandler {
 
@@ -406,13 +407,12 @@ class DynamoDbPartiQLHandler {
             return;
         }
         Set<String> projected = accessPath.projectedAttributeNames(table);
-        List<String> unprojected = stmt.where().stream()
-                .map(DynamoDbPartiQLHandler::filterAttribute)
-                .flatMap(Optional::stream)
+        // AWS lists the names in Java HashSet order in every case checked (eu-west-2, 2026-09-17).
+        Set<String> unprojected = stmt.where().stream()
+                .flatMap(DynamoDbPartiQLHandler::attributePaths)
                 .map(Path::root)
                 .filter(root -> !projected.contains(root))
-                .distinct()
-                .toList();
+                .collect(Collectors.toCollection(HashSet::new));
         if (!unprojected.isEmpty()) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: Secondary index "
@@ -426,13 +426,12 @@ class DynamoDbPartiQLHandler {
         return cond.bareAttribute().filter(indexKeys::contains).isPresent();
     }
 
-    // A NOT names whatever its operand names; an AND or OR names nothing.
-    private static Optional<Path> filterAttribute(Cond cond) {
+    private static Stream<Path> attributePaths(Cond cond) {
         return switch (cond) {
-            case Cond.Not not     -> filterAttribute(not.operand());
-            case Cond.Leaf leaf   -> Optional.of(leaf.path());
-            case Cond.And ignored -> Optional.empty();
-            case Cond.Or ignored  -> Optional.empty();
+            case Cond.Leaf leaf -> Stream.of(leaf.path());
+            case Cond.Not not   -> attributePaths(not.operand());
+            case Cond.And and   -> and.operands().stream().flatMap(DynamoDbPartiQLHandler::attributePaths);
+            case Cond.Or or     -> or.operands().stream().flatMap(DynamoDbPartiQLHandler::attributePaths);
         };
     }
 
