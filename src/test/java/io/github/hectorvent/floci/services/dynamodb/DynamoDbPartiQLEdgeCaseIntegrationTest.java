@@ -507,6 +507,33 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("message", equalTo("Overlapping conditions with range keys are not supported in where clause"));
     }
 
+    @Test
+    @Order(23)
+    void readsByAOneValueInAndRefusesAnythingBesideTheKeyInTransactionAndBatchReads() {
+        String select = "SELECT sk FROM \"" + TABLE + "\" WHERE ";
+        String batchRefused = "Select statements within BatchExecuteStatement must specify the primary key in the where clause.";
+
+        transaction(select + "pk IN ['ranges'] AND sk IN ['1']")
+            .statusCode(200)
+            .body("Responses[0].Item.sk.S", equalTo("1"));
+        transaction(select + "(pk IN ['ranges']) AND pk='ranges' AND sk='2'")
+            .statusCode(200)
+            .body("Responses[0].Item.sk.S", equalTo("2"));
+        transaction(select + "pk IN ['other'] AND pk='ranges' AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]:"
+                    + " Select statements within ExecuteTransaction must specify the primary key in the where clause."));
+
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":["
+                + "{\"Statement\":" + json(select + "pk IN ['ranges'] AND sk='1'") + "},"
+                + "{\"Statement\":" + json(select + "pk='ranges' AND sk='1' AND flag='one'") + "},"
+                + "{\"Statement\":" + json(select + "pk='ranges' AND sk='1' AND pk='other'") + "}]}")
+            .statusCode(200)
+            .body("Responses[0].Item.sk.S", equalTo("1"))
+            .body("Responses[1].Error.Message", equalTo(batchRefused))
+            .body("Responses[2].Error.Message", equalTo(batchRefused));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

@@ -2874,7 +2874,7 @@ public class DynamoDbJsonHandler {
             return false;
         }
         TableDefinition table = dynamoDbService.describeTable(select.table(), region);
-        return DynamoDbPartiQLHandler.pinsFullKey(table, select.where());
+        return DynamoDbPartiQLHandler.namesOnlyTheKey(table, select.where());
     }
 
     private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(JsonNode statement) {

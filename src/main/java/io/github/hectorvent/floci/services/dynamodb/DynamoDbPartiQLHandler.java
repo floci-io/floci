@@ -673,7 +673,7 @@ class DynamoDbPartiQLHandler {
         }
         ObjectNode get = mapper.createObjectNode();
         get.put("TableName", stmt.table());
-        get.set("Key", buildKey(table, stmt.where()));
+        get.set("Key", buildKey(table, asEqualities(stmt.where())));
         ObjectNode txItem = mapper.createObjectNode();
         txItem.set("Get", get);
         return txItem;
@@ -753,7 +753,7 @@ class DynamoDbPartiQLHandler {
         return key;
     }
 
-    static boolean pinsFullKey(TableDefinition table, List<Cond> where) {
+    private static boolean pinsFullKey(TableDefinition table, List<Cond> where) {
         Set<String> keyNames = keyAttributeNames(table);
         return where.stream()
                 .filter(c -> isKeyEquality(c, keyNames))
@@ -762,10 +762,18 @@ class DynamoDbPartiQLHandler {
                 .count() == keyNames.size();
     }
 
-    // A key named twice with one value still counts (checked on real AWS, eu-west-2, 2026-09-17).
-    private static boolean namesOnlyTheKey(TableDefinition table, List<Cond> where) {
-        return nonKeyConditions(table, where).isEmpty()
-                && where.stream().distinct().count() == keyAttributeNames(table).size();
+    // A key named twice with one value, or by an IN with one value, still counts
+    // (checked on real AWS, eu-west-2, 2026-09-17).
+    static boolean namesOnlyTheKey(TableDefinition table, List<Cond> where) {
+        List<Cond> equalities = asEqualities(where);
+        return nonKeyConditions(table, equalities).isEmpty()
+                && equalities.stream().distinct().count() == keyAttributeNames(table).size();
+    }
+
+    private static List<Cond> asEqualities(List<Cond> where) {
+        return where.stream()
+                .map(c -> c instanceof Cond.In in && in.values().size() == 1 ? new Cond.Eq(in.path(), in.values().getFirst()) : c)
+                .toList();
     }
 
     private static Set<String> keyAttributeNames(TableDefinition table) {
