@@ -232,7 +232,8 @@ class TlsCertificateHostnameTest {
         Set<String> expectedSans = Set.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
                 "localhost.floci.io", "*.localhost.floci.io",
                 "*.execute-api.localhost.floci.io",
-                "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
+                "*.execute-api.localhost.localstack.cloud",
+                "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost", "host.docker.internal");
         Set<String> actualSans = new HashSet<>(sans);
         
         assertEquals(expectedSans, actualSans,
@@ -257,7 +258,8 @@ class TlsCertificateHostnameTest {
         Set<String> expectedSans = Set.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
                 "localhost.floci.io", "*.localhost.floci.io",
                 "*.execute-api.localhost.floci.io",
-                "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
+                "*.execute-api.localhost.localstack.cloud",
+                "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost", "host.docker.internal");
         Set<String> actualSans = new HashSet<>(sans);
         
         assertEquals(expectedSans, actualSans,
@@ -412,7 +414,8 @@ class TlsCertificateHostnameTest {
         // issuer check can trigger regeneration here.
         List<String> sans = List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
                 "localhost.floci.io", "*.localhost.floci.io", "*.execute-api.localhost.floci.io",
-                "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
+                "*.execute-api.localhost.localstack.cloud",
+                "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost", "host.docker.internal");
         var legacy = gen.generateSelfSignedCertificate("localhost", sans, KeyAlgorithm.RSA_2048);
         Files.writeString(tlsDir.resolve("floci-server.crt"), legacy.certificatePem());
         Files.writeString(tlsDir.resolve("floci-server.key"), legacy.privateKeyPem());
@@ -438,7 +441,8 @@ class TlsCertificateHostnameTest {
         CertificateGenerator gen = new CertificateGenerator();
         List<String> sans = List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
                 "localhost.floci.io", "*.localhost.floci.io", "*.execute-api.localhost.floci.io",
-                "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
+                "*.execute-api.localhost.localstack.cloud",
+                "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost", "host.docker.internal");
         java.security.KeyPair keyPair = java.security.KeyPairGenerator.getInstance("RSA").generateKeyPair();
         // Issued by the current CA with a validity that ended a day ago: only the expiry check can trigger.
         X509Certificate expired = gen.signCertificate(new org.bouncycastle.asn1.x500.X500Name("CN=localhost"),

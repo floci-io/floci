@@ -35,7 +35,8 @@ class TlsConfigSourceLearnedHostnamesTest {
     private static final String LEARNED = "api.example.localhost.floci.io";
     private static final List<String> DEFAULTS = List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost",
             "localhost.floci.io", "*.localhost.floci.io", "*.execute-api.localhost.floci.io",
-            "*.execute-api.localhost.localstack.cloud", "host.docker.internal");
+            "*.execute-api.localhost.localstack.cloud",
+                "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost", "host.docker.internal");
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir

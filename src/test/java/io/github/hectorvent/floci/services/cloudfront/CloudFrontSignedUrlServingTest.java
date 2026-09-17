@@ -229,6 +229,66 @@ class CloudFrontSignedUrlServingTest {
                 .then().statusCode(200).body(containsString("DOC-" + suffix));
     }
 
+    /**
+     * A viewer downloads private content through the local delivery hostname, the form that resolves
+     * to loopback and is covered by the HTTPS certificate. The canned policy signs that hostname, so
+     * this also pins the resource URL the verifier rebuilds from the Host header.
+     */
+    @Test
+    void localDeliveryHostnameServesACannedSignedUrl() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cf-local-" + suffix;
+        s3Service.createBucket(bucket, REGION);
+        s3Service.putObject(bucket, "private/report.txt", ("LOCAL-" + suffix).getBytes(StandardCharsets.UTF_8),
+                "text/plain", Map.of());
+
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        KeyPair keyPair = generator.generateKeyPair();
+        String pem = "-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----";
+        io.github.hectorvent.floci.services.cloudfront.model.PublicKey publicKey =
+                new io.github.hectorvent.floci.services.cloudfront.model.PublicKey();
+        publicKey.setName("pk-" + suffix);
+        publicKey.setCallerReference("cr-" + suffix);
+        publicKey.setEncodedKey(pem);
+        publicKey = cloudFrontService.createPublicKey(publicKey);
+
+        KeyGroup keyGroup = new KeyGroup();
+        keyGroup.setName("kg-" + suffix);
+        keyGroup.setItems(List.of(publicKey.getId()));
+        keyGroup = cloudFrontService.createKeyGroup(keyGroup);
+
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(s3Origin("o", bucket)));
+        DefaultCacheBehavior dcb = defaultBehavior("o");
+        dcb.setTrustedKeyGroups(List.of(keyGroup.getId()));
+        cfg.setDefaultCacheBehavior(dcb);
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+
+        for (String host : List.of(dist.getId() + ".cloudfront.localhost.floci.io",
+                dist.getId() + ".cloudfront.localhost")) {
+            long expires = Instant.now().getEpochSecond() + 3600;
+            String policyJson = CloudFrontSignatureVerifier.cannedPolicy(
+                    "http://" + host + "/private/report.txt", Long.toString(expires));
+            Signature signer = Signature.getInstance("SHA1withRSA");
+            signer.initSign(keyPair.getPrivate());
+            signer.update(policyJson.getBytes(StandardCharsets.UTF_8));
+
+            given().header("Host", host)
+                    .queryParam("Expires", expires)
+                    .queryParam("Signature", cfBase64(signer.sign()))
+                    .queryParam("Key-Pair-Id", publicKey.getId())
+                    .when().get("/private/report.txt")
+                    .then().statusCode(200).body(containsString("LOCAL-" + suffix));
+
+            given().header("Host", host).when().get("/private/report.txt")
+                    .then().statusCode(403);
+        }
+    }
+
     private static String cfBase64(byte[] bytes) {
         return Base64.getEncoder().encodeToString(bytes).replace('+', '-').replace('=', '_').replace('/', '~');
     }

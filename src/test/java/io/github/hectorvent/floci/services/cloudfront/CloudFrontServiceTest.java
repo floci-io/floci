@@ -29,6 +29,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -271,6 +272,37 @@ class CloudFrontServiceTest {
         // No match for an unrelated host.
         assertNull(service.findByHost("unrelated.example.test"));
         assertNull(service.findByHost(null));
+    }
+
+    @Test
+    void findByHostMatchesLocalDeliveryHostnames() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        Distribution dist = service.createDistribution(distribution(true, List.of()), Map.of());
+        String id = dist.getId();
+
+        assertEquals(id, service.findByHost(id + ".cloudfront.localhost.floci.io").getId());
+        assertEquals(id, service.findByHost(id + ".cloudfront.localhost:4566").getId());
+        // Clients are free to lower-case the hostname they send.
+        assertEquals(id, service.findByHost(
+                (id + ".cloudfront.localhost.floci.io").toLowerCase(Locale.ROOT)).getId());
+
+        // The id stands for one label, and an unknown id belongs to no distribution.
+        assertNull(service.findByHost("a." + id + ".cloudfront.localhost.floci.io"));
+        assertNull(service.findByHost("EABCDEFGHIJKLM.cloudfront.localhost.floci.io"));
+        assertNull(service.findByHost(".cloudfront.localhost"));
+    }
+
+    @Test
+    void findByHostPrefersExactAliasOverLocalDeliveryHostname() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        Distribution generated = service.createDistribution(distribution(true, List.of()), Map.of());
+        String aliasOfAnother = generated.getId() + ".cloudfront.localhost";
+        Distribution aliasOwner = service.createDistribution(
+                distribution(true, List.of(aliasOfAnother)), Map.of());
+
+        assertEquals(aliasOwner.getId(), service.findByHost(aliasOfAnother).getId());
     }
 
     @Test
