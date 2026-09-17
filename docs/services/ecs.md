@@ -74,6 +74,10 @@ documents, by giving the aws-for-fluent-bit init process its `aws_fluent_bit_ini
 environment variables. ECS never inspects those and Floci passes them through, so that
 registration is accepted here too; it fetches nothing locally either, because Floci serves no ECS
 task metadata endpoint, which the init process reads before downloading.
+Floci also does not validate a task definition's `compatibilities` /
+`requiresCompatibilities` against `RunTask` `launchType`; a Fargate-compatible
+definition can still be run with `launchType=EC2` (and the reverse) the same
+way a missing metadata endpoint is accepted at registration.
 On an EC2-compatible task definition Floci reads the object from its own S3, writes it to the
 fixed `external.conf` path next to the generated config (`/fluent-bit/etc/external.conf` or
 `/fluentd/etc/external.conf`), and includes it from there, matching the paths the ECS agent uses.
