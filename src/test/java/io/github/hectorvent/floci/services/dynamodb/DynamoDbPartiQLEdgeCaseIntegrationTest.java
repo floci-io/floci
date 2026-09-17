@@ -103,6 +103,19 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("Items[0].'l[0]'.S", equalTo("a"));
     }
 
+    @Test
+    @Order(5)
+    void refusesANonStringTypeInAttributeType() {
+        statement("SELECT sk FROM \"" + TABLE + "\" WHERE pk='index' AND attribute_type(l, 1)")
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function;"
+                    + " operator or function: attribute_type, operand type: N"));
+        statement("SELECT sk FROM \"" + TABLE + "\" WHERE pk='index' AND attribute_type(l, true)")
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function;"
+                    + " operator or function: attribute_type, operand type: BOOL"));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

@@ -603,11 +603,14 @@ public class DynamoDbPartiQLParser {
     }
 
     private static void requireOrdered(String op, PVal val) {
-        String type = typeCode(val);
-        if (!ORDERED_TYPES.contains(type)) {
-            throw validationEx("Incorrect operand type for operator or function; "
-                    + "operator or function: " + op + ", operand type: " + type);
+        if (!ORDERED_TYPES.contains(typeCode(val))) {
+            throw incorrectOperandType(op, val);
         }
+    }
+
+    private static AwsException incorrectOperandType(String op, PVal val) {
+        return validationEx("Incorrect operand type for operator or function; "
+                + "operator or function: " + op + ", operand type: " + typeCode(val));
     }
 
     private Cond parseCond() {
@@ -712,6 +715,9 @@ public class DynamoDbPartiQLParser {
             List.of("N", "BS", "L", "B", "NULL", "M", "S", "SS", "NS", "BOOL");
 
     private static void requireAttributeTypeName(PVal type) {
+        if (!(type instanceof PVal.Str)) {
+            throw incorrectOperandType("attribute_type", type);
+        }
         if (type instanceof PVal.Str name && !ATTRIBUTE_TYPE_NAMES.contains(name.v())) {
             throw validationEx("Invalid attribute type name found; type: " + name.v()
                     + ", valid types: {" + String.join(",", ATTRIBUTE_TYPE_NAMES) + "}");
