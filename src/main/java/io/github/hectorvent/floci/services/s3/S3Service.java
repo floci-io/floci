@@ -735,6 +735,30 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeDeleteObject(bucketName, key, null, RequestAuthorization.unsigned());
     }
 
+    /**
+     * Authorize {@code s3:GetObject} as a signed principal (an IAM role session's access key),
+     * reusing the identity-policy + resource-policy evaluation a genuine SigV4 request goes
+     * through. Used for Redshift {@code COPY ... IAM_ROLE '<arn>'}.
+     */
+    public void authorizeSignedGetObject(String accessKeyId, String bucketName, String key) {
+        authorizeGetObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, null));
+    }
+
+    /** Authorize a signed {@code s3:PutObject}; see {@link #authorizeSignedGetObject}. */
+    public void authorizeSignedPutObject(String accessKeyId, String bucketName, String key) {
+        authorizePutObject(bucketName, key, new RequestAuthorization(true, accessKeyId, null));
+    }
+
+    /** Authorize a signed {@code s3:ListBucket}; see {@link #authorizeSignedGetObject}. */
+    public void authorizeSignedListBucket(String accessKeyId, String bucketName) {
+        authorizeListBucket(bucketName, new RequestAuthorization(true, accessKeyId, null));
+    }
+
+    /** Authorize a signed {@code s3:DeleteObject}; see {@link #authorizeSignedGetObject}. */
+    public void authorizeSignedDeleteObject(String accessKeyId, String bucketName, String key) {
+        authorizeDeleteObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, null));
+    }
+
     public void authorizeCloudFrontOacGetObject(
             String bucketName, String key, String distributionArn) {
         authorizeCloudFrontGetObject(

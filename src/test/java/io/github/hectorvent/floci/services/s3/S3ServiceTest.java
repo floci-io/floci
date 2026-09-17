@@ -1222,5 +1222,25 @@ class S3ServiceTest {
         s3Service.createBucket("anon-del-bucket", "us-east-1");
         assertDoesNotThrow(() -> s3Service.authorizeAnonymousDeleteObject("anon-del-bucket", "some/key"));
     }
+
+    @Test
+    void authorizeSignedGetObjectIsANoOpWhenEnforceAuthIsOff() {
+        assertDoesNotThrow(() -> s3Service.authorizeSignedGetObject("ASIAFAKEKEY00000001", "signed-get-bucket", "some/key"));
+    }
+
+    @Test
+    void authorizeSignedPutObjectIsANoOpWhenEnforceAuthIsOff() {
+        assertDoesNotThrow(() -> s3Service.authorizeSignedPutObject("ASIAFAKEKEY00000001", "signed-put-bucket", "some/key"));
+    }
+
+    @Test
+    void authorizeSignedListBucketIsANoOpWhenEnforceAuthIsOff() {
+        assertDoesNotThrow(() -> s3Service.authorizeSignedListBucket("ASIAFAKEKEY00000001", "signed-list-bucket"));
+    }
+
+    @Test
+    void authorizeSignedDeleteObjectIsANoOpWhenEnforceAuthIsOff() {
+        assertDoesNotThrow(() -> s3Service.authorizeSignedDeleteObject("ASIAFAKEKEY00000001", "signed-del-bucket", "some/key"));
+    }
 }
 
