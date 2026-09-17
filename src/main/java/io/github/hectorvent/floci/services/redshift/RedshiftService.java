@@ -1153,8 +1153,12 @@ public class RedshiftService {
 
     public List<ClusterSubnetGroup> describeClusterSubnetGroups(String name) {
         if (name != null && !name.isBlank()) {
+            // Real AWS's error code is "...Fault"-suffixed, and the Terraform AWS provider's
+            // generated deserializer type-matches on that exact string (errs.IsA[*ClusterSubnetGroupNotFoundFault])
+            // to recognise "doesn't exist yet, go create it" — a bare code falls through to an
+            // unclassified error and the provider never gets past Observe.
             ClusterSubnetGroup group = subnetGroups.get(name)
-                    .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
+                    .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
             return List.of(group);
         }
         return subnetGroups.scan(k -> true);
@@ -1162,7 +1166,7 @@ public class RedshiftService {
 
     public synchronized ClusterSubnetGroup modifyClusterSubnetGroup(String name, String description, List<String> subnetIds) {
         ClusterSubnetGroup group = subnetGroups.get(name)
-                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
+                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
         if (description != null) {
             group.setDescription(description);
         }
@@ -1176,7 +1180,7 @@ public class RedshiftService {
 
     public ClusterSubnetGroup deleteClusterSubnetGroup(String name) {
         ClusterSubnetGroup group = subnetGroups.get(name)
-                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + name + " not found", 404));
+                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 404));
         subnetGroups.delete(name);
         subnetGroups.flush();
         return group;
@@ -1339,7 +1343,7 @@ public class RedshiftService {
             }
             case "subnetgroup" -> {
                 ClusterSubnetGroup group = subnetGroups.get(id)
-                        .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFound", "Cluster subnet group " + id + " not found", 404));
+                        .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + id + " not found", 404));
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     subnetGroups.put(id, group);
