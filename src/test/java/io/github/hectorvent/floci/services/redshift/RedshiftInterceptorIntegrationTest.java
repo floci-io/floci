@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -44,6 +45,9 @@ class RedshiftInterceptorIntegrationTest {
 
     @Inject
     S3Service s3;
+
+    @Inject
+    IamService iamService;
 
     private String clusterId;
 
@@ -129,6 +133,31 @@ class RedshiftInterceptorIntegrationTest {
         assertEquals(1, objects.size());
         assertEquals("1|alice\n2|bob\n", new String(
                 s3.getObject(bucket, objects.get(0).getKey()).getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void copyWithIamRoleSucceedsWhenEnforceAuthIsOffEvenWithoutAPolicy() throws Exception {
+        clusterId = "it-copy-iam-role-no-enforce";
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        String bucket = "redshift-iam-role-no-enforce";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "people/p1.txt",
+                "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        iamService.createRole("CopyRoleNoPolicy", "/", "{}", null, 0, null);
+
+        try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
+                Statement ddl = connection.createStatement()) {
+            ddl.execute("CREATE TABLE people (id int, name text)");
+            try (PreparedStatement copy = connection.prepareStatement(
+                    "COPY people FROM 's3://" + bucket + "/people/p1.txt' "
+                            + "IAM_ROLE 'arn:aws:iam::000000000000:role/CopyRoleNoPolicy'")) {
+                copy.execute();
+            }
+            try (ResultSet rows = connection.createStatement().executeQuery("SELECT count(*) FROM people")) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+            }
+        }
     }
 
     @Test
