@@ -947,8 +947,10 @@ public class ContainerLifecycleManager {
             hostConfig.withBinds(spec.binds().toArray(new Bind[0]));
         }
 
-        // Extra hosts (e.g., host.docker.internal on Linux)
-        if (spec.extraHosts() != null && !spec.extraHosts().isEmpty()) {
+        // Docker rejects extra_hosts together with container:<id> network mode. Containers
+        // sharing another container's network namespace already inherit its network path.
+        if (spec.extraHosts() != null && !spec.extraHosts().isEmpty()
+                && !isContainerNetworkMode(spec.networkMode())) {
             hostConfig.withExtraHosts(spec.extraHosts().toArray(new String[0]));
         }
 
@@ -964,6 +966,10 @@ public class ContainerLifecycleManager {
         }
 
         return hostConfig;
+    }
+
+    private static boolean isContainerNetworkMode(String networkMode) {
+        return networkMode != null && networkMode.startsWith("container:");
     }
 
     private Map<Integer, EndpointInfo> resolveEndpoints(String containerId, ContainerSpec spec) {
