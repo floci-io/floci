@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -556,6 +557,31 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .statusCode(400)
             .body("CancellationReasons[0].Code", equalTo("ConditionalCheckFailed"))
             .body("CancellationReasons[1].Code", equalTo("None"));
+    }
+
+    @Test
+    @Order(25)
+    void cancelsATransactionThatNamesAMissingTable() {
+        putItem("missing", "\"flag\":{\"S\":\"right\"}");
+        String missingUpdate = "UPDATE \"partiql-edge-cases-missing\" SET a=1 WHERE pk='x' AND sk='1'";
+        String select = "SELECT * FROM \"" + TABLE + "\" WHERE pk='missing' AND sk='1'";
+
+        transaction(missingUpdate + " RETURNING ALL NEW *", "DELETE FROM \"partiql-edge-cases-missing\" WHERE pk='x' AND sk='1'")
+            .statusCode(400)
+            .body("__type", equalTo("TransactionCanceledException"))
+            .body("CancellationReasons.Code", contains("ResourceNotFound", "ResourceNotFound"))
+            .body("CancellationReasons[0].Message", equalTo("Requested resource not found"));
+        transaction(select, "SELECT * FROM \"partiql-edge-cases-missing\".\"idx\" WHERE pk='x' AND sk='1'")
+            .statusCode(400)
+            .body("CancellationReasons.Code", contains("None", "ResourceNotFound"));
+
+        transaction(missingUpdate, "UPDATE \"" + TABLE + "\" SET a=1 WHERE pk='missing' AND sk='1' RETURNING ALL NEW *")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[1]: RETURNING clause is not supported in ExecuteTransaction."));
+        transaction("SELECT * FROM \"partiql-edge-cases-missing\" WHERE pk='x' AND sk='1'", "SELECT * FROM \"" + TABLE + "\".\"idx\" WHERE pk='x' AND sk='1'")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[1]: Reads on indices are not supported within transactions."));
+        getItem("missing").body("Item.a", nullValue());
     }
 
     private static ValidatableResponse getItem(String pk) {

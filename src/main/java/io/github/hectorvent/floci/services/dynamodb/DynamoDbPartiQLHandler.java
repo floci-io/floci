@@ -572,7 +572,28 @@ class DynamoDbPartiQLHandler {
 
     // --- Transaction item builder ---
 
-    JsonNode toTransactItem(Stmt stmt, String region) {
+    /** A statement of a transaction, as the item it runs or as the reason it cancels the transaction. */
+    record TransactMember(JsonNode item, TransactionCanceledException.CancellationReason reason) {
+
+        static TransactMember cancels(String code, String message) {
+            return new TransactMember(null, new TransactionCanceledException.CancellationReason(code, null, message));
+        }
+    }
+
+    // A missing table cancels the transaction instead of failing it, and it is found before the
+    // RETURNING clause is checked (checked on real AWS, eu-west-2, 2026-09-17).
+    TransactMember toTransactItem(Stmt stmt, String region) {
+        if (stmt instanceof Stmt.Update upd) {
+            requireNoIndexQualifier(upd.index());
+        }
+        if (stmt instanceof Stmt.Delete del) {
+            requireNoIndexQualifier(del.index());
+        }
+        Optional<TableDefinition> found = service.findTable(stmt.table(), region);
+        if (found.isEmpty()) {
+            return TransactMember.cancels("ResourceNotFound", "Requested resource not found");
+        }
+        TableDefinition table = found.get();
         if (returningOf(stmt) != Returning.NONE) {
             throw new AwsException("ValidationException",
                     "RETURNING clause is not supported in ExecuteTransaction.", 400);
@@ -580,7 +601,6 @@ class DynamoDbPartiQLHandler {
         ObjectNode txItem = mapper.createObjectNode();
         switch (stmt) {
             case Stmt.Insert ins -> {
-                TableDefinition table = service.describeTable(ins.table(), region);
                 String pkName = table.getPartitionKeyName();
                 ObjectNode item = mapper.createObjectNode();
                 ins.item().forEach((k, v) -> item.set(k, toTypedNode(v)));
@@ -591,8 +611,6 @@ class DynamoDbPartiQLHandler {
                 txItem.set("Put", put);
             }
             case Stmt.Update upd -> {
-                requireNoIndexQualifier(upd.index());
-                TableDefinition table = service.describeTable(upd.table(), region);
                 ObjectNode key = buildKey(table, upd.where());
                 ExprAttrBuilder eav = new ExprAttrBuilder();
                 ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
@@ -607,8 +625,6 @@ class DynamoDbPartiQLHandler {
                 txItem.set("Update", update);
             }
             case Stmt.Delete del -> {
-                requireNoIndexQualifier(del.index());
-                TableDefinition table = service.describeTable(del.table(), region);
                 ObjectNode key = buildKey(table, del.where());
                 ExprAttrBuilder eav = new ExprAttrBuilder();
                 ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
@@ -630,15 +646,14 @@ class DynamoDbPartiQLHandler {
             case Stmt.Select ignored ->
                 throw new AwsException("ValidationException",
                         "SELECT is not supported inside ExecuteTransaction", 400);
-            case Stmt.Exists exists -> txItem.set("ConditionCheck", conditionCheck(exists.select(), region));
+            case Stmt.Exists exists -> txItem.set("ConditionCheck", conditionCheck(exists.select(), table));
         }
-        return txItem;
+        return new TransactMember(txItem, null);
     }
 
     // EXISTS needs the full key and at least one more condition, and IN does not count as
     // naming the key (checked on real AWS, eu-west-2, 2026-09-17).
-    private ObjectNode conditionCheck(Stmt.Select select, String region) {
-        TableDefinition table = service.describeTable(select.table(), region);
+    private ObjectNode conditionCheck(Stmt.Select select, TableDefinition table) {
         List<Cond> conditions = nonKeyConditions(table, select.where());
         if (!pinsFullKey(table, select.where()) || conditions.isEmpty()) {
             throw new AwsException("ValidationException",
@@ -659,15 +674,17 @@ class DynamoDbPartiQLHandler {
         return check;
     }
 
-    // describeTable counts the items to refresh the definition, so the caller carries
-    // one cache across the members rather than paying that per statement.
-    JsonNode toTransactGetItem(Stmt.Select stmt, String region, Map<String, TableDefinition> tables) {
+    // A read of a missing table cancels too, and it is found before the index qualifier is checked.
+    TransactMember toTransactGetItem(Stmt.Select stmt, String region) {
+        Optional<TableDefinition> found = service.findTable(stmt.table(), region);
+        if (found.isEmpty()) {
+            return TransactMember.cancels("ResourceNotFound", "Requested resource not found");
+        }
+        TableDefinition table = found.get();
         if (stmt.index() != null) {
             throw new AwsException("ValidationException",
                     "Reads on indices are not supported within transactions.", 400);
         }
-        TableDefinition table = tables.computeIfAbsent(stmt.table(),
-                name -> service.describeTable(name, region));
         DynamoDbPartiQLKeyPlan.of(stmt.where(), DynamoDbAccessPath.resolve(table, null), table).requireNoOverlap();
         if (!namesOnlyTheKey(table, stmt.where())) {
             throw new AwsException("ValidationException",
@@ -678,7 +695,7 @@ class DynamoDbPartiQLHandler {
         get.set("Key", buildKey(table, asEqualities(stmt.where())));
         ObjectNode txItem = mapper.createObjectNode();
         txItem.set("Get", get);
-        return txItem;
+        return new TransactMember(txItem, null);
     }
 
     JsonNode projectSelected(Stmt.Select stmt, JsonNode item) {

@@ -2703,11 +2703,12 @@ public class DynamoDbJsonHandler {
                         .map(DynamoDbPartiQLParser.Stmt.Select.class::cast)
                         .toList(), region);
             }
-            List<JsonNode> transactItems = new ArrayList<>();
+            List<DynamoDbPartiQLHandler.TransactMember> members = new ArrayList<>();
             for (int i = 0; i < statements.size(); i++) {
                 DynamoDbPartiQLParser.Stmt stmt = statements.get(i);
-                transactItems.add(inTransactStatement(i, () -> partiQLHandler.toTransactItem(stmt, region)));
+                members.add(inTransactStatement(i, () -> partiQLHandler.toTransactItem(stmt, region)));
             }
+            List<JsonNode> transactItems = cancelOnMemberReasons(members);
             dynamoDbService.transactWriteItems(transactItems, region,
                     request.path("ClientRequestToken").asText(null), request);
             ObjectNode resp = objectMapper.createObjectNode();
@@ -2735,17 +2736,17 @@ public class DynamoDbJsonHandler {
     }
 
     private Response executeTransactionReads(List<DynamoDbPartiQLParser.Stmt.Select> selects, String region) {
-        Map<String, TableDefinition> tables = new HashMap<>();
-        List<JsonNode> getItems = new ArrayList<>();
+        List<DynamoDbPartiQLHandler.TransactMember> members = new ArrayList<>();
         for (int i = 0; i < selects.size(); i++) {
             DynamoDbPartiQLParser.Stmt.Select select = selects.get(i);
-            getItems.add(inTransactStatement(i, () -> partiQLHandler.toTransactGetItem(select, region, tables)));
+            members.add(inTransactStatement(i, () -> partiQLHandler.toTransactGetItem(select, region)));
         }
+        List<JsonNode> getItems = cancelOnMemberReasons(members);
 
         List<JsonNode> results = dynamoDbService.transactGetItems(getItems, region);
         // A bad key cancels the transaction before a repeated item is refused
         // (checked on real AWS, eu-west-2, 2026-09-17).
-        requireOneReadPerItem(getItems, tables);
+        requireOneReadPerItem(getItems, region);
         ArrayNode responses = objectMapper.createArrayNode();
         for (int i = 0; i < results.size(); i++) {
             JsonNode item = partiQLHandler.projectSelected(selects.get(i), results.get(i));
@@ -2760,12 +2761,24 @@ public class DynamoDbJsonHandler {
         return Response.ok(resp).build();
     }
 
-    private void requireOneReadPerItem(List<JsonNode> getItems, Map<String, TableDefinition> tables) {
+    private static List<JsonNode> cancelOnMemberReasons(List<DynamoDbPartiQLHandler.TransactMember> members) {
+        if (members.stream().anyMatch(member -> member.reason() != null)) {
+            throw new TransactionCanceledException(members.stream()
+                    .map(member -> member.reason() != null
+                            ? member.reason()
+                            : new TransactionCanceledException.CancellationReason("", null))
+                    .toList());
+        }
+        return members.stream().map(DynamoDbPartiQLHandler.TransactMember::item).toList();
+    }
+
+    private void requireOneReadPerItem(List<JsonNode> getItems, String region) {
         Set<List<String>> items = new HashSet<>();
         for (JsonNode getItem : getItems) {
             JsonNode get = getItem.path("Get");
             String tableName = get.path("TableName").asText();
-            String itemKey = dynamoDbService.buildItemKey(tables.get(tableName), get.path("Key"), true);
+            TableDefinition table = dynamoDbService.findTable(tableName, region).orElseThrow();
+            String itemKey = dynamoDbService.buildItemKey(table, get.path("Key"), true);
             if (!items.add(List.of(tableName, itemKey))) {
                 throw new AwsException("ValidationException",
                         "Transaction request cannot include multiple operations on one item", 400);
@@ -2773,7 +2786,7 @@ public class DynamoDbJsonHandler {
         }
     }
 
-    // Only a validation error names its statement; a missing table comes back as it stands.
+    // Only a validation error names its statement.
     private <T> T inTransactStatement(int index, Supplier<T> member) {
         try {
             return member.get();
