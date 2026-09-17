@@ -35,6 +35,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @TestProfile(RedshiftInterceptorIamRoleEnforcedIntegrationTest.EnforceAuthProfile.class)
 class RedshiftInterceptorIamRoleEnforcedIntegrationTest {
 
+    private static final String REDSHIFT_TRUST_POLICY = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"Service":"redshift.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+            """;
+
     @Inject
     RedshiftService service;
 
@@ -85,7 +90,7 @@ class RedshiftInterceptorIamRoleEnforcedIntegrationTest {
         String bucket = "redshift-iam-role-allow";
         s3.createBucket(bucket, "us-east-1");
         s3.putObject(bucket, "p1.txt", "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
-        iamService.createRole("CopyRoleAllow", "/", "{}", null, 0, null);
+        iamService.createRole("CopyRoleAllow", "/", REDSHIFT_TRUST_POLICY, null, 0, null);
         iamService.putRolePolicy("CopyRoleAllow", "AllowS3", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket"],"Resource":"*"}
@@ -110,7 +115,7 @@ class RedshiftInterceptorIamRoleEnforcedIntegrationTest {
         String bucket = "redshift-iam-role-deny";
         s3.createBucket(bucket, "us-east-1");
         s3.putObject(bucket, "p1.txt", "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
-        iamService.createRole("CopyRoleDeny", "/", "{}", null, 0, null);
+        iamService.createRole("CopyRoleDeny", "/", REDSHIFT_TRUST_POLICY, null, 0, null);
         // No policy attached: implicit deny.
 
         try (Connection connection = waitForConnection(cluster);

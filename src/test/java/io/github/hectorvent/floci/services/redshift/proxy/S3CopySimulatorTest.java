@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.AfterEach;
@@ -209,6 +210,44 @@ class S3CopySimulatorTest {
                 () -> S3CopySimulator.prepareCopy(spec, s3, iamService));
 
         assertEquals("42501", error.sqlState());
+        verifyNoInteractions(s3);
+    }
+
+    @Test
+    void prepareCopyRejectsCrossAccountRole() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
+        IamService iamService = mock(IamService.class);
+
+        S3CopySimulator.S3TransferException error = assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(spec, s3, iamService, "111111111111"));
+
+        assertEquals("42501", error.sqlState());
+        assertTrue(error.getMessage().contains("cross-account"));
+        verifyNoInteractions(s3);
+        verifyNoInteractions(iamService);
+    }
+
+    @Test
+    void prepareCopyRejectsRoleWithoutRedshiftTrust() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
+        IamService iamService = mock(IamService.class);
+        IamRole role = mock(IamRole.class);
+        when(iamService.findRole("000000000000", "CopyRole"))
+                .thenReturn(java.util.Optional.of(role));
+        when(role.getAssumeRolePolicyDocument()).thenReturn(""
+                + "{\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},"
+                + "\"Action\":\"sts:AssumeRole\"}]}" );
+
+        S3CopySimulator.S3TransferException error = assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(spec, s3, iamService, "000000000000"));
+
+        assertEquals("42501", error.sqlState());
+        assertTrue(error.getMessage().contains("trust policy"));
         verifyNoInteractions(s3);
     }
 

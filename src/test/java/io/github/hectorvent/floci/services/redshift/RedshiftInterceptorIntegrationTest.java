@@ -40,6 +40,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class RedshiftInterceptorIntegrationTest {
 
+    private static final String REDSHIFT_TRUST_POLICY = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"Service":"redshift.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+            """;
+
     @Inject
     RedshiftService service;
 
@@ -143,7 +148,7 @@ class RedshiftInterceptorIntegrationTest {
         s3.createBucket(bucket, "us-east-1");
         s3.putObject(bucket, "people/p1.txt",
                 "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
-        iamService.createRole("CopyRoleNoPolicy", "/", "{}", null, 0, null);
+        iamService.createRole("CopyRoleNoPolicy", "/", REDSHIFT_TRUST_POLICY, null, 0, null);
 
         try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
                 Statement ddl = connection.createStatement()) {

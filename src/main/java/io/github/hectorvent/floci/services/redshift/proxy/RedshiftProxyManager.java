@@ -59,9 +59,11 @@ public class RedshiftProxyManager {
         // so sslmode=prefer/require handshakes succeed.
         tlsCertificates.ensureHost(advertisedHost);
         EmulatorConfig.RedshiftServiceConfig redshiftConfig = config.services().redshift();
+        String clusterAccountId = relayKey.substring(0, relayKey.indexOf(':'));
         RedshiftAuthProxy proxy = new RedshiftAuthProxy(
                 relayKey, backendHost, backendPort, masterUsername, masterPassword, dbName,
                 sigV4Validator, tlsCertificates, passwordValidator, s3Service, iamService,
+                clusterAccountId,
                 redshiftConfig.proxyHandshakeTimeoutMillis(), redshiftConfig.proxyBackendConnectTimeoutMillis(),
                 redshiftConfig.proxyMaxConnections());
         try {

@@ -3,9 +3,11 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.jboss.logging.Logger;
@@ -23,6 +25,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import java.util.function.IntConsumer;
 import java.util.zip.GZIPInputStream;
@@ -77,6 +80,8 @@ public final class S3CopySimulator {
     // Stateless (only needs an ObjectMapper), so a local instance avoids threading a new
     // dependency through the whole proxy chain for this one check.
     private static final IamPolicyEvaluator ROLE_POLICY_EVALUATOR = new IamPolicyEvaluator(new ObjectMapper());
+    private static final AssumeRolePolicyEvaluator ROLE_TRUST_POLICY_EVALUATOR =
+            new AssumeRolePolicyEvaluator(new ObjectMapper());
 
     private S3CopySimulator() {
     }
@@ -89,11 +94,10 @@ public final class S3CopySimulator {
     }
 
     /**
-     * Validates the role ARN and mints a short-lived session for it. The role's own account
-     * (embedded in the ARN) is used directly: cross-account role ARNs are out of scope, so no
-     * separate "cluster account" needs to be threaded in here.
+     * Validates the role ARN, its account and Redshift trust policy, then mints a short-lived session.
      */
-    private static RoleSession resolveRoleSession(String iamRoleArn, IamService iamService) {
+    private static RoleSession resolveRoleSession(String iamRoleArn, IamService iamService,
+                                                  String clusterAccountId) {
         AwsArnUtils.Arn parsed;
         try {
             parsed = AwsArnUtils.parse(iamRoleArn);
@@ -105,10 +109,22 @@ public final class S3CopySimulator {
             throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "IAM Role '" + iamRoleArn + "' could not be assumed: not an IAM role ARN", null);
         }
+        if (clusterAccountId != null && !clusterAccountId.equals(parsed.accountId())) {
+            throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "IAM Role '" + iamRoleArn + "' could not be assumed: cross-account role ARNs are not supported", null);
+        }
         String roleName = parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1);
-        if (iamService.findRole(parsed.accountId(), roleName).isEmpty()) {
+        Optional<IamRole> role = iamService.findRole(parsed.accountId(), roleName);
+        if (role.isEmpty()) {
             throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "IAM Role '" + iamRoleArn + "' could not be assumed: role does not exist", null);
+        }
+        if (clusterAccountId != null
+                && !ROLE_TRUST_POLICY_EVALUATOR.allowsService(
+                        role.get().getAssumeRolePolicyDocument(), "redshift.amazonaws.com")) {
+            throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "IAM Role '" + iamRoleArn + "' could not be assumed: trust policy does not allow redshift.amazonaws.com",
+                    null);
         }
 
         String accessKeyId = "ASIA" + randomString(UPPER_ALPHANUMERIC, 16);
@@ -195,8 +211,13 @@ public final class S3CopySimulator {
     }
 
     static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService) {
+        return prepareCopy(spec, s3, iamService, null);
+    }
+
+    static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                 String clusterAccountId) {
         RoleSession roleSession = spec.iamRoleArn() != null
-                ? resolveRoleSession(spec.iamRoleArn(), iamService)
+                ? resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId)
                 : null;
         try {
             try {
@@ -256,8 +277,13 @@ public final class S3CopySimulator {
     }
 
     static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService) {
+        return prepareUnload(spec, s3, iamService, null);
+    }
+
+    static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService,
+                                         String clusterAccountId) {
         RoleSession roleSession = spec.iamRoleArn() != null
-                ? resolveRoleSession(spec.iamRoleArn(), iamService)
+                ? resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId)
                 : null;
         String probeKey = unloadDataKey(spec, 0);
         try {
@@ -334,9 +360,15 @@ public final class S3CopySimulator {
     public static boolean runCopyFrom(Socket client, Socket backend,
                                       CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                       char txStatus, IntConsumer onStatusChange) throws IOException {
+        return runCopyFrom(client, backend, spec, s3, iamService, null, txStatus, onStatusChange);
+    }
+
+    public static boolean runCopyFrom(Socket client, Socket backend,
+                                      CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                      String clusterAccountId, char txStatus, IntConsumer onStatusChange) throws IOException {
         CopyInput input;
         try {
-            input = prepareCopy(spec, s3, iamService);
+            input = prepareCopy(spec, s3, iamService, clusterAccountId);
         } catch (S3TransferException e) {
             LOG.debugv(e, "COPY preparation failed for s3://{0}/{1}", spec.bucket(), spec.keyOrPrefix());
             sendError(client, backend, e.sqlState(), e.getMessage(), txStatus, onStatusChange);
@@ -667,9 +699,15 @@ public final class S3CopySimulator {
     public static boolean runUnload(Socket client, Socket backend,
             CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService, char txStatus,
             IntConsumer onStatusChange) throws IOException {
+        return runUnload(client, backend, spec, s3, iamService, null, txStatus, onStatusChange);
+    }
+
+    public static boolean runUnload(Socket client, Socket backend,
+            CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService, String clusterAccountId,
+            char txStatus, IntConsumer onStatusChange) throws IOException {
         UnloadCollector collector;
         try {
-            collector = prepareUnload(spec, s3, iamService);
+            collector = prepareUnload(spec, s3, iamService, clusterAccountId);
         } catch (S3TransferException e) {
             LOG.debugv(e, "UNLOAD preparation failed for s3://{0}/{1}", spec.bucket(), spec.prefix());
             sendError(client, backend, e.sqlState(), e.getMessage(), txStatus, onStatusChange);
@@ -931,7 +969,7 @@ public final class S3CopySimulator {
             }
             closeAcc(acc, sink);
             if (spec.manifest()) {
-                deleteWritten(s3, spec, writtenKeys, roleSession);
+                deleteWritten(s3, iamService, spec, writtenKeys, roleSession);
             }
             aborted = true;
         }
@@ -1078,7 +1116,8 @@ public final class S3CopySimulator {
         }
     }
 
-    private static void deleteWritten(S3Service s3, CopyStatementParser.S3Unload spec, List<String> keys,
+    private static void deleteWritten(S3Service s3, IamService iamService,
+                                      CopyStatementParser.S3Unload spec, List<String> keys,
                                       RoleSession roleSession) {
         if (spec.allowOverwrite()) {
             // Under ALLOWOVERWRITE a slice key may have replaced a pre-existing object, and there is no
@@ -1094,6 +1133,7 @@ public final class S3CopySimulator {
         for (String k : keys) {
             try {
                 if (roleSession != null) {
+                    authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:DeleteObject", objectArn(spec.bucket(), k));
                     s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), k);
                 } else {
                     s3.authorizeAnonymousDeleteObject(spec.bucket(), k);

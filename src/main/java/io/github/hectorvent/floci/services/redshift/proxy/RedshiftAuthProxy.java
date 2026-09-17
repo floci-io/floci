@@ -37,6 +37,7 @@ public class RedshiftAuthProxy {
     private final PasswordValidator passwordValidator;
     private final S3Service s3Service;
     private final IamService iamService;
+    private final String clusterAccountId;
     private final int handshakeTimeoutMillis;
     private final int backendConnectTimeoutMillis;
     private final Semaphore connectionPermits;
@@ -51,6 +52,19 @@ public class RedshiftAuthProxy {
                              S3Service s3Service, IamService iamService,
                              int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                              int maxConnections) {
+        this(clusterKey, backendHost, backendPort, masterUsername, masterPassword, dbName, sigV4,
+                tlsCertificates, passwordValidator, s3Service, iamService, null,
+                handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections);
+    }
+
+    public RedshiftAuthProxy(String clusterKey, String backendHost, int backendPort,
+                             String masterUsername, String masterPassword, String dbName,
+                             RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
+                             PasswordValidator passwordValidator,
+                             S3Service s3Service, IamService iamService,
+                             String clusterAccountId,
+                             int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                             int maxConnections) {
         this.clusterKey = clusterKey;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -62,6 +76,7 @@ public class RedshiftAuthProxy {
         this.passwordValidator = passwordValidator;
         this.s3Service = s3Service;
         this.iamService = iamService;
+        this.clusterAccountId = clusterAccountId;
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
         this.backendConnectTimeoutMillis = backendConnectTimeoutMillis;
         this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
@@ -178,7 +193,8 @@ public class RedshiftAuthProxy {
             if (session != null) {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
-                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService).run();
+                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
+                        clusterAccountId).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());

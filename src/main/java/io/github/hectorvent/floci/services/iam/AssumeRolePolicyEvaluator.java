@@ -74,6 +74,35 @@ public class AssumeRolePolicyEvaluator {
         return allow;
     }
 
+    /**
+     * Returns true if the trust policy allows the named AWS service principal to assume the role.
+     */
+    public boolean allowsService(String trustPolicyDocument, String servicePrincipal) {
+        if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
+            return false;
+        }
+        JsonNode statements;
+        try {
+            statements = objectMapper.readTree(trustPolicyDocument).path("Statement");
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
+            return false;
+        }
+        boolean allow = false;
+        if (statements.isArray()) {
+            for (JsonNode statement : statements) {
+                switch (evaluateServiceStatement(statement, servicePrincipal)) {
+                    case DENY -> { return false; }
+                    case ALLOW -> allow = true;
+                    case NO_MATCH -> { }
+                }
+            }
+        } else if (statements.isObject()) {
+            return evaluateServiceStatement(statements, servicePrincipal) == Match.ALLOW;
+        }
+        return allow;
+    }
+
     private enum Match { ALLOW, DENY, NO_MATCH }
 
     private Match evaluateStatement(JsonNode stmt, String callerArn, String callerAccount) {
@@ -84,6 +113,34 @@ public class AssumeRolePolicyEvaluator {
             return Match.NO_MATCH;
         }
         return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+    }
+
+    private Match evaluateServiceStatement(JsonNode stmt, String servicePrincipal) {
+        if (!actionApplies(stmt) || !matchesServicePrincipal(stmt.get("Principal"), servicePrincipal)) {
+            return Match.NO_MATCH;
+        }
+        return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+    }
+
+    private boolean matchesServicePrincipal(JsonNode principalNode, String servicePrincipal) {
+        if (principalNode == null || servicePrincipal == null) {
+            return false;
+        }
+        JsonNode service = principalNode.isObject() ? principalNode.get("Service") : null;
+        if (service == null) {
+            return false;
+        }
+        if (service.isTextual()) {
+            return IamPolicyEvaluator.globMatches(service.asText(), servicePrincipal);
+        }
+        if (service.isArray()) {
+            for (JsonNode entry : service) {
+                if (entry.isTextual() && IamPolicyEvaluator.globMatches(entry.asText(), servicePrincipal)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
