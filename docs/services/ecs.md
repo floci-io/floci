@@ -199,7 +199,7 @@ unchanged.
 
 ## Configuration
 
-Docker-backed `awsvpc` tasks receive an emulated ENI and share one protected network namespace across their containers when `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state and does not enforce packet filtering.
+Docker-backed `awsvpc` tasks receive an emulated ENI and share one protected network namespace across their containers by default. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state and does not enforce packet filtering. Set `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=false` to retain legacy networking during migration.
 
 | Variable | Default | Description |
 |---|---|---|

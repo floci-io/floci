@@ -121,7 +121,7 @@ floci:
   base-url: "http://localhost:4566"
   network:
     security-group-enforcement:
-      enabled: false
+      enabled: true
       helper-image: floci/network-helper:local
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci

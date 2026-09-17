@@ -24,6 +24,7 @@ public class InstanceNetworkInterface {
     private String attachmentId;
     private int deviceIndex;
     private String attachTime;
+    private List<String> ipv6Addresses = new ArrayList<>();
 
     public InstanceNetworkInterface() {}
 
@@ -68,4 +69,7 @@ public class InstanceNetworkInterface {
 
     public String getAttachTime() { return attachTime; }
     public void setAttachTime(String attachTime) { this.attachTime = attachTime; }
+
+    public List<String> getIpv6Addresses() { return ipv6Addresses; }
+    public void setIpv6Addresses(List<String> ipv6Addresses) { this.ipv6Addresses = ipv6Addresses; }
 }

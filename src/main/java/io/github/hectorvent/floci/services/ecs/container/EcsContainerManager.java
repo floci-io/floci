@@ -353,7 +353,9 @@ public class EcsContainerManager {
             }
             firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
                     region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(),
-                    namespace.transportAddress(), Set.copyOf(groupIds), groups), namespace.helperId(), prefixLists);
+                    eni.getIpv6Addresses().stream().findFirst().orElse(null),
+                    namespace.transportAddress(), namespace.transportIpv6Address(),
+                    Set.copyOf(groupIds), groups), namespace.helperId(), prefixLists);
             task.setNetworkInterfaceId(eniId);
             task.setPrivateIpAddress(eni.getPrivateIpAddress());
             return new PreparedNetwork(eni, namespace);

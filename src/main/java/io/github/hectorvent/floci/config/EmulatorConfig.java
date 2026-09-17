@@ -99,7 +99,7 @@ public interface EmulatorConfig {
     }
 
     interface SecurityGroupEnforcementConfig {
-        @WithDefault("false")
+        @WithDefault("true")
         boolean enabled();
 
         @WithDefault("floci/network-helper:local")

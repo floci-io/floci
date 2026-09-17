@@ -123,7 +123,7 @@ public final class CidrCanonicalizer {
      * form ({@code 2001:db8:0:0:0:0:0:0}, not {@code 2001:db8::}), so the compression
      * step is done here explicitly rather than delegated.
      */
-    private static String hostAddress(InetAddress address) {
+    public static String hostAddress(InetAddress address) {
         if (address instanceof Inet6Address v6) {
             return compressIpv6(v6.getAddress());
         }

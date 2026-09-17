@@ -42,6 +42,7 @@ import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTablePro
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachment;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachmentOptions;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
@@ -58,6 +59,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -70,6 +72,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -220,6 +223,105 @@ class Ec2ServiceTest {
 
         assertTrue(matched.stream()
                 .anyMatch(n -> eni.getNetworkInterfaceId().equals(n.getNetworkInterfaceId())));
+    }
+
+    @Test
+    void modifyNetworkInterfaceGroupsRefreshesTheFirewallOfAnUnattachedInterface() {
+        // An ECS awsvpc task's ENI is a protected endpoint with no instance attachment, so the
+        // instance-side refresh path skips it: the group change has to reach the firewall manager
+        // directly or the task's helper keeps enforcing the groups it no longer carries.
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        Ec2Service service = new Ec2Service(enforcingConfig(), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Vpc vpc = service.describeVpcs("us-east-1", List.of(), Map.of()).getFirst();
+        Subnet subnet = service.createSubnet("us-east-1", vpc.getVpcId(), "10.78.0.0/24", null, null, null);
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnet.getSubnetId(), null,
+                null, List.of(), List.of(), List.of());
+        SecurityGroup locked = service.createSecurityGroup("us-east-1", "locked", "locked down", vpc.getVpcId());
+
+        service.modifyNetworkInterfaceGroups("us-east-1", eni.getNetworkInterfaceId(),
+                List.of(locked.getGroupId()));
+
+        assertNull(eni.getAttachment());
+        verify(containerManager).updateSecurityGroups(eq(eni.getNetworkInterfaceId()),
+                eq(Set.of(locked.getGroupId())), any(), any());
+    }
+
+    @Test
+    void modifyNetworkInterfaceGroupsReachesAnInstancesImplicitInterface() {
+        // RunInstances mints its own primary interface and never writes it to the standalone store,
+        // so it is the most common ENI in the account and the only one Terraform's
+        // aws_network_interface_sg_attachment normally targets.
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        Ec2Service service = new Ec2Service(enforcingConfig(), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        Instance instance = reservation.getInstances().getFirst();
+        String eniId = instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId();
+        String vpcId = instance.getNetworkInterfaces().getFirst().getVpcId();
+        SecurityGroup locked = service.createSecurityGroup("us-east-1", "locked", "locked down", vpcId);
+
+        service.modifyNetworkInterfaceGroups("us-east-1", eniId, List.of(locked.getGroupId()));
+
+        assertEquals(List.of(locked.getGroupId()), instance.getNetworkInterfaces().getFirst().getGroups()
+                .stream().map(GroupIdentifier::getGroupId).toList());
+        // The primary interface's groups are the instance's groups, so DescribeInstances must agree.
+        assertEquals(List.of(locked.getGroupId()), instance.getSecurityGroups().stream()
+                .map(GroupIdentifier::getGroupId).toList());
+        verify(containerManager).updateSecurityGroups(eq(eniId), eq(Set.of(locked.getGroupId())),
+                any(), any());
+    }
+
+    @Test
+    void modifyNetworkInterfaceAttributeWithoutGroupsIsNotARejectedGroupChange() {
+        // ModifyNetworkInterfaceAttribute carries one attribute per call, and Terraform sends
+        // Description and SourceDestCheck through it far more often than a group list.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of());
+
+        service.modifyNetworkInterfaceAttributes("us-east-1", eni.getNetworkInterfaceId(),
+                "routed by the appliance", false, null);
+
+        NetworkInterface stored = service.describeNetworkInterfaces("us-east-1",
+                List.of(eni.getNetworkInterfaceId()), Map.of(), 0, null).networkInterfaces().getFirst();
+        assertEquals("routed by the appliance", stored.getDescription());
+        assertFalse(stored.isSourceDestCheck());
+        assertThrows(AwsException.class, () -> service.modifyNetworkInterfaceAttributes("us-east-1",
+                "eni-doesnotexist00", "x", null, null));
+    }
+
+    @Test
+    void networkInterfaceIpv6AddressesFollowTheSubnetAssociation() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Vpc vpc = service.describeVpcs("us-east-1", List.of(), Map.of()).getFirst();
+        VpcIpv6CidrBlockAssociation association = service.associateAmazonProvidedIpv6CidrBlock(
+                "us-east-1", vpc.getVpcId());
+        Subnet subnet = service.createSubnet("us-east-1", vpc.getVpcId(), "10.77.0.0/24", null,
+                null, association.getIpv6CidrBlock());
+
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnet.getSubnetId(), null,
+                null, List.of(), List.of(), 2, List.of(), List.of());
+
+        assertEquals(2, eni.getIpv6Addresses().size());
+        assertTrue(eni.getIpv6Addresses().stream()
+                .allMatch(address -> SecurityGroupPolicy.inCidr(address, association.getIpv6CidrBlock())));
+        List<String> removed = service.unassignIpv6Addresses("us-east-1", eni.getNetworkInterfaceId(),
+                List.of(eni.getIpv6Addresses().getFirst()));
+        assertEquals(1, removed.size());
+        assertEquals(1, eni.getIpv6Addresses().size());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.assignIpv6Addresses("us-east-1", eni.getNetworkInterfaceId(),
+                        List.of("2001:db8::1"), 0)).getErrorCode());
     }
 
     @Test
@@ -3873,6 +3975,18 @@ class Ec2ServiceTest {
         when(config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2);
         when(ec2.mock()).thenReturn(ec2Mock);
+        return config;
+    }
+
+    /** A real-Docker config with security-group enforcement on, the shipped default. */
+    private static EmulatorConfig enforcingConfig() {
+        EmulatorConfig config = mockConfig(false);
+        EmulatorConfig.NetworkConfig network = mock(EmulatorConfig.NetworkConfig.class);
+        EmulatorConfig.SecurityGroupEnforcementConfig enforcement =
+                mock(EmulatorConfig.SecurityGroupEnforcementConfig.class);
+        when(config.network()).thenReturn(network);
+        when(network.securityGroupEnforcement()).thenReturn(enforcement);
+        when(enforcement.enabled()).thenReturn(true);
         return config;
     }
 

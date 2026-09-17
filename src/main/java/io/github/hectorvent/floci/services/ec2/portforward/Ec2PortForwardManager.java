@@ -121,7 +121,7 @@ public class Ec2PortForwardManager {
      * terminate and stop. Runs on the caller's thread (both callers are already async).
      */
     public void unpublishAll(Instance instance) {
-        if (instance == null) {
+        if (!enabled() || instance == null) {
             return;
         }
         synchronized (instance) {
@@ -148,14 +148,19 @@ public class Ec2PortForwardManager {
      * survive. Sidecars are independent containers, so a surviving one keeps working untouched.
      */
     public void restore(Instance instance) {
-        if (!enabled() || instance == null || instance.getDockerContainerId() == null
+        if (instance == null || instance.getDockerContainerId() == null
                 || instance.getPublishedPorts().isEmpty()) {
+            return;
+        }
+        // Persisted host ports stay reserved whichever backend published them, so the
+        // allocator never hands out a port the protected namespace already binds.
+        instance.getPublishedPorts().values().forEach(portAllocator::markReserved);
+        if (!enabled()) {
             return;
         }
         for (Map.Entry<Integer, Integer> entry : new LinkedHashMap<>(instance.getPublishedPorts()).entrySet()) {
             int appPort = entry.getKey();
             int hostPort = entry.getValue();
-            portAllocator.markReserved(hostPort);
             String name = forwardContainerName(instance.getInstanceId(), appPort);
             if (lifecycleManager.findByName(name).isEmpty()) {
                 LOG.infov("Recreating missing port-forward sidecar for EC2 instance {0} app port {1}",

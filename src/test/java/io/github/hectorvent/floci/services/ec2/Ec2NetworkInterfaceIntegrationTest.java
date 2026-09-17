@@ -559,4 +559,258 @@ class Ec2NetworkInterfaceIntegrationTest {
 
         org.junit.jupiter.api.Assertions.assertTrue(replacement.startsWith("i-"));
     }
+
+    // ─── IPv6 over the wire ────────────────────────────────────────────────────
+
+    /**
+     * Builds a dual-stack subnet with {@code AssignIpv6AddressOnCreation} set, in a VPC of its own
+     * so the default subnets stay untouched. Returns the new subnet id.
+     */
+    private String createIpv6SubnetWithAutoAssign(String vpcCidr, String subnetCidr) {
+        String vpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", vpcCidr)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        String ipv6Cidr = given()
+            .formParam("Action", "AssociateVpcCidrBlock")
+            .formParam("VpcId", vpcId)
+            .formParam("AmazonProvidedIpv6CidrBlock", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("AssociateVpcCidrBlockResponse.ipv6CidrBlockAssociation.ipv6CidrBlock");
+
+        String ipv6SubnetId = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpcId)
+            .formParam("CidrBlock", subnetCidr)
+            .formParam("Ipv6CidrBlock", ipv6Cidr)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        given()
+            .formParam("Action", "ModifySubnetAttribute")
+            .formParam("SubnetId", ipv6SubnetId)
+            .formParam("AssignIpv6AddressOnCreation.Value", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        return ipv6SubnetId;
+    }
+
+    /**
+     * Omitting {@code Ipv6AddressCount} leaves the subnet's {@code AssignIpv6AddressOnCreation}
+     * in charge, so the interface comes up with one address.
+     */
+    @Test
+    @Order(18)
+    void createNetworkInterfaceAutoAssignsIpv6WhenTheCountIsOmitted() {
+        String ipv6SubnetId = createIpv6SubnetWithAutoAssign("10.90.0.0/16", "10.90.1.0/24");
+
+        given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", ipv6SubnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateNetworkInterfaceResponse.networkInterface.ipv6AddressesSet.item.size()",
+                    equalTo(1));
+    }
+
+    /**
+     * An explicit {@code Ipv6AddressCount=0} overrides the subnet's
+     * {@code AssignIpv6AddressOnCreation} and assigns none, which the API reference calls out
+     * directly. Parsing the absent parameter as 0 collapsed the two cases and auto-assigned anyway.
+     */
+    @Test
+    @Order(19)
+    void createNetworkInterfaceWithAnExplicitZeroCountOverridesTheSubnetAutoAssign() {
+        String ipv6SubnetId = createIpv6SubnetWithAutoAssign("10.91.0.0/16", "10.91.1.0/24");
+
+        given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", ipv6SubnetId)
+            .formParam("Ipv6AddressCount", "0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateNetworkInterfaceResponse.networkInterface.ipv6AddressesSet.item.size()",
+                    equalTo(0));
+    }
+
+    /**
+     * {@code AssignIpv6Addresses} requires either {@code Ipv6Addresses.N} or
+     * {@code Ipv6AddressCount}; with neither it used to report success having assigned nothing.
+     */
+    @Test
+    @Order(20)
+    void assignIpv6AddressesRequiresAddressesOrACount() {
+        String ipv6SubnetId = createIpv6SubnetWithAutoAssign("10.92.0.0/16", "10.92.1.0/24");
+
+        String eni = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", ipv6SubnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        given()
+            .formParam("Action", "AssignIpv6Addresses")
+            .formParam("NetworkInterfaceId", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    /**
+     * {@code assignedIpv6Addresses} carries only the addresses the request actually added: "Existing
+     * IPv6 addresses that were assigned to the network interface before the request are not
+     * included." Re-requesting an address the interface already holds therefore reports nothing,
+     * and does not duplicate it on the interface. Also pins the wire name to {@code Ipv6Addresses.N},
+     * which is what the SDKs and the CLI send.
+     */
+    @Test
+    @Order(21)
+    void assignIpv6AddressesReportsOnlyTheAddressesItActuallyAdded() {
+        String ipv6SubnetId = createIpv6SubnetWithAutoAssign("10.93.0.0/16", "10.93.1.0/24");
+
+        String eni = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", ipv6SubnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        String existing = given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeNetworkInterfacesResponse.networkInterfaceSet.item"
+                    + ".ipv6AddressesSet.item.ipv6Address");
+
+        // A fresh address is reported as assigned, under the wire name the SDKs use.
+        String fresh = existing.replaceFirst("[^:]+$", "ff01");
+        given()
+            .formParam("Action", "AssignIpv6Addresses")
+            .formParam("NetworkInterfaceId", eni)
+            .formParam("Ipv6Addresses.1", fresh)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AssignIpv6AddressesResponse.assignedIpv6Addresses.item", equalTo(fresh));
+
+        // Re-requesting it adds nothing, so nothing is reported as newly assigned.
+        given()
+            .formParam("Action", "AssignIpv6Addresses")
+            .formParam("NetworkInterfaceId", eni)
+            .formParam("Ipv6Addresses.1", fresh)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AssignIpv6AddressesResponse.assignedIpv6Addresses.item.size()", equalTo(0));
+
+        // ... and the interface still holds it exactly once, alongside the original.
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item"
+                    + ".ipv6AddressesSet.item.ipv6Address", containsInAnyOrder(existing, fresh));
+    }
+
+    /**
+     * {@code UnassignIpv6Addresses} reads the same {@code Ipv6Addresses.N} wire name, and reports
+     * only the addresses that were really there to remove.
+     */
+    @Test
+    @Order(22)
+    void unassignIpv6AddressesReadsTheSdkWireNameAndReportsOnlyRemovedAddresses() {
+        String ipv6SubnetId = createIpv6SubnetWithAutoAssign("10.94.0.0/16", "10.94.1.0/24");
+
+        String eni = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", ipv6SubnetId)
+            .formParam("Ipv6AddressCount", "2")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        String assigned = given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeNetworkInterfacesResponse.networkInterfaceSet.item"
+                    + ".ipv6AddressesSet.item[0].ipv6Address");
+
+        // One address is really on the interface, the other never was.
+        given()
+            .formParam("Action", "UnassignIpv6Addresses")
+            .formParam("NetworkInterfaceId", eni)
+            .formParam("Ipv6Addresses.1", assigned)
+            .formParam("Ipv6Addresses.2", assigned.replaceFirst("[^:]+$", "ff02"))
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UnassignIpv6AddressesResponse.unassignedIpv6Addresses.item", equalTo(assigned));
+
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item"
+                    + ".ipv6AddressesSet.item.ipv6Address", not(hasItem(assigned)));
+    }
 }

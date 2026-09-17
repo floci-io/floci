@@ -100,11 +100,11 @@ See [Storage Modes](./storage.md) for a full explanation of each mode.
 
 ## Docker Daemon
 
-This foundation release provides opt-in security-group filtering for EC2 Docker instances and ECS `awsvpc` tasks. A rootful Linux Docker daemon with nftables support is required. Before enabling it, terminate existing EC2 instances and ECS tasks, then launch replacements so their namespaces are prepared before application code starts. Restart Floci after changing this setting. Mock mode remains a control-plane simulation and does not filter packets.
+Security-group filtering is enabled by default for EC2 Docker instances and ECS `awsvpc` tasks. It requires rootful Linux Docker and Linux workload containers. Before upgrading, terminate existing EC2 instances and ECS tasks, then launch replacements so Floci can prepare their protected namespaces before application code starts. To retain the legacy unrestricted Docker networking during migration, set `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=false` and restart Floci. Mock mode remains a control-plane simulation and does not filter packets.
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` | `false` | Opt in to filtering Docker-backed EC2 and ECS `awsvpc` traffic by attached security groups |
+| `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` | `true` | Filter Docker-backed EC2 and ECS `awsvpc` traffic by attached security groups; set to `false` for legacy networking |
 | `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_HELPER_IMAGE` | `floci/network-helper:local` | Linux helper image containing nftables; Floci builds the default image locally when missing |
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket path or TCP address |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(none)_ | Path to a directory containing Docker's `config.json` for registry auth |
