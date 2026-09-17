@@ -677,6 +677,9 @@ public class DynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, hashTokens);
             Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
             checkUnusedEav(exprAttrValues, colonTokensAll);
+            dynamoDbService.addOrDeleteOperandTypeError(updateExpression, exprAttrValues).ifPresent(message -> {
+                throw new AwsException("ValidationException", "1 validation error detected: " + message, 400);
+            });
         }
 
         if (expectedUpd != null) {
@@ -1697,6 +1700,11 @@ public class DynamoDbJsonHandler {
                         op.get("ExpressionAttributeNames"),
                         op.get("ExpressionAttributeValues"));
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
+                // Unlike UpdateItem, the message carries no error count (checked on real AWS, eu-west-2, 2026-09-17).
+                dynamoDbService.addOrDeleteOperandTypeError(op.path("UpdateExpression").textValue(),
+                        op.get("ExpressionAttributeValues")).ifPresent(message -> {
+                            throw new AwsException("ValidationException", message, 400);
+                        });
             }
         }
 

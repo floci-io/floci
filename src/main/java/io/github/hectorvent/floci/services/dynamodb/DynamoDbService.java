@@ -2620,6 +2620,46 @@ public class DynamoDbService implements ResourceProvider {
         return clause;
     }
 
+    private static final Map<String, String> OPERAND_TYPE_NAMES = Map.of(
+            "S", "STRING", "N", "NUMBER", "B", "Binary", "BOOL", "BOOL", "NULL", "NULL", "L", "LIST", "M", "MAP");
+
+    // AWS refuses the operand before it reads the table or the item, and names the ADD
+    // type set for DELETE too (checked on real AWS, eu-west-2, 2026-09-17).
+    Optional<String> addOrDeleteOperandTypeError(String updateExpression, JsonNode exprAttrValues) {
+        if (updateExpression == null || exprAttrValues == null) {
+            return Optional.empty();
+        }
+        String remaining = updateExpression.trim().replaceAll("\\s+", " ");
+        while (!remaining.isEmpty()) {
+            String keyword = remaining.substring(0, Math.max(remaining.indexOf(' '), 0)).toUpperCase();
+            String body = remaining.substring(keyword.length()).trim();
+            int nextClause = findNextClauseKeyword(body);
+            String actions = nextClause < 0 ? body : body.substring(0, nextClause);
+            remaining = nextClause < 0 ? "" : body.substring(nextClause);
+            Set<String> allowed = switch (keyword) {
+                case "ADD" -> Set.of("N", "SS", "NS", "BS");
+                case "DELETE" -> Set.of("SS", "NS", "BS");
+                default -> null;
+            };
+            while (allowed != null && !actions.isBlank()) {
+                int comma = findNextComma(actions);
+                String[] words = (comma < 0 ? actions : actions.substring(0, comma)).trim().split(" ");
+                actions = comma < 0 ? "" : actions.substring(comma + 1);
+                JsonNode operand = exprAttrValues.get(words[words.length - 1]);
+                if (operand == null) {
+                    continue;
+                }
+                String type = DynamoDbAttributeValueValidator.typeOf(operand);
+                if (!allowed.contains(type)) {
+                    return Optional.of("Invalid UpdateExpression: Incorrect operand type for operator or function;"
+                            + " operator: " + keyword + ", operand type: " + OPERAND_TYPE_NAMES.get(type)
+                            + ", typeSet: ALLOWED_FOR_ADD_OPERAND");
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     // ADD and DELETE refuse an operand whose type differs from the stored attribute
     // (checked on real AWS, eu-west-2, 2026-09-17).
     private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {
