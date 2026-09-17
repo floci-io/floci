@@ -40,6 +40,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -167,6 +168,59 @@ class EcsContainerManagerSecurityGroupTest {
 
         verify(firewallManager).unregister("eni-1");
         verify(ec2Service).deleteNetworkInterface("us-east-1", "eni-1");
+    }
+
+    @Test
+    void firelensRouterAndAppBothJoinTheHelperNamespace() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(firewallManager.enabled()).thenReturn(true);
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any()))
+                .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
+
+        NetworkInterface eni = new NetworkInterface();
+        eni.setNetworkInterfaceId("eni-1");
+        eni.setVpcId("vpc-1");
+        eni.setPrivateIpAddress("10.0.0.10");
+        eni.setGroups(List.of(new GroupIdentifier("sg-1", "default")));
+        when(ec2Service.createNetworkInterface(any(), eq("subnet-1"), any(), any(), any(), any(), any()))
+                .thenReturn(eni);
+        SecurityGroup sg = new SecurityGroup();
+        sg.setGroupId("sg-1");
+        when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-1")), any(), any()))
+                .thenReturn(List.of(sg));
+
+        when(lifecycleManager.create(any())).thenReturn("router-id");
+        when(lifecycleManager.startCreated(anyString(), any()))
+                .thenReturn(new ContainerInfo("router-id", Map.of()));
+        var inspectVolumeCmd = mock(com.github.dockerjava.api.command.InspectVolumeCmd.class);
+        var volume = mock(com.github.dockerjava.api.command.InspectVolumeResponse.class);
+        when(dockerClient.inspectVolumeCmd(anyString())).thenReturn(inspectVolumeCmd);
+        when(inspectVolumeCmd.exec()).thenReturn(volume);
+        when(volume.getMountpoint()).thenReturn("/var/lib/docker/volumes/floci-ecs-firelens-abc123/_data");
+        var copyCmd = mock(com.github.dockerjava.api.command.CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("router-id")).thenReturn(copyCmd);
+
+        ContainerDefinition router = new ContainerDefinition();
+        router.setName("log_router");
+        router.setImage("amazon/aws-for-fluent-bit:stable");
+        router.setFirelensConfiguration(new io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration(
+                "fluentbit", Map.of()));
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setLogConfiguration(new io.github.hectorvent.floci.services.ecs.model.LogConfiguration(
+                "awsfirelens", Map.of("Name", "cloudwatch"), null));
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("firelens-family");
+        taskDef.setRevision(1);
+        taskDef.setNetworkMode(NetworkMode.awsvpc);
+        taskDef.setContainerDefinitions(List.of(app, router));
+
+        manager.startTask(awsvpcTask(), taskDef, List.of(), "us-east-1");
+
+        verify(builder, times(2)).withNetworkMode("container:helper-id");
+        verify(builder, times(2)).withLabels(Map.of("floci.security-group-workload", "true"));
     }
 
     private static EcsTask awsvpcTask() {
