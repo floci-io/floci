@@ -27,12 +27,12 @@ class RedshiftZeroEtlWriterTest {
         Connection connection = mock(Connection.class);
         Statement statement = mock(Statement.class);
         Cluster cluster = cluster();
-        when(redshiftService.describeClusters("warehouse")).thenReturn(List.of(cluster));
+        when(redshiftService.describeClustersForAccount("111111111111", "warehouse")).thenReturn(List.of(cluster));
         when(connectionFactory.open(any())).thenReturn(connection);
         when(connection.createStatement()).thenReturn(statement);
 
         RedshiftZeroEtlWriter writer = new RedshiftZeroEtlWriter(redshiftService, connectionFactory, objectMapper);
-        writer.createLandingTable("warehouse", "floci_zetl_orders");
+        writer.createLandingTable("111111111111", "warehouse", "floci_zetl_orders");
 
         verify(statement).executeUpdate(contains("event_id TEXT PRIMARY KEY"));
         verify(statement).executeUpdate(contains("new_image_json TEXT"));
@@ -46,7 +46,7 @@ class RedshiftZeroEtlWriterTest {
         ObjectMapper objectMapper = new ObjectMapper();
         Connection connection = mock(Connection.class);
         PreparedStatement statement = mock(PreparedStatement.class);
-        when(redshiftService.describeClusters("warehouse")).thenReturn(List.of(cluster()));
+        when(redshiftService.describeClustersForAccount("111111111111", "warehouse")).thenReturn(List.of(cluster()));
         when(connectionFactory.open(any())).thenReturn(connection);
         when(connection.prepareStatement(contains("ON CONFLICT (event_id) DO NOTHING"))).thenReturn(statement);
 
@@ -54,7 +54,7 @@ class RedshiftZeroEtlWriterTest {
         DynamoDbStreamRecord second = record("event-2", "000000000000000000002");
         RedshiftZeroEtlWriter writer = new RedshiftZeroEtlWriter(redshiftService, connectionFactory, objectMapper);
 
-        String sequence = writer.writeBatch("warehouse", "floci_zetl_orders", List.of(first, second));
+        String sequence = writer.writeBatch("111111111111", "warehouse", "floci_zetl_orders", List.of(first, second));
 
         assertEquals("000000000000000000002", sequence);
         verify(statement, times(2)).executeUpdate();

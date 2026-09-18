@@ -93,7 +93,8 @@ public class RedshiftDynamoDbZeroEtlConsumer {
     }
 
     void pollOnce(Integration integration) {
-        writer.createLandingTable(integration.getTargetClusterIdentifier(), integration.getLandingTableName());
+        writer.createLandingTable(integration.getAccountId(), integration.getTargetClusterIdentifier(),
+                integration.getLandingTableName());
         String iteratorType = integration.getCheckpointSequenceNumber() == null
                 ? "TRIM_HORIZON" : "AFTER_SEQUENCE_NUMBER";
         String iterator = streamService.getShardIterator(integration.getSourceStreamArn(),
@@ -102,7 +103,7 @@ public class RedshiftDynamoDbZeroEtlConsumer {
         if (result.records().isEmpty()) {
             return;
         }
-        String sequence = writer.writeBatch(integration.getTargetClusterIdentifier(),
+        String sequence = writer.writeBatch(integration.getAccountId(), integration.getTargetClusterIdentifier(),
                 integration.getLandingTableName(), result.records());
         redshiftService.updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
                 sequence, true, null);

@@ -28,15 +28,15 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
                 eq("TRIM_HORIZON"), eq(null))).thenReturn(iterator);
         when(streamService.getRecords(iterator, 100)).thenReturn(
                 new DynamoDbStreamService.GetRecordsResult(List.of(record), "next"));
-        when(writer.writeBatch("warehouse", "floci_zetl_orders", List.of(record)))
+        when(writer.writeBatch(integration.getAccountId(), "warehouse", "floci_zetl_orders", List.of(record)))
                 .thenReturn(record.getSequenceNumber());
 
         RedshiftDynamoDbZeroEtlConsumer consumer =
                 new RedshiftDynamoDbZeroEtlConsumer(streamService, redshiftService, writer);
         consumer.pollOnce(integration);
 
-        verify(writer).createLandingTable("warehouse", "floci_zetl_orders");
-        verify(writer).writeBatch("warehouse", "floci_zetl_orders", List.of(record));
+        verify(writer).createLandingTable(integration.getAccountId(), "warehouse", "floci_zetl_orders");
+        verify(writer).writeBatch(integration.getAccountId(), "warehouse", "floci_zetl_orders", List.of(record));
         verify(redshiftService).updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
                 record.getSequenceNumber(), true, null);
     }

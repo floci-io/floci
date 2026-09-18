@@ -547,6 +547,17 @@ public class RedshiftService {
         return clusters.scan(k -> true);
     }
 
+    public List<Cluster> describeClustersForAccount(String accountId, String identifier) {
+        if (identifier != null) {
+            Optional<Cluster> cluster = clusters.getForAccount(accountId, identifier);
+            if (cluster.isEmpty()) {
+                throw new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404);
+            }
+            return List.of(cluster.get());
+        }
+        return clusters.scanForAccount(accountId, k -> true);
+    }
+
     public synchronized Cluster deleteCluster(String identifier) {
         Optional<Cluster> clusterOpt = clusters.get(identifier);
         if (clusterOpt.isEmpty()) {

@@ -431,6 +431,19 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void describeClustersForAccountUsesTheRequestedAccount() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-c");
+        when(clusterBackend.getForAccount("222222222222", "test-c")).thenReturn(Optional.of(cluster));
+
+        List<Cluster> list = service.describeClustersForAccount("222222222222", "test-c");
+
+        assertEquals(List.of(cluster), list);
+        verify(clusterBackend).getForAccount("222222222222", "test-c");
+        verify(clusterBackend, never()).get("test-c");
+    }
+
+    @Test
     void testDeleteCluster() {
         Cluster c = new Cluster();
         c.setClusterIdentifier("test-c");

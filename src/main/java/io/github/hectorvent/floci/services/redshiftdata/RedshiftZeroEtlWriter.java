@@ -51,9 +51,9 @@ public class RedshiftZeroEtlWriter {
         this.objectMapper = objectMapper;
     }
 
-    public void createLandingTable(String clusterIdentifier, String tableName) {
+    public void createLandingTable(String accountId, String clusterIdentifier, String tableName) {
         String safeTableName = validateTableName(tableName);
-        try (Connection connection = connectionFactory.open(target(clusterIdentifier));
+        try (Connection connection = connectionFactory.open(target(accountId, clusterIdentifier));
              Statement statement = connection.createStatement()) {
             statement.executeUpdate(LANDING_TABLE_DDL.formatted(safeTableName) + ")");
         } catch (SQLException e) {
@@ -61,13 +61,14 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
-    public String writeBatch(String clusterIdentifier, String tableName, List<DynamoDbStreamRecord> records) {
+    public String writeBatch(String accountId, String clusterIdentifier, String tableName,
+                             List<DynamoDbStreamRecord> records) {
         if (records == null || records.isEmpty()) {
             return null;
         }
         String safeTableName = validateTableName(tableName);
         String newestSequence = null;
-        try (Connection connection = connectionFactory.open(target(clusterIdentifier));
+        try (Connection connection = connectionFactory.open(target(accountId, clusterIdentifier));
              PreparedStatement statement = connection.prepareStatement(INSERT_RECORD.formatted(safeTableName))) {
             for (DynamoDbStreamRecord record : records) {
                 bind(statement, record);
@@ -116,10 +117,10 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
-    private RedshiftDataResourceResolver.DatabaseTarget target(String clusterIdentifier) {
+    private RedshiftDataResourceResolver.DatabaseTarget target(String accountId, String clusterIdentifier) {
         Cluster cluster;
         try {
-            cluster = redshiftService.describeClusters(clusterIdentifier).get(0);
+            cluster = redshiftService.describeClustersForAccount(accountId, clusterIdentifier).get(0);
         } catch (RuntimeException e) {
             throw new AwsException("ResourceNotFoundException",
                     "Redshift cluster " + clusterIdentifier + " was not found.", 404);
