@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -109,6 +110,8 @@ class EksIrsaDockerIntegrationTest {
         cluster = new Cluster();
         cluster.setName(clusterName);
         cluster.setAccountId(ACCOUNT);
+        cluster.setArn("arn:aws:eks:us-east-1:" + ACCOUNT + ":cluster/" + clusterName);
+        cluster.setCreatedAt(Instant.now());
         cluster.setRoleArn("arn:aws:iam::" + ACCOUNT + ":role/eks-service-role");
 
         String issuer = oidcService.newIssuerUrl("us-east-1");

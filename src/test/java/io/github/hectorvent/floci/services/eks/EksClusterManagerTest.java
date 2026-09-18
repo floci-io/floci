@@ -83,6 +83,15 @@ class EksClusterManagerTest {
     }
 
     @Test
+    void webhookPathHandlesMissingArnOrCreatedAtGracefully() {
+        Cluster cluster = new Cluster();
+        cluster.setName("demo");
+        cluster.setAccountId("123456789012");
+        assertEquals("/_floci/eks/clusters/demo/token-webhook/scope/123456789012"
+                + "/us-east-1/1970-01-01T00:00:00Z", EksClusterManager.webhookPath(cluster));
+    }
+
+    @Test
     void webhookPathBindsAuthenticationToOneCluster() {
         assertEquals("/_floci/eks/clusters/demo/token-webhook", EksClusterManager.webhookPath("demo"));
     }

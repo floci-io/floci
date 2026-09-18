@@ -47,6 +47,7 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -915,8 +916,19 @@ public class EksClusterManager {
 
     static String webhookPath(Cluster cluster) {
         // client-go replaces a server URL query when constructing its TokenReview request.
-        return webhookPath(cluster.getName()) + "/scope/" + cluster.getAccountId()
-                + "/" + cluster.getArn().split(":", 6)[3] + "/" + cluster.getCreatedAt();
+        String accountId = cluster.getAccountId() != null && !cluster.getAccountId().isBlank()
+                ? cluster.getAccountId()
+                : (cluster.getArn() != null && cluster.getArn().split(":", 6).length > 4 ? cluster.getArn().split(":", 6)[4] : "000000000000");
+        String region = "us-east-1";
+        if (cluster.getArn() != null) {
+            String[] parts = cluster.getArn().split(":", 6);
+            if (parts.length > 3 && !parts[3].isBlank()) {
+                region = parts[3];
+            }
+        }
+        Instant createdAt = cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.EPOCH;
+        return webhookPath(cluster.getName()) + "/scope/" + accountId
+                + "/" + region + "/" + createdAt;
     }
 
     static String webhookPath(String clusterName) {
