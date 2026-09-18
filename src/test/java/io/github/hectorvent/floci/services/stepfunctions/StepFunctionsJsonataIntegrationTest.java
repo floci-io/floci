@@ -3843,6 +3843,52 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithItemReader_zeroMaxItemsPathReadsAllItems() throws Exception {
+        createBucket("map-inputs-zero-max-items-path");
+        putObject("map-inputs-zero-max-items-path", "workers/a.json", "[]");
+        putObject("map-inputs-zero-max-items-path", "workers/b.json", "[]");
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItemsPath": "$.limit"
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-zero-max-items-path",
+                    "Prefix": "workers/"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-zero-max-items-path-test", definition);
+        JsonNode items = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":0}")));
+
+        assertEquals(2, items.size());
+        assertEquals("workers/a.json", items.get(0).path("Key").asText());
+        assertEquals("workers/b.json", items.get(1).path("Key").asText());
+    }
+
+    @Test
+    void distributedMapWithItemReader_zeroJsonataMaxItemsReadsAllItems() throws Exception {
+        createBucket("map-inputs-zero-jsonata-max-items");
+        putObject("map-inputs-zero-jsonata-max-items", "workers/a.json", "[]");
+        putObject("map-inputs-zero-jsonata-max-items", "workers/b.json", "[]");
+        String definition = listObjectsDefinition("\"QueryLanguage\": \"JSONata\",", """
+                "ReaderConfig": {
+                    "MaxItems": "{% $states.input.limit %}"
+                },
+                "Arguments": {
+                    "Bucket": "map-inputs-zero-jsonata-max-items",
+                    "Prefix": "workers/"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-zero-jsonata-max-items-test", definition);
+        JsonNode items = objectMapper.readTree(waitForExecution(startExecution(smArn, "{\"limit\":0}")));
+
+        assertEquals(2, items.size());
+        assertEquals("workers/a.json", items.get(0).path("Key").asText());
+        assertEquals("workers/b.json", items.get(1).path("Key").asText());
+    }
+
+    @Test
     void distributedMapWithItemReader_rejectsNegativeMaxItemsPathAsItemReaderFailure() throws Exception {
         String definition = listObjectsDefinition("""
                 "ReaderConfig": {
