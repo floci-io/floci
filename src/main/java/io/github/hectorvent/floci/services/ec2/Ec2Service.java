@@ -107,6 +107,8 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfigurat
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import jakarta.annotation.PostConstruct;
 import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
@@ -147,6 +149,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final String defaultAccountId;
     private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
     private final EmulatorConfig config;
+    private final IamService iamService;
     private final Ec2ContainerManager containerManager;
     private final Ec2PortForwardManager portForwardManager;
     private final AmiImageResolver amiImageResolver;
@@ -227,9 +230,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
                       jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
-                      VpcNetworkManager vpcNetworkManager) {
+                      VpcNetworkManager vpcNetworkManager, IamService iamService) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
-                instanceTypeCatalog, storageFactory, requestContextInstance);
+                instanceTypeCatalog, storageFactory, requestContextInstance, iamService);
         this.vpcNetworkManager = vpcNetworkManager;
     }
 
@@ -238,6 +241,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
                       jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, storageFactory, requestContextInstance, null);
+    }
+
+    public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      Ec2PortForwardManager portForwardManager,
+                      AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
+                      jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+                      IamService iamService) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
@@ -273,7 +286,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         new TypeReference<Map<String, NetworkInterface>>() {}),
                 storageFactory.create("ec2", "ec2-capacity-reservations.json",
                         new TypeReference<Map<String, CapacityReservation>>() {}),
-                requestContextInstance);
+                requestContextInstance, iamService);
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -383,6 +396,49 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                StorageBackend<String, NetworkInterface> networkInterfaces,
                StorageBackend<String, CapacityReservation> capacityReservations,
                jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, vpcs, subnets, securityGroups, securityGroupRules,
+                internetGateways, routeTables, keyPairs, addresses, instances,
+                volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections, networkInterfaces, capacityReservations, requestContextInstance, null);
+    }
+
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
+               StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               StorageBackend<String, NetworkInterface> networkInterfaces,
+               StorageBackend<String, CapacityReservation> capacityReservations,
+               jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+               IamService iamService) {
+        this.iamService = iamService;
         this.defaultAccountId = config.defaultAccountId();
         this.requestContextInstance = requestContextInstance;
         this.config = config;
@@ -5559,7 +5615,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     /**
      * The instance-profile ARN a launch from {@code data} should use. A template given only a
-     * {@code Name} keeps that form as stored; the ARN is derived here, at launch time, instead of
+     * {@code Name} keeps that form as stored; the ARN is resolved from IAM here, at launch time, instead of
      * being written back into the template.
      */
     public String iamInstanceProfileArn(LaunchTemplateData data) {
@@ -5573,7 +5629,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (profile.getName() == null || profile.getName().isBlank()) {
             return null;
         }
-        return AwsArnUtils.Arn.of("iam", "", callerAccountId(), "instance-profile/" + profile.getName()).toString();
+        return resolveIamInstanceProfileName(profile.getName());
+    }
+
+    public String resolveIamInstanceProfileName(String name) {
+        if (iamService == null) {
+            throw new IllegalStateException("IAM service is required to resolve instance profile names");
+        }
+        return iamService.findInstanceProfile(callerAccountId(), name)
+                .map(InstanceProfile::getArn)
+                .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                        "Invalid IAM Instance Profile name: " + name, 400));
     }
 
     public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
