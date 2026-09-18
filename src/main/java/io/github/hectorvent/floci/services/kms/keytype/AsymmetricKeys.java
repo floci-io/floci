@@ -24,15 +24,6 @@ final class AsymmetricKeys {
     private AsymmetricKeys() {
     }
 
-    static KmsKeySpec.Algorithm requireSpecAlgorithm(KmsKeySpec spec, String algorithm) {
-        KmsKeySpec.Algorithm signingAlgorithm = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
-        if (!spec.getAlgorithm().contains(signingAlgorithm)) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "Algorithm " + algorithm + " is incompatible with key spec " + spec.name() + ".", 400);
-        }
-        return signingAlgorithm;
-    }
-
     static void requireRawMessage(KmsKeySpec spec, KmsMessageType messageType) {
         if (messageType != KmsMessageType.RAW) {
             throw new AwsException("ValidationException",

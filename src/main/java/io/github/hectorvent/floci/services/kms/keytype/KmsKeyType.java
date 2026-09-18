@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.kms.keytype;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
@@ -11,14 +10,14 @@ public interface KmsKeyType {
 
     void generateKeyMaterial(KmsKey key, String region) throws GeneralSecurityException;
 
-    default byte[] sign(KmsKey key, byte[] message, String algorithm, KmsMessageType messageType)
+    default byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws Exception {
-        throw new AwsException("UnsupportedOperationException", "Unsupported key spec for signing.", 400);
+        throw new IllegalStateException(key.getKeySpec() + " does not sign");
     }
 
-    default boolean verify(KmsKey key, byte[] message, byte[] signature, String algorithm,
+    default boolean verify(KmsKey key, byte[] message, byte[] signature, KmsKeySpec.Algorithm algorithm,
                            KmsMessageType messageType) throws Exception {
-        return false;
+        throw new IllegalStateException(key.getKeySpec() + " does not verify");
     }
 
     default byte[] encrypt(KmsKey key, KmsKeySpec.Algorithm algorithm, byte[] plaintext) {

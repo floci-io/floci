@@ -1690,6 +1690,99 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
     }
 
+    /** Checked against real AWS in us-east-1. KMS validates the name before it looks up the key. */
+    @Test
+    void signRejectsAnUnknownSigningAlgorithmBeforeLookingUpTheKey() {
+        given()
+                .header("X-Amz-Target", "TrentService.Sign")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"00000000-0000-0000-0000-000000000000\",\"Message\":\"bWVzc2FnZQ==\",\"SigningAlgorithm\":\"FOO\"}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value 'FOO' at 'signingAlgorithm' failed to "
+                        + "satisfy constraint: Member must satisfy enum value set: [RSASSA_PSS_SHA_256, "
+                        + "RSASSA_PSS_SHA_384, RSASSA_PSS_SHA_512, RSASSA_PKCS1_V1_5_SHA_256, RSASSA_PKCS1_V1_5_SHA_384, "
+                        + "RSASSA_PKCS1_V1_5_SHA_512, ECDSA_SHA_256, ECDSA_SHA_384, ECDSA_SHA_512, ED25519_SHA_512, "
+                        + "ED25519_PH_SHA_512, SM2DSA, ML_DSA_SHAKE_256]"));
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({"Sign", "Verify"})
+    void signAndVerifyRequireASigningAlgorithm(String operation) {
+        String keyArn = createKeyArn("RSA_2048", "SIGN_VERIFY");
+
+        given()
+                .header("X-Amz-Target", "TrentService." + operation)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"Signature\":\"%s\"}"
+                        .formatted(keyArn, Base64.getEncoder().encodeToString(new byte[64])))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value null at 'signingAlgorithm' failed to "
+                        + "satisfy constraint: Member must not be null"));
+    }
+
+    /**
+     * Checked against real AWS in us-east-1. SYMMETRIC_DEFAULT is not in the modeled enum, yet KMS
+     * answers it with the key spec error, not a validation error.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "RSA_2048, ECDSA_SHA_256, Sign",
+            "RSA_2048, ECDSA_SHA_256, Verify",
+            "RSA_2048, SYMMETRIC_DEFAULT, Sign",
+            "ECC_NIST_P256, ECDSA_SHA_384, Sign",
+            "ECC_NIST_P256, ECDSA_SHA_384, Verify",
+            "ECC_NIST_P256, RSASSA_PSS_SHA_256, Sign",
+            "ECC_NIST_P256, ED25519_PH_SHA_512, Sign",
+    })
+    void signAndVerifyRejectAnAlgorithmTheKeySpecDoesNotSupport(String keySpec, String algorithm, String operation) {
+        String keyArn = createKeyArn(keySpec, "SIGN_VERIFY");
+
+        given()
+                .header("X-Amz-Target", "TrentService." + operation)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                        .formatted(keyArn, Base64.getEncoder().encodeToString(new byte[64]), algorithm))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo("Algorithm " + algorithm + " is incompatible with key spec " + keySpec + "."));
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @Test
+    void signRejectsAnEncryptionAlgorithmAsASigningAlgorithm() {
+        String keyArn = createKeyArn("RSA_2048", "SIGN_VERIFY");
+
+        given()
+                .header("X-Amz-Target", "TrentService.Sign")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"SigningAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
+                        .formatted(keyArn))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", startsWith("1 validation error detected: Value 'RSAES_OAEP_SHA_256' at 'signingAlgorithm'"));
+    }
+
+    private static String createKeyArn(String keySpec, String keyUsage) {
+        return given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"%s\",\"KeySpec\":\"%s\"}".formatted(keyUsage, keySpec))
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.Arn");
+    }
+
     private static byte[] sha512(byte[] value) {
         try {
             return java.security.MessageDigest.getInstance("SHA-512").digest(value);

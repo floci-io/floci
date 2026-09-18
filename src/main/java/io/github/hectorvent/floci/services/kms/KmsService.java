@@ -1166,7 +1166,7 @@ public class KmsService implements ResourceProvider {
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyIsUsableForCryptoOperations(kmsKey);
         validateKeyUsage(kmsKey, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
-        validateEncryptionAlgorithmForSpec(algorithm, kmsKey.getKeySpec());
+        validateAlgorithmForSpec(algorithm, kmsKey.getKeySpec());
 
         if (algorithm != KmsKeySpec.Algorithm.SYMMETRIC_DEFAULT) {
             rejectEncryptionContextForAsymmetricKey(encryptionContext);
@@ -1233,7 +1233,7 @@ public class KmsService implements ResourceProvider {
             KmsKey requestKey = resolveKey(requestKeyId, region);
             validateKeyIsUsableForCryptoOperations(requestKey);
             validateKeyUsage(requestKey, KmsKeyUsage.ENCRYPT_DECRYPT, "Decrypt");
-            validateEncryptionAlgorithmForSpec(algorithm, requestKey.getKeySpec());
+            validateAlgorithmForSpec(algorithm, requestKey.getKeySpec());
             rejectEncryptionContextForAsymmetricKey(encryptionContext);
             byte[] plaintext = keyTypes.of(requestKey.getKeySpec()).decrypt(requestKey, algorithm, ciphertext);
             return new DecryptResult(plaintext, requestKey.getArn(), algorithm.getAlgName());
@@ -1555,7 +1555,7 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    private static void validateEncryptionAlgorithmForSpec(KmsKeySpec.Algorithm algorithm, KmsKeySpec spec) {
+    private static void validateAlgorithmForSpec(KmsKeySpec.Algorithm algorithm, KmsKeySpec spec) {
         if (!spec.getAlgorithm().contains(algorithm)) {
             throw new AwsException("InvalidKeyUsageException",
                     "Algorithm " + algorithm.getAlgName() + " is incompatible with key spec " + spec.name() + ".", 400);
@@ -1577,15 +1577,24 @@ public class KmsService implements ResourceProvider {
         }
     }
 
+    /** SigningAlgorithmSpec from the KMS model, in the order KMS lists it in validation errors. */
+    private static final List<String> SIGNING_ALGORITHMS = List.of(
+            "RSASSA_PSS_SHA_256", "RSASSA_PSS_SHA_384", "RSASSA_PSS_SHA_512",
+            "RSASSA_PKCS1_V1_5_SHA_256", "RSASSA_PKCS1_V1_5_SHA_384", "RSASSA_PKCS1_V1_5_SHA_512",
+            "ECDSA_SHA_256", "ECDSA_SHA_384", "ECDSA_SHA_512", "ED25519_SHA_512", "ED25519_PH_SHA_512",
+            "SM2DSA", "ML_DSA_SHAKE_256");
+
     public byte[] sign(String keyId, byte[] message, String algorithm, String region) {
         return sign(keyId, message, algorithm, RAW, region);
     }
 
     public byte[] sign(String keyId, byte[] message, String algorithm, KmsMessageType messageType, String region) {
+        KmsKeySpec.Algorithm signingAlgorithm = resolveSigningAlgorithm(algorithm);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Sign");
+        validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
         try {
-            return keyTypes.of(kmsKey.getKeySpec()).sign(kmsKey, message, algorithm, messageType);
+            return keyTypes.of(kmsKey.getKeySpec()).sign(kmsKey, message, signingAlgorithm, messageType);
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -1593,15 +1602,36 @@ public class KmsService implements ResourceProvider {
         }
     }
 
+    /**
+     * SYMMETRIC_DEFAULT is not in the modeled enum, but real KMS lets it through to the key spec
+     * check instead of failing validation.
+     */
+    private static KmsKeySpec.Algorithm resolveSigningAlgorithm(String algorithm) {
+        if (algorithm == null) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'signingAlgorithm' failed to satisfy "
+                            + "constraint: Member must not be null", 400);
+        }
+        if (!SIGNING_ALGORITHMS.contains(algorithm) && !"SYMMETRIC_DEFAULT".equals(algorithm)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + algorithm + "' at 'signingAlgorithm' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: ["
+                            + String.join(", ", SIGNING_ALGORITHMS) + "]", 400);
+        }
+        return KmsKeySpec.Algorithm.valueOf(algorithm);
+    }
+
     public boolean verify(String keyId, byte[] message, byte[] signature, String algorithm, String region) {
         return verify(keyId, message, signature, algorithm, RAW, region);
     }
 
     public boolean verify(String keyId, byte[] message, byte[] signature, String algorithm, KmsMessageType messageType, String region) {
+        KmsKeySpec.Algorithm signingAlgorithm = resolveSigningAlgorithm(algorithm);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Verify");
+        validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
         try {
-            return keyTypes.of(kmsKey.getKeySpec()).verify(kmsKey, message, signature, algorithm, messageType);
+            return keyTypes.of(kmsKey.getKeySpec()).verify(kmsKey, message, signature, signingAlgorithm, messageType);
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {

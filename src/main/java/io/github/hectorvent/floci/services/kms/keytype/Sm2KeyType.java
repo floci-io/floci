@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.kms.keytype;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import org.bouncycastle.crypto.CryptoException;
 import org.bouncycastle.crypto.params.ParametersWithRandom;
@@ -31,9 +32,8 @@ final class Sm2KeyType implements KmsKeyType {
     }
 
     @Override
-    public byte[] sign(KmsKey key, byte[] message, String algorithm, KmsMessageType messageType)
+    public byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws IOException, CryptoException {
-        AsymmetricKeys.requireSpecAlgorithm(key.getKeySpec(), algorithm);
         AsymmetricKeys.requireRawMessage(key.getKeySpec(), messageType);
         SM2Signer signer = new SM2Signer();
         signer.init(true, new ParametersWithRandom(BcEcKeys.privateKeyParameters(key, CURVE), random));
@@ -42,9 +42,8 @@ final class Sm2KeyType implements KmsKeyType {
     }
 
     @Override
-    public boolean verify(KmsKey key, byte[] message, byte[] signature, String algorithm,
+    public boolean verify(KmsKey key, byte[] message, byte[] signature, KmsKeySpec.Algorithm algorithm,
                           KmsMessageType messageType) throws IOException {
-        AsymmetricKeys.requireSpecAlgorithm(key.getKeySpec(), algorithm);
         AsymmetricKeys.requireRawMessage(key.getKeySpec(), messageType);
         SM2Signer verifier = new SM2Signer();
         verifier.init(false, BcEcKeys.publicKeyParameters(key, CURVE));

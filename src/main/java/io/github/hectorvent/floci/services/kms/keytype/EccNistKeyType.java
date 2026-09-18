@@ -20,26 +20,23 @@ final class EccNistKeyType implements KmsKeyType {
     }
 
     @Override
-    public byte[] sign(KmsKey key, byte[] message, String algorithm, KmsMessageType messageType)
+    public byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws GeneralSecurityException {
         PrivateKey privateKey = AsymmetricKeys.privateKey(key, "EC");
-        String jcaAlgorithm = switch (messageType) {
-            case DIGEST -> "NONEwithECDSA";
-            case RAW -> KmsKeySpec.getSignVerifyAlgorithm(algorithm).getJavaName();
-        };
-        return AsymmetricKeys.sign(privateKey, jcaAlgorithm, message);
+        return AsymmetricKeys.sign(privateKey, jcaAlgorithm(algorithm, messageType), message);
     }
 
     @Override
-    public boolean verify(KmsKey key, byte[] message, byte[] signature, String algorithm,
+    public boolean verify(KmsKey key, byte[] message, byte[] signature, KmsKeySpec.Algorithm algorithm,
                           KmsMessageType messageType) throws GeneralSecurityException {
         PublicKey publicKey = AsymmetricKeys.publicKey(key, "EC");
-        // An unknown algorithm name fails even for DIGEST.
-        KmsKeySpec.Algorithm signingAlgorithm = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
-        String jcaAlgorithm = switch (messageType) {
+        return AsymmetricKeys.verify(publicKey, jcaAlgorithm(algorithm, messageType), message, signature);
+    }
+
+    private static String jcaAlgorithm(KmsKeySpec.Algorithm algorithm, KmsMessageType messageType) {
+        return switch (messageType) {
             case DIGEST -> "NONEwithECDSA";
-            case RAW -> signingAlgorithm.getJavaName();
+            case RAW -> algorithm.getJavaName();
         };
-        return AsymmetricKeys.verify(publicKey, jcaAlgorithm, message, signature);
     }
 }

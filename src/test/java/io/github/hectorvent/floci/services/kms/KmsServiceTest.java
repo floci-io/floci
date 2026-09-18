@@ -46,6 +46,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -1558,14 +1559,19 @@ class KmsServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521", "ECC_SECG_P256K1"})
-    void signAndVerify(String keySpec) {
+    @CsvSource({
+            "ECC_NIST_P256, ECDSA_SHA_256",
+            "ECC_NIST_P384, ECDSA_SHA_384",
+            "ECC_NIST_P521, ECDSA_SHA_512",
+            "ECC_SECG_P256K1, ECDSA_SHA_256",
+    })
+    void signAndVerify(String keySpec, String algorithm) {
         KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", keySpec, null, Map.of(), REGION);
         byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);
 
-        byte[] sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
+        byte[] sig = kmsService.sign(key.getKeyId(), message, algorithm, REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig, "ECDSA_SHA_256", REGION));
+        assertTrue(kmsService.verify(key.getKeyId(), message, sig, algorithm, REGION));
     }
 
     @Test
@@ -1647,25 +1653,27 @@ class KmsServiceTest {
     }
 
     @Test
-    void signWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
-        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+    void signWithInvalidAlgorithmFailsValidation() {
+        KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
 
-        var ex = assertThrows(AwsException.class, () ->
+        AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.sign(key.getKeyId(), "sign me".getBytes(StandardCharsets.UTF_8), "NOT_AN_ALGORITHM", REGION));
 
-        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().startsWith(
+                "1 validation error detected: Value 'NOT_AN_ALGORITHM' at 'signingAlgorithm' failed to satisfy constraint"));
     }
 
     @Test
-    void verifyWithInvalidAlgorithmThrowsInvalidSigningAlgorithm() {
-        var key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
-        var message = "sign me".getBytes(StandardCharsets.UTF_8);
-        var sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
+    void verifyWithInvalidAlgorithmFailsValidation() {
+        KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);
+        byte[] sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);
 
-        var ex = assertThrows(AwsException.class, () ->
+        AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.verify(key.getKeyId(), message, sig, "NOT_AN_ALGORITHM", REGION));
 
-        assertEquals("InvalidSigningAlgorithmException", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 
     @Test

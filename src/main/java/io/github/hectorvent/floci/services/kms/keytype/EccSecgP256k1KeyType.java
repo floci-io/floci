@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.kms.keytype;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
@@ -36,13 +35,10 @@ final class EccSecgP256k1KeyType implements KmsKeyType {
     }
 
     @Override
-    public byte[] sign(KmsKey key, byte[] message, String algorithm, KmsMessageType messageType)
+    public byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws GeneralSecurityException, IOException {
         ECPrivateKeyParameters privateKey = BcEcKeys.privateKeyParameters(key, CURVE);
-        byte[] hash = switch (messageType) {
-            case DIGEST -> message;
-            case RAW -> hashForEcdsa(message, KmsKeySpec.getSignVerifyAlgorithm(algorithm));
-        };
+        byte[] hash = hash(message, algorithm, messageType);
 
         ECDSASigner signer = new ECDSASigner();
         signer.init(true, new ParametersWithRandom(privateKey, random));
@@ -57,15 +53,10 @@ final class EccSecgP256k1KeyType implements KmsKeyType {
     }
 
     @Override
-    public boolean verify(KmsKey key, byte[] message, byte[] signature, String algorithm,
+    public boolean verify(KmsKey key, byte[] message, byte[] signature, KmsKeySpec.Algorithm algorithm,
                           KmsMessageType messageType) throws GeneralSecurityException, IOException {
         ECPublicKeyParameters publicKey = BcEcKeys.publicKeyParameters(key, CURVE);
-        // An unknown algorithm name fails even for DIGEST.
-        KmsKeySpec.Algorithm signingAlgorithm = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
-        byte[] hash = switch (messageType) {
-            case DIGEST -> message;
-            case RAW -> hashForEcdsa(message, signingAlgorithm);
-        };
+        byte[] hash = hash(message, algorithm, messageType);
 
         ASN1Sequence asn1 = ASN1Sequence.getInstance(ASN1Primitive.fromByteArray(signature));
         BigInteger r = ASN1Integer.getInstance(asn1.getObjectAt(0)).getValue();
@@ -76,14 +67,16 @@ final class EccSecgP256k1KeyType implements KmsKeyType {
         return verifier.verifySignature(hash, r, s);
     }
 
-    private static byte[] hashForEcdsa(byte[] message, KmsKeySpec.Algorithm algorithm)
+    private static byte[] hash(byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws GeneralSecurityException {
+        if (messageType == KmsMessageType.DIGEST) {
+            return message;
+        }
         String digest = switch (algorithm) {
             case ECDSA_SHA_256 -> "SHA-256";
             case ECDSA_SHA_384 -> "SHA-384";
             case ECDSA_SHA_512 -> "SHA-512";
-            default -> throw new AwsException("InvalidSigningAlgorithmException",
-                    "Unsupported EC algorithm: " + algorithm.getJavaName(), 400);
+            default -> throw new IllegalStateException("Not an ECDSA algorithm: " + algorithm);
         };
         return MessageDigest.getInstance(digest).digest(message);
     }

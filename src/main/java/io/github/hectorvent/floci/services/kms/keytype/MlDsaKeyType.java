@@ -11,8 +11,6 @@ import java.security.PublicKey;
 
 final class MlDsaKeyType implements KmsKeyType {
 
-    private static final String JCA_ALGORITHM = KmsKeySpec.Algorithm.ML_DSA_SHAKE_256.getJavaName();
-
     @Override
     public void generateKeyMaterial(KmsKey key, String region) throws GeneralSecurityException {
         String algorithm = key.getKeySpec().name().replace('_', '-');
@@ -20,20 +18,18 @@ final class MlDsaKeyType implements KmsKeyType {
     }
 
     @Override
-    public byte[] sign(KmsKey key, byte[] message, String algorithm, KmsMessageType messageType)
+    public byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws GeneralSecurityException {
-        AsymmetricKeys.requireSpecAlgorithm(key.getKeySpec(), algorithm);
         AsymmetricKeys.requireRawMessage(key.getKeySpec(), messageType);
         PrivateKey privateKey = AsymmetricKeys.privateKey(key, "ML-DSA");
-        return AsymmetricKeys.sign(privateKey, JCA_ALGORITHM, message);
+        return AsymmetricKeys.sign(privateKey, algorithm.getJavaName(), message);
     }
 
     @Override
-    public boolean verify(KmsKey key, byte[] message, byte[] signature, String algorithm,
+    public boolean verify(KmsKey key, byte[] message, byte[] signature, KmsKeySpec.Algorithm algorithm,
                           KmsMessageType messageType) throws GeneralSecurityException {
-        AsymmetricKeys.requireSpecAlgorithm(key.getKeySpec(), algorithm);
         AsymmetricKeys.requireRawMessage(key.getKeySpec(), messageType);
         PublicKey publicKey = AsymmetricKeys.publicKey(key, "ML-DSA");
-        return AsymmetricKeys.verify(publicKey, JCA_ALGORITHM, message, signature);
+        return AsymmetricKeys.verify(publicKey, algorithm.getJavaName(), message, signature);
     }
 }

@@ -31,7 +31,7 @@ import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.spec.MGF1ParameterSpec;
 
-import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.DIGEST;
+import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
 
 final class RsaKeyType implements KmsKeyType {
 
@@ -51,34 +51,33 @@ final class RsaKeyType implements KmsKeyType {
     }
 
     @Override
-    public byte[] sign(KmsKey key, byte[] message, String algorithm, KmsMessageType messageType) throws Exception {
+    public byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
+            throws Exception {
         PrivateKey privateKey = AsymmetricKeys.privateKey(key, "RSA");
-        if (messageType == DIGEST) {
-            if (isPss(algorithm)) {
-                return signPssDigest(privateKey, message, algorithm);
-            }
-            // RFC 8017 9.2: PKCS#1 v1.5 signs DigestInfo{hashOID, digest}, not the
-            // bare digest, so the signature validates with external verifiers and
-            // real KMS (NONEwithRSA only pads the bytes it is given).
-            return AsymmetricKeys.sign(privateKey, "NONEwithRSA", wrapInDigestInfo(message, algorithm));
+        if (messageType == RAW) {
+            return AsymmetricKeys.sign(privateKey, algorithm.getJavaName(), message);
         }
-        return AsymmetricKeys.sign(privateKey, KmsKeySpec.getSignVerifyAlgorithm(algorithm).getJavaName(), message);
+        if (isPss(algorithm)) {
+            return signPssDigest(privateKey, message, algorithm);
+        }
+        // RFC 8017 9.2: PKCS#1 v1.5 signs DigestInfo{hashOID, digest}, not the
+        // bare digest, so the signature validates with external verifiers and
+        // real KMS (NONEwithRSA only pads the bytes it is given).
+        return AsymmetricKeys.sign(privateKey, "NONEwithRSA", wrapInDigestInfo(message, algorithm));
     }
 
     @Override
-    public boolean verify(KmsKey key, byte[] message, byte[] signature, String algorithm,
+    public boolean verify(KmsKey key, byte[] message, byte[] signature, KmsKeySpec.Algorithm algorithm,
                           KmsMessageType messageType) throws Exception {
         PublicKey publicKey = AsymmetricKeys.publicKey(key, "RSA");
-        // An unknown algorithm name fails even for DIGEST.
-        KmsKeySpec.Algorithm signingAlgorithm = KmsKeySpec.getSignVerifyAlgorithm(algorithm);
-        if (messageType == DIGEST) {
-            if (isPss(algorithm)) {
-                return verifyPssDigest(publicKey, message, signature, algorithm);
-            }
-            // Mirror sign(): verify against DigestInfo{hashOID, digest} (RFC 8017 9.2).
-            return AsymmetricKeys.verify(publicKey, "NONEwithRSA", wrapInDigestInfo(message, algorithm), signature);
+        if (messageType == RAW) {
+            return AsymmetricKeys.verify(publicKey, algorithm.getJavaName(), message, signature);
         }
-        return AsymmetricKeys.verify(publicKey, signingAlgorithm.getJavaName(), message, signature);
+        if (isPss(algorithm)) {
+            return verifyPssDigest(publicKey, message, signature, algorithm);
+        }
+        // Mirror sign(): verify against DigestInfo{hashOID, digest} (RFC 8017 9.2).
+        return AsymmetricKeys.verify(publicKey, "NONEwithRSA", wrapInDigestInfo(message, algorithm), signature);
     }
 
     @Override
@@ -131,22 +130,21 @@ final class RsaKeyType implements KmsKeyType {
         }
     }
 
-    private static boolean isPss(String algorithm) {
-        return algorithm.startsWith("RSASSA_PSS");
+    private static boolean isPss(KmsKeySpec.Algorithm algorithm) {
+        return switch (algorithm) {
+            case RSASSA_PSS_SHA_256, RSASSA_PSS_SHA_384, RSASSA_PSS_SHA_512 -> true;
+            default -> false;
+        };
     }
 
     // NONEwithRSA pads only the bytes it gets, so PKCS#1 v1.5 needs the DigestInfo wrapper (RFC 8017 9.2).
-    private static byte[] wrapInDigestInfo(byte[] digest, String algorithm) {
-        ASN1ObjectIdentifier hashOid;
-        if (algorithm.endsWith("SHA_256")) {
-            hashOid = NISTObjectIdentifiers.id_sha256;
-        } else if (algorithm.endsWith("SHA_384")) {
-            hashOid = NISTObjectIdentifiers.id_sha384;
-        } else if (algorithm.endsWith("SHA_512")) {
-            hashOid = NISTObjectIdentifiers.id_sha512;
-        } else {
-            throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + algorithm, 400);
-        }
+    private static byte[] wrapInDigestInfo(byte[] digest, KmsKeySpec.Algorithm algorithm) {
+        ASN1ObjectIdentifier hashOid = switch (algorithm) {
+            case RSASSA_PKCS1_V1_5_SHA_256 -> NISTObjectIdentifiers.id_sha256;
+            case RSASSA_PKCS1_V1_5_SHA_384 -> NISTObjectIdentifiers.id_sha384;
+            case RSASSA_PKCS1_V1_5_SHA_512 -> NISTObjectIdentifiers.id_sha512;
+            default -> throw new IllegalStateException("Not a PKCS#1 v1.5 algorithm: " + algorithm);
+        };
         try {
             return new DigestInfo(new AlgorithmIdentifier(hashOid, DERNull.INSTANCE), digest).getEncoded();
         } catch (IOException e) {
@@ -155,27 +153,28 @@ final class RsaKeyType implements KmsKeyType {
     }
 
     // The JDK RSASSA-PSS Signature always hashes its input, so a DIGEST request needs BC's raw PSS signer.
-    private byte[] signPssDigest(PrivateKey privateKey, byte[] digest, String algorithm) throws Exception {
+    private byte[] signPssDigest(PrivateKey privateKey, byte[] digest, KmsKeySpec.Algorithm algorithm)
+            throws Exception {
         PSSSigner signer = rawPssSigner(algorithm);
         signer.init(true, new ParametersWithRandom(PrivateKeyFactory.createKey(privateKey.getEncoded()), random));
         signer.update(digest, 0, digest.length);
         return signer.generateSignature();
     }
 
-    private static boolean verifyPssDigest(PublicKey publicKey, byte[] digest, byte[] signature, String algorithm)
-            throws IOException {
+    private static boolean verifyPssDigest(PublicKey publicKey, byte[] digest, byte[] signature,
+                                           KmsKeySpec.Algorithm algorithm) throws IOException {
         PSSSigner signer = rawPssSigner(algorithm);
         signer.init(false, PublicKeyFactory.createKey(publicKey.getEncoded()));
         signer.update(digest, 0, digest.length);
         return signer.verifySignature(signature);
     }
 
-    private static PSSSigner rawPssSigner(String algorithm) {
+    private static PSSSigner rawPssSigner(KmsKeySpec.Algorithm algorithm) {
         Digest digest = switch (algorithm) {
-            case "RSASSA_PSS_SHA_256" -> new SHA256Digest();
-            case "RSASSA_PSS_SHA_384" -> new SHA384Digest();
-            case "RSASSA_PSS_SHA_512" -> new SHA512Digest();
-            default -> throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + algorithm, 400);
+            case RSASSA_PSS_SHA_256 -> new SHA256Digest();
+            case RSASSA_PSS_SHA_384 -> new SHA384Digest();
+            case RSASSA_PSS_SHA_512 -> new SHA512Digest();
+            default -> throw new IllegalStateException("Not a PSS algorithm: " + algorithm);
         };
         return PSSSigner.createRawSigner(new RSABlindedEngine(), digest);
     }

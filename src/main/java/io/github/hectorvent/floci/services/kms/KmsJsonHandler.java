@@ -345,7 +345,7 @@ public class KmsJsonHandler {
     private Response handleSign(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
         byte[] message = decodeBlob(request, "Message");
-        String algorithm = request.path("SigningAlgorithm").asText("RSASSA_PSS_SHA_256");
+        String algorithm = request.path("SigningAlgorithm").asText(null);
         KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
         byte[] signature = service.sign(keyId, message, algorithm, messageType, region);
@@ -361,7 +361,7 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         byte[] message = decodeBlob(request, "Message");
         byte[] signature = decodeBlob(request, "Signature");
-        String algorithm = request.path("SigningAlgorithm").asText("RSASSA_PSS_SHA_256");
+        String algorithm = request.path("SigningAlgorithm").asText(null);
         KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
         boolean valid = service.verify(keyId, message, signature, algorithm, messageType, region);
