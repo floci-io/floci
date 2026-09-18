@@ -1952,6 +1952,19 @@ class KmsIntegrationTest {
                         + "satisfy constraint: Member must not be null"));
     }
 
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({"GenerateMac, HMAC_SHA_512", "GenerateMac, HMAC_SHA_224", "VerifyMac, HMAC_SHA_384"})
+    void macOperationsRejectAnAlgorithmTheKeySpecDoesNotSupport(String operation, String algorithm) {
+        String keyArn = createKeyArn("HMAC_256", "GENERATE_VERIFY_MAC");
+
+        callKms(operation, cryptoRequest(operation, keyArn, algorithm))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo("Algorithm " + algorithm + " is incompatible with key spec HMAC_256."));
+    }
+
     private static String cryptoRequest(String operation, String keyArn, String algorithm) {
         String blob = Base64.getEncoder().encodeToString(new byte[64]);
         return switch (operation) {

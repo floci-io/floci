@@ -1721,13 +1721,7 @@ public class KmsService implements ResourceProvider {
         validateKeyUsage(kmsKey, KmsKeyUsage.GENERATE_VERIFY_MAC, operation);
         requireImportedKeyMaterial(kmsKey, "MAC operations");
         validateKeyIsUsableForCryptoOperations(kmsKey);
-        KmsKeySpec spec = kmsKey.getKeySpec();
-
-        String expectedAlgorithm = kmsKey.getKeySpec().getAlgorithm().getFirst().getAlgName();
-        if (!Objects.equals(expectedAlgorithm, algorithm)) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "MacAlgorithm " + algorithm + " is not valid for KeySpec " + spec + ".", 400);
-        }
+        validateAlgorithmForSpec(KmsKeySpec.Algorithm.valueOf(algorithm), kmsKey.getKeySpec());
         return kmsKey;
     }
 
