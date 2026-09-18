@@ -37,13 +37,14 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
 
         verify(writer).createLandingTable("warehouse", "floci_zetl_orders");
         verify(writer).writeBatch("warehouse", "floci_zetl_orders", List.of(record));
-        verify(redshiftService).updateIntegrationRuntime(integration.getIntegrationArn(),
+        verify(redshiftService).updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
                 record.getSequenceNumber(), true, null);
     }
 
     private static Integration integration() {
         Integration integration = new Integration();
         integration.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:one");
+        integration.setAccountId("111111111111");
         integration.setSourceStreamArn("arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/one");
         integration.setTargetClusterIdentifier("warehouse");
         integration.setLandingTableName("floci_zetl_orders");

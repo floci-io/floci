@@ -16,6 +16,7 @@ import java.util.Map;
 @RegisterForReflection
 public class Integration {
     private String integrationArn;
+    private String accountId;
     private String integrationName;
     private String sourceArn;
     private String targetArn;
@@ -38,6 +39,8 @@ public class Integration {
 
     public String getIntegrationArn() { return integrationArn; }
     public void setIntegrationArn(String integrationArn) { this.integrationArn = integrationArn; }
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String accountId) { this.accountId = accountId; }
     public String getIntegrationName() { return integrationName; }
     public void setIntegrationName(String integrationName) { this.integrationName = integrationName; }
     public String getSourceArn() { return sourceArn; }

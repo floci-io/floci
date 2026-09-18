@@ -1396,6 +1396,9 @@ public interface EmulatorConfig {
         @WithDefault("7199")
         int proxyMaxPort();
 
+        @WithDefault("1000")
+        long pollIntervalMs();
+
         // Hostname clients use to reach a cluster endpoint. Empty -> resolved from
         // DockerHostResolver (falls back to "localhost").
         Optional<String> endpointHost();

@@ -188,6 +188,7 @@ floci:
       enabled: true
       default-port: 5439
       image-version: postgres:15-alpine
+      poll-interval-ms: 1000
       proxy-base-port: 7100
       proxy-max-port: 7199
       default-credential-duration-seconds: 900

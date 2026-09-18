@@ -1,48 +1,67 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftZeroEtlWriter;
 import io.quarkus.runtime.StartupEvent;
+import io.vertx.core.Vertx;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
-import jakarta.annotation.PreDestroy;
 import org.jboss.logging.Logger;
 
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class RedshiftDynamoDbZeroEtlConsumer {
 
     private static final Logger LOG = Logger.getLogger(RedshiftDynamoDbZeroEtlConsumer.class);
     private static final int BATCH_SIZE = 100;
-    private static final long POLL_INTERVAL_SECONDS = 1;
 
+    private final Vertx vertx;
     private final DynamoDbStreamService streamService;
     private final RedshiftService redshiftService;
     private final RedshiftZeroEtlWriter writer;
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2, runnable -> {
+    private final long pollIntervalMs;
+    private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
+    private final ExecutorService pollExecutor = Executors.newCachedThreadPool(runnable -> {
         Thread thread = new Thread(runnable, "redshift-zero-etl");
         thread.setDaemon(true);
         return thread;
     });
-    private final Map<String, ScheduledFuture<?>> pollers = new ConcurrentHashMap<>();
 
     @Inject
-    public RedshiftDynamoDbZeroEtlConsumer(DynamoDbStreamService streamService,
+    public RedshiftDynamoDbZeroEtlConsumer(Vertx vertx,
+                                           DynamoDbStreamService streamService,
                                            RedshiftService redshiftService,
-                                           RedshiftZeroEtlWriter writer) {
+                                           RedshiftZeroEtlWriter writer,
+                                           EmulatorConfig config) {
+        this(vertx, streamService, redshiftService, writer, config.services().redshift().pollIntervalMs());
+    }
+
+    RedshiftDynamoDbZeroEtlConsumer(DynamoDbStreamService streamService,
+                                    RedshiftService redshiftService,
+                                    RedshiftZeroEtlWriter writer) {
+        this(null, streamService, redshiftService, writer, 1000);
+    }
+
+    private RedshiftDynamoDbZeroEtlConsumer(Vertx vertx,
+                                            DynamoDbStreamService streamService,
+                                            RedshiftService redshiftService,
+                                            RedshiftZeroEtlWriter writer,
+                                            long pollIntervalMs) {
+        this.vertx = vertx;
         this.streamService = streamService;
         this.redshiftService = redshiftService;
         this.writer = writer;
+        this.pollIntervalMs = pollIntervalMs;
     }
 
     void onStart(@Observes StartupEvent event) {
@@ -58,17 +77,19 @@ public class RedshiftDynamoDbZeroEtlConsumer {
     }
 
     public void startPolling(Integration integration) {
-        stopPolling(integration.getIntegrationArn());
-        ScheduledFuture<?> future = scheduler.scheduleWithFixedDelay(
-                () -> pollSafely(integration), 0, POLL_INTERVAL_SECONDS, TimeUnit.SECONDS);
-        pollers.put(integration.getIntegrationArn(), future);
+        if (vertx == null || timerIds.containsKey(integration.getIntegrationArn())) {
+            return;
+        }
+        long timerId = vertx.setPeriodic(pollIntervalMs, ignored -> pollAnd(integration));
+        timerIds.put(integration.getIntegrationArn(), timerId);
     }
 
     public void stopPolling(String integrationArn) {
-        ScheduledFuture<?> future = pollers.remove(integrationArn);
-        if (future != null) {
-            future.cancel(false);
+        Long timerId = timerIds.remove(integrationArn);
+        if (timerId != null) {
+            vertx.cancelTimer(timerId);
         }
+        activePolls.remove(integrationArn);
     }
 
     void pollOnce(Integration integration) {
@@ -83,20 +104,36 @@ public class RedshiftDynamoDbZeroEtlConsumer {
         }
         String sequence = writer.writeBatch(integration.getTargetClusterIdentifier(),
                 integration.getLandingTableName(), result.records());
-        redshiftService.updateIntegrationRuntime(integration.getIntegrationArn(), sequence, true, null);
+        redshiftService.updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
+                sequence, true, null);
         integration.setCheckpointSequenceNumber(sequence);
     }
 
     public void reset() {
-        for (String integrationArn : pollers.keySet()) {
+        for (String integrationArn : timerIds.keySet()) {
             stopPolling(integrationArn);
         }
-        scheduler.shutdownNow();
+        activePolls.clear();
     }
 
     @PreDestroy
     void onStop() {
         reset();
+        pollExecutor.shutdownNow();
+    }
+
+    private void pollAnd(Integration integration) {
+        String integrationArn = integration.getIntegrationArn();
+        if (activePolls.putIfAbsent(integrationArn, Boolean.TRUE) != null) {
+            return;
+        }
+        pollExecutor.submit(() -> {
+            try {
+                pollSafely(integration);
+            } finally {
+                activePolls.remove(integrationArn);
+            }
+        });
     }
 
     private void pollSafely(Integration integration) {
@@ -109,7 +146,7 @@ public class RedshiftDynamoDbZeroEtlConsumer {
                 integration.setCheckpointSequenceNumber(null);
             }
             try {
-                redshiftService.updateIntegrationRuntime(integration.getIntegrationArn(),
+                redshiftService.updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
                         integration.getCheckpointSequenceNumber(), false, e.getMessage());
             } catch (Exception updateError) {
                 LOG.warnv(updateError, "Could not persist zero-ETL failure for integration {0}",

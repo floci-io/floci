@@ -358,6 +358,7 @@ public class RedshiftService {
 
         String integrationId = UUID.randomUUID().toString();
         Integration integration = new Integration();
+        integration.setAccountId(integrations.accountId());
         integration.setIntegrationArn("arn:aws:redshift:" + region + ":" + regionResolver.getAccountId()
                 + ":integration:" + integrationId);
         integration.setIntegrationName(integrationName);
@@ -441,16 +442,24 @@ public class RedshiftService {
     }
 
     public List<Integration> listDynamoDbZeroEtlIntegrations() {
-        return integrations.scan(key -> true).stream()
-                .filter(integration -> integration.getSourceStreamArn() != null
-                        && !integration.getSourceStreamArn().isBlank())
+        return integrations.scanAllAccountEntries(key -> true).stream()
+                .filter(entry -> entry.value().getSourceStreamArn() != null
+                        && !entry.value().getSourceStreamArn().isBlank())
+                .map(entry -> {
+                    Integration integration = entry.value();
+                    if (integration.getAccountId() == null) {
+                        integration.setAccountId(entry.accountId());
+                    }
+                    return integration;
+                })
                 .toList();
     }
 
-    public synchronized void updateIntegrationRuntime(String integrationArn, String checkpointSequenceNumber,
+    public synchronized void updateIntegrationRuntime(String accountId, String integrationArn,
+                                                       String checkpointSequenceNumber,
                                                        boolean successful, String error) {
-        for (String key : integrations.keys()) {
-            Optional<Integration> stored = integrations.get(key);
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
             if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
                 continue;
             }
@@ -465,7 +474,7 @@ public class RedshiftService {
                 integration.setLastError(error);
                 integration.setStatus("failed");
             }
-            integrations.put(key, integration);
+            integrations.putForAccount(accountId, key, integration);
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
