@@ -39,21 +39,20 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrA
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
- * REST JSON controller for the AWS SES V2 API.
- * Implements the AWS SES V2 wire protocol at /v2/email/* for the operations
- * exposed by this controller.
- * Reuses the shared {@link SesService} for business logic shared with other SES
- * protocol handlers.
- *
- * Follows the same pattern as {@code LambdaController}: AwsExceptions are thrown
- * directly and converted by the global {@code AwsExceptionMapper}.
+ * REST JSON controller for the three SES V2 send endpoints:
+ * {@code /v2/email/outbound-emails}, {@code /v2/email/outbound-bulk-emails} and
+ * {@code /v2/email/outbound-custom-verification-emails}. Every other v2 URL group has its own
+ * controller in this package; the send path stays here because it is the one group that reads
+ * across several domains. It goes through the {@link SesService} facade for that reason, and
+ * through {@link SesTemplateService} and {@link SesAccountService} for the stored template and
+ * the account-level sending switch.
  */
 @Path("/v2/email")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
-public class SesController {
+public class SesSendController {
 
-    private static final Logger LOG = Logger.getLogger(SesController.class);
+    private static final Logger LOG = Logger.getLogger(SesSendController.class);
 
     private final SesService sesService;
     // The bulk send resolves a stored template's content before handing the entries to the facade.
@@ -64,7 +63,7 @@ public class SesController {
     private final ObjectMapper objectMapper;
 
     @Inject
-    public SesController(SesService sesService, SesTemplateService templateService,
+    public SesSendController(SesService sesService, SesTemplateService templateService,
                          SesAccountService accountService, RegionResolver regionResolver,
                          ObjectMapper objectMapper) {
         this.sesService = sesService;

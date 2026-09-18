@@ -36,10 +36,10 @@ import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesAccountController;
 import io.github.hectorvent.floci.services.ses.SesConfigurationSetController;
 import io.github.hectorvent.floci.services.ses.SesContactController;
-import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.ses.SesCvetController;
 import io.github.hectorvent.floci.services.ses.SesDedicatedIpController;
 import io.github.hectorvent.floci.services.ses.SesIdentityController;
+import io.github.hectorvent.floci.services.ses.SesSendController;
 import io.github.hectorvent.floci.services.ses.SesSuppressionController;
 import io.github.hectorvent.floci.services.ses.SesTagController;
 import io.github.hectorvent.floci.services.ses.SesTemplateController;
@@ -296,12 +296,12 @@ public class ResolvedServiceCatalog {
                         "ses", config.storage().mode(), 5000L, AwsNamespaces.SES, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON, ServiceProtocol.QUERY),
                         Set.of(), Set.of("email", "ses", "sesv2"), Set.of(),
-                        Set.of(SesController.class, SesAccountController.class,
-                                SesConfigurationSetController.class, SesContactController.class,
-                                SesCvetController.class, SesDedicatedIpController.class,
-                                SesIdentityController.class, SesSuppressionController.class,
-                                SesTagController.class,
-                                SesTemplateController.class, SesTenantController.class)),
+                        Set.of(SesAccountController.class, SesConfigurationSetController.class,
+                                SesContactController.class, SesCvetController.class,
+                                SesDedicatedIpController.class, SesIdentityController.class,
+                                SesSendController.class, SesSuppressionController.class,
+                                SesTagController.class, SesTemplateController.class,
+                                SesTenantController.class)),
                 descriptor("es", "opensearch", config.services().opensearch().enabled(), true,
                         "opensearch", storageMode(config.storage().services().opensearch().mode(), config.storage().mode()),
                         config.storage().services().opensearch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

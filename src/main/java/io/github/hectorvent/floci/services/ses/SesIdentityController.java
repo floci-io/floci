@@ -34,8 +34,8 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrA
 
 /**
  * SES V2 email-identity endpoints ({@code /v2/email/identities}), including the sending
- * authorization policies, DKIM, MAIL FROM, feedback and default configuration set, split out of
- * {@link SesController}. Reads and the single-domain attribute writes call
+ * authorization policies, DKIM, MAIL FROM, feedback and default configuration set.
+ * Reads and the single-domain attribute writes call
  * {@link SesIdentityService} directly; create, delete, the policy operations and the default
  * configuration set go through the {@link SesService} facade, which checks the configuration set
  * exists, guards the delete against tenant associations and cascades the identity's policies.

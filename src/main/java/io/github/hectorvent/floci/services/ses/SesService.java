@@ -48,6 +48,34 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+/**
+ * What is left of the original single SES service after the store-based domain split and the
+ * per-domain controller split that followed it: the flows that no one domain service can own. A
+ * method belongs here only if it touches two or more domains or the send path, which is the
+ * survival rule the store split established. Everything else lives in the domain service that
+ * owns its store, and this class owns no store of its own.
+ *
+ * <p>What that leaves, by category:
+ * <ul>
+ *   <li>the send path, which assembles a message, applies the account, tenant and
+ *       configuration-set gates, filters suppressed recipients, relays and records it, then
+ *       publishes the send events;</li>
+ *   <li>delete guards, where a tenant association or a policy cascade has to run around another
+ *       domain's delete;</li>
+ *   <li>configuration-set option validation, which probes the identity and dedicated-IP domains
+ *       through injected callbacks;</li>
+ *   <li>the tenant to resource associations and the tenant delete cascade;</li>
+ *   <li>the ARN dispatch behind the tag operations, which routes one ARN to one of seven
+ *       domains;</li>
+ *   <li>the tenant-scoped suppression routing, which picks the tenant store or the account-wide
+ *       one from a {@code TenantName};</li>
+ *   <li>the inspection reads over recorded mail.</li>
+ * </ul>
+ *
+ * <p>The name is historical. This is not the service for SES as a whole: SES is served by the
+ * domain services in this package, with this class above them and
+ * {@link SesSendController} and {@link SesQueryHandler} in front.
+ */
 @ApplicationScoped
 public class SesService {
 

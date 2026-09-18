@@ -28,7 +28,7 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 
 /**
- * SES V2 resource-tag endpoints ({@code /v2/email/tags}), split out of {@link SesController}.
+ * SES V2 resource-tag endpoints ({@code /v2/email/tags}).
  * Every operation keeps going through the {@link SesService} facade, which parses the resource
  * ARN and dispatches to whichever of the seven taggable domains owns it; that cross-domain
  * dispatch is the facade's job by the survival rule, so this class is a pure size split like

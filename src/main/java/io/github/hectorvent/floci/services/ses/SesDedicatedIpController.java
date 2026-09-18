@@ -35,8 +35,8 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObjec
 
 /**
  * SES V2 dedicated IP pool and dedicated IP endpoints ({@code /v2/email/dedicated-ip-pools} and
- * {@code /v2/email/dedicated-ips}), split out of {@link SesController}. Every operation is a
- * single-domain call on {@link SesDedicatedIpService}, so this controller does not touch the
+ * {@code /v2/email/dedicated-ips}). Every operation is a single-domain call on
+ * {@link SesDedicatedIpService}, so this controller does not touch the
  * {@link SesService} facade; the account-level auto-warmup setting stays under {@code /account}.
  */
 @Path("/v2/email")
