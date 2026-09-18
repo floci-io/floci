@@ -143,12 +143,13 @@ class RedshiftInterceptorIntegrationTest {
     @Test
     void copyWithIamRoleSucceedsWhenEnforceAuthIsOffEvenWithoutAPolicy() throws Exception {
         clusterId = "it-copy-iam-role-no-enforce";
-        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
         String bucket = "redshift-iam-role-no-enforce";
         s3.createBucket(bucket, "us-east-1");
         s3.putObject(bucket, "people/p1.txt",
                 "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
         iamService.createRole("CopyRoleNoPolicy", "/", REDSHIFT_TRUST_POLICY, null, 0, null);
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123", null, List.of(),
+                List.of("arn:aws:iam::000000000000:role/CopyRoleNoPolicy"));
 
         try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
                 Statement ddl = connection.createStatement()) {

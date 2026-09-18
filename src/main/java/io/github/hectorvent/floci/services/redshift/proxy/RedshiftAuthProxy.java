@@ -13,6 +13,7 @@ import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.List;
 import java.util.concurrent.Semaphore;
 
 /**
@@ -38,6 +39,7 @@ public class RedshiftAuthProxy {
     private final S3Service s3Service;
     private final IamService iamService;
     private final String clusterAccountId;
+    private final List<String> iamRoleArns;
     private final int handshakeTimeoutMillis;
     private final int backendConnectTimeoutMillis;
     private final Semaphore connectionPermits;
@@ -54,6 +56,7 @@ public class RedshiftAuthProxy {
                              int maxConnections) {
         this(clusterKey, backendHost, backendPort, masterUsername, masterPassword, dbName, sigV4,
                 tlsCertificates, passwordValidator, s3Service, iamService, null,
+                List.of(),
                 handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections);
     }
 
@@ -63,6 +66,7 @@ public class RedshiftAuthProxy {
                              PasswordValidator passwordValidator,
                              S3Service s3Service, IamService iamService,
                              String clusterAccountId,
+                             List<String> iamRoleArns,
                              int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                              int maxConnections) {
         this.clusterKey = clusterKey;
@@ -77,6 +81,7 @@ public class RedshiftAuthProxy {
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.clusterAccountId = clusterAccountId;
+        this.iamRoleArns = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
         this.backendConnectTimeoutMillis = backendConnectTimeoutMillis;
         this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
@@ -194,7 +199,7 @@ public class RedshiftAuthProxy {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
                 new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
-                        clusterAccountId).run();
+                        clusterAccountId, iamRoleArns).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());

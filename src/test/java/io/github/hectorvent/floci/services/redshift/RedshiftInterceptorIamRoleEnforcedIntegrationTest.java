@@ -20,6 +20,7 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -86,7 +87,6 @@ class RedshiftInterceptorIamRoleEnforcedIntegrationTest {
     @Test
     void copyWithAllowingRolePolicySucceeds() throws Exception {
         clusterId = "it-copy-iam-role-allow";
-        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
         String bucket = "redshift-iam-role-allow";
         s3.createBucket(bucket, "us-east-1");
         s3.putObject(bucket, "p1.txt", "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
@@ -96,6 +96,8 @@ class RedshiftInterceptorIamRoleEnforcedIntegrationTest {
                   {"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket"],"Resource":"*"}
                 ]}
                 """);
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123", null, List.of(),
+                List.of("arn:aws:iam::000000000000:role/CopyRoleAllow"));
 
         try (Connection connection = waitForConnection(cluster);
                 Statement ddl = connection.createStatement()) {
@@ -111,12 +113,13 @@ class RedshiftInterceptorIamRoleEnforcedIntegrationTest {
     @Test
     void copyWithNoMatchingRolePolicyFails() throws Exception {
         clusterId = "it-copy-iam-role-deny";
-        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
         String bucket = "redshift-iam-role-deny";
         s3.createBucket(bucket, "us-east-1");
         s3.putObject(bucket, "p1.txt", "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
         iamService.createRole("CopyRoleDeny", "/", REDSHIFT_TRUST_POLICY, null, 0, null);
         // No policy attached: implicit deny.
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123", null, List.of(),
+                List.of("arn:aws:iam::000000000000:role/CopyRoleDeny"));
 
         try (Connection connection = waitForConnection(cluster);
                 Statement ddl = connection.createStatement()) {

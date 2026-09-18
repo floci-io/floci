@@ -117,7 +117,8 @@ public class RedshiftService {
                         relayKey(entry.accountId(), cluster.getClusterIdentifier()), proxyPort,
                         handle.getHost(), handle.getPort(), endpoint.getAddress(),
                         cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
-                        passwordValidatorFor(entry.accountId(), cluster.getClusterIdentifier()));
+                        passwordValidatorFor(entry.accountId(), cluster.getClusterIdentifier()),
+                        cluster.getIamRoleArns());
                 cluster.setContainerHost(handle.getHost());
                 cluster.setContainerPort(handle.getPort());
                 cluster.setEndpoint(endpoint);
@@ -143,13 +144,20 @@ public class RedshiftService {
     }
 
     public Cluster createCluster(String identifier, String nodeType, String username, String password) {
-        return createCluster(identifier, nodeType, username, password, null, List.of());
+        return createCluster(identifier, nodeType, username, password, null, List.of(), List.of());
     }
 
     // synchronized like modify/reboot: the container + proxy + port steps must not
     // interleave with another admin call on the same cluster.
     public synchronized Cluster createCluster(String identifier, String nodeType, String username, String password,
                                   String clusterSubnetGroupName, List<String> vpcSecurityGroupIds) {
+        return createCluster(identifier, nodeType, username, password, clusterSubnetGroupName,
+                vpcSecurityGroupIds, List.of());
+    }
+
+    public synchronized Cluster createCluster(String identifier, String nodeType, String username, String password,
+                                               String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
+                                               List<String> iamRoleArns) {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
@@ -164,6 +172,7 @@ public class RedshiftService {
         cluster.setMasterPassword(password);
         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
         cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds != null ? vpcSecurityGroupIds : List.of());
+        cluster.setIamRoleArns(iamRoleArns != null ? List.copyOf(iamRoleArns) : List.of());
         cluster.setClusterStatus("creating");
         clusters.put(identifier, cluster);
         clusters.flush();
@@ -181,7 +190,7 @@ public class RedshiftService {
             proxyManager.startProxy(relayKey(accountId, identifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     username, password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, identifier));
+                    passwordValidatorFor(accountId, identifier), cluster.getIamRoleArns());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
@@ -497,7 +506,7 @@ public class RedshiftService {
             cluster.setProxyPort(proxyPort);
             proxyManager.startProxy(key, proxyPort, handle.getHost(), handle.getPort(),
                     endpoint.getAddress(), cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, clusterIdentifier));
+                    passwordValidatorFor(accountId, clusterIdentifier), cluster.getIamRoleArns());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
@@ -727,7 +736,7 @@ public class RedshiftService {
             proxyManager.startProxy(relayKey(accountId, clusterIdentifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     username, password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, clusterIdentifier));
+                    passwordValidatorFor(accountId, clusterIdentifier), cluster.getIamRoleArns());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);

@@ -7,6 +7,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -218,7 +219,7 @@ public class AssumeRolePolicyEvaluator {
         if (principal.matches("\\d{12}")) {
             return principal.equals(callerAccount);
         }
-        var rootMatcher = ACCOUNT_ROOT_ARN.matcher(principal);
+        Matcher rootMatcher = ACCOUNT_ROOT_ARN.matcher(principal);
         if (rootMatcher.matches()) {
             return rootMatcher.group(1).equals(callerAccount);
         }
@@ -248,7 +249,7 @@ public class AssumeRolePolicyEvaluator {
      * be denied a role they are entitled to, with nothing in the response saying why.
      */
     private static String assumedRoleToRoleArn(String arn) {
-        var m = ASSUMED_ROLE_ARN.matcher(arn);
+        Matcher m = ASSUMED_ROLE_ARN.matcher(arn);
         if (!m.matches()) {
             return null;
         }

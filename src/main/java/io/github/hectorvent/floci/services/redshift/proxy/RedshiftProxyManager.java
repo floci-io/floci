@@ -13,6 +13,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -53,6 +54,14 @@ public class RedshiftProxyManager {
                                         String backendHost, int backendPort, String advertisedHost,
                                         String masterUsername, String masterPassword, String dbName,
                                         PasswordValidator passwordValidator) {
+        startProxy(relayKey, proxyPort, backendHost, backendPort, advertisedHost, masterUsername,
+                masterPassword, dbName, passwordValidator, List.of());
+    }
+
+    public synchronized void startProxy(String relayKey, int proxyPort,
+                                        String backendHost, int backendPort, String advertisedHost,
+                                        String masterUsername, String masterPassword, String dbName,
+                                        PasswordValidator passwordValidator, List<String> iamRoleArns) {
         // A prior unclosable entry for this key is left in place: its listener may still
         // be bound, and only a successful stop (never a fresh start) may drop it.
         // Make sure the self-signed proxy certificate covers the host clients will connect to,
@@ -64,6 +73,7 @@ public class RedshiftProxyManager {
                 relayKey, backendHost, backendPort, masterUsername, masterPassword, dbName,
                 sigV4Validator, tlsCertificates, passwordValidator, s3Service, iamService,
                 clusterAccountId,
+                iamRoleArns,
                 redshiftConfig.proxyHandshakeTimeoutMillis(), redshiftConfig.proxyBackendConnectTimeoutMillis(),
                 redshiftConfig.proxyMaxConnections());
         try {

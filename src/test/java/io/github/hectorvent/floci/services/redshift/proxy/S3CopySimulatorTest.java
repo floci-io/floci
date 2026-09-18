@@ -230,6 +230,22 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void prepareCopyRejectsRoleNotAssociatedWithCluster() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
+        IamService iamService = mock(IamService.class);
+
+        S3CopySimulator.S3TransferException error = assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(spec, s3, iamService, "000000000000", List.of()));
+
+        assertEquals("42501", error.sqlState());
+        assertTrue(error.getMessage().contains("not associated"));
+        verifyNoInteractions(s3);
+        verifyNoInteractions(iamService);
+    }
+
+    @Test
     void prepareCopyRejectsRoleWithoutRedshiftTrust() {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.util.List;
 
 final class ExtendedS3Exchange {
 
@@ -18,13 +19,13 @@ final class ExtendedS3Exchange {
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3Statement statement, S3Service s3Service, IamService iamService,
             BackendResponseCoordinator coordinator, BackendResponseCoordinator.Ticket ticket) throws IOException {
-        execute(client, backend, executeFrame, statement, s3Service, iamService, null, coordinator, ticket);
+        execute(client, backend, executeFrame, statement, s3Service, iamService, null, List.of(), coordinator, ticket);
     }
 
     static void execute(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3Statement statement, S3Service s3Service, IamService iamService,
-            String clusterAccountId, BackendResponseCoordinator coordinator,
+            String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator,
             BackendResponseCoordinator.Ticket ticket) throws IOException {
         BackendResponseCoordinator.GateResult gate;
         try {
@@ -43,13 +44,13 @@ final class ExtendedS3Exchange {
             switch (statement) {
                 case CopyStatementParser.S3CopyFrom copy -> {
                     CopyResult result = runCopy(client, backend, executeFrame, copy, s3Service, iamService,
-                            clusterAccountId, coordinator);
+                            clusterAccountId, iamRoleArns, coordinator);
                     failed = !result.succeeded();
                     deferredReadyForQuery = result.deferredReadyForQuery();
                 }
                 case CopyStatementParser.S3Unload unload -> {
                     CopyResult result = runUnload(client, backend, executeFrame, unload, s3Service, iamService,
-                            clusterAccountId, coordinator);
+                            clusterAccountId, iamRoleArns, coordinator);
                     failed = !result.succeeded();
                     deferredReadyForQuery = result.deferredReadyForQuery();
                 }
@@ -69,7 +70,7 @@ final class ExtendedS3Exchange {
     private static CopyResult runCopy(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3CopyFrom spec, S3Service s3Service, IamService iamService,
-            String clusterAccountId, BackendResponseCoordinator coordinator) throws IOException {
+            String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator) throws IOException {
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(executeFrame.toPacketBytes());
         backendOut.flush();
@@ -88,7 +89,7 @@ final class ExtendedS3Exchange {
 
         S3CopySimulator.CopyInput input;
         try {
-            input = S3CopySimulator.prepareCopy(spec, s3Service, iamService, clusterAccountId);
+            input = S3CopySimulator.prepareCopy(spec, s3Service, iamService, clusterAccountId, iamRoleArns);
         } catch (S3CopySimulator.S3TransferException e) {
             S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
             forwardClientSyncToBackend(sync, backendOut, coordinator);
@@ -120,7 +121,7 @@ final class ExtendedS3Exchange {
     private static CopyResult runUnload(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3Unload spec, S3Service s3Service, IamService iamService,
-            String clusterAccountId, BackendResponseCoordinator coordinator) throws IOException {
+            String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator) throws IOException {
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(executeFrame.toPacketBytes());
         backendOut.flush();
@@ -138,7 +139,7 @@ final class ExtendedS3Exchange {
 
         S3CopySimulator.UnloadCollector collector;
         try {
-            collector = S3CopySimulator.prepareUnload(spec, s3Service, iamService, clusterAccountId);
+            collector = S3CopySimulator.prepareUnload(spec, s3Service, iamService, clusterAccountId, iamRoleArns);
         } catch (S3CopySimulator.S3TransferException e) {
             S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
             drainExecute(client, decoder, coordinator, false);

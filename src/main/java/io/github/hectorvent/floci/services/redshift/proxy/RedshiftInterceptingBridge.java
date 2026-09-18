@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
@@ -44,6 +45,7 @@ public class RedshiftInterceptingBridge {
     private final S3Service s3Service;
     private final IamService iamService;
     private final String clusterAccountId;
+    private final List<String> iamRoleArns;
     private final ExtendedQuerySession session = new ExtendedQuerySession();
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
 
@@ -57,11 +59,17 @@ public class RedshiftInterceptingBridge {
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
                                       String clusterAccountId) {
+        this(client, backend, s3Service, iamService, clusterAccountId, List.of());
+    }
+
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
+                                      String clusterAccountId, List<String> iamRoleArns) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.clusterAccountId = clusterAccountId;
+        this.iamRoleArns = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
     }
 
     @FunctionalInterface
@@ -148,10 +156,10 @@ public class RedshiftInterceptingBridge {
             CopyStatementParser.S3Statement statement = parsed;
             boolean intercepted = runWithBackendOwned(() -> switch (statement) {
                 case CopyStatementParser.S3CopyFrom copy -> S3CopySimulator.runCopyFrom(
-                        client, backend, copy, s3Service, iamService, clusterAccountId, coordinator.lastReadyStatus(),
+                        client, backend, copy, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
                 case CopyStatementParser.S3Unload unload -> S3CopySimulator.runUnload(
-                        client, backend, unload, s3Service, iamService, clusterAccountId, coordinator.lastReadyStatus(),
+                        client, backend, unload, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
             });
             if (intercepted) {
@@ -287,7 +295,7 @@ public class RedshiftInterceptingBridge {
         try {
             backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
             ExtendedS3Exchange.execute(client, backend, executeFrame, statement, s3Service, iamService,
-                    clusterAccountId, coordinator, ticket);
+                    clusterAccountId, iamRoleArns, coordinator, ticket);
         } finally {
             try {
                 backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);

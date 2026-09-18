@@ -17,6 +17,7 @@ public class Cluster {
     private String clusterSubnetGroupName;
     private String clusterParameterGroupName;
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
+    private List<String> iamRoleArns = new ArrayList<>();
 
     public String getClusterIdentifier() { return clusterIdentifier; }
     public void setClusterIdentifier(String clusterIdentifier) { this.clusterIdentifier = clusterIdentifier; }
@@ -36,6 +37,8 @@ public class Cluster {
     public void setClusterParameterGroupName(String clusterParameterGroupName) { this.clusterParameterGroupName = clusterParameterGroupName; }
     public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
     public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) { this.vpcSecurityGroupIds = vpcSecurityGroupIds; }
+    public List<String> getIamRoleArns() { return iamRoleArns; }
+    public void setIamRoleArns(List<String> iamRoleArns) { this.iamRoleArns = iamRoleArns; }
 
     // Real backend address of this cluster's PostgreSQL container. `endpoint` now points at the
     // auth proxy, not the container, so the container address is kept here for proxy wiring and
