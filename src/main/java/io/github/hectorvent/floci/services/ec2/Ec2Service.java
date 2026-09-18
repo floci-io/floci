@@ -141,6 +141,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             Pattern.compile("^tgw-rtb-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Pattern TRANSIT_GATEWAY_ATTACHMENT_ID_PATTERN =
             Pattern.compile("^tgw-attach-[0-9a-f]{8}([0-9a-f]{9})?$");
+    private static final Set<String> ROUTE_TABLE_MEMBERSHIP_FILTER_NAMES =
+            Set.of("resource-id", "resource-type", "transit-gateway-attachment-id");
     // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
     private static final Duration CONTAINER_LAUNCH_TIMEOUT = Duration.ofMinutes(5);
@@ -2062,11 +2064,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
-    /** The attachments associated with a route table, which is where an association is recorded. */
     public List<TransitGatewayVpcAttachment> associationsOf(String region, String routeTableId) {
+        return associationsOf(region, routeTableId, Map.of());
+    }
+
+    /** The attachments associated with a route table, which is where an association is recorded. */
+    public List<TransitGatewayVpcAttachment> associationsOf(
+            String region, String routeTableId, Map<String, List<String>> filters) {
+        Map<String, List<String>> modeledFilters = new LinkedHashMap<>(filters);
+        modeledFilters.keySet().retainAll(ROUTE_TABLE_MEMBERSHIP_FILTER_NAMES);
         return transitGatewayVpcAttachments.scan(k -> true).stream()
                 .filter(attachment -> region.equals(attachment.getRegion()))
                 .filter(attachment -> routeTableId.equals(attachment.getAssociationRouteTableId()))
+                .filter(attachment -> matchesFilters(attachment, modeledFilters, region))
                 .collect(Collectors.toList());
     }
 
@@ -2111,9 +2121,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public List<TransitGatewayRouteTablePropagation> propagationsOf(String region, String routeTableId) {
+        return propagationsOf(region, routeTableId, Map.of());
+    }
+
+    public List<TransitGatewayRouteTablePropagation> propagationsOf(
+            String region, String routeTableId, Map<String, List<String>> filters) {
+        Map<String, List<String>> modeledFilters = new LinkedHashMap<>(filters);
+        modeledFilters.keySet().retainAll(ROUTE_TABLE_MEMBERSHIP_FILTER_NAMES);
         return transitGatewayPropagations.scan(k -> true).stream()
                 .filter(propagation -> region.equals(propagation.getRegion()))
                 .filter(propagation -> routeTableId.equals(propagation.getTransitGatewayRouteTableId()))
+                .filter(propagation -> matchesFilters(propagation, modeledFilters, region))
                 .collect(Collectors.toList());
     }
 
@@ -7415,6 +7433,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "prefix-list-id" -> matchesValue(values, prefixList.getPrefixListId());
                 case "prefix-list-name" -> matchesValue(values, prefixList.getPrefixListName());
                 case "owner-id" -> matchesValue(values, prefixList.getOwnerId());
+                default -> true;
+            };
+        }
+        if (resource instanceof TransitGatewayRouteTable routeTable) {
+            return switch (filterName) {
+                case "transit-gateway-route-table-id" ->
+                        matchesValue(values, routeTable.getTransitGatewayRouteTableId());
+                case "transit-gateway-id" -> matchesValue(values, routeTable.getTransitGatewayId());
+                case "state" -> matchesValue(values, routeTable.getState());
+                case "default-association-route-table" ->
+                        matchesValue(values, String.valueOf(routeTable.isDefaultAssociationRouteTable()));
+                case "default-propagation-route-table" ->
+                        matchesValue(values, String.valueOf(routeTable.isDefaultPropagationRouteTable()));
+                default -> true;
+            };
+        }
+        if (resource instanceof TransitGatewayRouteTablePropagation propagation) {
+            return switch (filterName) {
+                case "transit-gateway-attachment-id" -> matchesValue(values, propagation.getTransitGatewayAttachmentId());
+                case "resource-id" -> matchesValue(values, propagation.getResourceId());
+                case "resource-type" -> matchesValue(values, propagation.getResourceType());
                 default -> true;
             };
         }

@@ -24,6 +24,11 @@ import java.util.Optional;
  * the request signature, expiration, and signed cluster ID before resolving worker access entries.
  * Non-worker credentials retain the legacy cluster-admin compatibility behavior.
  *
+ * <p>New clusters use {@code token-webhook/scope/{accountId}/{region}/{createdAt}}, keeping
+ * scope in the path because Kubernetes client-go replaces URL query parameters. The base
+ * {@code token-webhook} route retains query-parameter scope for legacy compatibility;
+ * unscoped requests cannot authenticate workers.
+ *
  * <p>This is Floci plumbing under the {@code _floci/...} namespace, not an AWS API.
  */
 @ApplicationScoped
@@ -40,6 +45,16 @@ public class EksTokenWebhookController {
     public EksTokenWebhookController(EksTokenValidator tokenValidator, EksWorkerAuthentication authentication) {
         this.tokenValidator = tokenValidator;
         this.authentication = authentication;
+    }
+
+    @POST
+    @Path("scope/{accountId}/{region}/{createdAt}")
+    public Response reviewScoped(@PathParam("clusterName") String clusterName,
+                                 @PathParam("accountId") String accountId,
+                                 @PathParam("region") String region,
+                                 @PathParam("createdAt") String createdAt,
+                                 Map<String, Object> tokenReview) {
+        return review(clusterName, accountId, region, createdAt, tokenReview);
     }
 
     @POST

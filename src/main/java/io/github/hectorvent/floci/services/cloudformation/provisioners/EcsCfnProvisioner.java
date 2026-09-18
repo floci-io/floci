@@ -10,8 +10,10 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
@@ -22,6 +24,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -270,6 +273,8 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             def.setPortMappings(parsePortMappings(item.path("PortMappings")));
             def.setEnvironment(parseEnvironment(item.path("Environment")));
             def.setSecrets(parseSecrets(item.path("Secrets")));
+            def.setLogConfiguration(parseLogConfiguration(item.path("LogConfiguration")));
+            def.setFirelensConfiguration(parseFirelensConfiguration(item.path("FirelensConfiguration")));
             if (item.path("Command").isArray()) {
                 def.setCommand(toStringList(item.path("Command")));
             }
@@ -279,6 +284,31 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             result.add(def);
         }
         return result;
+    }
+
+    private static LogConfiguration parseLogConfiguration(JsonNode node) {
+        if (node == null || !node.isObject() || !node.hasNonNull("LogDriver")) {
+            return null;
+        }
+        return new LogConfiguration(node.path("LogDriver").asText(),
+                parseOptions(node.path("Options")),
+                node.has("SecretOptions") ? parseSecrets(node.path("SecretOptions")) : null);
+    }
+
+    private static FirelensConfiguration parseFirelensConfiguration(JsonNode node) {
+        if (node == null || !node.isObject() || !node.hasNonNull("Type")) {
+            return null;
+        }
+        return new FirelensConfiguration(node.path("Type").asText(), parseOptions(node.path("Options")));
+    }
+
+    private static LinkedHashMap<String, String> parseOptions(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        LinkedHashMap<String, String> options = new LinkedHashMap<>();
+        node.fields().forEachRemaining(entry -> options.put(entry.getKey(), entry.getValue().asText()));
+        return options;
     }
 
     private static List<PortMapping> parsePortMappings(JsonNode node) {

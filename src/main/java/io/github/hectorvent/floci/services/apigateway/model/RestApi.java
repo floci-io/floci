@@ -22,6 +22,16 @@ public class RestApi {
     private EndpointConfiguration endpointConfiguration;
     /** Content types treated as binary when applying integration contentHandling. */
     private List<String> binaryMediaTypes = new ArrayList<>();
+    /** Resource policy document, stored exactly as the caller sent it. */
+    private String policy;
+
+    public String getPolicy() {
+        return policy;
+    }
+
+    public void setPolicy(String policy) {
+        this.policy = policy;
+    }
 
     public List<String> getBinaryMediaTypes() {
         return binaryMediaTypes;

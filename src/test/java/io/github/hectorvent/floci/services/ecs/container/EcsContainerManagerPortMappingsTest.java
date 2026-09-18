@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs.container;
 
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -18,6 +19,7 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,6 +27,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -92,7 +96,7 @@ class EcsContainerManagerPortMappingsTest {
         when(ecrRegistryManager.rewriteImageUri(anyString())).thenAnswer(inv -> inv.getArgument(0));
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService,
+                containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService, mock(S3Service.class),
                 ecrRegistryManager, mock(HostVolumePolicy.class));
     }
 
@@ -225,12 +229,13 @@ class EcsContainerManagerPortMappingsTest {
     }
 
     @Test
-    void firelensRouterUsesLoopbackOnlyDynamicPortBinding() {
+    void firelensRouterDeclaringTheForwardPortIsRejected() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
 
         ContainerDefinition router = new ContainerDefinition();
         router.setName("router");
         router.setImage("fluent/fluent-bit:latest");
+        router.setPortMappings(List.of(new PortMapping(24224)));
         router.setFirelensConfiguration(new FirelensConfiguration("fluentbit", Map.of()));
 
         ContainerDefinition app = new ContainerDefinition();
@@ -245,13 +250,10 @@ class EcsContainerManagerPortMappingsTest {
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
 
-        when(lifecycleManager.createAndStart(any()))
-                .thenReturn(new ContainerInfo("router-id", Map.of(), Map.of(24224, 32768)))
-                .thenReturn(new ContainerInfo("app-id", Map.of()));
+        AwsException failure = assertThrows(AwsException.class,
+                () -> manager.startTask(task, taskDef, List.of(), "us-east-1"));
 
-        manager.startTask(task, taskDef, List.of(), "us-east-1");
-
-        verify(builder).withLoopbackPortBinding(24224, 0);
+        assertEquals("FireLens port 24224 must not be exposed.", failure.getMessage());
         verify(builder, never()).withDynamicPort(24224);
     }
 }

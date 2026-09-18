@@ -2442,7 +2442,8 @@ public class Ec2QueryHandler {
     private Response handleGetTransitGatewayRouteTableAssociations(
             MultivaluedMap<String, String> p, String region) {
         String routeTableId = p.getFirst("TransitGatewayRouteTableId");
-        List<TransitGatewayVpcAttachment> associated = service.associationsOf(region, routeTableId);
+        List<TransitGatewayVpcAttachment> associated =
+                service.associationsOf(region, routeTableId, getFilters(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("GetTransitGatewayRouteTableAssociationsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2481,7 +2482,7 @@ public class Ec2QueryHandler {
     private Response handleGetTransitGatewayRouteTablePropagations(
             MultivaluedMap<String, String> p, String region) {
         List<TransitGatewayRouteTablePropagation> propagations =
-                service.propagationsOf(region, p.getFirst("TransitGatewayRouteTableId"));
+                service.propagationsOf(region, p.getFirst("TransitGatewayRouteTableId"), getFilters(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("GetTransitGatewayRouteTablePropagationsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

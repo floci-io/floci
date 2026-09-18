@@ -4,7 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.core.command.ExecStartResultCallback;
-import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import com.github.dockerjava.core.command.LogContainerResultCallback;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
@@ -34,6 +34,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EcsContainerManagerFirelensDockerIntegrationTest {
 
     private static final String IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    /** A real FireLens router image: Floci writes the generated config to its own
+     * {@code /fluent-bit/etc}, which no minimal image carries. */
+    private static final String ROUTER_IMAGE = "public.ecr.aws/aws-observability/aws-for-fluent-bit:3";
 
     @Inject
     EcsContainerManager containerManager;
@@ -58,19 +61,18 @@ class EcsContainerManagerFirelensDockerIntegrationTest {
     }
 
     @Test
-    void applicationStdoutReachesFirelensRouterThroughPublishedHostPort() throws Exception {
+    void applicationRecordReachesTheRouterThroughTheGeneratedConfig() throws Exception {
         String marker = "firelens-marker-" + UUID.randomUUID();
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
         app.setImage(IMAGE);
-        app.setCommand(List.of("sh", "-c", "echo " + marker + "; sleep 2"));
-        app.setLogConfiguration(new LogConfiguration("awsfirelens", Map.of(), null));
+        app.setCommand(List.of("sh", "-c", "while true; do echo " + marker + "; sleep 1; done"));
+        app.setLogConfiguration(new LogConfiguration("awsfirelens", Map.of("Name", "stdout"), null));
 
         ContainerDefinition router = new ContainerDefinition();
         router.setName("router");
-        router.setImage(IMAGE);
-        router.setCommand(List.of("sh", "-c", "while true; do nc -l -p 24224 >> /tmp/received; done"));
+        router.setImage(ROUTER_IMAGE);
         router.setFirelensConfiguration(new FirelensConfiguration("fluentbit", Map.of()));
 
         TaskDefinition taskDefinition = new TaskDefinition();
@@ -78,67 +80,86 @@ class EcsContainerManagerFirelensDockerIntegrationTest {
         taskDefinition.setContainerDefinitions(List.of(app, router));
 
         EcsTask task = new EcsTask();
-        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/firelens/" + marker);
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/firelens/" + UUID.randomUUID());
 
         taskHandle = containerManager.startTask(task, taskDefinition, List.of(), "us-east-1");
 
         assertEquals(List.of("router", "app"), taskHandle.getContainerIds().keySet().stream().toList());
         String appId = taskHandle.getContainerIds().get("app");
         String routerId = taskHandle.getContainerIds().get("router");
-        dockerClient.waitContainerCmd(appId)
-                .exec(new WaitContainerResultCallback())
-                .awaitStatusCode(30, TimeUnit.SECONDS);
 
-        String received = awaitRouterBuffer(routerId, marker);
-        assertTrue(received.contains(marker), "FireLens router did not receive the app stdout record");
+        // The Docker daemon, not the application container, makes this connection, so the
+        // address has to be a path on the host: the socket the router creates inside the
+        // task's own volume, which the daemon reaches at the volume's mountpoint.
+        assertEquals("unix://" + firelensVolumeMountpoint() + "/fluent.sock", appLogDriverAddress(appId));
+
+        String routerLogs = awaitRouterLogs(routerId, marker);
+        assertTrue(routerLogs.contains(marker),
+                "FireLens router did not print the application record routed by the generated config: "
+                        + routerLogs);
+        assertTrue(routerLogs.contains("ecs_task_arn"),
+                "The generated config's ECS metadata filter did not run: " + routerLogs);
     }
 
-    private String awaitRouterBuffer(String routerId, String marker) throws Exception {
+    private String firelensVolumeMountpoint() throws Exception {
+        return dockerClient.inspectVolumeCmd(taskHandle.getFirelensVolumeName())
+                .exec()
+                .getMountpoint();
+    }
+
+    private String appLogDriverAddress(String appId) {
+        return dockerClient.inspectContainerCmd(appId)
+                .exec()
+                .getHostConfig()
+                .getLogConfig()
+                .getConfig()
+                .get("fluentd-address");
+    }
+
+    private String awaitRouterLogs(String routerId, String marker) throws Exception {
+        String logs = "";
         for (int attempt = 0; attempt < 30; attempt++) {
-            ExecResult result = readRouterBuffer(routerId, marker);
-            if (result.exitCode() == 0 && result.output().contains(marker)) {
-                return result.output();
+            logs = readContainerLogs(routerId);
+            if (logs.contains(marker)) {
+                return logs;
             }
             Thread.sleep(1000);
         }
-        return readRouterBuffer(routerId, marker).output();
+        return logs;
     }
 
-    private ExecResult readRouterBuffer(String routerId, String marker) throws Exception {
-        String execId = dockerClient.execCreateCmd(routerId)
-                .withCmd("sh", "-c", "grep -a " + marker + " /tmp/received")
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec()
-                .getId();
+    private String readContainerLogs(String containerId) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         CountDownLatch complete = new CountDownLatch(1);
-        Closeable callback = dockerClient.execStartCmd(execId).exec(new ExecStartResultCallback() {
-            @Override
-            public void onNext(Frame frame) {
-                try {
-                    if (frame.getStreamType() == StreamType.STDOUT) {
-                        output.write(frame.getPayload());
+        Closeable callback = dockerClient.logContainerCmd(containerId)
+                .withStdOut(true)
+                .withStdErr(true)
+                .exec(new LogContainerResultCallback() {
+                    @Override
+                    public void onNext(Frame frame) {
+                        try {
+                            if (frame.getStreamType() == StreamType.STDOUT
+                                    || frame.getStreamType() == StreamType.STDERR) {
+                                output.write(frame.getPayload());
+                            }
+                        } catch (IOException e) {
+                            throw new IllegalStateException("Failed to capture router logs", e);
+                        }
                     }
-                } catch (IOException e) {
-                    throw new IllegalStateException("Failed to capture FireLens output", e);
-                }
-            }
 
-            @Override
-            public void onComplete() {
-                complete.countDown();
-            }
+                    @Override
+                    public void onComplete() {
+                        complete.countDown();
+                    }
 
-            @Override
-            public void onError(Throwable throwable) {
-                complete.countDown();
-            }
-        });
+                    @Override
+                    public void onError(Throwable throwable) {
+                        complete.countDown();
+                    }
+                });
         try {
-            assertTrue(complete.await(10, TimeUnit.SECONDS), "Timed out reading FireLens router buffer");
-            long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
-            return new ExecResult(exitCode, output.toString(StandardCharsets.UTF_8));
+            complete.await(10, TimeUnit.SECONDS);
+            return output.toString(StandardCharsets.UTF_8);
         } finally {
             callback.close();
         }
@@ -153,6 +174,4 @@ class EcsContainerManagerFirelensDockerIntegrationTest {
         }
     }
 
-    private record ExecResult(long exitCode, String output) {
-    }
 }

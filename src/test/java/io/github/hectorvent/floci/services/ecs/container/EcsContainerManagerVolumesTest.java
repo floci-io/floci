@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -87,7 +88,7 @@ class EcsContainerManagerVolumesTest {
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService,
-                ecrRegistryManager, new HostVolumePolicy(config));
+                mock(S3Service.class), ecrRegistryManager, new HostVolumePolicy(config));
     }
 
     @Test
@@ -182,7 +183,7 @@ class EcsContainerManagerVolumesTest {
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
                 mock(RegionResolver.class), awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class), ecrRegistryManager, new HostVolumePolicy(cfg));
+                mock(SecretsManagerService.class), mock(S3Service.class), ecrRegistryManager, new HostVolumePolicy(cfg));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
@@ -217,7 +218,8 @@ class EcsContainerManagerVolumesTest {
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
                 mock(RegionResolver.class), awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class), ecrRegistryManager, new HostVolumePolicy(cfg));
+                mock(SecretsManagerService.class), mock(S3Service.class),
+                ecrRegistryManager, new HostVolumePolicy(cfg));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");

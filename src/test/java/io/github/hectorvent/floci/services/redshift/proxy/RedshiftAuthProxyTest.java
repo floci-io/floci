@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
@@ -74,7 +75,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class), 5000, 5000, 100);
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 100);
         proxy.start(proxyPort);
 
         try (Socket client = new Socket("localhost", proxyPort)) {
@@ -117,7 +118,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class), 5000, 5000, 100);
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 100);
         proxy.start(proxyPort);
 
         // Connect, then drop without ever sending a startup packet.
@@ -134,7 +135,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class), 200, 5000, 100);
+                mock(S3Service.class), mock(IamService.class), 200, 5000, 100);
         proxy.start(proxyPort);
 
         try (Socket client = new Socket("localhost", proxyPort)) {
@@ -153,7 +154,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class), 5000, 5000, 1);
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 1);
         proxy.start(proxyPort);
 
         // Hold the proxy's single connection permit from the test thread itself, so the
@@ -192,7 +193,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class), 5000, 5000, 100);
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 100);
         proxy.start(proxyPort); // must not throw despite the port being busy at first
 
         assertTrue(portAccepts(proxyPort), "proxy never bound the port after the squatter released it");
@@ -205,7 +206,7 @@ class RedshiftAuthProxyTest {
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
                 "admin", "old", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class), 5000, 5000, 100);
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 100);
         proxy.start(proxyPort);
 
         proxy.updateMasterPassword("rotated");

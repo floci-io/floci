@@ -192,7 +192,7 @@ class RedshiftServiceTest {
 
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7108),
                 eq("172.17.0.12"), eq(32830), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
@@ -240,7 +240,7 @@ class RedshiftServiceTest {
 
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(cluster.getProxyPort()),
                 eq("172.17.0.9"), eq(32800), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
@@ -456,7 +456,7 @@ class RedshiftServiceTest {
         verify(proxyManager).stopProxy("111111111111:c1");
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107),
                 eq("172.17.0.11"), eq(32820), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
@@ -487,7 +487,7 @@ class RedshiftServiceTest {
         // replacement container must be stopped too — once before the restart, once in
         // rollback — so it is not left running behind a "failed" cluster.
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
         verify(proxyManager, times(2)).stopProxy("111111111111:c1");
         verify(cm, times(2)).stop("111111111111", "c1");
     }
@@ -860,7 +860,7 @@ class RedshiftServiceTest {
         assertEquals(restored.getEndpoint().getPort(), restored.getProxyPort());
         verify(proxyManager).startProxy(eq("111111111111:restored"), anyInt(),
                 eq("172.17.0.10"), eq(32810), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
