@@ -860,6 +860,7 @@ public class RedshiftQueryHandler {
         return switch (baseName) {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
             case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
+            case "IamRoles" -> quoted + "(\\.member|\\.IamRoleArn)?\\.\\d+";
             case "TagKeys" -> quoted + "(\\.member|\\.TagKey)?\\.\\d+";
             case "DbGroups" -> quoted + "(\\.member|\\.DbGroup)?\\.\\d+";
             default -> quoted + "(\\.member)?\\.\\d+";

@@ -197,8 +197,9 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   a comma default delimiter.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
-- `IAM_ROLE '<role-arn>'` is supported. The role must exist in the local IAM service. With
-  `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, the role only needs to exist. With it on, the role's
+- `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster, exist in
+  the local IAM service, and trust Redshift to assume it. With
+  `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
 - Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `AVRO`, `ORC`, `MANIFEST`, `MAXERROR`,
@@ -250,8 +251,9 @@ the result to S3 as one or more objects under `<prefix>`.
   `ALLOWOVERWRITE` a failed UNLOAD leaves its objects in place (they may have replaced prior data,
   so they are not deleted); a `MANIFEST` request that fails this way can leave data objects without
   a manifest, and rerunning the same statement overwrites them.
-- `IAM_ROLE '<role-arn>'` is supported. The role must exist in the local IAM service. With
-  `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, the role only needs to exist. With it on, the role's
+- `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster, exist in
+  the local IAM service, and trust Redshift to assume it. With
+  `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
 - Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `CREDENTIALS`,

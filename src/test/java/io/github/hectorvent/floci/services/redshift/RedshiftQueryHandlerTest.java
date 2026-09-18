@@ -76,6 +76,28 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<ClusterStatus>available</ClusterStatus>"));
         assertTrue(xml.contains("<RequestId>test-req-id</RequestId>"));
     }
+
+    @Test
+    void createClusterParsesIamRoleArnLocationName() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+        params.putSingle("NodeType", "dc2.large");
+        params.putSingle("MasterUsername", "admin");
+        params.putSingle("MasterUserPassword", "password123");
+        params.putSingle("IamRoles.IamRoleArn.2", "arn:aws:iam::000000000000:role/second");
+        params.putSingle("IamRoles.IamRoleArn.1", "arn:aws:iam::000000000000:role/first");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setClusterStatus("available");
+        when(service.createCluster(any(), any(), any(), any(), any(), any(), any())).thenReturn(cluster);
+
+        handler.handle("CreateCluster", params);
+
+        verify(service).createCluster(eq("test-cluster"), eq("dc2.large"), eq("admin"), eq("password123"),
+                isNull(), eq(List.of()), eq(List.of("arn:aws:iam::000000000000:role/first",
+                        "arn:aws:iam::000000000000:role/second")));
+    }
     
     @Test
     void testDescribeClusters() {
