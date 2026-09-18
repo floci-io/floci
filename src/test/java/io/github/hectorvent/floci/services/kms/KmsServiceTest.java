@@ -2161,7 +2161,8 @@ class KmsServiceTest {
         String keyId = key.getKeyId();
         AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.sign(keyId, message, "RSASSA_PKCS1_V1_5_SHA_256", REGION));
-        assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+        assertEquals(key.getArn() + " key usage is ENCRYPT_DECRYPT which is not valid for Sign.", ex.getMessage());
     }
 
     @Test

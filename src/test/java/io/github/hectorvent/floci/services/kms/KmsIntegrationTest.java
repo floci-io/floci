@@ -1652,6 +1652,44 @@ class KmsIntegrationTest {
                 .body("message", equalTo("Digest is invalid length for algorithm ED25519_PH_SHA_512."));
     }
 
+    /**
+     * Real KMS answers Sign and Verify on a key whose KeyUsage is not SIGN_VERIFY with an
+     * InvalidKeyUsageException, whatever the key spec and the signing algorithm. Checked against
+     * real AWS in us-east-1.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "HMAC_256, GENERATE_VERIFY_MAC, Sign",
+            "HMAC_256, GENERATE_VERIFY_MAC, Verify",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, Sign",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, Verify",
+            "RSA_2048, ENCRYPT_DECRYPT, Sign",
+            "RSA_2048, ENCRYPT_DECRYPT, Verify",
+            "ECC_NIST_P256, KEY_AGREEMENT, Sign",
+            "ECC_NIST_P256, KEY_AGREEMENT, Verify",
+    })
+    void signAndVerifyRejectKeysWhoseUsageIsNotSignVerify(String keySpec, String keyUsage, String operation) {
+        String keyArn = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyUsage\":\"%s\",\"KeySpec\":\"%s\"}".formatted(keyUsage, keySpec))
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.Arn");
+
+        String signature = Base64.getEncoder().encodeToString(new byte[64]);
+        given()
+                .header("X-Amz-Target", "TrentService." + operation)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"MessageType\":\"RAW\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"}"
+                        .formatted(keyArn, signature))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
+    }
+
     private static byte[] sha512(byte[] value) {
         try {
             return java.security.MessageDigest.getInstance("SHA-512").digest(value);

@@ -1165,7 +1165,7 @@ public class KmsService implements ResourceProvider {
         validatePlaintextLength(plaintext, operation);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyIsUsableForCryptoOperations(kmsKey);
-        validateKeyUsageForEncryptionOperation(kmsKey, operation);
+        validateKeyUsage(kmsKey, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
         validateEncryptionAlgorithmForSpec(algorithm, kmsKey.getKeySpec());
 
         if (algorithm != KmsKeySpec.Algorithm.SYMMETRIC_DEFAULT) {
@@ -1232,7 +1232,7 @@ public class KmsService implements ResourceProvider {
             }
             KmsKey requestKey = resolveKey(requestKeyId, region);
             validateKeyIsUsableForCryptoOperations(requestKey);
-            validateKeyUsageForEncryptionOperation(requestKey, "Decrypt");
+            validateKeyUsage(requestKey, KmsKeyUsage.ENCRYPT_DECRYPT, "Decrypt");
             validateEncryptionAlgorithmForSpec(algorithm, requestKey.getKeySpec());
             rejectEncryptionContextForAsymmetricKey(encryptionContext);
             byte[] plaintext = keyTypes.of(requestKey.getKeySpec()).decrypt(requestKey, algorithm, ciphertext);
@@ -1547,8 +1547,8 @@ public class KmsService implements ResourceProvider {
         };
     }
 
-    private static void validateKeyUsageForEncryptionOperation(KmsKey key, String operation) {
-        if (KmsKeyUsage.ENCRYPT_DECRYPT != key.getKeyUsage()) {
+    private static void validateKeyUsage(KmsKey key, KmsKeyUsage keyUsage, String operation) {
+        if (keyUsage != key.getKeyUsage()) {
             throw new AwsException("InvalidKeyUsageException",
                     key.getArn() + " key usage is " + key.getKeyUsage() + " which is not valid for "
                             + operation + ".", 400);
@@ -1583,6 +1583,7 @@ public class KmsService implements ResourceProvider {
 
     public byte[] sign(String keyId, byte[] message, String algorithm, KmsMessageType messageType, String region) {
         KmsKey kmsKey = resolveKey(keyId, region);
+        validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Sign");
         try {
             return keyTypes.of(kmsKey.getKeySpec()).sign(kmsKey, message, algorithm, messageType);
         } catch (AwsException e) {
@@ -1598,6 +1599,7 @@ public class KmsService implements ResourceProvider {
 
     public boolean verify(String keyId, byte[] message, byte[] signature, String algorithm, KmsMessageType messageType, String region) {
         KmsKey kmsKey = resolveKey(keyId, region);
+        validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Verify");
         try {
             return keyTypes.of(kmsKey.getKeySpec()).verify(kmsKey, message, signature, algorithm, messageType);
         } catch (AwsException e) {
