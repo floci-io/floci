@@ -70,7 +70,9 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 - `Port` is ignored: Floci assigns the dynamic host proxy port returned in `Endpoint.Port`.
 - `DBName` other than `dev` is ignored: the emulated PostgreSQL container database is always `dev`.
 - `NumberOfNodes` is not stored on cluster create: every emulated cluster is backed by a single PostgreSQL container.
-- `ManageMasterPassword` is rejected: set `MasterUserPassword` instead.
+- `ManageMasterPassword` creates a Redshift-owned Secrets Manager secret. The secret contains the
+  managed username, password, endpoint, port, and database name. `MasterUserSecret.KmsKeyId`
+  selects the KMS key used for the secret metadata and is validated through KMS.
 - `SnapshotIdentifier` is ignored: a fresh cluster is created instead of restoring from a snapshot.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
 
@@ -296,4 +298,7 @@ These views expose the documented Redshift column names, types, and ordering map
 - Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.
 - `IAM_ROLE default` and cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
+- A cluster using `ManageMasterPassword` keeps its generated password in sync with the
+  Redshift-owned Secrets Manager secret. Updating `MasterUserPassword` through `ModifyCluster`
+  updates the current secret version as well.
 - IAM database authentication over the wire, and `sslmode=verify-full` against the self-signed proxy certificate.

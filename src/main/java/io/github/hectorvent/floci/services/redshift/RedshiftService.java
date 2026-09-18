@@ -1,14 +1,14 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
-import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
@@ -22,6 +22,11 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.RandomPasswordGenerator;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -68,6 +73,8 @@ public class RedshiftService {
     private final RedshiftProxyManager proxyManager;
     private final DockerHostResolver dockerHostResolver;
     private final RedshiftCredentialBroker credentialBroker;
+    private final SecretsManagerService secretsManagerService;
+    private final ObjectMapper objectMapper;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
@@ -75,7 +82,8 @@ public class RedshiftService {
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
                             EmulatorConfig config, RegionResolver regionResolver,
                             RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
-                            RedshiftCredentialBroker credentialBroker) {
+                            RedshiftCredentialBroker credentialBroker,
+                            SecretsManagerService secretsManagerService, ObjectMapper objectMapper) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -87,6 +95,16 @@ public class RedshiftService {
         this.proxyManager = proxyManager;
         this.dockerHostResolver = dockerHostResolver;
         this.credentialBroker = credentialBroker;
+        this.secretsManagerService = secretsManagerService;
+        this.objectMapper = objectMapper;
+    }
+
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver,
+                    RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
+                    RedshiftCredentialBroker credentialBroker) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, null, new ObjectMapper());
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
@@ -221,6 +239,30 @@ public class RedshiftService {
             throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
         }
 
+        clusters.put(identifier, cluster);
+        clusters.flush();
+        return cluster;
+    }
+
+    public synchronized Cluster createClusterWithManagedMasterPassword(
+            String identifier, String nodeType, String username, String clusterSubnetGroupName,
+            List<String> vpcSecurityGroupIds, List<String> iamRoleArns,
+            String kmsKeyId, String region) {
+        if (secretsManagerService == null) {
+            throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
+        }
+        String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
+        Cluster cluster = createCluster(identifier, nodeType, username, password,
+                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
+        String secretName = "redshift/" + identifier;
+        String secretString = managedMasterSecret(cluster, password);
+        Secret secret = secretsManagerService.createSecret(secretName, secretString, null,
+                        "Managed master user secret for Redshift cluster " + identifier,
+                        kmsKeyId, List.of(), "redshift", region);
+        cluster.setMasterUserSecretArn(secret.getArn());
+        cluster.setMasterUserSecretVersionId(secret.getCurrentVersionId());
+        cluster.setMasterUserSecretKmsKeyId(kmsKeyId);
+        cluster.setMasterUserSecretStatus("available");
         clusters.put(identifier, cluster);
         clusters.flush();
         return cluster;
@@ -425,6 +467,15 @@ public class RedshiftService {
         // identifier does not accept them as master-equivalent.
         credentialBroker.revokeCluster(clusters.accountId(), identifier);
 
+        if (cluster.getMasterUserSecretArn() != null && secretsManagerService != null) {
+            try {
+                secretsManagerService.deleteSecret(cluster.getMasterUserSecretArn(), null, true,
+                        regionResolver.getRegion());
+            } catch (AwsException e) {
+                LOG.warnv(e, "Failed to remove managed master secret for cluster {0}", identifier);
+            }
+        }
+
         cluster.setClusterStatus("deleting");
         return cluster;
     }
@@ -444,6 +495,7 @@ public class RedshiftService {
             // Keep the proxy's password check in sync so new connections use the new secret.
             proxyManager.updateMasterPassword(
                     relayKey(clusters.accountId(), clusterIdentifier), masterUserPassword);
+            updateManagedMasterSecret(cluster, masterUserPassword);
         }
 
         // NodeType only updates metadata — it does not resize the underlying Postgres container
@@ -462,6 +514,31 @@ public class RedshiftService {
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;
+    }
+
+    private void updateManagedMasterSecret(Cluster cluster, String password) {
+        if (cluster.getMasterUserSecretArn() == null || secretsManagerService == null) {
+            return;
+        }
+        SecretVersion version = secretsManagerService.putSecretValue(cluster.getMasterUserSecretArn(),
+                        managedMasterSecret(cluster, password), null, null, regionResolver.getRegion(),
+                        List.of("AWSCURRENT"));
+        cluster.setMasterUserSecretVersionId(version.getVersionId());
+    }
+
+    private String managedMasterSecret(Cluster cluster, String password) {
+        try {
+            return objectMapper.createObjectNode()
+                    .put("engine", "redshift")
+                    .put("username", cluster.getMasterUsername())
+                    .put("password", password)
+                    .put("host", cluster.getEndpoint() == null ? "" : cluster.getEndpoint().getAddress())
+                    .put("port", cluster.getEndpoint() == null ? 0 : cluster.getEndpoint().getPort())
+                    .put("dbname", CLUSTER_DB_NAME)
+                    .toString();
+        } catch (RuntimeException e) {
+            throw new AwsException("InternalFailure", "Failed to encode managed master secret", 500);
+        }
     }
 
     public synchronized Cluster rebootCluster(String clusterIdentifier) {

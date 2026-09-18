@@ -65,11 +65,17 @@ public class RedshiftQueryHandler {
             String nodeType = params.getFirst("NodeType");
             String masterUsername = params.getFirst("MasterUsername");
             String masterUserPassword = params.getFirst("MasterUserPassword");
+            boolean manageMasterPassword = Boolean.parseBoolean(params.getFirst("ManageMasterPassword"));
             String clusterSubnetGroupName = params.getFirst("ClusterSubnetGroupName");
             List<String> vpcSecurityGroupIds = memberList(params, "VpcSecurityGroupIds");
             List<String> iamRoleArns = memberList(params, "IamRoles");
 
-            Cluster cluster = iamRoleArns.isEmpty()
+            String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
+            Cluster cluster = manageMasterPassword
+                    ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
+                            params.getFirst("MasterUserSecret.KmsKeyId"), region)
+                    : iamRoleArns.isEmpty()
                     ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
                             clusterSubnetGroupName, vpcSecurityGroupIds)
                     : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
@@ -617,6 +623,15 @@ public class RedshiftQueryHandler {
             .elem("ClusterAvailabilityStatus", availabilityStatus(cluster.getClusterStatus()))
             .elem("AvailabilityZoneRelocationStatus", "disabled")
             .elem("ClusterSubnetGroupName", cluster.getClusterSubnetGroupName());
+
+        if (cluster.getMasterUserSecretArn() != null) {
+            builder.start("MasterUserSecret")
+                .elem("SecretArn", cluster.getMasterUserSecretArn())
+                .elem("SecretVersionId", cluster.getMasterUserSecretVersionId())
+                .elem("KmsKeyId", cluster.getMasterUserSecretKmsKeyId())
+                .elem("SecretStatus", cluster.getMasterUserSecretStatus())
+              .end("MasterUserSecret");
+        }
 
         if (cluster.getVpcSecurityGroupIds() != null && !cluster.getVpcSecurityGroupIds().isEmpty()) {
             builder.start("VpcSecurityGroups");

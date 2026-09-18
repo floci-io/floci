@@ -16,6 +16,8 @@ import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -48,6 +50,7 @@ class RedshiftServiceTest {
     private RedshiftProxyManager proxyManager;
     private DockerHostResolver dockerHostResolver;
     private RedshiftCredentialBroker credentialBroker;
+    private SecretsManagerService secretsManagerService;
     private RedshiftService service;
 
     @BeforeEach
@@ -88,15 +91,41 @@ class RedshiftServiceTest {
         regionResolver = new RegionResolver("us-east-1", "111111111111");
 
         credentialBroker = new RedshiftCredentialBroker();
+        secretsManagerService = mock(SecretsManagerService.class);
 
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
-                credentialBroker);
+                credentialBroker, secretsManagerService, new com.fasterxml.jackson.databind.ObjectMapper());
     }
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
     private static String dumpPath(String snapshotId) {
         return Paths.get("target/test-data", "redshift-dumps", "111111111111", snapshotId + ".sql")
                 .toAbsolutePath().normalize().toString();
+    }
+
+    @Test
+    void managedMasterPasswordCreatesOwnedSecretAndExposesItsMetadata() {
+        when(cm.start(eq("111111111111"), eq("managed-cluster"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "managed-cluster", "localhost", 5432));
+
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-managed");
+        secret.setCurrentVersionId("version-1");
+        when(secretsManagerService.createSecret(eq("redshift/managed-cluster"), anyString(), isNull(),
+                anyString(), eq("arn:aws:kms:us-east-1:111111111111:key/key-1"), anyList(),
+                eq("redshift"), eq("us-east-1"))).thenReturn(secret);
+
+        Cluster cluster = service.createClusterWithManagedMasterPassword("managed-cluster", "dc2.large",
+                "admin", null, List.of(), List.of(),
+                "arn:aws:kms:us-east-1:111111111111:key/key-1", "us-east-1");
+
+        assertEquals(secret.getArn(), cluster.getMasterUserSecretArn());
+        assertEquals("version-1", cluster.getMasterUserSecretVersionId());
+        assertEquals("arn:aws:kms:us-east-1:111111111111:key/key-1", cluster.getMasterUserSecretKmsKeyId());
+        assertEquals("available", cluster.getMasterUserSecretStatus());
+        verify(secretsManagerService).createSecret(eq("redshift/managed-cluster"),
+                contains("\"username\":\"admin\""), isNull(), anyString(),
+                eq("arn:aws:kms:us-east-1:111111111111:key/key-1"), anyList(), eq("redshift"), eq("us-east-1"));
     }
 
     @Test

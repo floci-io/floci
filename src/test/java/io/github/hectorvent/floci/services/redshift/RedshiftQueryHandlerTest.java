@@ -42,6 +42,7 @@ class RedshiftQueryHandlerTest {
         iamDbUserResolver = mock(RedshiftIamDbUserResolver.class);
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("acc");
+        when(regionResolver.resolveRegionFromAuth(anyString())).thenReturn("us-east-1");
         handler = new RedshiftQueryHandler(service, credentialBroker, config, iamDbUserResolver, regionResolver);
     }
 
@@ -75,6 +76,37 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<ClusterIdentifier>test-cluster</ClusterIdentifier>"));
         assertTrue(xml.contains("<ClusterStatus>available</ClusterStatus>"));
         assertTrue(xml.contains("<RequestId>test-req-id</RequestId>"));
+    }
+
+    @Test
+    void createClusterWithManagedMasterPasswordUsesSecretsManagerSecret() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "managed-cluster");
+        params.putSingle("NodeType", "dc2.large");
+        params.putSingle("MasterUsername", "admin");
+        params.putSingle("ManageMasterPassword", "true");
+        params.putSingle("MasterUserSecret.KmsKeyId", "arn:aws:kms:us-east-1:acc:key/key-1");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("managed-cluster");
+        cluster.setClusterStatus("available");
+        cluster.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed");
+        cluster.setMasterUserSecretVersionId("version-1");
+        cluster.setMasterUserSecretKmsKeyId("arn:aws:kms:us-east-1:acc:key/key-1");
+        cluster.setMasterUserSecretStatus("available");
+        when(service.createClusterWithManagedMasterPassword(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(cluster);
+
+        Response response = handler.handle("CreateCluster", params,
+                "AWS4-HMAC-SHA256 Credential=test/20260918/us-east-1/redshift/aws4_request");
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<SecretArn>arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed</SecretArn>"));
+        assertTrue(xml.contains("<SecretStatus>available</SecretStatus>"));
+        verify(service).createClusterWithManagedMasterPassword(eq("managed-cluster"), eq("dc2.large"),
+                eq("admin"), isNull(), eq(List.of()), eq(List.of()),
+                eq("arn:aws:kms:us-east-1:acc:key/key-1"), eq("us-east-1"));
     }
 
     @Test
