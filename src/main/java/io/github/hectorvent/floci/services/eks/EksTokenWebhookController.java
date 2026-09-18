@@ -43,6 +43,16 @@ public class EksTokenWebhookController {
     }
 
     @POST
+    @Path("scope/{accountId}/{region}/{createdAt}")
+    public Response reviewScoped(@PathParam("clusterName") String clusterName,
+                                 @PathParam("accountId") String accountId,
+                                 @PathParam("region") String region,
+                                 @PathParam("createdAt") String createdAt,
+                                 Map<String, Object> tokenReview) {
+        return review(clusterName, accountId, region, createdAt, tokenReview);
+    }
+
+    @POST
     public Response review(@PathParam("clusterName") String clusterName, @QueryParam("accountId") String accountId,
                            @QueryParam("region") String region, @QueryParam("createdAt") String createdAt,
                            Map<String, Object> tokenReview) {

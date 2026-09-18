@@ -74,7 +74,28 @@ class EksWorkerAuthenticationIntegrationTest {
             given().queryParam("accountId", "999999999999").queryParam("region", "us-east-1")
                     .queryParam("createdAt", incarnation).contentType("application/json").body(review)
                     .post(path).then().statusCode(200).body("status.authenticated", equalTo(false));
+            String scopedPath = path + "/scope/" + account + "/us-east-1/" + incarnation;
+            // No scope query parameters: client-go replaces the webhook server URL query.
+            given().contentType("application/json").body(review).post(scopedPath).then().statusCode(200)
+                    .body("status.authenticated", equalTo(true))
+                    .body("status.user.username", equalTo("system:node:" + instance.getPrivateDnsName()))
+                    .body("status.user.groups", contains("system:bootstrappers", "system:nodes"));
+            // Query values cannot override the scoped route's cluster identity.
+            given().queryParam("accountId", "999999999999").queryParam("region", "us-west-2")
+                    .queryParam("createdAt", "2000-01-01T00:00:00Z")
+                    .contentType("application/json").body(review).post(scopedPath).then().statusCode(200)
+                    .body("status.authenticated", equalTo(true));
+            for (String invalidPath : new String[]{
+                    path,
+                    path + "/scope/999999999999/us-east-1/" + incarnation,
+                    path + "/scope/" + account + "/us-west-2/" + incarnation,
+                    path + "/scope/" + account + "/us-east-1/2000-01-01T00:00:00Z"}) {
+                given().contentType("application/json").body(review).post(invalidPath).then().statusCode(200)
+                        .body("status.authenticated", equalTo(false));
+            }
             credentials.unregister(instance);
+            given().contentType("application/json").body(review).post(scopedPath).then().statusCode(200)
+                    .body("status.authenticated", equalTo(false));
             given().queryParam("accountId", account).queryParam("region", "us-east-1")
                     .queryParam("createdAt", incarnation).contentType("application/json").body(review)
                     .post(path).then().statusCode(200).body("status.authenticated", equalTo(false));

@@ -700,8 +700,9 @@ public class EksClusterManager {
     }
 
     static String webhookPath(Cluster cluster) {
-        return webhookPath(cluster.getName()) + "?accountId=" + cluster.getAccountId()
-                + "&region=" + cluster.getArn().split(":", 6)[3] + "&createdAt=" + cluster.getCreatedAt();
+        // client-go replaces a server URL query when constructing its TokenReview request.
+        return webhookPath(cluster.getName()) + "/scope/" + cluster.getAccountId()
+                + "/" + cluster.getArn().split(":", 6)[3] + "/" + cluster.getCreatedAt();
     }
 
     static String webhookPath(String clusterName) {

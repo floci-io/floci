@@ -67,8 +67,8 @@ class EksClusterManagerTest {
         cluster.setAccountId("123456789012");
         cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/demo");
         cluster.setCreatedAt(Instant.parse("2026-09-17T00:00:00Z"));
-        assertEquals("/_floci/eks/clusters/demo/token-webhook?accountId=123456789012"
-                + "&region=us-west-2&createdAt=2026-09-17T00:00:00Z", EksClusterManager.webhookPath(cluster));
+        assertEquals("/_floci/eks/clusters/demo/token-webhook/scope/123456789012"
+                + "/us-west-2/2026-09-17T00:00:00Z", EksClusterManager.webhookPath(cluster));
     }
 
     @Test

@@ -46,7 +46,9 @@ running EC2 instance, and attached instance profile. Missing/deleted entries, re
 revoked sessions and terminated instances are rejected without falling back to administrator access.
 The existing k3s webhook cache can retain a successful authentication for up to 30 seconds.
 
-New cluster webhook configurations carry the target account, region and creation timestamp.
+New cluster webhook configurations carry the target account, region and creation timestamp in the URL path.
+Kubernetes client-go replaces server URL query parameters when sending TokenReview requests, so
+worker scope must not depend on those parameters.
 Recreate older local clusters before using worker authentication; a legacy unscoped webhook
 rejects instance credentials. Obtain fresh IMDS credentials after upgrading so the session
 includes the stable role ID.
