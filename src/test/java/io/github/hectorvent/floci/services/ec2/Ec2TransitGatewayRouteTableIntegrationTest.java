@@ -89,6 +89,36 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
                     + ".transitGatewayRouteTableId");
     }
 
+    private String routeTablesFilteredBy(String filterName, String value) {
+        return given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", filterName)
+            .formParam("Filter.1.Value.1", value)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+    }
+
+    /** Both listings of what a route table holds take the same three filters. */
+    private String spokeTableMembersFilteredBy(String action, String filterName, String value) {
+        return given()
+            .formParam("Action", action)
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", filterName)
+            .formParam("Filter.1.Value.1", value)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+    }
+
+    private String associationsFilteredBy(String filterName, String value) {
+        return spokeTableMembersFilteredBy("GetTransitGatewayRouteTableAssociations", filterName, value);
+    }
+
+    private String propagationsFilteredBy(String filterName, String value) {
+        return spokeTableMembersFilteredBy("GetTransitGatewayRouteTablePropagations", filterName, value);
+    }
+
     private String extract(String body, String element) {
         int start = body.indexOf("<" + element + ">") + element.length() + 2;
         return body.substring(start, body.indexOf("</" + element + ">", start));
@@ -300,6 +330,15 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
         .then().statusCode(200).extract().asString();
         assertThat(defaultOnly, containsString(defaultRouteTableId));
         assertThat(defaultOnly, not(containsString(routeTableId)));
+
+        String byId = routeTablesFilteredBy("transit-gateway-route-table-id", routeTableId);
+        assertThat(byId, containsString(routeTableId));
+        assertThat(byId, not(containsString(defaultRouteTableId)));
+        assertThat(routeTablesFilteredBy("transit-gateway-route-table-id", "tgw-rtb-0123456789abcdef0"),
+                not(containsString("<item>")));
+
+        assertThat(routeTablesFilteredBy("state", "available"), containsString(routeTableId));
+        assertThat(routeTablesFilteredBy("state", "deleting"), not(containsString("<item>")));
     }
 
     @Test
@@ -325,6 +364,12 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
         .when().post("/")
         .then().statusCode(200).extract().asString();
         assertThat(unmatched, not(containsString("<item>")));
+
+        assertThat(associationsFilteredBy("resource-id", vpcId), containsString(attachmentId));
+        assertThat(associationsFilteredBy("resource-id", "vpc-0123456789abcdef0"),
+                not(containsString("<item>")));
+        assertThat(associationsFilteredBy("resource-type", "vpc"), containsString(attachmentId));
+        assertThat(associationsFilteredBy("resource-type", "vpn"), not(containsString("<item>")));
     }
 
     @Test
@@ -400,5 +445,11 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
         .when().post("/")
         .then().statusCode(200).extract().asString();
         assertThat(unmatched, not(containsString("<item>")));
+
+        assertThat(propagationsFilteredBy("resource-id", vpcId), containsString(attachmentId));
+        assertThat(propagationsFilteredBy("resource-id", "vpc-0123456789abcdef0"),
+                not(containsString("<item>")));
+        assertThat(propagationsFilteredBy("resource-type", "vpc"), containsString(attachmentId));
+        assertThat(propagationsFilteredBy("resource-type", "vpn"), not(containsString("<item>")));
     }
 }
