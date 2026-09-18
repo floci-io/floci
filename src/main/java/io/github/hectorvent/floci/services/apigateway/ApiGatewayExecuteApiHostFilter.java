@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -101,7 +102,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
-        String host = requestContext.getHeaderString("Host");
+        String host = RequestHost.of(requestContext);
         if (host == null) {
             return;
         }

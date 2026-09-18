@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
@@ -113,7 +114,7 @@ public class CloudFrontServingController {
         String rawViewerPath = rawViewerPath(request.uri());
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
                 uriInfo.getRequestUri().getScheme(),
-                headers.getHeaderString("Host"),
+                RequestHost.of(request),
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION),
                 request.getHeader("Origin"), "GET", null, null,
                 request.getHeader("Pragma"));
@@ -127,7 +128,7 @@ public class CloudFrontServingController {
         String rawViewerPath = rawViewerPath(request.uri());
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
                 uriInfo.getRequestUri().getScheme(),
-                headers.getHeaderString("Host"),
+                RequestHost.of(request),
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION),
                 request.getHeader("Origin"), "HEAD", null, null,
                 request.getHeader("Pragma"));
@@ -141,7 +142,7 @@ public class CloudFrontServingController {
         String rawViewerPath = rawViewerPath(request.uri());
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
                 uriInfo.getRequestUri().getScheme(),
-                headers.getHeaderString("Host"),
+                RequestHost.of(request),
                 headers.getHeaderString(HttpHeaders.AUTHORIZATION),
                 request.getHeader("Origin"), "OPTIONS",
                 request.getHeader("Access-Control-Request-Method"),
@@ -274,7 +275,7 @@ public class CloudFrontServingController {
             io.vertx.core.http.HttpServerRequest request,
             String rawViewerPath) {
         String scheme = request.scheme() != null ? request.scheme() : "https";
-        String host = request.getHeader("Host");
+        String host = RequestHost.of(request);
         if (host == null || host.isBlank()) {
             host = distribution.getDomainName();
         }

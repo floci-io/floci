@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import jakarta.annotation.Priority;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -26,7 +27,7 @@ public class LambdaUrlRoutingFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext) throws IOException {
-        String host = requestContext.getHeaderString("Host");
+        String host = RequestHost.of(requestContext);
         if (host == null) return;
 
         // Pattern: <urlId>.lambda-url.<region>.<anything>
