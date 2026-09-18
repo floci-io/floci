@@ -737,7 +737,7 @@ final class CognitoAuthFlowHandler {
         event.put("triggerSource", triggerSource);
         Map<String, Object> req = new HashMap<>(request);
         if (user != null) {
-            req.put("userAttributes", user.getAttributes() == null ? Map.of() : user.getAttributes());
+            req.put("userAttributes", triggerUserAttributes(user));
         }
         event.put("request", req);
         event.put("response", new HashMap<>());
@@ -769,6 +769,15 @@ final class CognitoAuthFlowHandler {
             LOG.warnv(e, "Cognito trigger {0} invocation failed", triggerKey);
             return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, e.getMessage());
         }
+    }
+
+    private Map<String, String> triggerUserAttributes(CognitoUser user) {
+        Map<String, String> attributes = new LinkedHashMap<>();
+        if (user.getAttributes() != null) {
+            attributes.putAll(user.getAttributes());
+        }
+        attributes.put("cognito:user_status", user.getUserStatus());
+        return attributes;
     }
 
     private Map<String, Object> requireCustomAuthTriggerResponse(TriggerResult result, String triggerName) {

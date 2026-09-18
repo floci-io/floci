@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -145,6 +146,33 @@ class CognitoLambdaTriggersTest {
 
         verify(lambdaService, atLeastOnce())
                 .invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void preAuthenticationIncludesUserStatusWithoutMutatingUserAttributes() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class),
+                eq(InvocationType.RequestResponse))).thenReturn(ok(Map.of()));
+
+        service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre"), payloadCaptor.capture(),
+                eq(InvocationType.RequestResponse));
+
+        Map<String, Object> event = MAPPER.readValue(payloadCaptor.getValue(), new TypeReference<>() {});
+        Map<String, Object> request = (Map<String, Object>) event.get("request");
+        Map<String, Object> userAttributes = (Map<String, Object>) request.get("userAttributes");
+
+        assertEquals("CONFIRMED", userAttributes.get("cognito:user_status"));
+        assertEquals(user.getAttributes().get("sub"), userAttributes.get("sub"));
+        assertFalse(user.getAttributes().containsKey("cognito:user_status"));
     }
 
     @Test
