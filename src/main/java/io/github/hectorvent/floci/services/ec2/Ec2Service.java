@@ -147,6 +147,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
     private static final Duration CONTAINER_LAUNCH_TIMEOUT = Duration.ofMinutes(5);
     private static final long CONTAINER_LAUNCH_POLL_MILLIS = 50;
+    private static final Set<String> VPN_GATEWAY_FILTERS = Set.of(
+            "amazon-side-asn", "attachment.state", "attachment.vpc-id", "availability-zone",
+            "state", "tag-key", "tag-value", "type", "vpn-gateway-id");
+    private static final Set<String> EGRESS_ONLY_INTERNET_GATEWAY_FILTERS = Set.of(
+            "attachment.state", "attachment.vpc-id",
+            "egress-only-internet-gateway-id", "tag-key", "tag-value");
 
     private final String defaultAccountId;
     private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
@@ -3561,6 +3567,39 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .filter(v -> vpcIds.isEmpty() || vpcIds.contains(v.getVpcId()))
                 .filter(v -> matchesFilters(v, filters, region))
                 .collect(Collectors.toList());
+    }
+
+    public List<String> describeVpnGatewayIds(
+            String region, List<String> gatewayIds, Map<String, List<String>> filters) {
+        return emptyNetworkDiscovery(gatewayIds, filters, VPN_GATEWAY_FILTERS,
+                "InvalidVpnGatewayID.NotFound",
+                "The vpnGateway ID '%s' does not exist");
+    }
+
+    public List<String> describeEgressOnlyInternetGatewayIds(
+            String region, List<String> gatewayIds, Map<String, List<String>> filters) {
+        return emptyNetworkDiscovery(gatewayIds, filters, EGRESS_ONLY_INTERNET_GATEWAY_FILTERS,
+                "InvalidEgressOnlyInternetGatewayId.NotFound",
+                "The egress-only internet gateway ID '%s' does not exist");
+    }
+
+    private List<String> emptyNetworkDiscovery(
+            List<String> resourceIds,
+            Map<String, List<String>> filters,
+            Set<String> supportedFilters,
+            String notFoundCode,
+            String notFoundMessage) {
+        filters.keySet().stream()
+                .filter(name -> !supportedFilters.contains(name)
+                        && !(supportedFilters.contains("tag-key") && name.startsWith("tag:")))
+                .findFirst()
+                .ifPresent(name -> {
+                    throw new AwsException("InvalidParameterValue", "The filter '" + name + "' is invalid", 400);
+                });
+        if (!resourceIds.isEmpty()) {
+            throw new AwsException(notFoundCode, notFoundMessage.formatted(resourceIds.getFirst()), 400);
+        }
+        return List.of();
     }
 
     public void deleteVpc(String region, String vpcId) {

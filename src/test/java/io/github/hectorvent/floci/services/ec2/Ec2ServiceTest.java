@@ -81,6 +81,66 @@ import static org.mockito.Mockito.when;
 class Ec2ServiceTest {
 
     @Test
+    void describeVpnGatewaysReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        for (String filterName : List.of("attachment.vpc-id", "tag-value")) {
+            assertTrue(service.describeVpnGatewayIds(
+                    "us-east-1", List.of(), Map.of(filterName, List.of("value"))).isEmpty());
+        }
+
+        AwsException vpnError = assertThrows(AwsException.class, () -> service.describeVpnGatewayIds(
+                "us-east-1", List.of("vgw-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidVpnGatewayID.NotFound", vpnError.getErrorCode());
+        assertEquals("The vpnGateway ID 'vgw-0123456789abcdef0' does not exist", vpnError.getMessage());
+        assertEquals(400, vpnError.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeVpnGatewayIds(
+                        "us-east-1", List.of(), Map.of("unsupported", List.of("value"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
+    }
+
+    @Test
+    void describeEgressOnlyInternetGatewaysReturnsEmptyWhenNoneExist() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Map<String, List<String>> supportedFilters = Map.of(
+                "attachment.state", List.of("attached"),
+                "attachment.vpc-id", List.of("vpc-0123456789abcdef0"),
+                "egress-only-internet-gateway-id", List.of("eigw-0123456789abcdef0"),
+                "tag:Owner", List.of("TeamA"),
+                "tag-key", List.of("Owner"),
+                "tag-value", List.of("TeamA"));
+
+        for (Map.Entry<String, List<String>> filter : supportedFilters.entrySet()) {
+            assertTrue(service.describeEgressOnlyInternetGatewayIds(
+                    "us-east-1", List.of(), Map.of(filter.getKey(), filter.getValue())).isEmpty());
+        }
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeEgressOnlyInternetGatewayIds(
+                        "us-east-1", List.of("eigw-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidEgressOnlyInternetGatewayId.NotFound", error.getErrorCode());
+        assertEquals("The egress-only internet gateway ID 'eigw-0123456789abcdef0' does not exist",
+                error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        AwsException filterError = assertThrows(AwsException.class,
+                () -> service.describeEgressOnlyInternetGatewayIds(
+                        "us-east-1", List.of(),
+                        Map.of("unsupported", List.of("value"))));
+        assertEquals("InvalidParameterValue", filterError.getErrorCode());
+        assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
+        assertEquals(400, filterError.getHttpStatus());
+    }
+
+    @Test
     void mockModeTreatsExistingNonTerminatedInstanceAsRunningContainer() {
         Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
         Ec2Service service = new Ec2Service(mockConfig(true), containerManager,

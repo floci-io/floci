@@ -202,9 +202,16 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
+| DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
+| DescribeEgressOnlyInternetGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
+
+The two describe-only network actions above provide discovery compatibility when no
+resources exist. Egress-only gateway discovery validates its pagination parameters before
+returning an empty page. Neither models virtual private gateway or egress-only internet
+gateway lifecycles.
 
 ### Subnets
 

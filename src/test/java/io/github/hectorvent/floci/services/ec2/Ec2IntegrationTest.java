@@ -976,6 +976,151 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(323)
+    void describeVpnGatewaysReturnsEmptySetAndNotFoundError() {
+        given()
+            .formParam("Action", "DescribeVpnGateways")
+            .formParam("Filter.1.Name", "attachment.vpc-id")
+            .formParam("Filter.1.Value.1", vpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpnGatewaysResponse.vpnGatewaySet.item.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeVpnGateways")
+            .formParam("Filter.1.Name", "tag-value")
+            .formParam("Filter.1.Value.1", "TeamA")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpnGatewaysResponse.vpnGatewaySet.item.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeVpnGateways")
+            .formParam("VpnGatewayId.1", "vgw-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVpnGatewayID.NotFound"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The vpnGateway ID 'vgw-0123456789abcdef0' does not exist"));
+    }
+
+    @Test
+    @Order(324)
+    void describeEgressOnlyInternetGatewaysReturnsEmptySetAndNotFoundError() {
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "tag:Owner")
+            .formParam("Filter.1.Value.1", "TeamA")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.size()",
+                    equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "tag-value")
+            .formParam("Filter.1.Value.1", "TeamA")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.size()",
+                    equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "attachment.vpc-id")
+            .formParam("Filter.1.Value.1", vpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.size()",
+                    equalTo(0));
+
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "unsupported")
+            .formParam("Filter.1.Value.1", "value")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The filter 'unsupported' is invalid"));
+
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("EgressOnlyInternetGatewayId.1", "eigw-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code",
+                    equalTo("InvalidEgressOnlyInternetGatewayId.NotFound"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The egress-only internet gateway ID "
+                            + "'eigw-0123456789abcdef0' does not exist"));
+    }
+
+    @Test
+    @Order(325)
+    void emptyNetworkDiscoveryValidatesPaginationBeforeReturningResults() {
+        String action = "DescribeEgressOnlyInternetGateways";
+        int maximum = 255;
+        for (String maxResults : List.of("5", Integer.toString(maximum))) {
+            given()
+                .formParam("Action", action)
+                .formParam("MaxResults", maxResults)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<nextToken>")));
+        }
+
+        for (String maxResults : List.of("4", Integer.toString(maximum + 1), "not-a-number")) {
+            given()
+                .formParam("Action", action)
+                .formParam("MaxResults", maxResults)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidMaxResults"));
+        }
+
+        given()
+            .formParam("Action", action)
+            .formParam("NextToken", "arbitrary-token")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
     @Order(12)
     void modifyVpcAttribute() {
         given()

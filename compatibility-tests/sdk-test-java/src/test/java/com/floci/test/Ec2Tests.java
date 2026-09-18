@@ -35,6 +35,71 @@ class Ec2Tests {
         keyName = "sdk-test-key";
     }
 
+    @Test
+    @Order(0)
+    @DisplayName("DescribeVpnGateways - empty when none exist")
+    void describeVpnGatewaysEmpty() {
+        assertThat(ec2.describeVpnGateways().vpnGateways()).isEmpty();
+        assertThat(ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .filters(Filter.builder()
+                        .name("attachment.vpc-id")
+                        .values("vpc-0123456789abcdef0")
+                        .build())
+                .build()).vpnGateways()).isEmpty();
+        assertThat(ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .filters(Filter.builder().name("tag-value").values("TeamA").build())
+                .build()).vpnGateways()).isEmpty();
+
+        assertThatThrownBy(() -> ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .vpnGatewayIds("vgw-0123456789abcdef0")
+                .build()))
+                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode())
+                            .isEqualTo("InvalidVpnGatewayID.NotFound");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .isEqualTo("The vpnGateway ID 'vgw-0123456789abcdef0' does not exist");
+                    assertThat(error.requestId()).isNotBlank();
+                });
+    }
+
+    @Test
+    @Order(0)
+    @DisplayName("DescribeEgressOnlyInternetGateways - empty when none exist")
+    void describeEgressOnlyInternetGatewaysEmpty() {
+        assertThat(ec2.describeEgressOnlyInternetGateways().egressOnlyInternetGateways()).isEmpty();
+        assertThat(ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .filters(Filter.builder()
+                                .name("tag:Owner")
+                                .values("TeamA")
+                                .build())
+                        .build()).egressOnlyInternetGateways()).isEmpty();
+        assertThat(ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .filters(Filter.builder().name("tag-value").values("TeamA").build())
+                        .build()).egressOnlyInternetGateways()).isEmpty();
+        DescribeEgressOnlyInternetGatewaysResponse paged =
+                ec2.describeEgressOnlyInternetGateways(
+                        DescribeEgressOnlyInternetGatewaysRequest.builder().maxResults(5).build());
+        assertThat(paged.egressOnlyInternetGateways()).isEmpty();
+        assertThat(paged.nextToken()).isNull();
+
+        assertThatThrownBy(() -> ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .egressOnlyInternetGatewayIds("eigw-0123456789abcdef0")
+                        .build()))
+                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode())
+                            .isEqualTo("InvalidEgressOnlyInternetGatewayId.NotFound");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .isEqualTo("The egress-only internet gateway ID "
+                                    + "'eigw-0123456789abcdef0' does not exist");
+                    assertThat(error.requestId()).isNotBlank();
+                });
+    }
+
     @AfterAll
     static void cleanup() {
         if (ec2 != null) {
