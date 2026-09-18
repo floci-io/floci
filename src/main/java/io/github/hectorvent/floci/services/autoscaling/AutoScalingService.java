@@ -63,6 +63,7 @@ public class AutoScalingService {
     // region :: name → resource
     private Map<String, LaunchConfiguration> launchConfigs = new ConcurrentHashMap<>();
     private Map<String, AutoScalingGroup> groups = new ConcurrentHashMap<>();
+    private final Map<String, Object> groupLocks = new ConcurrentHashMap<>();
     private Map<String, LifecycleHook> hooks = new ConcurrentHashMap<>();
     private Map<String, ScalingPolicy> policies = new ConcurrentHashMap<>();
     private Map<String, ScalingActivity> activities = new ConcurrentHashMap<>();
@@ -328,7 +329,8 @@ public class AutoScalingService {
     }
 
     public void deleteAutoScalingGroup(String region, String name, boolean forceDelete) {
-        synchronized (groups) {
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
             List<AsgInstance> active = asg.getInstances().stream()
                     .filter(i -> !"Terminated".equals(i.getLifecycleState()))
@@ -351,7 +353,7 @@ public class AutoScalingService {
                             }
                         });
             }
-            groups.remove(asgKey(region, name));
+            groups.remove(key);
         }
         // clean up associated hooks and policies
         hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
@@ -374,13 +376,9 @@ public class AutoScalingService {
                 .collect(Collectors.toList());
     }
 
-    public void saveAutoScalingGroup(AutoScalingGroup asg) {
-        groups.put(asgKey(asg.getRegion(), asg.getAutoScalingGroupName()), asg);
-    }
-
     public boolean saveAutoScalingGroupIfPresent(AutoScalingGroup asg) {
         String key = asgKey(asg.getRegion(), asg.getAutoScalingGroupName());
-        synchronized (groups) {
+        synchronized (lockFor(key)) {
             AutoScalingGroup current = groups.get(key);
             if (current == asg) {
                 groups.put(key, asg);
@@ -388,6 +386,10 @@ public class AutoScalingService {
             }
             return false;
         }
+    }
+
+    private Object lockFor(String key) {
+        return groupLocks.computeIfAbsent(key, ignored -> new Object());
     }
 
     public void setDesiredCapacity(String region, String name, int desiredCapacity) {

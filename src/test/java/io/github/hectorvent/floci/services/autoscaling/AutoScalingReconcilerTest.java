@@ -78,6 +78,7 @@ class AutoScalingReconcilerTest {
         asg.setRegion("us-east-1");
         asg.setAutoScalingGroupName("app-asg");
         asg.setDesiredCapacity(0);
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(true);
 
         reconciler.reconcile(asg);
 
@@ -165,6 +166,7 @@ class AutoScalingReconcilerTest {
         reconciler.reconcile(asg);
 
         verify(ec2Service).terminateInstances("us-east-1", List.of("i-stale"));
+        verify(asgService, never()).completeInstanceRefreshIfSettled("us-east-1", "app-asg");
     }
 
     @Test
@@ -525,6 +527,7 @@ class AutoScalingReconcilerTest {
                         "The launch template 'app-lt' does not exist.", 400));
         AutoScalingReconciler reconciler =
                 new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(true);
 
         reconciler.reconcile(asg);
 

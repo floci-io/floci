@@ -103,8 +103,9 @@ public class AutoScalingReconciler {
         } else if (activeCapacity > desired) {
             scaleIn(asg, (int) (activeCapacity - desired));
         }
-        asgService.saveAutoScalingGroupIfPresent(asg);
-        asgService.completeInstanceRefreshIfSettled(asg.getRegion(), asg.getAutoScalingGroupName());
+        if (asgService.saveAutoScalingGroupIfPresent(asg)) {
+            asgService.completeInstanceRefreshIfSettled(asg.getRegion(), asg.getAutoScalingGroupName());
+        }
     }
 
     static long activeCapacity(AutoScalingGroup asg) {
