@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2.net;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
@@ -124,6 +125,7 @@ public class VpcNetworkManager {
 
     private final EmulatorConfig config;
     private final DockerClient dockerClient;
+    private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
 
     /** region::vpcId -> binding. Rebuilt from persisted VPCs at startup. */
     private final Map<String, VpcBinding> bindings = new ConcurrentHashMap<>();
@@ -143,9 +145,15 @@ public class VpcNetworkManager {
     });
 
     @Inject
-    public VpcNetworkManager(EmulatorConfig config, DockerClient dockerClient) {
+    public VpcNetworkManager(EmulatorConfig config, DockerClient dockerClient,
+                             CurrentContainerNetworkResolver currentContainerNetworkResolver) {
         this.config = config;
         this.dockerClient = dockerClient;
+        this.currentContainerNetworkResolver = currentContainerNetworkResolver;
+    }
+
+    VpcNetworkManager(EmulatorConfig config, DockerClient dockerClient) {
+        this(config, dockerClient, null);
     }
 
     @PreDestroy
@@ -562,6 +570,7 @@ public class VpcNetworkManager {
     private String materialise(VpcBinding vpc) {
         synchronized (vpc) {
             if (vpc.created) {
+                attachCurrentContainer(vpc, null);
                 return vpc.networkName;
             }
             Network existing = null;
@@ -576,6 +585,7 @@ public class VpcNetworkManager {
                 List<Cidr4> actual = ipamSubnets(existing);
                 if (actual.contains(vpc.effective)) {
                     vpc.created = true;
+                    attachCurrentContainer(vpc, existing);
                     return vpc.networkName;
                 }
                 // A leftover under this VPC's own name, routing a range this VPC does not plan
@@ -609,6 +619,7 @@ public class VpcNetworkManager {
                         .withLabels(networkLabels(vpc))
                         .exec();
                 vpc.created = true;
+                attachCurrentContainer(vpc, null);
                 LOG.infov("Created Docker network {0} for VPC {1} ({2}){3}",
                         vpc.networkName, vpc.vpcId, vpc.effective,
                         vpc.substituted ? " [substituted; declared " + vpc.declared + "]" : "");
@@ -620,6 +631,34 @@ public class VpcNetworkManager {
                         vpc.networkName, vpc.vpcId, vpc.effective, e.getMessage());
                 return null;
             }
+        }
+    }
+
+    private void attachCurrentContainer(VpcBinding vpc, Network network) {
+        if (currentContainerNetworkResolver == null) {
+            return;
+        }
+        Optional<String> currentContainerId = currentContainerNetworkResolver.resolveContainerId();
+        if (currentContainerId.isEmpty() || currentContainerId.get().equals(vpc.flociContainerId)) {
+            return;
+        }
+        String containerId = currentContainerId.get();
+        Map<String, Network.ContainerNetworkConfig> containers = network == null ? null : network.getContainers();
+        if (containers != null && containers.containsKey(containerId)) {
+            vpc.flociContainerId = containerId;
+            return;
+        }
+        try {
+            dockerClient.connectToNetworkCmd()
+                    .withContainerId(containerId)
+                    .withNetworkId(vpc.networkName)
+                    .exec();
+            vpc.flociContainerId = containerId;
+            LOG.infov("Attached Floci container {0} to VPC network {1}", containerId, vpc.networkName);
+        } catch (Exception e) {
+            LOG.warnv("Could not attach Floci container {0} to VPC network {1}: {2}. ELBv2 and other "
+                            + "in-process services cannot reach private targets on this VPC.",
+                    containerId, vpc.networkName, e.getMessage());
         }
     }
 
@@ -876,6 +915,7 @@ public class VpcNetworkManager {
         final String networkName;
         final Map<String, SubnetBinding> subnets = new ConcurrentHashMap<>();
         volatile boolean created;
+        volatile String flociContainerId;
 
         VpcBinding(String region, String vpcId, Cidr4 declared, Cidr4 effective,
                    boolean substituted, String networkName) {
