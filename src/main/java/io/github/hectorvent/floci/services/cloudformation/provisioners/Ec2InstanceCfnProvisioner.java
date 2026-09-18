@@ -137,6 +137,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        ec2Service.terminateInstances(region, List.of(physicalId));
+        // Tolerate an instance already terminated out of band, so DeleteStack does not fail on it.
+        CfnDeletes.safeDelete("EC2 instance", physicalId,
+                () -> ec2Service.terminateInstances(region, List.of(physicalId)),
+                "InvalidInstanceID.NotFound");
     }
 }
