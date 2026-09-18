@@ -69,6 +69,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEve
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEventSourceMappingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsLogStreamCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsMetricFilterCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnProvisioner;
@@ -271,6 +272,7 @@ final class CfnProvisionerFixture {
             }
             if (logsService != null) {
                 discovered.add(new LogsCfnProvisioner(logsService));
+                discovered.add(new LogsLogStreamCfnProvisioner(logsService));
             }
             if (logsMetricFilterService != null) {
                 discovered.add(new LogsMetricFilterCfnProvisioner(logsMetricFilterService));

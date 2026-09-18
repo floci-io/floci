@@ -53,6 +53,17 @@ StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` 
 
 Operation IDs are recorded and validated. Duplicate IDs return `OperationIdAlreadyExistsException`, missing stack sets return `StackSetNotFoundException`, and missing operation IDs return `OperationNotFoundException`. Invalid targets and request shapes use the CloudFormation query-protocol validation errors. Operations complete locally, so `OperationInProgressException` is only reachable when local operation state actually overlaps; Floci does not inject concurrency failures solely to exercise an error code.
 
+## CloudWatch Logs log streams
+
+`AWS::Logs::LogStream` creates a stream in the required `LogGroupName`. `LogStreamName` is optional;
+when omitted, CloudFormation generates a name and keeps it across updates. `Ref` returns the stream
+name. The resource has no `Fn::GetAtt` attributes.
+
+Changing either name replaces the stream. The previous stream and its events remain available
+until the update commits; a failed stack update restores the previous stream. `UpdateReplacePolicy:
+Retain` keeps a displaced stream. Stack deletion removes the current stream and its events, and
+tolerates a stream that was already deleted.
+
 ## CloudWatch Logs metric filters
 
 `AWS::Logs::MetricFilter` returns the filter name alone for both `Ref` and
@@ -149,7 +160,7 @@ cross-resource references.
 | IoT Core | `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
 | CloudFront | `CachePolicy`, `Distribution`, `OriginAccessControl`, `OriginRequestPolicy`, `ResponseHeadersPolicy` |
 | CloudWatch | `Alarm`, `Dashboard` |
-| CloudWatch Logs | `LogGroup`, `MetricFilter` |
+| CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
 | WAFv2 | `WebACL` |
 | Config | `ConfigRule` |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
