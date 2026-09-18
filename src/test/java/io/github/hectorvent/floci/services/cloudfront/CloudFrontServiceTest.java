@@ -238,6 +238,18 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void createPublicKeyIssuesAnAwsShapedId() throws Exception {
+        CloudFrontService service = serviceWithDomainSuffix(DEFAULT_DOMAIN_SUFFIX);
+
+        PublicKey created = service.createPublicKey(validPublicKey("signer"));
+
+        // Verified on AWS us-east-1 2026-09-18: CreatePublicKey answers K + 13 characters
+        // (K2VKB3XV74876Q), the value a signed URL carries as Key-Pair-Id.
+        assertTrue(created.getId().matches("K[A-Z0-9]{13}"),
+                "Expected an AWS-shaped public key id, got: " + created.getId());
+    }
+
+    @Test
     void createDistributionLowerCasesTheDomainNameId() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
 

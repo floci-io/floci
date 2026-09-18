@@ -132,6 +132,9 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
 - Distribution IDs are 14 uppercase alphanumeric characters starting with `E` (e.g. `E1Z2X3C4V5B6N7`).
 - Distribution domain names follow the pattern `{id}.cloudfront.net`, with the id lower-cased as AWS
   writes it in a host name.
+- Public key IDs are `K` followed by 13 uppercase alphanumeric characters (e.g. `K2JCJMDEHXQW5F`),
+  the value a signed URL carries as `Key-Pair-Id`. Key group, cache policy, origin request policy and
+  response headers policy IDs are UUIDs, as they are on AWS.
 - ARNs are global — no region segment: `arn:aws:cloudfront::{accountId}:distribution/{id}`.
 - Invalidations are immediately marked `Completed`.
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.

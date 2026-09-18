@@ -1280,7 +1280,7 @@ public class CloudFrontService {
                     "A public key with this caller reference already exists.",
                     409);
         }
-        key.setId(UUID.randomUUID().toString());
+        key.setId(generatePublicKeyId());
         key.setCreatedTime(Instant.now());
         key.setEtag(UUID.randomUUID().toString());
         publicKeyStore.put(key.getId(), key);
@@ -1811,6 +1811,15 @@ public class CloudFrontService {
 
     private static String generateDistributionId() {
         StringBuilder sb = new StringBuilder("E");
+        for (int i = 0; i < 13; i++) {
+            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
+        }
+        return sb.toString();
+    }
+
+    /** AWS issues public key ids as K + 13 characters; the value travels in Key-Pair-Id. */
+    private static String generatePublicKeyId() {
+        StringBuilder sb = new StringBuilder("K");
         for (int i = 0; i < 13; i++) {
             sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
         }
