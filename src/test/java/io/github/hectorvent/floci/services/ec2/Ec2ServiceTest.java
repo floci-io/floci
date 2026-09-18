@@ -58,6 +58,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -696,6 +697,40 @@ class Ec2ServiceTest {
                 "us-east-1", List.of("ami-0abcdef1234567891"), List.of(), Map.of());
         assertEquals(1, catalog.size());
         assertEquals("al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64", catalog.getFirst().getName());
+    }
+
+    @Test
+    void describeImagesWritesRefreshedTagsBackWhenStorageReturnsDetachedImages() {
+        DetachedImageStorage imageStorage = new DetachedImageStorage();
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), new AmiImageResolver(imageCatalog), imageCatalog,
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-registered-images.json", imageStorage)));
+
+        Image stored = new Image();
+        stored.setImageId("ami-detached-tags");
+        stored.setName("detached-tags");
+        stored.setOwnerId("000000000000");
+        stored.setPublic(false);
+        stored.setImageOwnerAlias(null);
+        stored.setRegion("us-east-1");
+        imageStorage.put("us-east-1::ami-detached-tags", stored);
+        int putsBeforeDescribe = imageStorage.putCount();
+
+        Tag tag = new Tag();
+        tag.setKey("ManagedBy");
+        tag.setValue("test");
+        service.createTags("us-east-1", List.of(stored.getImageId()), List.of(tag));
+
+        List<Image> described = service.describeImages(
+                "us-east-1", List.of(stored.getImageId()), List.of(), Map.of());
+
+        assertEquals(1, described.size());
+        assertEquals("test", described.getFirst().getTags().getFirst().getValue());
+        assertTrue(imageStorage.putCount() > putsBeforeDescribe,
+                "DescribeImages must persist refreshed tags even when scan() returns detached values");
+        assertEquals("test", imageStorage.storedImage().getTags().getFirst().getValue());
     }
 
     @Test
@@ -3897,6 +3932,68 @@ class Ec2ServiceTest {
                 return (AccountAwareStorageBackend<V>) override;
             }
             return AccountAwareStorageBackend.inMemory("000000000000");
+        }
+    }
+
+    private static final class DetachedImageStorage extends AccountAwareStorageBackend<Image> {
+        private final Map<String, Image> values = new HashMap<>();
+        private int putCount;
+
+        private DetachedImageStorage() {
+            super(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(), null, "000000000000");
+        }
+
+        @Override
+        public void put(String key, Image value) {
+            putCount++;
+            values.put(key, copy(value));
+        }
+
+        @Override
+        public Optional<Image> get(String key) {
+            Image value = values.get(key);
+            return value == null ? Optional.empty() : Optional.of(copy(value));
+        }
+
+        @Override
+        public List<Image> scan(Predicate<String> keyFilter) {
+            return values.entrySet().stream()
+                    .filter(entry -> keyFilter.test(entry.getKey()))
+                    .map(entry -> copy(entry.getValue()))
+                    .toList();
+        }
+
+        private int putCount() {
+            return putCount;
+        }
+
+        private Image storedImage() {
+            return copy(values.get("us-east-1::ami-detached-tags"));
+        }
+
+        private static Image copy(Image source) {
+            Image copy = new Image();
+            copy.setImageId(source.getImageId());
+            copy.setName(source.getName());
+            copy.setDescription(source.getDescription());
+            copy.setState(source.getState());
+            copy.setOwnerId(source.getOwnerId());
+            copy.setPublic(source.isPublic());
+            copy.setArchitecture(source.getArchitecture());
+            copy.setRootDeviceType(source.getRootDeviceType());
+            copy.setRootDeviceName(source.getRootDeviceName());
+            copy.setVirtualizationType(source.getVirtualizationType());
+            copy.setHypervisor(source.getHypervisor());
+            copy.setPlatform(source.getPlatform());
+            copy.setImageOwnerAlias(source.getImageOwnerAlias());
+            copy.setCreationDate(source.getCreationDate());
+            copy.setRegion(source.getRegion());
+            copy.setSourceImageId(source.getSourceImageId());
+            copy.setDockerImage(source.getDockerImage());
+            copy.setBlockDeviceMappings(source.getBlockDeviceMappings() == null
+                    ? List.of() : new java.util.ArrayList<>(source.getBlockDeviceMappings()));
+            copy.setTags(source.getTags() == null ? List.of() : new java.util.ArrayList<>(source.getTags()));
+            return copy;
         }
     }
 }
