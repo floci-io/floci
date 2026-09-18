@@ -329,26 +329,51 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
 
     @Test
     @Order(8)
-    void theAssociationStateFilterComparesTheAssociationState() {
-        given()
+    void associationsIgnoreFiltersTheActionDoesNotModel() {
+        String unmodeled = given()
             .formParam("Action", "GetTransitGatewayRouteTableAssociations")
             .formParam("TransitGatewayRouteTableId", routeTableId)
-            .formParam("Filter.1.Name", "state")
-            .formParam("Filter.1.Value.1", "associated")
-            .header("Authorization", AUTH_HEADER)
-        .when().post("/")
-        .then().statusCode(200)
-            .body("GetTransitGatewayRouteTableAssociationsResponse.associations.item.transitGatewayAttachmentId",
-                    equalTo(attachmentId));
-
-        String attachmentLifecycleState = given()
-            .formParam("Action", "GetTransitGatewayRouteTableAssociations")
-            .formParam("TransitGatewayRouteTableId", routeTableId)
-            .formParam("Filter.1.Name", "state")
-            .formParam("Filter.1.Value.1", "available")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", "vpc-0123456789abcdef0")
             .header("Authorization", AUTH_HEADER)
         .when().post("/")
         .then().statusCode(200).extract().asString();
-        assertThat(attachmentLifecycleState, not(containsString("<item>")));
+        assertThat(unmodeled, containsString(attachmentId));
+    }
+
+    @Test
+    @Order(9)
+    void theTwoDefaultTableFiltersReadTheirOwnFlag() {
+        String created = given()
+            .formParam("Action", "CreateTransitGateway")
+            .formParam("Options.DefaultRouteTableAssociation", "enable")
+            .formParam("Options.DefaultRouteTablePropagation", "disable")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        String gatewayId = extract(created, "transitGatewayId");
+        String associationOnlyTable = extract(created, "associationDefaultRouteTableId");
+
+        String byAssociation = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", gatewayId)
+            .formParam("Filter.2.Name", "default-association-route-table")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(byAssociation, containsString(associationOnlyTable));
+
+        String byPropagation = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", gatewayId)
+            .formParam("Filter.2.Name", "default-propagation-route-table")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(byPropagation, not(containsString("<item>")));
     }
 }

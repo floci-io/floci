@@ -138,6 +138,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             Pattern.compile("^tgw-rtb-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Pattern TRANSIT_GATEWAY_ATTACHMENT_ID_PATTERN =
             Pattern.compile("^tgw-attach-[0-9a-f]{8}([0-9a-f]{9})?$");
+    private static final Set<String> ASSOCIATION_FILTER_NAMES =
+            Set.of("resource-id", "resource-type", "transit-gateway-attachment-id");
     // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
     private static final Duration CONTAINER_LAUNCH_TIMEOUT = Duration.ofMinutes(5);
@@ -2010,14 +2012,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /** The attachments associated with a route table, which is where an association is recorded. */
     public List<TransitGatewayVpcAttachment> associationsOf(
             String region, String routeTableId, Map<String, List<String>> filters) {
-        Map<String, List<String>> attachmentFilters = new LinkedHashMap<>(filters);
-        List<String> associationStates = attachmentFilters.remove("state");
+        Map<String, List<String>> modeledFilters = new LinkedHashMap<>(filters);
+        modeledFilters.keySet().retainAll(ASSOCIATION_FILTER_NAMES);
         return transitGatewayVpcAttachments.scan(k -> true).stream()
                 .filter(attachment -> region.equals(attachment.getRegion()))
                 .filter(attachment -> routeTableId.equals(attachment.getAssociationRouteTableId()))
-                .filter(attachment -> associationStates == null
-                        || matchesValue(associationStates, attachment.getAssociationState()))
-                .filter(attachment -> matchesFilters(attachment, attachmentFilters, region))
+                .filter(attachment -> matchesFilters(attachment, modeledFilters, region))
                 .collect(Collectors.toList());
     }
 
