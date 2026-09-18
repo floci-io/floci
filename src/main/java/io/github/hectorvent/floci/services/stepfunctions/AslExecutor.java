@@ -3209,17 +3209,18 @@ public class AslExecutor {
                 && JsonataEvaluator.isExpression(readerConfig.get("MaxItems").asText());
         if (hasMaxItemsPath) {
             JsonNode value = resolvePath(readerConfig.get("MaxItemsPath").asText(), mapInput);
-            if (!value.isIntegralNumber()) {
+            long maxItems;
+            try {
+                maxItems = Long.parseLong(value.asText());
+            } catch (NumberFormatException e) {
                 throw new FailStateException("States.Runtime",
                         "MaxItems must resolve to an integer of 0 or more", "MaxItems");
             }
-            if (value.bigIntegerValue().signum() < 0) {
+            if (maxItems < 0) {
                 throw new FailStateException(
                         "States.ItemReaderFailed", "field MaxItems must be positive", true);
             }
-            return value.bigIntegerValue().compareTo(BigInteger.valueOf(ITEM_READER_MAX_ITEMS)) > 0
-                    ? ITEM_READER_MAX_ITEMS
-                    : value.intValue();
+            return (int) Math.min(maxItems, ITEM_READER_MAX_ITEMS);
         }
 
         int maxItems = resolveMapIntegerField(

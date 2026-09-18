@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -9,9 +10,13 @@ import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
@@ -3906,11 +3911,148 @@ class StepFunctionsJsonataIntegrationTest {
         assertEquals("field MaxItems must be positive", failure.jsonPath().getString("cause"));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            getObject     | 2                     | 2
+            listObjectsV2 | 2                     | 2
+            getObject     | "2"                   | 2
+            listObjectsV2 | "2"                   | 2
+            getObject     | "0"                   | 3
+            listObjectsV2 | "0"                   | 3
+            getObject     | 100000001             | 3
+            listObjectsV2 | 100000001             | 3
+            getObject     | "100000001"           | 3
+            listObjectsV2 | "100000001"           | 3
+            getObject     | 9223372036854775807    | 3
+            listObjectsV2 | 9223372036854775807    | 3
+            getObject     | "9223372036854775807"  | 3
+            listObjectsV2 | "9223372036854775807"  | 3
+            """)
+    void distributedMapWithItemReader_parsesMaxItemsPathAsLong(
+            String resource, String limit, int expectedItems) throws Exception {
+        String name = "max-path-valid-" + resource + "-" + Integer.toUnsignedString(limit.hashCode());
+        String definition = maxItemsPathDefinition(resource, name);
+        String smArn = createStateMachine(name, definition);
+
+        JsonNode items = objectMapper.readTree(waitForExecution(
+                startExecution(smArn, "{\"limit\":" + limit + "}")));
+
+        assertEquals(expectedItems, items.size());
+        assertEquals("workers/a.json", items.get(0).path("Key").asText());
+        assertEquals("workers/b.json", items.get(1).path("Key").asText());
+        if (expectedItems == 3) {
+            assertEquals("workers/c.json", items.get(2).path("Key").asText());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            getObject     | 9223372036854775808
+            listObjectsV2 | 9223372036854775808
+            getObject     | "9223372036854775808"
+            listObjectsV2 | "9223372036854775808"
+            getObject     | -9223372036854775809
+            listObjectsV2 | -9223372036854775809
+            getObject     | "-9223372036854775809"
+            listObjectsV2 | "-9223372036854775809"
+            getObject     | 2.0
+            listObjectsV2 | 2.0
+            getObject     | "2.0"
+            listObjectsV2 | "2.0"
+            getObject     | null
+            listObjectsV2 | null
+            getObject     | true
+            listObjectsV2 | true
+            getObject     | []
+            listObjectsV2 | []
+            getObject     | {}
+            listObjectsV2 | {}
+            """)
+    void distributedMapWithItemReader_rejectsMaxItemsPathOutsideLongSyntaxAndRange(
+            String resource, String limit) throws Exception {
+        String name = "max-path-invalid-" + resource + "-" + Integer.toUnsignedString(limit.hashCode());
+        String definition = maxItemsPathDefinition(resource, name);
+        String smArn = createStateMachine(name, definition);
+
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":" + limit + "}"));
+
+        assertEquals("States.Runtime", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("MaxItems"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            getObject     | -1
+            listObjectsV2 | -1
+            getObject     | "-1"
+            listObjectsV2 | "-1"
+            getObject     | -9223372036854775808
+            listObjectsV2 | -9223372036854775808
+            getObject     | "-9223372036854775808"
+            listObjectsV2 | "-9223372036854775808"
+            """)
+    void distributedMapWithItemReader_rejectsNegativeMaxItemsPathLongAsItemReaderFailure(
+            String resource, String limit) throws Exception {
+        String name = "max-path-negative-" + resource + "-" + Integer.toUnsignedString(limit.hashCode());
+        String definition = maxItemsPathDefinition(resource, name);
+        String smArn = createStateMachine(name, definition);
+
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":" + limit + "}"));
+
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+        assertEquals("field MaxItems must be positive", failure.jsonPath().getString("cause"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"getObject", "listObjectsV2"})
+    void distributedMapWithItemReader_jsonataMaxItemsStillRejectsNumericStrings(String resource) throws Exception {
+        String name = "max-jsonata-numeric-string-" + resource;
+        ObjectNode root = (ObjectNode) objectMapper.readTree(maxItemsPathDefinition(resource, name));
+        root.put("QueryLanguage", "JSONata");
+        ObjectNode reader = (ObjectNode) root.path("States").path("ProcessWorkers")
+                .path("ItemReader");
+        ObjectNode config = (ObjectNode) reader.path("ReaderConfig");
+        config.remove("MaxItemsPath");
+        config.put("MaxItems", "{% $states.input.limit %}");
+        reader.set("Arguments", reader.remove("Parameters"));
+        String smArn = createStateMachine(name, root.toString());
+
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":\"2\"}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("MaxItems"));
+    }
+
+    private String maxItemsPathDefinition(String resource, String bucket) {
+        bucket = bucket.toLowerCase(Locale.ROOT);
+        s3Service.createBucket(bucket, "us-east-1");
+        for (String key : List.of("workers/a.json", "workers/b.json", "workers/c.json")) {
+            s3Service.putObject(bucket, key,
+                    "[{\"Key\":\"workers/a.json\"},{\"Key\":\"workers/b.json\"},{\"Key\":\"workers/c.json\"}]"
+                            .getBytes(), "application/json", new HashMap<>());
+        }
+        return itemReaderDefinition(resource, "", """
+                "ReaderConfig": {
+                    %s
+                    "MaxItemsPath": "$.limit"
+                },
+                "Parameters": {
+                    "Bucket": "%s",
+                    %s
+                }
+                """.formatted("getObject".equals(resource) ? "\"InputType\":\"JSON\"," : "",
+                bucket, "getObject".equals(resource) ? "\"Key\":\"workers/a.json\"" : "\"Prefix\":\"workers/\""));
+    }
+
     private static String listObjectsDefinition(String itemReaderFields) {
         return listObjectsDefinition("", itemReaderFields);
     }
 
     private static String listObjectsDefinition(String topLevelFields, String itemReaderFields) {
+        return itemReaderDefinition("listObjectsV2", topLevelFields, itemReaderFields);
+    }
+
+    private static String itemReaderDefinition(String resource, String topLevelFields, String itemReaderFields) {
         return String.format("""
                 {
                     %s
@@ -3919,7 +4061,7 @@ class StepFunctionsJsonataIntegrationTest {
                         "ProcessWorkers": {
                             "Type": "Map",
                             "ItemReader": {
-                                "Resource": "arn:aws:states:::s3:listObjectsV2",
+                                "Resource": "arn:aws:states:::s3:%s",
                                 %s
                             },
                             "ItemProcessor": {
@@ -3939,7 +4081,7 @@ class StepFunctionsJsonataIntegrationTest {
                         }
                     }
                 }
-                """, topLevelFields, itemReaderFields);
+                """, topLevelFields, resource, itemReaderFields);
     }
 
     @Test
