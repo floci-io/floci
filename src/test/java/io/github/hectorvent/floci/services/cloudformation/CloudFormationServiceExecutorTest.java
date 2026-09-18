@@ -36,7 +36,7 @@ class CloudFormationServiceExecutorTest {
     void rejectedCloudFormationOperationUsesAwsErrorCode() {
         AwsException exception = CloudFormationService.operationLimitExceeded();
 
-        assertEquals("LimitExceeded", exception.getErrorCode());
+        assertEquals("LimitExceededException", exception.getErrorCode());
     }
 
     private static void await(CountDownLatch release) {

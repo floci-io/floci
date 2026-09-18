@@ -37,7 +37,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -713,7 +712,7 @@ public class CloudFormationService implements ResourceProvider {
             persistStack(stack);
             return submitExecution(stack, claimed[0].changeSet(), claimed[0].isCreate(), region, accountId);
         } catch (AwsException e) {
-            if ("LimitExceeded".equals(e.getErrorCode())) {
+            if ("LimitExceededException".equals(e.getErrorCode())) {
                 Stack restored = restoreStack(accountId, canonicalStackName, region, snapshot[0]);
                 if (restored != null) {
                     persistStack(restored);
@@ -833,9 +832,10 @@ public class CloudFormationService implements ResourceProvider {
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
         try {
-            return submitOperation(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
+            return submitOperation(() -> runUnderAccount(accountId,
+                    () -> deleteStackResources(stack, region, accountId)));
         } catch (AwsException e) {
-            if ("LimitExceeded".equals(e.getErrorCode())) {
+            if ("LimitExceededException".equals(e.getErrorCode())) {
                 Stack restored = restoreStack(accountId, stack.getStackName(), region, snapshot);
                 if (restored != null) {
                     persistStack(restored);
@@ -887,7 +887,7 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     static AwsException operationLimitExceeded() {
-        return new AwsException("LimitExceeded",
+        return new AwsException("LimitExceededException",
                 "Too many CloudFormation operations are in progress.", 400);
     }
 
@@ -1620,30 +1620,22 @@ public class CloudFormationService implements ResourceProvider {
         return false;
     }
 
-    private void deleteResourcePhysically(StackResource resource, String region) throws Exception {
+    private void deleteResourcePhysically(StackResource resource, String region, String accountId)
+            throws Exception {
         if ("AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
-            Future<?> future = deleteStack(resource.getPhysicalId(), region, regionResolver.getAccountId());
-            if (future != null) {
-                try {
-                    future.get();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw e;
-                } catch (ExecutionException e) {
-                    Throwable cause = e.getCause();
-                    if (cause instanceof Exception ex) {
-                        throw ex;
-                    }
-                    throw e;
-                }
+            Stack child = resolveStack(resource.getPhysicalId(), region, accountId);
+            if (child == null) {
+                return;
             }
-            Stack child = resolveStack(resource.getPhysicalId(), region);
-            if (child != null && "DELETE_FAILED".equals(child.getStatus())) {
-                String reason = child.getStatusReason() != null
-                        ? child.getStatusReason()
-                        : "Nested stack deletion failed";
-                throw new IllegalStateException(reason);
+            if (child.isEnableTerminationProtection()) {
+                throw new AwsException("ValidationError",
+                        "Stack [" + child.getStackId()
+                                + "] cannot be deleted while TerminationProtection is enabled", 400);
             }
+            child.setStatus("DELETE_IN_PROGRESS");
+            addEvent(child, child.getStackName(), child.getStackId(),
+                    "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+            deleteStackResources(child, region, accountId);
         } else {
             provisioner.delete(resource, region);
         }
@@ -1728,7 +1720,7 @@ public class CloudFormationService implements ResourceProvider {
                         addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                                 resource.getResourceType(), "DELETE_IN_PROGRESS",
                                 "Resource creation cancelled during update rollback");
-                        deleteResourcePhysically(resource, region);
+                        deleteResourcePhysically(resource, region, ownerAccount(stack));
                     }
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE",
@@ -1888,7 +1880,7 @@ public class CloudFormationService implements ResourceProvider {
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
-                deleteResourcePhysically(resource, region);
+                deleteResourcePhysically(resource, region, ownerAccount(stack));
                 completeResourceDeletion(stack, resource);
             } catch (Exception e) {
                 if (isAlreadyDeleted(e)) {
@@ -1946,7 +1938,7 @@ public class CloudFormationService implements ResourceProvider {
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
-                deleteResourcePhysically(resource, region);
+                deleteResourcePhysically(resource, region, ownerAccount(stack));
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_COMPLETE", null);
                 stack.getResources().remove(resource.getLogicalId());
@@ -2004,7 +1996,7 @@ public class CloudFormationService implements ResourceProvider {
         return ordered;
     }
 
-    private void deleteStackResources(Stack stack, String region) {
+    private void deleteStackResources(Stack stack, String region, String accountId) {
         try {
             List<StackResource> resources = resourcesInCreationOrder(stack, region);
             Collections.reverse(resources); // Dependents go before what they depend on
@@ -2033,7 +2025,7 @@ public class CloudFormationService implements ResourceProvider {
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_IN_PROGRESS", null);
                 try {
-                    deleteResourcePhysically(resource, region);
+                    deleteResourcePhysically(resource, region, accountId);
                     completeResourceDeletion(stack, resource);
                 } catch (Exception e) {
                     if (isAlreadyDeleted(e)) {
