@@ -1166,6 +1166,8 @@ class RdsQueryHandlerTest {
         // answers it with GlobalClusterNotFoundFault rather than an empty list.
         MultivaluedMap<String, String> params = params();
         params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+        when(service.describeGlobalCluster("no-such-gc")).thenThrow(
+                new AwsException("GlobalClusterNotFoundFault", "Global cluster 'no-such-gc' not found", 404));
 
         Response response = handler.handle("DescribeGlobalClusters", params);
 
@@ -1191,6 +1193,8 @@ class RdsQueryHandlerTest {
     void describeGlobalClusters_rejectsMaxRecordsOutsideTheAllowedRange() {
         // A live account rejects this before it looks the identifier up, so an empty model is no
         // reason to accept a value AWS refuses.
+        when(service.describeGlobalCluster("no-such-gc")).thenThrow(
+                new AwsException("GlobalClusterNotFoundFault", "Global cluster 'no-such-gc' not found", 404));
         for (String value : new String[]{"5", "101", "abc"}) {
             MultivaluedMap<String, String> params = params();
             params.putSingle("MaxRecords", value);
@@ -1227,6 +1231,8 @@ class RdsQueryHandlerTest {
         assertTrue(((String) response.getEntity()).contains("The request token is invalid."));
 
         params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+        when(service.describeGlobalCluster("no-such-gc")).thenThrow(
+                new AwsException("GlobalClusterNotFoundFault", "Global cluster 'no-such-gc' not found", 404));
         Response withBoth = handler.handle("DescribeGlobalClusters", params);
         assertEquals(404, withBoth.getStatus());
         assertTrue(((String) withBoth.getEntity()).contains("GlobalClusterNotFoundFault"));

@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * Provisions and deletes the CloudFormation resource types for a single service, replacing one
@@ -42,6 +44,26 @@ public interface CfnResourceProvisioner {
      * the resource as UPDATE_FAILED with "Rollback is not implemented" on false.
      */
     default boolean rollbackUpdate(StackResource resource) {
+        return false;
+    }
+
+    default boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
+        return rollbackUpdate(resource);
+    }
+
+    /**
+     * Whether a failed update still needs this provisioner's ownership-aware delete. Opt-in:
+     * a failed resource is not otherwise assumed to own a backing entity.
+     */
+    default boolean hasPendingRollbackCleanup(StackResource resource) {
+        return false;
+    }
+
+    /**
+     * True when this provisioner keeps the failed update attempt's own identity and tracking for
+     * its {@code rollbackUpdate}, so the engine must not restore the previous resource over it.
+     */
+    default boolean retainsFailedUpdateState(StackResource resource) {
         return false;
     }
 

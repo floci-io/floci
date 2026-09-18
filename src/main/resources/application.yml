@@ -101,7 +101,6 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
-      - --initialize-at-run-time=graphql.util.IdGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
@@ -403,6 +402,7 @@ floci:
       # default-postgres-image: "registry.example.com/postgres:16-alpine"
       # default-mysql-image: "registry.example.com/mysql:8.0"
       # default-mariadb-image: "registry.example.com/mariadb:11"
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
       proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
       proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
       proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
@@ -664,6 +664,14 @@ floci:
       staging-bucket: floci-cur-staging
     bcm-pricing-calculator:
       enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: false                                 # FLOCI_SERVICES_TIMESTREAM_INFLUXDB_MOCK: true = metadata only, no Docker
+      default-image: "influxdb:2.7"
+      host-port-base: 8086
+      host-port-max: 8185
+      readiness-timeout-seconds: 120
+      # docker-network: my-network               # Docker network to attach InfluxDB containers to
     bcm-data-exports:
       enabled: true
       emit-mode: synchronous
@@ -687,6 +695,9 @@ floci:
       vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL resolver template may execute (truncates the loop, does not fail the template)
       vtl-max-output-chars: 1048576        # Maximum characters a VTL resolver template may render before it fails
       vtl-timeout-millis: 5000             # Maximum wall-clock time a VTL resolver template may spend evaluating before it fails
+      # graphql-url: http://floci-graphql:8181  # set to skip sidecar container management
+      # Exact version on purpose: a cached :latest is never re-pulled. Published from floci-io/floci-sidecars.
+      graphql-image: "floci/floci-sidecar-graphql:0.2.0"
     s3vectors:
       enabled: true
     s3tables:

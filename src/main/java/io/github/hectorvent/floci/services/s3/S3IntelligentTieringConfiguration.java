@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.S3FilterGrammar;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 
@@ -81,71 +82,13 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
 
         XmlBuilder inner = new XmlBuilder().elem("Id", id);
         if (filters == 1) {
-            inner.start("Filter").raw(filterXml(xml)).end("Filter");
+            inner.start("Filter").raw(S3FilterGrammar.filterXml(xml, List.of())).end("Filter");
         }
         inner.elem("Status", status);
         for (int i = 0; i < tierings; i++) {
             inner.start("Tiering").raw(tieringXml(xml, i)).end("Tiering");
         }
         return new S3IntelligentTieringConfiguration(id, inner.build());
-    }
-
-    /**
-     * Serializes the filter. A filter is exactly one of a prefix, an object tag, or an And
-     * conjunction: AWS answers MalformedXML for a filter naming none of them or more than one,
-     * and for an And holding fewer than two predicates.
-     */
-    private static String filterXml(String xml) {
-        List<String> predicates = XmlParser.childElementNames(xml, "Filter");
-        if (predicates.size() != 1) {
-            throw malformed();
-        }
-
-        String predicate = predicates.getFirst();
-        return switch (predicate) {
-            case "Prefix" -> new XmlBuilder().elem("Prefix", requireText(xml, "Prefix")).build();
-            case "Tag" -> tagsXml(xml, 1);
-            case "And" -> {
-                List<String> conjuncts = XmlParser.childElementNames(xml, "And");
-                if (conjuncts.size() < 2) {
-                    throw malformed();
-                }
-                XmlBuilder and = new XmlBuilder().start("And");
-                if (conjuncts.contains("Prefix")) {
-                    and.elem("Prefix", requireText(xml, "Prefix"));
-                }
-                long tagCount = conjuncts.stream().filter("Tag"::equals).count();
-                if (tagCount > 0) {
-                    and.raw(tagsXml(xml, (int) tagCount));
-                }
-                // Every conjunct has to be one floci understands, or the filter it stores would
-                // not be the filter that was sent.
-                if (conjuncts.size() != tagCount + (conjuncts.contains("Prefix") ? 1 : 0)) {
-                    throw malformed();
-                }
-                yield and.end("And").build();
-            }
-            default -> throw malformed();
-        };
-    }
-
-    /**
-     * Serializes {@code expected} tags. A tag carries both a key and a value, so a pair short of
-     * the element count means one of them was missing.
-     */
-    private static String tagsXml(String xml, int expected) {
-        Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
-        if (tags.size() != expected) {
-            throw malformed();
-        }
-        XmlBuilder out = new XmlBuilder();
-        tags.forEach((key, value) -> {
-            if (key.isBlank() || value == null) {
-                throw malformed();
-            }
-            out.start("Tag").elem("Key", key).elem("Value", value).end("Tag");
-        });
-        return out.build();
     }
 
     /**
@@ -188,13 +131,5 @@ record S3IntelligentTieringConfiguration(String id, String innerXml) {
                 .elem("AccessTier", accessTier)
                 .elem("Days", days)
                 .build();
-    }
-
-    private static String requireText(String xml, String element) {
-        String value = XmlParser.extractFirst(xml, element, null);
-        if (value == null) {
-            throw malformed();
-        }
-        return value;
     }
 }

@@ -124,6 +124,26 @@ public class GlueJsonHandler {
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableVersions", glueService.getTableVersions(dbName, tableName))).build();
             }
+            case "GetTableVersion" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                yield Response.ok(Map.of("TableVersion", glueService.getTableVersion(
+                        dbName, tableName, request.path("VersionId").asText(null)))).build();
+            }
+            case "DeleteTableVersion" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                glueService.deleteTableVersion(dbName, tableName, request.path("VersionId").asText(null));
+                yield Response.ok().build();
+            }
+            case "BatchDeleteTableVersion" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                List<String> versionIds = mapper.convertValue(request.get("VersionIds"), STRING_LIST);
+                yield Response.ok(Map.of("Errors", glueService.batchDeleteTableVersions(
+                        dbName, tableName, versionIds == null ? List.of() : versionIds))).build();
+            }
+            case "SearchTables" -> handleSearchTables(request);
             case "DeleteTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("Name").asText();
@@ -156,6 +176,7 @@ public class GlueJsonHandler {
                 yield Response.ok(Map.of("Partitions", glueService.getPartitions(dbName, tableName, expression))).build();
             }
             case "DeletePartition" -> handleDeletePartition(request);
+            case "BatchDeletePartition" -> handleBatchDeletePartition(request);
             case "UpdatePartition" -> handleUpdatePartition(request);
             case "UpdateColumnStatisticsForPartition" -> handleUpdateColumnStatisticsForPartition(request);
             case "GetColumnStatisticsForPartition" -> handleGetColumnStatisticsForPartition(request);
@@ -317,6 +338,31 @@ public class GlueJsonHandler {
                 "Partitions", glueService.batchGetPartitions(dbName, tableName, partitionValues),
                 "UnprocessedKeys", List.of()))
                 .build();
+    }
+
+    private Response handleBatchDeletePartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<Map<String, Object>> partitionsToDelete = mapper.convertValue(request.get("PartitionsToDelete"), MAP_LIST);
+        List<List<String>> partitionValues = (partitionsToDelete == null ? List.<Map<String, Object>>of() : partitionsToDelete)
+                .stream()
+                .map(partition -> mapper.convertValue(partition.get("Values"), STRING_LIST))
+                .toList();
+        return Response.ok(Map.of(
+                "Errors", glueService.batchDeletePartitions(dbName, tableName, partitionValues))).build();
+    }
+
+    private Response handleSearchTables(JsonNode request) {
+        List<GlueService.SearchFilter> filters = request.hasNonNull("Filters")
+                ? mapper.convertValue(request.get("Filters"), new TypeReference<List<GlueService.SearchFilter>>() {})
+                : null;
+        List<GlueService.SearchSort> sortCriteria = request.hasNonNull("SortCriteria")
+                ? mapper.convertValue(request.get("SortCriteria"), new TypeReference<List<GlueService.SearchSort>>() {})
+                : null;
+        GlueService.Page<Table> page = glueService.searchTables(
+                request.path("SearchText").asText(null), filters, sortCriteria,
+                readMaxResults(request), readNextToken(request));
+        return Response.ok(pageResponse("TableList", page.items(), page.nextToken())).build();
     }
 
     private Response handleDeletePartition(JsonNode request) {

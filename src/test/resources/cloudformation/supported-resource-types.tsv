@@ -54,7 +54,7 @@ AWS::DynamoDB::GlobalTable	DynamoDbCfnProvisioner
 AWS::DynamoDB::Table	DynamoDbCfnProvisioner
 AWS::EC2::EIP	Ec2NetworkCfnProvisioner
 AWS::EC2::FlowLog	Ec2FlowLogCfnProvisioner
-AWS::EC2::Instance	LEGACY_SWITCH
+AWS::EC2::Instance	Ec2InstanceCfnProvisioner
 AWS::EC2::InternetGateway	Ec2NetworkCfnProvisioner
 AWS::EC2::LaunchTemplate	Ec2LaunchTemplateCfnProvisioner
 AWS::EC2::NatGateway	Ec2NetworkCfnProvisioner
@@ -62,7 +62,7 @@ AWS::EC2::NetworkAcl	Ec2NetworkAclCfnProvisioner
 AWS::EC2::NetworkAclEntry	Ec2NetworkAclCfnProvisioner
 AWS::EC2::Route	Ec2NetworkCfnProvisioner
 AWS::EC2::RouteTable	Ec2NetworkCfnProvisioner
-AWS::EC2::SecurityGroup	LEGACY_SWITCH
+AWS::EC2::SecurityGroup	Ec2SecurityGroupCfnProvisioner
 AWS::EC2::SecurityGroupEgress	Ec2SecurityGroupRuleCfnProvisioner
 AWS::EC2::SecurityGroupIngress	Ec2SecurityGroupRuleCfnProvisioner
 AWS::EC2::Subnet	Ec2NetworkCfnProvisioner
@@ -111,6 +111,7 @@ AWS::Lambda::Permission	LambdaAddressingCfnProvisioner
 AWS::Lambda::Url	LambdaAddressingCfnProvisioner
 AWS::Lambda::Version	LambdaVersionAliasCfnProvisioner
 AWS::Logs::LogGroup	LogsCfnProvisioner
+AWS::Logs::MetricFilter	LogsMetricFilterCfnProvisioner
 AWS::Organizations::Account	OrganizationsCfnProvisioner
 AWS::Organizations::Organization	OrganizationsCfnProvisioner
 AWS::Organizations::OrganizationalUnit	OrganizationsCfnProvisioner

@@ -38,6 +38,7 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.LogConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -54,6 +55,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -79,6 +81,55 @@ public class EcsContainerManager {
     private final HostVolumePolicy hostVolumePolicy;
     private Ec2Service ec2Service;
     private SecurityGroupFirewallManager firewallManager;
+
+    static LogConfig firelensLogConfig(String taskId, String containerName, int fluentdPort) {
+        return new LogConfig(LogConfig.LoggingType.FLUENTD, Map.of(
+                "fluentd-address", "127.0.0.1:" + fluentdPort,
+                "tag", taskId + "." + containerName,
+                "fluentd-async", "true"));
+    }
+
+    static List<ContainerDefinition> orderFirelensContainers(List<ContainerDefinition> definitions) {
+        ContainerDefinition router = firelensRouter(definitions);
+        boolean hasFirelensApplication = definitions.stream().anyMatch(EcsContainerManager::usesFirelens);
+        if (router == null) {
+            if (hasFirelensApplication) {
+                throw new AwsException("ClientException",
+                        "An awsfirelens log configuration requires a FireLens log router.", 400);
+            }
+            return definitions;
+        }
+        String type = router.getFirelensConfiguration().type();
+        if (!"fluentbit".equalsIgnoreCase(type) && !"fluentd".equalsIgnoreCase(type)) {
+            throw new AwsException("ClientException",
+                    "FireLens configuration type must be fluentbit or fluentd.", 400);
+        }
+        if (router.getPortMappings() != null && router.getPortMappings().stream()
+                .anyMatch(port -> port.containerPort() == 24224)) {
+            throw new AwsException("ClientException",
+                    "FireLens port 24224 must not be exposed.", 400);
+        }
+        List<ContainerDefinition> ordered = new ArrayList<>(definitions.size());
+        ordered.add(router);
+        definitions.stream().filter(definition -> definition != router).forEach(ordered::add);
+        return ordered;
+    }
+
+    private static ContainerDefinition firelensRouter(List<ContainerDefinition> definitions) {
+        List<ContainerDefinition> routers = definitions.stream()
+                .filter(definition -> definition.getFirelensConfiguration() != null)
+                .toList();
+        if (routers.size() > 1) {
+            throw new AwsException("ClientException",
+                    "A task definition can have only one FireLens log router.", 400);
+        }
+        return routers.isEmpty() ? null : routers.getFirst();
+    }
+
+    private static boolean usesFirelens(ContainerDefinition definition) {
+        return definition.getLogConfiguration() != null
+                && "awsfirelens".equalsIgnoreCase(definition.getLogConfiguration().logDriver());
+    }
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -135,7 +186,9 @@ public class EcsContainerManager {
         Map<String, String> containerIds = new LinkedHashMap<>();
         Map<String, Closeable> logStreamsByContainerId = new LinkedHashMap<>();
         List<Container> runtimeContainers = new ArrayList<>();
-        List<ContainerDefinition> launchOrder = orderForVolumesFrom(taskDef.getContainerDefinitions());
+        List<ContainerDefinition> orderedDefinitions = orderFirelensContainers(taskDef.getContainerDefinitions());
+        ContainerDefinition firelensRouter = firelensRouter(orderedDefinitions);
+        List<ContainerDefinition> launchOrder = orderForDependencies(orderedDefinitions, firelensRouter);
 
         // Task-level volumes consumed by per-container mountPoints: host volumes map their
         // name -> absolute host source path; efsVolumeConfiguration volumes map their
@@ -156,6 +209,12 @@ public class EcsContainerManager {
         }
 
         Map<String, ContainerOverride> overridesByName = overridesByName(containerOverrides);
+        if (firelensRouter != null && taskDef.getNetworkMode() == NetworkMode.awsvpc
+                && firewallManager != null && firewallManager.enabled()) {
+            throw new AwsException("ClientException",
+                    "FireLens is not supported with security-group enforcement.", 400);
+        }
+        OptionalInt firelensHostPort = OptionalInt.empty();
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
@@ -185,12 +244,21 @@ public class EcsContainerManager {
                     // own loopback.
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
-                    .withLogRotation()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                             "ecs", taskId, regionResolver.getAccountId(), region));
+            boolean firelensApplication = usesFirelens(def);
+            if (!firelensApplication) {
+                specBuilder.withLogRotation();
+            }
             if (protectedNetwork != null) {
                 specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
                 specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+            } else if (firelensApplication) {
+                String routerId = containerIds.get(firelensRouter.getName());
+                specBuilder.withNetworkMode("container:" + routerId);
+            }
+            if (def == firelensRouter) {
+                specBuilder.withLoopbackPortBinding(24224, 0);
             }
 
             // Add memory limit if specified
@@ -206,7 +274,7 @@ public class EcsContainerManager {
             // local Docker host (#1778) — awsvpc mappings always get a dynamic
             // host port in native mode, or expose-only in Docker mode where ECS
             // consumers reach containers via the docker network IP.
-            if (protectedNetwork == null && def.getPortMappings() != null) {
+            if (protectedNetwork == null && !firelensApplication && def.getPortMappings() != null) {
                 boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
                 boolean publishToHost = !containerDetector.isRunningInContainer();
                 for (PortMapping pm : def.getPortMappings()) {
@@ -231,6 +299,11 @@ public class EcsContainerManager {
             }
             if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
                 specBuilder.withEntrypoint(def.getEntryPoint());
+            }
+
+            if (firelensApplication) {
+                specBuilder.withLogConfig(firelensLogConfig(
+                        taskId, def.getName(), firelensHostPort.orElseThrow()));
             }
 
             // Bind-mount task-level volumes referenced by this container's mountPoints.
@@ -282,6 +355,14 @@ public class EcsContainerManager {
             ContainerInfo info = lifecycleManager.createAndStart(spec);
             String dockerId = info.containerId();
 
+            if (def == firelensRouter) {
+                firelensHostPort = info.publishedHostPort(24224);
+                if (firelensHostPort.isEmpty()) {
+                    throw new AwsException("ClientException",
+                            "The FireLens log router did not publish port 24224.", 400);
+                }
+            }
+
             LOG.infov("Created ECS container {0} for task {1} container {2}", dockerId, taskId, def.getName());
 
             // Resolve network bindings for ECS-specific model
@@ -297,11 +378,13 @@ public class EcsContainerManager {
             String logGroup = "/ecs/" + taskDef.getFamily();
             String logStream = logStreamer.generateLogStreamName(def.getName() + "/" + taskId);
 
-            Closeable logHandle = logStreamer.attach(
-                    dockerId, logGroup, logStream, region,
-                    "ecs:" + taskDef.getFamily() + ":" + def.getName());
-            if (logHandle != null) {
-                logStreamsByContainerId.put(dockerId, logHandle);
+            if (!firelensApplication) {
+                Closeable logHandle = logStreamer.attach(
+                        dockerId, logGroup, logStream, region,
+                        "ecs:" + taskDef.getFamily() + ":" + def.getName());
+                if (logHandle != null) {
+                    logStreamsByContainerId.put(dockerId, logHandle);
+                }
             }
         }
         } catch (Exception e) {
@@ -335,7 +418,8 @@ public class EcsContainerManager {
                 protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region);
     }
 
-    private List<ContainerDefinition> orderForVolumesFrom(List<ContainerDefinition> definitions) {
+    private List<ContainerDefinition> orderForDependencies(List<ContainerDefinition> definitions,
+                                                          ContainerDefinition firelensRouter) {
         Map<String, ContainerDefinition> definitionsByName = new LinkedHashMap<>();
         for (ContainerDefinition definition : definitions) {
             definitionsByName.put(definition.getName(), definition);
@@ -345,22 +429,26 @@ public class EcsContainerManager {
         Set<ContainerDefinition> visiting = new HashSet<>();
         Set<ContainerDefinition> visited = new HashSet<>();
         for (ContainerDefinition definition : definitions) {
-            addAfterVolumeSources(definition, definitionsByName, visiting, visited, ordered);
+            addAfterDependencies(definition, definitionsByName, firelensRouter, visiting, visited, ordered);
         }
         return ordered;
     }
 
-    private void addAfterVolumeSources(ContainerDefinition definition,
-                                       Map<String, ContainerDefinition> definitionsByName,
-                                       Set<ContainerDefinition> visiting,
-                                       Set<ContainerDefinition> visited,
-                                       List<ContainerDefinition> ordered) {
+    private void addAfterDependencies(ContainerDefinition definition,
+                                      Map<String, ContainerDefinition> definitionsByName,
+                                      ContainerDefinition firelensRouter,
+                                      Set<ContainerDefinition> visiting,
+                                      Set<ContainerDefinition> visited,
+                                      List<ContainerDefinition> ordered) {
         if (visited.contains(definition)) {
             return;
         }
         if (!visiting.add(definition)) {
-            throw new IllegalArgumentException("ECS volumesFrom references contain a cycle at container "
+            throw new IllegalArgumentException("ECS container dependencies contain a cycle at container "
                     + definition.getName());
+        }
+        if (usesFirelens(definition)) {
+            addAfterDependencies(firelensRouter, definitionsByName, firelensRouter, visiting, visited, ordered);
         }
         if (definition.getVolumesFrom() != null) {
             for (VolumeFrom volumeFrom : definition.getVolumesFrom()) {
@@ -369,7 +457,7 @@ public class EcsContainerManager {
                     throw new IllegalArgumentException("ECS volumesFrom references unknown source container "
                             + volumeFrom.sourceContainer());
                 }
-                addAfterVolumeSources(source, definitionsByName, visiting, visited, ordered);
+                addAfterDependencies(source, definitionsByName, firelensRouter, visiting, visited, ordered);
             }
         }
         visiting.remove(definition);

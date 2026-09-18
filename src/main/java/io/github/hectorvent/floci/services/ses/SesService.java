@@ -4,23 +4,19 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
-import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
-import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
@@ -39,8 +35,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -48,6 +42,33 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+/**
+ * What is left of the original single SES service after the store-based domain split and the
+ * per-domain controller split that followed it: the flows that no one domain service can own. A
+ * method belongs here only if it touches two or more domains or the send path, which is the
+ * survival rule the store split established. Everything else lives in the domain service that
+ * owns its store, and this class owns no store of its own.
+ *
+ * <p>What that leaves, by category:
+ * <ul>
+ *   <li>the send path, which assembles a message, applies the account, tenant and
+ *       configuration-set gates, filters suppressed recipients, relays and records it, then
+ *       publishes the send events;</li>
+ *   <li>delete guards, where a tenant association or a policy cascade has to run around another
+ *       domain's delete;</li>
+ *   <li>configuration-set option validation, which probes the identity and dedicated-IP domains
+ *       through injected callbacks;</li>
+ *   <li>the tenant to resource associations and the tenant delete cascade;</li>
+ *   <li>the ARN dispatch behind the tag operations, which routes one ARN to one of seven
+ *       domains;</li>
+ *   <li>the tenant-scoped suppression routing, which picks the tenant store or the account-wide
+ *       one from a {@code TenantName}.</li>
+ * </ul>
+ *
+ * <p>The name is historical. This is not the service for SES as a whole: SES is served by the
+ * domain services in this package, with this class above them and
+ * {@link SesSendController} and {@link SesQueryHandler} in front.
+ */
 @ApplicationScoped
 public class SesService {
 
@@ -55,13 +76,14 @@ public class SesService {
 
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
-    // Identities extracted to SesIdentityService (CRUD, verification, MAIL FROM, notifications,
-    // tags, and the DKIM state machine with its Route53 lookup). The facade keeps the cross-domain
-    // flows and send-path reads, reaching the store through its find/save.
+    // Identities live in SesIdentityService (CRUD, verification, MAIL FROM, notifications, tags,
+    // and the DKIM state machine with its Route53 lookup), which the v2 controller and the v1
+    // handler call directly. The facade keeps the cross-domain flows (create's configuration-set
+    // check, the tenant-guarded delete with its policy cascade, the default configuration set) and
+    // the send-path reads, reaching the store through its find/save.
     private final SesIdentityService identityService;
-    // Sent-email records extracted to SesSentEmailService. The send path records finished emails via
-    // it; the account and v1 statistics reads go to the service directly, inspection still reads
-    // back through the facade.
+    // Sent-email records extracted to SesSentEmailService. The send path records finished emails
+    // via it; every read goes to the service directly.
     private final SesSentEmailService sentEmailService;
     // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
     // reads via it, and ARN-dispatched tagging reads/writes via its find/save.
@@ -82,8 +104,9 @@ public class SesService {
     // and the unsubscribe endpoint call directly; the facade only reaches it from the send-path
     // list-management orchestration and the ARN-dispatched tagging.
     private final SesContactService contactService;
-    // Identity (sending authorization) policy storage, extracted to SesPolicyService.
-    // The facade keeps the identity-existence check and delegates the rest.
+    // Identity (sending authorization) policy storage lives in SesPolicyService, which the v1
+    // handler calls directly; the facade keeps the v2 operations, which check the identity exists
+    // first, and the delete cascade.
     private final SesPolicyService policyService;
     // Custom verification email templates: storage extracted to SesCvetService, which the v2
     // controller and the v1 handler call directly for get/list/delete. The facade keeps create and
@@ -157,10 +180,6 @@ public class SesService {
         this.regionResolver = null;
     }
 
-    public Identity verifyEmailIdentity(String emailAddress, String region) {
-        return identityService.verifyEmailIdentity(emailAddress, region);
-    }
-
     /**
      * v2 CreateEmailIdentity. The identity domain builds and persists the complete record in one
      * write; only the configuration-set existence check is cross-domain, so it is passed in as the
@@ -172,10 +191,6 @@ public class SesService {
                 : () -> configSetService.get(configurationSetName, region);
         return identityService.createEmailIdentity(emailIdentity, configurationSetName, tags, region,
                 configurationSetExistsCheck);
-    }
-
-    public Identity verifyDomainIdentity(String domain, String region) {
-        return identityService.verifyDomainIdentity(domain, region);
     }
 
     public void deleteIdentity(String identityValue, String region) {
@@ -194,14 +209,6 @@ public class SesService {
         policyService.deletePoliciesForIdentity(identityValue, region);
 
         LOG.infov("Deleted identity: {0}", identityValue);
-    }
-
-    public List<Identity> listIdentities(String identityType, String region) {
-        return identityService.listIdentities(identityType, region);
-    }
-
-    public Identity getIdentityVerificationAttributes(String identityValue, String region) {
-        return identityService.getIdentityVerificationAttributes(identityValue, region);
     }
 
     public String sendEmail(String source, List<String> toAddresses, List<String> ccAddresses,
@@ -540,38 +547,6 @@ public class SesService {
         return events;
     }
 
-    public void setIdentityNotificationTopic(String identityValue, String notificationType,
-                                              String snsTopic, String region) {
-        identityService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic, region);
-    }
-
-    public Identity getIdentityNotificationAttributes(String identityValue, String region) {
-        return identityService.getIdentityNotificationAttributes(identityValue, region);
-    }
-
-    public void setDkimAttributes(String identityValue, boolean signingEnabled, String region) {
-        identityService.setDkimAttributes(identityValue, signingEnabled, region);
-    }
-
-    public List<String> verifyDomainDkim(String domain, String region) {
-        return identityService.verifyDomainDkim(domain, region);
-    }
-
-    public SesIdentityService.DkimSigningResult putDkimSigningAttributes(String identityValue, String origin,
-                                                                         String signingSelector, String nextKeyLength,
-                                                                         String region) {
-        return identityService.putDkimSigningAttributes(identityValue, origin, signingSelector,
-                nextKeyLength, region);
-    }
-
-    public Identity effectiveDkimSource(Identity identity, String region) {
-        return identityService.effectiveDkimSource(identity, region);
-    }
-
-    public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
-        identityService.setFeedbackForwardingEnabled(identityValue, enabled, region);
-    }
-
     public void setEmailIdentityConfigurationSet(String identityValue, String configurationSetName,
                                                  String region) {
         Identity identity = identityService.find(identityValue, region)
@@ -636,32 +611,6 @@ public class SesService {
                     "Configuration set <" + cs + "> does not exist.", 400);
         }
         return cs;
-    }
-
-    public void setMailFromDomain(String identityValue, String mailFromDomain,
-                                   String behaviorOnMxFailure, String region) {
-        identityService.setMailFromDomain(identityValue, mailFromDomain, behaviorOnMxFailure, region);
-    }
-
-    public Identity getMailFromAttributes(String identityValue, String region) {
-        return identityService.getMailFromAttributes(identityValue, region);
-    }
-
-    public void setHeadersInNotificationsEnabled(String identityValue, String notificationType,
-                                                   boolean enabled, String region) {
-        identityService.setHeadersInNotificationsEnabled(identityValue, notificationType, enabled, region);
-    }
-
-    public List<String> getVerifiedEmailAddresses(String region) {
-        return identityService.getVerifiedEmailAddresses(region);
-    }
-
-    public List<SentEmail> getEmails() {
-        return sentEmailService.listAll();
-    }
-
-    public void clearEmails() {
-        sentEmailService.clear();
     }
 
     // ──────────────────────────── Templates ────────────────────────────
@@ -854,7 +803,7 @@ public class SesService {
     }
 
     private boolean isVerifiedDomainIdentity(String domain, String region) {
-        Identity identity = getIdentityVerificationAttributes(domain, region);
+        Identity identity = identityService.getIdentityVerificationAttributes(domain, region);
         return identity != null && "Success".equals(identity.getVerificationStatus())
                 && "Domain".equals(identity.getIdentityType());
     }
@@ -1053,10 +1002,6 @@ public class SesService {
     // Policy storage lives in SesPolicyService; this facade forwards, and for the v2 mutators it runs
     // the identity-existence check (an Identity-domain read) first, before delegating.
 
-    public void putIdentityPolicy(String identity, String policyName, String policy, String region) {
-        policyService.putIdentityPolicy(identity, policyName, policy, region);
-    }
-
     public void createEmailIdentityPolicy(String identity, String policyName, String policy, String region) {
         requireIdentityExists(identity, region);
         policyService.createEmailIdentityPolicy(identity, policyName, policy, region);
@@ -1072,21 +1017,9 @@ public class SesService {
         return policyService.listAllPolicies(identity, region);
     }
 
-    public Map<String, String> getIdentityPolicies(String identity, List<String> policyNames, String region) {
-        return policyService.getIdentityPolicies(identity, policyNames, region);
-    }
-
-    public List<String> listIdentityPolicyNames(String identity, String region) {
-        return policyService.listIdentityPolicyNames(identity, region);
-    }
-
     public void deleteEmailIdentityPolicy(String identity, String policyName, String region) {
         requireIdentityExists(identity, region);
         policyService.deleteEmailIdentityPolicy(identity, policyName, region);
-    }
-
-    public void deleteIdentityPolicy(String identity, String policyName, String region) {
-        policyService.deleteIdentityPolicy(identity, policyName, region);
     }
 
     private void requireIdentityExists(String identity, String region) {
@@ -1117,7 +1050,6 @@ public class SesService {
         return List.copyOf(
                 suppressionService.getAccountSuppressionAttributes(region).getSuppressedReasons());
     }
-
 
     public List<Tag> listResourceTags(String arn, String region) {
         ResourceRef ref = parseSesArn(arn);
@@ -1237,31 +1169,13 @@ public class SesService {
                 resource.substring(0, slash), resource.substring(slash + 1));
     }
 
-    // ──────────────────── Suppression (account attributes + list) ────────────────────
-    // Storage lives in SesSuppressionService; the account attributes are read and written by the v2
-    // controller directly, the list operations below keep the tenant routing here, and the send
-    // filters (collectSuppressedReasons / resolveSuppressionReason) read entries back through it.
-
-    // A TenantName routes each suppression-list operation to that tenant's own list (fully separate
-    // from the account list on AWS); the reason/address validation still runs first, matching the
-    // probed precedence where request validation precedes tenant existence.
-
-    public void putSuppressedDestination(String region, String emailAddress, String reason) {
-        putSuppressedDestination(region, emailAddress, reason, null);
-    }
-
-    public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
-        return getSuppressedDestination(region, emailAddress, null);
-    }
-
-    public void deleteSuppressedDestination(String region, String emailAddress) {
-        deleteSuppressedDestination(region, emailAddress, null);
-    }
-
-    public List<SuppressedDestination> listSuppressedDestinations(String region,
-                                                                  List<String> reasonFilters) {
-        return listSuppressedDestinations(region, reasonFilters, null);
-    }
+    // ──────────────────────────── Suppression list ────────────────────────────
+    // Storage lives in SesSuppressionService, and the account-level attributes are read and
+    // written by the v2 controller through it directly. What stays here is the tenant routing: a
+    // TenantName sends the operation to that tenant's own list, which is fully separate from the
+    // account list on AWS, and the reason and address validation still runs first, matching the
+    // probed precedence where request validation precedes tenant existence. The send filters
+    // (collectSuppressedReasons, resolveSuppressionReason) read entries back through the service.
 
     public void putSuppressedDestination(String region, String emailAddress, String reason,
                                          String tenantName) {
@@ -1417,7 +1331,6 @@ public class SesService {
         return out;
     }
 
-
     /**
      * Filter out recipients whose effective suppression reason is non-null. Returns a new
      * list containing only the addresses that should reach the SMTP relay, mirroring AWS
@@ -1475,8 +1388,6 @@ public class SesService {
         }
         return effective.contains(entry.getReason()) ? entry.getReason() : null;
     }
-
-
 
     public String sendTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                                      List<String> bccAddresses, List<String> replyToAddresses,

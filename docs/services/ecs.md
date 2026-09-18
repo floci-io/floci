@@ -32,13 +32,25 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 
 `runtimePlatform` and a container's `logConfiguration` are stored and returned exactly as
 registered, so a client that reads back what it wrote (Terraform, or a deploy tool verifying its
-own `RegisterTaskDefinition`) sees no drift. Neither changes how a local task runs: Floci launches
-every task on the host's own architecture, and a task's output stays with its Docker container
-rather than being routed to the configured log driver.
+own `RegisterTaskDefinition`) sees no drift. FireLens task definitions are also used at runtime:
+Floci starts the configured `fluentbit` or `fluentd` router first, places routed containers in its
+network namespace, and sends their output to the task-local forward port `24224` through Docker's
+Fluentd log driver. The router container's output continues to be forwarded by Floci's existing
+CloudWatch Logs integration. Custom S3 configuration files are not downloaded by Floci.
+The `awsfirelens` output options are preserved in the task definition, but Floci does not generate
+or inject a Fluent Bit or Fluentd output configuration from those options.
+
+#### FireLens
+
+A task using `awsfirelens` must contain exactly one container with `firelensConfiguration` and a
+supported type of `fluentbit` or `fluentd`. The router must not publish port `24224`. Docker-backed
+tasks require a router image configured to accept the Fluent Forward protocol on
+`127.0.0.1:24224`; mock mode preserves the JSON fields without starting containers.
 
 Container `volumesFrom` entries are also stored and returned. In Docker mode, source containers
 are launched before their consumers and their declared volumes are inherited with the requested
-read-only or read-write access mode.
+read-only or read-write access mode. Startup ordering also respects FireLens router dependencies;
+cycles involving both volume inheritance and log routing are rejected before containers start.
 
 ### Tasks
 

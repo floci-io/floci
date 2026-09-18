@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -21,13 +20,27 @@ class FlowLogServiceTest {
 
     @BeforeEach
     void setUp() {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.defaultAccountId()).thenReturn("000000000000");
+        flowLogService = serviceCallingAs("000000000000");
+    }
+
+    /** A service whose EC2 dependency resolves the caller to {@code accountId}. */
+    private FlowLogService serviceCallingAs(String accountId) {
         Ec2Service ec2Service = mock(Ec2Service.class);
+        when(ec2Service.callerAccountId()).thenReturn(accountId);
         when(ec2Service.describeInstances(any(), any(), any())).thenReturn(List.of());
         when(ec2Service.endpointNetworkInterfaces(any())).thenReturn(List.of());
-        flowLogService = new FlowLogService(config, ec2Service, mock(S3Service.class),
-                new InMemoryStorage<>());
+        return new FlowLogService(ec2Service, mock(S3Service.class), new InMemoryStorage<>());
+    }
+
+    @Test
+    void createFlowLogRecordsTheCallingAccountNotTheDefault() {
+        // The account lands in the delivered record's account-id field and in the S3 key prefix
+        // (AWSLogs/{account}/vpcflowlogs/...), so a flow log created by a non-default caller must
+        // carry that caller. Before issue #3775 this was pinned to the configured default account.
+        FlowLog fl = serviceCallingAs("444444444444").createFlowLog("us-east-1", "vpc-123", "VPC",
+                "ALL", "s3", "arn:aws:s3:::flow-bucket", null, null, 600);
+
+        assertEquals("444444444444", fl.getAccountId());
     }
 
     @Test

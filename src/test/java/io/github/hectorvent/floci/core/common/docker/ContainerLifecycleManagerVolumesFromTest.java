@@ -15,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -35,6 +36,36 @@ class ContainerLifecycleManagerVolumesFromTest {
                 .withVolumesFrom("readwrite-source-id", false)
                 .build();
 
+        HostConfig hostConfig = createHostConfig(config, spec);
+        VolumesFrom[] inherited = hostConfig.getVolumesFrom();
+        assertEquals("readonly-source-id", inherited[0].getContainer());
+        assertEquals(AccessMode.ro, inherited[0].getAccessMode());
+        assertEquals("readwrite-source-id", inherited[1].getContainer());
+        assertEquals(AccessMode.rw, inherited[1].getAccessMode());
+    }
+
+    @Test
+    void createPreservesInheritedVolumesWhenSharingRouterNetworkAndOmitsExtraHosts() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        ContainerBuilder builder = new ContainerBuilder(
+                config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class));
+        ContainerSpec spec = builder.newContainer("app:latest")
+                .withVolumesFrom("source-id", true)
+                .withNetworkMode("container:router-id")
+                .withExtraHost("host.docker.internal", "host-gateway")
+                .build();
+
+        HostConfig hostConfig = createHostConfig(config, spec);
+
+        assertEquals("container:router-id", hostConfig.getNetworkMode());
+        assertEquals(1, hostConfig.getVolumesFrom().length);
+        assertEquals("source-id", hostConfig.getVolumesFrom()[0].getContainer());
+        assertEquals(AccessMode.ro, hostConfig.getVolumesFrom()[0].getAccessMode());
+        assertTrue(hostConfig.getExtraHosts() == null || hostConfig.getExtraHosts().length == 0);
+    }
+
+    private static HostConfig createHostConfig(EmulatorConfig config, ContainerSpec spec) {
         DockerClient dockerClient = mock(DockerClient.class);
         CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
         when(dockerClient.createContainerCmd("app:latest")).thenReturn(createCmd);
@@ -50,10 +81,6 @@ class ContainerLifecycleManagerVolumesFromTest {
 
         ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
         verify(createCmd).withHostConfig(hostConfig.capture());
-        VolumesFrom[] inherited = hostConfig.getValue().getVolumesFrom();
-        assertEquals("readonly-source-id", inherited[0].getContainer());
-        assertEquals(AccessMode.ro, inherited[0].getAccessMode());
-        assertEquals("readwrite-source-id", inherited[1].getContainer());
-        assertEquals(AccessMode.rw, inherited[1].getAccessMode());
+        return hostConfig.getValue();
     }
 }

@@ -92,17 +92,11 @@ column defaults to `true`. Duplicate key values are reported in the `warnings` a
 
 #### `generateDistinctId`
 
-Controls whether the key's `id` and `value` fields are distinct. AWS's undocumented default behaviour is that they are **the same string** unless `generateDistinctId=true` is explicitly requested.
-
-| `generateDistinctId` | `id` | `value` |
-|---|---|---|
-| absent (default) | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
-| `false` | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
-| `true` | opaque short token (`shortId`) | caller-supplied `value`, or a generated UUID-derived string |
-
-When `generateDistinctId` is absent or `false`, a single shared string is used for both `id` and `value`. If the caller supplies a `value` in the request body, that string is used for both; otherwise a UUID-derived string is generated and assigned to both.
-
-When `generateDistinctId=true`, `id` is set to an opaque short token independent of `value`.
+API key identifiers are generated independently from their secret values when `generateDistinctId`
+is absent, matching current AWS behavior, or explicitly set to `true`. The deprecated explicit
+`generateDistinctId=false` behavior is retained for compatibility and uses the key value as its
+identifier. A caller-supplied `value` remains available only from create responses and reads that
+explicitly request values.
 
 #### Revocation
 

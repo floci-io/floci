@@ -44,7 +44,7 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObjec
 
 /**
  * SES V2 configuration-set endpoints ({@code /v2/email/configuration-sets}), including the event
- * destinations, split out of {@link SesController}. Most operations call
+ * destinations. Most operations call
  * {@link SesConfigurationSetService} directly; create, the tracking and delivery option setters
  * and delete go through the {@link SesService} facade, which supplies the verified-domain and
  * dedicated-pool probes those validations need and guards the delete against tenant associations.

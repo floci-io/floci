@@ -2,23 +2,15 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ReplacementCleanup;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2SecurityGroupRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
-import io.github.hectorvent.floci.services.ec2.model.IpPermission;
-import io.github.hectorvent.floci.services.ec2.model.IpRange;
-import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
-import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
-import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.services.ec2.model.Tag;
-import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
@@ -52,6 +44,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -125,8 +118,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::ApiGatewayV2::Route",
             "AWS::ApiGatewayV2::Stage",
             "AWS::CloudFormation::CustomResource",
-            "AWS::EC2::Instance",
-            "AWS::EC2::SecurityGroup",
             "AWS::EKS::Cluster",
             "AWS::EKS::Nodegroup",
             "AWS::IAM::AccessKey",
@@ -155,7 +146,6 @@ public class CloudFormationResourceProvisioner {
     private final ObjectMapper objectMapper;
     private final CustomResourceResponseStore customResourceResponseStore;
     private final ContainerReachableEndpoint reachableEndpoint;
-    private final Ec2Service ec2Service;
     private final EksService eksService;
     // Item 15 decomposition: extracted per-service provisioners are consulted before the switch
     // below. As types migrate, their switch cases and provisionXxx methods are removed here; the
@@ -174,7 +164,6 @@ public class CloudFormationResourceProvisioner {
                                              ObjectMapper objectMapper,
                                              CustomResourceResponseStore customResourceResponseStore,
                                              ContainerReachableEndpoint reachableEndpoint,
-                                             Ec2Service ec2Service,
                                              EksService eksService,
                                              CloudFormationResourceRegistry resourceRegistry,
                                              CfnDynamicReferences dynamicReferences,
@@ -189,7 +178,6 @@ public class CloudFormationResourceProvisioner {
         this.objectMapper = objectMapper;
         this.customResourceResponseStore = customResourceResponseStore;
         this.reachableEndpoint = reachableEndpoint;
-        this.ec2Service = ec2Service;
         this.eksService = eksService;
         this.resourceRegistry = resourceRegistry;
         this.dynamicReferences = dynamicReferences;
@@ -221,6 +209,14 @@ public class CloudFormationResourceProvisioner {
                                    CloudFormationTemplateEngine engine, String region, String accountId,
                                    String stackName, String existingPhysicalId,
                                    Map<String, String> existingAttributes) {
+        return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
+                existingPhysicalId, existingAttributes, event -> {});
+    }
+
+    public StackResource provision(String logicalId, String resourceType, JsonNode properties,
+                                   CloudFormationTemplateEngine engine, String region, String accountId,
+                                   String stackName, String existingPhysicalId,
+                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
@@ -231,7 +227,7 @@ public class CloudFormationResourceProvisioner {
             CfnResourceProvisioner extracted = resourceRegistry.forType(resourceType).orElse(null);
             if (extracted != null) {
                 extracted.provision(resource, properties,
-                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId));
+                        new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress));
                 resource.setStatus("CREATE_COMPLETE");
                 return resource;
             }
@@ -258,11 +254,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ApiGatewayV2::Deployment" -> provisionApiGatewayV2Deployment(resource, properties, engine, region);
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
-                // EC2 networking. These delegate to Ec2Service so the resources actually exist
-                // (describe-subnets, ELBv2, etc. can find them) instead of being stubbed with a
-                // fake physical id. Topological ordering guarantees parents are provisioned first.
-                case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
-                case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 default -> {
@@ -478,8 +469,6 @@ public class CloudFormationResourceProvisioner {
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
             case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
-            case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
-            case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
             case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
             // Warn for the same reason the create path does: the delete reports success over a
             // type nothing here removes, and at debug that is invisible at the default log level.
@@ -488,60 +477,6 @@ public class CloudFormationResourceProvisioner {
             // the first leaves something behind.
             default -> LOG.warnv("No delete implemented for resource type {0}: {1} is not removed "
                     + "here.", resourceType, physicalId);
-        }
-    }
-
-    // ── EC2 networking ─────────────────────────────────────────────────────────
-    // Each method delegates to Ec2Service so the resource really exists (describe-subnets,
-    // ELBv2 create-load-balancer, etc. resolve it). physicalId is set to the real EC2 id so
-    // Ref/exports resolve to a real vpc-/subnet-/... id rather than a stub.
-
-    private void provisionSecurityGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                        String region, String stackName) {
-        String groupName = resolveOptional(props, "GroupName", engine);
-        if (groupName == null || groupName.isBlank()) {
-            groupName = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
-        }
-        String description = resolveOptional(props, "GroupDescription", engine);
-        if (description == null || description.isBlank()) {
-            description = "Managed by CloudFormation";
-        }
-        String vpcId = resolveOptional(props, "VpcId", engine);
-        // provision() re-runs for every resource on every update. Re-creating an unchanged group
-        // would mint a new group id (and collide on the name whenever the VPC id is stable), so
-        // reuse the group this resource already points at.
-        var reconciled = existingSecurityGroupToReconcile(r.getPhysicalId(), groupName, description, vpcId, region);
-        final SecurityGroup sg = reconciled != null
-                ? reconciled
-                : ec2Service.createSecurityGroup(region, groupName, description, vpcId);
-        // Ref on AWS::EC2::SecurityGroup returns the group id for VPC security groups.
-        r.setPhysicalId(sg.getGroupId());
-        r.getAttributes().put("GroupId", sg.getGroupId());
-        if (sg.getVpcId() != null) {
-            r.getAttributes().put("VpcId", sg.getVpcId());
-        }
-
-        // Inline rule properties — previously dropped, leaving the group empty. The mapping is
-        // shared with the standalone SecurityGroupIngress/Egress resource types, which live in
-        // Ec2SecurityGroupRuleCfnProvisioner; this arm joins them when it is extracted.
-        // Authorize appends without a duplicate check, so re-running this on a reused group would
-        // stack another copy of every inline rule on each update. Only authorize what the group
-        // does not already carry.
-        //
-        // Deliberately additive: a rule dropped from the template is not revoked here. Revoking
-        // the difference would mean revoking permissions this resource cannot prove it owns - a
-        // group can also carry rules from standalone AWS::EC2::SecurityGroupIngress/Egress
-        // resources, and clearing them on an unrelated update would close ports another stack
-        // resource is responsible for. Removing a rule the template no longer declares needs the
-        // provisioner to record what it authorized; noted as a follow-up.
-        var peerGroupId = peerGroupIdResolver(region, sg.getVpcId());
-        if (props != null && props.has("SecurityGroupIngress")) {
-            authorizeMissing(props.get("SecurityGroupIngress"), sg.getIpPermissions(), engine, peerGroupId,
-                    perms -> ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), perms));
-        }
-        if (props != null && props.has("SecurityGroupEgress")) {
-            authorizeMissing(props.get("SecurityGroupEgress"), sg.getIpPermissionsEgress(), engine, peerGroupId,
-                    perms -> ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), perms));
         }
     }
 
@@ -600,211 +535,6 @@ public class CloudFormationResourceProvisioner {
         // engine.resolveStringList accepts both a literal array and a list-valued intrinsic
         // (Fn::Split / Fn::GetAZs / Fn::Cidr) and drops blank entries (issue #2937).
         return new ArrayList<>(engine.resolveStringList(props.get(field)));
-    }
-
-    private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                      String region) {
-        String imageId = resolveOptional(props, "ImageId", engine);
-        String instanceType = resolveOptional(props, "InstanceType", engine);
-        String keyName = resolveOptional(props, "KeyName", engine);
-
-        // An instance may reference a LaunchTemplate for its config; fields the
-        // properties don't set resolve from the template's data, as on AWS.
-        if (props != null && props.has("LaunchTemplate")) {
-            JsonNode ltRef = engine.resolveNode(props.get("LaunchTemplate"));
-            try {
-                var ltData = ec2Service.resolveLaunchTemplateData(region,
-                        ltRef.path("LaunchTemplateId").asText(null),
-                        ltRef.path("LaunchTemplateName").asText(null),
-                        ltRef.path("Version").asText(null));
-                if (imageId == null || imageId.isBlank()) {
-                    imageId = ltData.getImageId();
-                }
-                if (instanceType == null || instanceType.isBlank()) {
-                    instanceType = ltData.getInstanceType();
-                }
-                if (keyName == null || keyName.isBlank()) {
-                    keyName = ltData.getKeyName();
-                }
-            } catch (Exception e) {
-                LOG.debugv("Could not resolve launch template for instance {0}: {1}",
-                        r.getLogicalId(), e.getMessage());
-            }
-        }
-        if (instanceType == null || instanceType.isBlank()) {
-            instanceType = "t3.micro";
-        }
-        String subnetId = resolveOptional(props, "SubnetId", engine);
-        String userData = resolveOptional(props, "UserData", engine);
-        String iamInstanceProfile = resolveOptional(props, "IamInstanceProfile", engine);
-
-        List<String> securityGroupIds = new ArrayList<>();
-        if (props != null && props.has("SecurityGroupIds") && props.get("SecurityGroupIds").isArray()) {
-            for (JsonNode sg : props.get("SecurityGroupIds")) {
-                securityGroupIds.add(engine.resolve(sg));
-            }
-        }
-
-        List<Tag> tags = new ArrayList<>();
-        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
-        if (tagsNode != null && tagsNode.isArray()) {
-            for (JsonNode tag : tagsNode) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    tags.add(new Tag(key, engine.resolve(tag.path("Value"))));
-                }
-            }
-        }
-
-        // The launch-time public-IP override rides on the primary network
-        // interface spec; absent means the subnet's MapPublicIpOnLaunch default.
-        Boolean associatePublicIp = null;
-        var networkInterfaces = props.path("NetworkInterfaces");
-        if (networkInterfaces.isArray() && !networkInterfaces.isEmpty()) {
-            String assocRaw = engine.resolve(networkInterfaces.get(0).path("AssociatePublicIpAddress"));
-            if (assocRaw != null && !assocRaw.isBlank()) {
-                associatePublicIp = Boolean.parseBoolean(assocRaw);
-            }
-        }
-
-        var reservation = ec2Service.runInstances(region, imageId, instanceType, 1, 1, keyName,
-                securityGroupIds, subnetId, null, tags, userData, iamInstanceProfile,
-                associatePublicIp);
-        var instance = reservation.getInstances().get(0);
-        r.setPhysicalId(instance.getInstanceId());
-        r.getAttributes().put("InstanceId", instance.getInstanceId());
-        r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
-        ec2Service.awaitContainerLaunch(instance);
-        r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
-        if (instance.getPrivateIpAddress() != null) {
-            r.getAttributes().put("PrivateIp", instance.getPrivateIpAddress());
-        }
-        if (instance.getPublicIpAddress() != null) {
-            r.getAttributes().put("PublicIp", instance.getPublicIpAddress());
-        }
-        if (instance.getPrivateDnsName() != null) {
-            r.getAttributes().put("PrivateDnsName", instance.getPrivateDnsName());
-        }
-        if (instance.getPublicDnsName() != null) {
-            r.getAttributes().put("PublicDnsName", instance.getPublicDnsName());
-        }
-        if (instance.getPlacement() != null && instance.getPlacement().getAvailabilityZone() != null) {
-            r.getAttributes().put("AvailabilityZone", instance.getPlacement().getAvailabilityZone());
-        }
-    }
-
-    /** The VPC a security group would land in for this template value: the default when omitted. */
-    private String effectiveVpcId(String vpcId, String region) {
-        return vpcId != null && !vpcId.isEmpty() ? vpcId : String.valueOf(ec2Service.resolveDefaultVpcId(region));
-    }
-
-    /**
-     * Authorizes each declared rule that the group does not already carry, one call per rule so a
-     * rejected rule cannot take its siblings down with it.
-     */
-    private void authorizeMissing(JsonNode declared, List<IpPermission> existing,
-                                  CloudFormationTemplateEngine engine,
-                                  java.util.function.UnaryOperator<String> peerGroupId,
-                                  java.util.function.Consumer<List<IpPermission>> authorize) {
-        Set<String> present = existing.stream()
-                .map(p -> permissionKey(p, peerGroupId))
-                .collect(java.util.stream.Collectors.toSet());
-        for (JsonNode rule : declared) {
-            IpPermission perm = Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine);
-            if (present.add(permissionKey(perm, peerGroupId))) {
-                authorize.accept(List.of(perm));
-            }
-        }
-    }
-
-    /**
-     * Resolves a peer group's name to its id, the same lookup {@code Ec2Service} performs when it
-     * stores an authorized rule. Group names are unique per VPC rather than per region, so the
-     * search is confined to the group being authorized. A name matching nothing there stays a
-     * name, which is also what the service does.
-     */
-    private java.util.function.UnaryOperator<String> peerGroupIdResolver(String region, String vpcId) {
-        return groupName -> ec2Service.describeSecurityGroups(region, List.of(), List.of(groupName), Map.of())
-                .stream()
-                .filter(peer -> Objects.equals(vpcId, peer.getVpcId()))
-                .map(SecurityGroup::getGroupId)
-                .filter(Objects::nonNull)
-                .findFirst()
-                .orElse(groupName);
-    }
-
-    /**
-     * Identity of a permission for duplicate detection. {@link IpPermission} and the range types
-     * it holds define no {@code equals}, so compare a canonical rendering instead. Descriptions
-     * are left out: AWS treats a rule differing only by description as the same rule.
-     */
-    private static String permissionKey(IpPermission p, java.util.function.UnaryOperator<String> peerGroupId) {
-        return String.join("|",
-                String.valueOf(p.getIpProtocol()),
-                String.valueOf(p.getFromPort()),
-                String.valueOf(p.getToPort()),
-                p.getIpRanges().stream().map(IpRange::getCidrIp).filter(Objects::nonNull).sorted()
-                        .collect(java.util.stream.Collectors.joining(",")),
-                p.getIpv6Ranges().stream().map(Ipv6Range::getCidrIpv6).filter(Objects::nonNull).sorted()
-                        .collect(java.util.stream.Collectors.joining(",")),
-                p.getUserIdGroupPairs().stream()
-                        .map(g -> peerIdentity(g, peerGroupId))
-                        .filter(Objects::nonNull).sorted()
-                        .collect(java.util.stream.Collectors.joining(",")),
-                p.getPrefixListIds().stream().map(PrefixListId::getPrefixListId)
-                        .filter(Objects::nonNull).sorted()
-                        .collect(java.util.stream.Collectors.joining(",")));
-    }
-
-    /**
-     * How a peer group is identified when two permissions are compared: its id whenever one can be
-     * had. A stored pair already carries one, because authorize resolves the name as it records the
-     * rule, while a pair straight from the template carries only the name it was declared with.
-     * Keying a resolved id against an unresolved name never matches, which re-authorized a rule
-     * naming its peer through {@code SourceSecurityGroupName} on every single update.
-     */
-    private static String peerIdentity(UserIdGroupPair pair,
-                                       java.util.function.UnaryOperator<String> peerGroupId) {
-        if (pair.getGroupId() != null) {
-            return pair.getGroupId();
-        }
-        return pair.getGroupName() == null ? null : peerGroupId.apply(pair.getGroupName());
-    }
-
-    /**
-     * The security group this stack resource already points at, when an UpdateStack re-invocation
-     * left it unchanged. Unlike most resources the physical id here is the group <em>id</em>, not
-     * the name, so the rename check compares the stored group's name against the template's.
-     *
-     * <p>Returns {@code null} for a fresh create, a group deleted out of band, or any change AWS
-     * treats as a replacement: GroupName, GroupDescription and VpcId are all immutable on a
-     * security group, so a template that changes one wants a new group, not an edit to this one.
-     * The caller then creates.
-     */
-    private SecurityGroup existingSecurityGroupToReconcile(String priorPhysicalId, String groupName,
-                                                           String description, String vpcId, String region) {
-        if (priorPhysicalId == null || priorPhysicalId.isBlank()) {
-            return null;
-        }
-        try {
-            return ec2Service.describeSecurityGroups(region, List.of(priorPhysicalId), List.of(), Map.of())
-                    .stream()
-                    .filter(existing -> groupName == null || groupName.equals(existing.getGroupName()))
-                    .filter(existing -> description == null || description.equals(existing.getDescription()))
-                    // Compare the VpcId the template would actually get, not the raw property.
-                    // createSecurityGroup resolves an omitted VpcId to the region's default VPC,
-                    // so the stored group always has one: comparing against a null property would
-                    // either force a replacement on every update, or - the bug - let a template
-                    // that drops VpcId keep a group sitting in the explicit VPC it named before.
-                    .filter(existing -> effectiveVpcId(vpcId, region).equals(existing.getVpcId()))
-                    .findFirst()
-                    .orElse(null);
-        } catch (AwsException notFound) {
-            // Expected when the group was deleted out of band since the prior update.
-            LOG.debugv(notFound, "No existing security group {0} found on file, falling back to create",
-                    priorPhysicalId);
-            return null;
-        }
     }
 
     // ── EKS ─────────────────────────────────────────────────────────────────────
@@ -1493,6 +1223,12 @@ public class CloudFormationResourceProvisioner {
 
     // ── IAM Policy ────────────────────────────────────────────────────────────
 
+    private static String resolvePolicyDocument(JsonNode props, CloudFormationTemplateEngine engine) {
+        JsonNode documentNode = props != null ? props.get("PolicyDocument") : null;
+        String resolved = documentNode != null ? engine.resolveJsonAttributeStrict(documentNode) : null;
+        return resolved != null ? resolved : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+    }
+
     /**
      * Provisions {@code AWS::IAM::Policy}, which in AWS is an <em>inline</em> policy embedded in the
      * named roles/users/groups (equivalent to PutRolePolicy/PutUserPolicy/PutGroupPolicy) — <em>not</em>
@@ -1515,9 +1251,7 @@ public class CloudFormationResourceProvisioner {
                     ? previousPolicyName
                     : generatePhysicalName(stackName, r.getLogicalId(), 128, false);
         }
-        String document = props != null && props.has("PolicyDocument")
-                ? props.get("PolicyDocument").toString()
-                : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String document = resolvePolicyDocument(props, engine);
 
         final String name = policyName;
         final String doc = document;
@@ -1674,9 +1408,7 @@ public class CloudFormationResourceProvisioner {
         if (policyName == null || policyName.isBlank()) {
             policyName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
         }
-        String document = props != null && props.has("PolicyDocument")
-                ? props.get("PolicyDocument").toString()
-                : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String document = resolvePolicyDocument(props, engine);
         List<String> roleNames = resolveStringList(props, "Roles", engine);
         String existingArn = r.getPhysicalId();
 
@@ -1924,6 +1656,21 @@ public class CloudFormationResourceProvisioner {
                 .map(owner -> owner.updateCleanupPhysicalId(resource))
                 .orElse(null);
     }
+
+    /** Only an opted-in provisioner may identify cleanup owed by an UPDATE_FAILED resource. */
+    boolean hasPendingRollbackCleanup(StackResource resource) {
+        return resourceRegistry.forType(resource.getResourceType())
+                .map(owner -> owner.hasPendingRollbackCleanup(resource))
+                .orElse(false);
+    }
+
+    /** Only an opted-in provisioner may keep a failed update attempt in place of the previous resource. */
+    boolean retainsFailedUpdateState(StackResource resource) {
+        return resourceRegistry.forType(resource.getResourceType())
+                .map(owner -> owner.retainsFailedUpdateState(resource))
+                .orElse(false);
+    }
+
     /**
      * Whether this update replaced the resource's physical entity, so the stack has cleanup
      * pending.
@@ -1944,8 +1691,12 @@ public class CloudFormationResourceProvisioner {
      * the stack update, delegated to the provisioner that owns the type.
      */
     boolean rollbackUpdate(StackResource resource) {
+        return rollbackUpdate(resource, event -> {});
+    }
+
+    boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
         return resourceRegistry.forType(resource.getResourceType())
-                .map(owner -> owner.rollbackUpdate(resource))
+                .map(owner -> owner.rollbackUpdate(resource, progress))
                 .orElse(false);
     }
 

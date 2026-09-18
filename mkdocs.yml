@@ -140,6 +140,7 @@ nav:
     - MemoryDB: services/memorydb.md
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
+    - Timestream for InfluxDB: services/timestream-influxdb.md
     - MSK (Kafka): services/msk.md
     - Amazon MQ: services/amazonmq.md
     - Glue: services/glue.md
@@ -154,6 +155,7 @@ nav:
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
+    - CloudWatch Metric Filter Verification: services/cloudwatch-metric-filters-verification.md
     - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
     - Managed Prometheus (AMP): services/managed-prometheus.md

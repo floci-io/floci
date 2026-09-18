@@ -741,6 +741,7 @@ public interface EmulatorConfig {
         BcmDataExportsServiceConfig bcmDataExports();
         OamServiceConfig oam();
         BcmPricingCalculatorServiceConfig bcmPricingCalculator();
+        TimestreamInfluxDbServiceConfig timestreamInfluxdb();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
@@ -1444,6 +1445,10 @@ public interface EmulatorConfig {
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultMariadbImage();
 
+        /** Docker image used for SQL Server instances when no override is configured. */
+        @WithDefault("mcr.microsoft.com/mssql/server:2022-latest")
+        String defaultSqlServerImage();
+
         /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
         Optional<String> endpointHost();
 
@@ -2053,6 +2058,12 @@ public interface EmulatorConfig {
          *  Env: FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS */
         @WithDefault("5000")
         long vtlTimeoutMillis();
+
+        /** When set, Floci uses this URL and skips GraphQL sidecar container management. */
+        Optional<String> graphqlUrl();
+
+        @WithDefault("floci/floci-sidecar-graphql:0.2.0")
+        String graphqlImage();
     }
 
     interface OamServiceConfig {
@@ -2063,6 +2074,34 @@ public interface EmulatorConfig {
     interface BcmPricingCalculatorServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface TimestreamInfluxDbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, DB instances and clusters reach AVAILABLE without a backing InfluxDB container. */
+        @WithDefault("false")
+        boolean mock();
+
+        /** InfluxDB 2.x image backing DB instances. Env: FLOCI_SERVICES_TIMESTREAM_INFLUXDB_DEFAULT_IMAGE */
+        @WithDefault("influxdb:2.7")
+        String defaultImage();
+
+        /** Lowest host port the InfluxDB HTTP listener (container port 8086) is published on. */
+        @WithDefault("8086")
+        int hostPortBase();
+
+        /** Highest host port the InfluxDB HTTP listener is published on. */
+        @WithDefault("8185")
+        int hostPortMax();
+
+        /** Seconds to wait for a started InfluxDB container to answer its health check. */
+        @WithDefault("120")
+        int readinessTimeoutSeconds();
+
+        /** Docker network to attach InfluxDB containers to. Empty uses the default network. */
+        Optional<String> dockerNetwork();
     }
 
     interface BcmDataExportsServiceConfig {

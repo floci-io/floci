@@ -26,9 +26,8 @@ import java.util.stream.Stream;
  * <p>The rule-object to {@link IpPermission} mapping lives here as
  * {@link #toIpPermission(JsonNode, CloudFormationTemplateEngine)} because the inline
  * {@code SecurityGroupIngress}/{@code SecurityGroupEgress} properties of
- * {@code AWS::EC2::SecurityGroup} take the same shape. That arm is still in
- * {@code CloudFormationResourceProvisioner} and calls this method, so there is one mapping rather
- * than two; it moves here when the security-group arm itself is extracted.
+ * {@code AWS::EC2::SecurityGroup} take the same shape. {@link Ec2SecurityGroupCfnProvisioner}
+ * provisions the group and calls this method, so there is one mapping rather than two.
  */
 @ApplicationScoped
 public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisioner {

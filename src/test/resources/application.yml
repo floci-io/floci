@@ -199,6 +199,7 @@ floci:
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
       proxy-handshake-timeout-millis: 10000
       proxy-backend-connect-timeout-millis: 5000
       proxy-max-connections: 100
@@ -368,6 +369,9 @@ floci:
       emit-mode: off
     bcm-pricing-calculator:
       enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: true
     bcm-data-exports:
       enabled: true
       emit-mode: off

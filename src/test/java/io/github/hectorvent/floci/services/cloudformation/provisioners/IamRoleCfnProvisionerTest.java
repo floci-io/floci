@@ -57,13 +57,18 @@ class IamRoleCfnProvisionerTest {
         // tests use it just walks the array and calls resolve(...) per element, stubbed above.
         when(engine.resolveStringList(any())).thenCallRealMethod();
 
-        when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
-                JsonNode node = inv.getArgument(0);
-                return node != null && node.isTextual() ? node.asText() : node.toString();
-        });
+        when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> resolvedDocument(inv.getArgument(0)));
+        when(engine.resolveJsonAttributeStrict(any())).thenAnswer(inv -> resolvedDocument(inv.getArgument(0)));
 
         return new ProvisionContext(engine, "us-east-1", ACCOUNT_ID, "test-stack");
         }
+
+    private static String resolvedDocument(JsonNode node) {
+        if (node == null) {
+            return null;
+        }
+        return node.isTextual() ? node.asText() : node.toString();
+    }
 
     private StackResource resource() {
         StackResource r = new StackResource();
@@ -400,7 +405,7 @@ void assumeRolePolicyIntrinsicsAreResolved() {
         }
         """);
 
-    when(engine.resolveJsonAttribute(any())).thenReturn(
+    when(engine.resolveJsonAttributeStrict(any())).thenReturn(
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Principal\":{\"AWS\":\"arn:aws:iam::" + ACCOUNT_ID + ":root\"},"
             + "\"Action\":\"sts:AssumeRole\"}]}"

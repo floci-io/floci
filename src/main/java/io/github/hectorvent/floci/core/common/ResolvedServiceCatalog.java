@@ -36,9 +36,10 @@ import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesAccountController;
 import io.github.hectorvent.floci.services.ses.SesConfigurationSetController;
 import io.github.hectorvent.floci.services.ses.SesContactController;
-import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.ses.SesCvetController;
 import io.github.hectorvent.floci.services.ses.SesDedicatedIpController;
+import io.github.hectorvent.floci.services.ses.SesIdentityController;
+import io.github.hectorvent.floci.services.ses.SesSendController;
 import io.github.hectorvent.floci.services.ses.SesSuppressionController;
 import io.github.hectorvent.floci.services.ses.SesTagController;
 import io.github.hectorvent.floci.services.ses.SesTemplateController;
@@ -183,7 +184,7 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("neptune"), Set.of(), Set.of()),
                 descriptor("docdb", "docdb", config.services().docdb().enabled(), true,
-                        "docdb", config.storage().mode(),                        
+                        "docdb", config.storage().mode(),
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("docdb"), Set.of(), Set.of()),
@@ -295,11 +296,12 @@ public class ResolvedServiceCatalog {
                         "ses", config.storage().mode(), 5000L, AwsNamespaces.SES, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON, ServiceProtocol.QUERY),
                         Set.of(), Set.of("email", "ses", "sesv2"), Set.of(),
-                        Set.of(SesController.class, SesAccountController.class,
-                                SesConfigurationSetController.class, SesContactController.class,
-                                SesCvetController.class, SesDedicatedIpController.class,
-                                SesSuppressionController.class, SesTagController.class,
-                                SesTemplateController.class, SesTenantController.class)),
+                        Set.of(SesAccountController.class, SesConfigurationSetController.class,
+                                SesContactController.class, SesCvetController.class,
+                                SesDedicatedIpController.class, SesIdentityController.class,
+                                SesSendController.class, SesSuppressionController.class,
+                                SesTagController.class, SesTemplateController.class,
+                                SesTenantController.class)),
                 descriptor("es", "opensearch", config.services().opensearch().enabled(), true,
                         "opensearch", storageMode(config.storage().services().opensearch().mode(), config.storage().mode()),
                         config.storage().services().opensearch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
@@ -581,6 +583,11 @@ public class ResolvedServiceCatalog {
                         "bcmpricingcalculator", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AWSBCMPricingCalculator."), Set.of("bcm-pricing-calculator"), Set.of(), Set.of()),
+                descriptor("timestream-influxdb", "timestreaminfluxdb",
+                        config.services().timestreamInfluxdb().enabled(), true,
+                        "timestreaminfluxdb", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AmazonTimestreamInfluxDB."), Set.of("timestream-influxdb"), Set.of(), Set.of()),
                 descriptor("bcm-data-exports", "bcmdataexports", config.services().bcmDataExports().enabled(), true,
                         "bcmdataexports", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

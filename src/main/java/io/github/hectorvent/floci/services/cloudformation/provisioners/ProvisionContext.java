@@ -2,12 +2,14 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * The per-provision context every resource handler drew from: the template engine (for resolving
@@ -16,7 +18,22 @@ import java.util.UUID;
  * so extracted provisioners produce byte-identical physical ids and resolved values.
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
-                               String accountId, String stackName, String priorPhysicalId) {
+                               String accountId, String stackName, String priorPhysicalId,
+                               Consumer<StackEvent> progress) {
+
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId) {
+        this(engine, region, accountId, stackName, priorPhysicalId, event -> {});
+    }
+
+    /** Intermediate resource events retain the stack pipeline's event IDs and metadata. */
+    public static void report(Consumer<StackEvent> progress, String physicalId, String status, String reason) {
+        StackEvent event = new StackEvent();
+        event.setPhysicalResourceId(physicalId);
+        event.setResourceStatus(status);
+        event.setResourceStatusReason(reason);
+        progress.accept(event);
+    }
 
     /** A context for a first-time create, with no prior physical id. */
     public ProvisionContext(CloudFormationTemplateEngine engine, String region,

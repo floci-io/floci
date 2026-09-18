@@ -32,8 +32,8 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
 
 /**
  * SES V2 tenant endpoints ({@code /v2/email/tenants}, {@code /v2/email/tenant} and
- * {@code /v2/email/resources/tenants}), split out of {@link SesController}. Tenant create, get,
- * list and suppression attributes call {@link SesTenantService} directly; the resource
+ * {@code /v2/email/resources/tenants}). Tenant create, get, list and suppression attributes
+ * call {@link SesTenantService} directly; the resource
  * associations and tenant delete go through the {@link SesService} facade, which checks the
  * associated identity, configuration set or template exists and cascades the tenant's
  * suppression entries, work that spans several domains.

@@ -457,7 +457,10 @@ public class DocDbService {
     }
 
     public DocDbCluster getDbCluster(String id) {
-        String region = regionResolver.getRegion();
+        return getDbCluster(id, regionResolver.getRegion());
+    }
+
+    public DocDbCluster getDbCluster(String id, String region) {
         DocDbCluster cluster = findCluster(region, id).orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "DocDB cluster " + id + " not found.", 404));
@@ -706,7 +709,10 @@ public class DocDbService {
     }
 
     public DocDbInstance getDbInstance(String id) {
-        String region = regionResolver.getRegion();
+        return getDbInstance(id, regionResolver.getRegion());
+    }
+
+    public DocDbInstance getDbInstance(String id, String region) {
         DocDbInstance instance = findInstance(region, id).orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "DocDB instance " + id + " not found.", 404));

@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CountDownLatch;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -1311,4 +1312,173 @@ class GlueServiceTest {
         glueService.getPartitionIndexes("db1", "indexed");
     }
 
+    // ── Table versions, batch partition delete and SearchTables ──────────────
+
+    private Table namedTable(String name) {
+        Table table = new Table();
+        table.setName(name);
+        return table;
+    }
+
+    private void createVersions(String name, int updates) {
+        Table table = namedTable(name);
+        table.setDescription("v0");
+        glueService.createTable("db1", table);
+        for (int i = 1; i <= updates; i++) {
+            Table replacement = namedTable(name);
+            replacement.setDescription("v" + i);
+            glueService.updateTable("db1", replacement, String.valueOf(i - 1), false);
+        }
+    }
+
+    @Test
+    void getTableVersionReturnsTheRequestedOrTheCurrentVersion() {
+        createVersions("plain", 2);
+
+        Map<String, Object> archived = glueService.getTableVersion("db1", "plain", "0");
+        assertEquals("0", archived.get("VersionId"));
+        assertEquals("v0", ((Table) archived.get("Table")).getDescription());
+
+        Map<String, Object> current = glueService.getTableVersion("db1", "plain", null);
+        assertEquals("2", current.get("VersionId"));
+        assertEquals("v2", ((Table) current.get("Table")).getDescription());
+        assertEquals("2", glueService.getTableVersion("db1", "plain", "2").get("VersionId"));
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> glueService.getTableVersion("db1", "plain", "7"));
+        assertEquals("EntityNotFoundException", missing.getErrorCode());
+        assertEquals("Version not found.", missing.getMessage());
+        AwsException notAnInteger = assertThrows(AwsException.class,
+                () -> glueService.getTableVersion("db1", "plain", "latest"));
+        assertEquals("InvalidInputException", notAnInteger.getErrorCode());
+        AwsException noTable = assertThrows(AwsException.class,
+                () -> glueService.getTableVersion("db1", "nope", "0"));
+        assertEquals("EntityNotFoundException", noTable.getErrorCode());
+    }
+
+    @Test
+    void deleteTableVersionDropsArchivedVersionsButNeverTheCurrentOne() {
+        createVersions("plain", 3);
+
+        glueService.deleteTableVersion("db1", "plain", "1");
+        List<String> remaining = glueService.getTableVersions("db1", "plain").stream()
+                .map(version -> (String) version.get("VersionId")).toList();
+        assertEquals(List.of("3", "2", "0"), remaining);
+
+        AwsException current = assertThrows(AwsException.class,
+                () -> glueService.deleteTableVersion("db1", "plain", "3"));
+        assertEquals("InvalidInputException", current.getErrorCode());
+        AwsException gone = assertThrows(AwsException.class,
+                () -> glueService.deleteTableVersion("db1", "plain", "1"));
+        assertEquals("EntityNotFoundException", gone.getErrorCode());
+        AwsException blank = assertThrows(AwsException.class,
+                () -> glueService.deleteTableVersion("db1", "plain", null));
+        assertEquals("InvalidInputException", blank.getErrorCode());
+
+        List<GlueService.TableVersionError> errors =
+                glueService.batchDeleteTableVersions("db1", "plain", List.of("0", "9", "3", "2"));
+        assertEquals(List.of("9", "3"), errors.stream().map(GlueService.TableVersionError::versionId).toList());
+        assertEquals("EntityNotFoundException", errors.get(0).errorDetail().errorCode());
+        assertEquals("InvalidInputException", errors.get(1).errorDetail().errorCode());
+        assertEquals("plain", errors.get(0).tableName());
+        assertEquals(1, glueService.getTableVersions("db1", "plain").size(), "only the current version is left");
+
+        List<String> tooMany = java.util.stream.IntStream.rangeClosed(1, 101)
+                .mapToObj(String::valueOf).toList();
+        AwsException overCap = assertThrows(AwsException.class,
+                () -> glueService.batchDeleteTableVersions("db1", "plain", tooMany));
+        assertEquals("InvalidInputException", overCap.getErrorCode());
+    }
+
+    @Test
+    void batchDeletePartitionDeletesWhatExistsAndReportsTheRest() {
+        Table table = namedTable("events");
+        table.setPartitionKeys(List.of(new Column("dt", "string")));
+        glueService.createTable("db1", table);
+        for (String dt : List.of("2026-01-01", "2026-01-02", "2026-01-03")) {
+            Partition partition = new Partition();
+            partition.setValues(List.of(dt));
+            glueService.createPartition("db1", "events", partition);
+        }
+
+        List<GlueService.BatchCreatePartitionError> errors = glueService.batchDeletePartitions(
+                "db1", "events", List.of(List.of("2026-01-01"), List.of("2026-01-09"), List.of("2026-01-03")));
+
+        assertEquals(1, errors.size());
+        assertEquals(List.of("2026-01-09"), errors.get(0).partitionValues());
+        assertEquals("EntityNotFoundException", errors.get(0).errorDetail().errorCode());
+        assertEquals(List.of(List.of("2026-01-02")),
+                glueService.getPartitions("db1", "events").stream().map(Partition::getValues).toList());
+        AwsException noTable = assertThrows(AwsException.class,
+                () -> glueService.batchDeletePartitions("db1", "nope", List.of(List.of("x"))));
+        assertEquals("EntityNotFoundException", noTable.getErrorCode());
+    }
+
+    @Test
+    void searchTablesMatchesTextTokensAndTimesAcrossDatabases() {
+        glueService.createDatabase(new Database("db2"));
+        Table orders = namedTable("customer-orders");
+        orders.setDescription("Orders placed by customers");
+        orders.setOwner("sales");
+        orders.setTableType("EXTERNAL_TABLE");
+        StorageDescriptor sd = new StorageDescriptor();
+        sd.setColumns(List.of(new Column("order_id", "string"), new Column("total", "double")));
+        orders.setStorageDescriptor(sd);
+        orders.setParameters(Map.of("classification", "parquet"));
+        glueService.createTable("db1", orders);
+        Table link = namedTable("xx-link-yy");
+        link.setOwner("data");
+        glueService.createTable("db2", link);
+        Table nolink = namedTable("xxlinkyy");
+        nolink.setOwner("data");
+        glueService.createTable("db2", nolink);
+
+        List<String> all = names(glueService.searchTables(null, null, null, null, null));
+        assertEquals(List.of("customer-orders", "xx-link-yy", "xxlinkyy"), all, "database then name");
+
+        assertEquals(List.of("customer-orders"), names(glueService.searchTables("ORDER_ID", null, null, null, null)),
+                "column names take part in the text search");
+        assertEquals(List.of("xx-link-yy", "xxlinkyy"), names(glueService.searchTables("link", null, null, null, null)));
+        assertEquals(List.of("xx-link-yy"),
+                names(glueService.searchTables("\"xx-link-yy\"", null, null, null, null)), "quotes mean exact");
+        assertEquals(List.of(), names(glueService.searchTables("\"link\"", null, null, null, null)));
+
+        // The reference's example: Key=Name, Value=link finds xx-link-yy but not xxlinkyy.
+        assertEquals(List.of("xx-link-yy"), names(glueService.searchTables(null,
+                List.of(new GlueService.SearchFilter("Name", "link", null)), null, null, null)));
+        assertEquals(List.of("customer-orders"), names(glueService.searchTables(null,
+                List.of(new GlueService.SearchFilter("DatabaseName", "db1", null),
+                        new GlueService.SearchFilter("classification", "parquet", null)), null, null, null)));
+        assertEquals(List.of(), names(glueService.searchTables(null,
+                List.of(new GlueService.SearchFilter("Owner", "sales", null),
+                        new GlueService.SearchFilter("TableType", "VIRTUAL_VIEW", null)), null, null, null)));
+
+        long future = Instant.now().getEpochSecond() + 3600;
+        assertEquals(3, glueService.searchTables(null,
+                List.of(new GlueService.SearchFilter("CreateTime", String.valueOf(future), "LESS_THAN")),
+                null, null, null).items().size());
+        assertEquals(List.of(), names(glueService.searchTables(null,
+                List.of(new GlueService.SearchFilter("CreateTime", String.valueOf(future), "GREATER_THAN")),
+                null, null, null)));
+        AwsException badComparator = assertThrows(AwsException.class, () -> glueService.searchTables(null,
+                List.of(new GlueService.SearchFilter("CreateTime", "0", "BETWEEN")), null, null, null));
+        assertEquals("InvalidInputException", badComparator.getErrorCode());
+
+        assertEquals(List.of("xxlinkyy", "xx-link-yy", "customer-orders"), names(glueService.searchTables(null, null,
+                List.of(new GlueService.SearchSort("Name", "DESC")), null, null)));
+        AwsException badField = assertThrows(AwsException.class, () -> glueService.searchTables(null, null,
+                List.of(new GlueService.SearchSort("Columns", "ASC")), null, null));
+        assertEquals("InvalidInputException", badField.getErrorCode());
+
+        GlueService.Page<Table> first = glueService.searchTables(null, null, null, 2, null);
+        assertEquals(2, first.items().size());
+        assertNotNull(first.nextToken());
+        GlueService.Page<Table> second = glueService.searchTables(null, null, null, 2, first.nextToken());
+        assertEquals(List.of("xxlinkyy"), names(second));
+        assertNull(second.nextToken());
+    }
+
+    private static List<String> names(GlueService.Page<Table> page) {
+        return page.items().stream().map(Table::getName).toList();
+    }
 }

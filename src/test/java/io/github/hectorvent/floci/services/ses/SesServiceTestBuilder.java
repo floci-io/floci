@@ -52,11 +52,13 @@ final class SesServiceTestBuilder {
     private Route53Service route53Service = null;
     private ObjectMapper objectMapper = new ObjectMapper();
     private Clock clock = Clock.systemUTC();
-    // Built by build(); exposed so tests can seed contacts, account suppression and configuration-set
-    // options through the domain services now that the facade no longer forwards those operations.
+    // Built by build(); exposed so tests can reach the domain services directly now that the facade
+    // no longer forwards their operations.
     private SesContactService contactService;
     private SesSuppressionService suppressionService;
     private SesConfigurationSetService configSetService;
+    private SesIdentityService identityService;
+    private SesSentEmailService sentEmailService;
 
     static SesServiceTestBuilder create() {
         return new SesServiceTestBuilder();
@@ -133,14 +135,30 @@ final class SesServiceTestBuilder {
         return configSetService;
     }
 
+    SesSentEmailService sentEmailService() {
+        if (sentEmailService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return sentEmailService;
+    }
+
+    SesIdentityService identityService() {
+        if (identityService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return identityService;
+    }
+
     SesService build() {
         contactService = new SesContactService(contactListStore, contactStore, clock);
         suppressionService = new SesSuppressionService(suppressionStore, accountSuppressionStore,
                 new InMemoryStorage<>());
         configSetService = new SesConfigurationSetService(configSetStore);
+        identityService = new SesIdentityService(identityStore, route53Service, clock);
+        sentEmailService = new SesSentEmailService(emailStore);
         return new SesService(
-                new SesIdentityService(identityStore, route53Service, clock),
-                new SesSentEmailService(emailStore),
+                identityService,
+                sentEmailService,
                 new SesTemplateService(templateStore, objectMapper, new SecureRandom()),
                 configSetService,
                 suppressionService,

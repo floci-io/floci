@@ -770,7 +770,9 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         List<Map<String, String>> patchOperations = parsePatchOperations(body);
         ApiKey key = service.updateApiKey(region, apiKeyId, patchOperations);
-        return Response.ok(toApiKeyNode(key).toString()).type(MediaType.APPLICATION_JSON).build();
+        ObjectNode node = toApiKeyNode(key);
+        node.remove("value");
+        return Response.ok(node.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -2297,11 +2299,20 @@ public class ApiGatewayController {
         node.put("name", k.getName());
         node.put("value", k.getValue());
         node.put("enabled", k.isEnabled());
+        node.put("createdDate", k.getCreatedDate());
+        node.put("lastUpdatedDate", k.getLastUpdatedDate());
+        if (k.getCustomerId() != null) {
+            node.put("customerId", k.getCustomerId());
+        }
         if (k.getDescription() != null) {
             node.put("description", k.getDescription());
         }
-        if (k.getTags() != null && !k.getTags().isEmpty()) {
-            ObjectNode tags = node.putObject("tags");
+        ArrayNode stageKeys = node.putArray("stageKeys");
+        if (k.getStageKeys() != null) {
+            k.getStageKeys().forEach(stageKeys::add);
+        }
+        ObjectNode tags = node.putObject("tags");
+        if (k.getTags() != null) {
             k.getTags().forEach(tags::put);
         }
         return node;

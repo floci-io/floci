@@ -73,6 +73,53 @@ class RdsContainerManagerTest {
                 DatabaseEngine.POSTGRES, "postgres:18").isEmpty());
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.MARIADB, "mariadb:11").isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.SQLSERVER, "mcr.microsoft.com/mssql/server:2022-latest").isEmpty());
+    }
+
+    @Test
+    void sqlServerUsesPersistentDataDirectory() {
+        assertEquals("/var/opt/mssql",
+                RdsContainerManager.engineDefaultDataPath(DatabaseEngine.SQLSERVER,
+                        "mcr.microsoft.com/mssql/server:2022-latest"));
+    }
+
+    @Test
+    void sqlServerContainerUsesOfficialImageEnvironmentAndPort() {
+        EmulatorConfig config = config(tempDir.resolve("sqlserver-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "sqlserver-container", Map.of(1433,
+                new ContainerLifecycleManager.EndpointInfo("db1", 1433))));
+        ContainerDetector detector = mock(ContainerDetector.class);
+        when(detector.isRunningInContainer()).thenReturn(false);
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, detector, config,
+                new RegionResolver("us-east-1", "000000000000"), mock(ServiceConfigAccess.class));
+
+        manager.start("db1", "vol1", DatabaseEngine.SQLSERVER,
+                "mcr.microsoft.com/mssql/server:2022-latest", "sa", "Password123!", null);
+
+        org.mockito.ArgumentCaptor<ContainerSpec> spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(spec.capture());
+        assertEquals("mcr.microsoft.com/mssql/server:2022-latest", spec.getValue().image());
+        assertTrue(spec.getValue().env().contains("ACCEPT_EULA=Y"));
+        assertTrue(spec.getValue().env().contains("MSSQL_SA_PASSWORD=Password123!"));
+        assertEquals(1433, spec.getValue().portBindings().keySet().iterator().next());
+        assertEquals("/var/opt/mssql", spec.getValue().binds().getFirst().getVolume().getPath());
+    }
+
+    @Test
+    void sqlServerMasterLoginDoesNotCreateDatabaseOrGrantSysadmin() {
+        String sql = RdsContainerManager.sqlServerMasterLoginSql("admin", "Password123!");
+
+        assertTrue(sql.contains("CREATE LOGIN [admin]"));
+        assertFalse(sql.contains("CREATE DATABASE"));
+        assertFalse(sql.contains("sysadmin"));
     }
 
     @Test
@@ -128,6 +175,12 @@ class RdsContainerManagerTest {
                 DatabaseEngine.POSTGRES, "admin", "old-pass", "new-pass");
         assertEquals("psql", postgres[0]);
         assertEquals("ALTER ROLE \"admin\" WITH PASSWORD 'new-pass';", postgres[postgres.length - 1]);
+
+        String[] sqlServer = RdsContainerManager.passwordRotationCommand(
+                DatabaseEngine.SQLSERVER, "admin", "old-pass", "new-pass");
+        assertEquals("admin", sqlServer[5]);
+        assertEquals("old-pass", sqlServer[7]);
+        assertTrue(sqlServer[9].contains("ALTER LOGIN [admin]"));
     }
 
     @Test

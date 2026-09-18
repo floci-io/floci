@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -14,6 +15,7 @@ import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -296,7 +298,14 @@ class IamManagedPolicyAccountScopeTest {
         assertTrue(caller.identityPolicies().stream()
                 .anyMatch(document -> document.contains("logs:CreateLogGroup")));
         assertTrue(caller.boundaryPolicyDocument().contains("NotAction"));
-        assertFalse(caller.boundaryPolicyDocument().contains("\"Action\":\"*\""));
+        assertFalse(caller.boundaryPolicyDocument().contains("\"Action\":\"*\""));        IamPolicyEvaluator evaluator = new IamPolicyEvaluator(new ObjectMapper());
+        String logArn = "arn:aws:logs:us-east-1:" + REQUEST_ACCT + ":log-group:/aws/lambda/task-role:*";
+        for (String action : List.of("logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents")) {
+            assertEquals(IamPolicyEvaluator.Decision.ALLOW,
+                    evaluator.evaluate(caller, List.of(), action, logArn, Map.of()));
+        }
+        assertEquals(IamPolicyEvaluator.Decision.DENY,
+                evaluator.evaluate(caller, List.of(), "s3:GetObject", "arn:aws:s3:::private-bucket/key", Map.of()));
     }
     /**
      * The alias is the only IAM entity keyed by a constant rather than a caller-supplied name, so

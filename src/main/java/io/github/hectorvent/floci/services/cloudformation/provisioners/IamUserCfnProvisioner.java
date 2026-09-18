@@ -144,7 +144,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
                                         + " has no PolicyDocument.", 400);
                     }
                     iamService.putUserPolicy(resolvedUserName, policyName,
-                            ctx.engine().resolveJsonAttribute(document));
+                            ctx.engine().resolveJsonAttributeStrict(document));
                     inlineWrittenByThisAttempt.add(policyName);
                 }
             }

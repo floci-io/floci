@@ -31,8 +31,8 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 
 /**
- * SES V2 email-template endpoints ({@code /v2/email/templates}), split out of
- * {@link SesController}. Talks to {@link SesTemplateService} directly; only
+ * SES V2 email-template endpoints ({@code /v2/email/templates}). Talks to
+ * {@link SesTemplateService} directly; only
  * {@code DeleteEmailTemplate} goes through the {@link SesService} facade, which wraps the delete in
  * the tenant-association guard.
  */

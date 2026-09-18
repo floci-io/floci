@@ -1,10 +1,10 @@
 # RDS
 
-**Protocol:** Query (XML) for management API + PostgreSQL / MySQL wire protocol for data plane
+**Protocol:** Query (XML) for management API + PostgreSQL / MySQL / SQL Server wire protocol for data plane
 **Management Endpoint:** `POST http://localhost:4566/`
 **Data Endpoint:** `localhost:<proxy-port>` (TCP)
 
-Floci manages real PostgreSQL, MySQL, and MariaDB Docker containers and proxies TCP connections to them, including IAM authentication support.
+Floci manages real PostgreSQL, MySQL, MariaDB, and SQL Server Docker containers and proxies TCP connections to them, including IAM authentication support where the protocol supports it. SQL Server uses a transparent TCP relay for its native TDS protocol.
 
 RDS Data API (`rds-data`) is documented separately because it uses REST JSON routes instead of the RDS Query protocol. See [RDS Data API](rds-data.md).
 
@@ -66,7 +66,14 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
 | `DescribeDBProxyTargets` | List a proxy target group's registered targets |
 | `DescribeDBClusterSnapshots` | Return an empty cluster-snapshot list (snapshots are not modeled) |
-| `DescribeGlobalClusters` | List global clusters — always empty, as none are modeled |
+| `DescribeGlobalClusters` | List the account's global clusters with their primary and secondary members; see [Global clusters](#global-clusters) |
+| `CreateGlobalCluster` | Create an Aurora global database, empty or with an existing Aurora cluster as its primary |
+| `ModifyGlobalCluster` | Rename a global cluster, set deletion protection, or upgrade its engine version (members follow) |
+| `DeleteGlobalCluster` | Delete a global cluster once every member has been removed and deletion protection is off |
+| `RemoveFromGlobalCluster` | Detach a member into a standalone cluster; the primary goes last |
+| `FailoverGlobalCluster` | Promote a secondary to primary (failover with `AllowDataLoss`, or switchover) |
+| `SwitchoverGlobalCluster` | Promote a secondary to primary and demote the current primary to a secondary |
+| `FailoverDBCluster` | Move a DB cluster's writer role to a reader instance, the named one or the first |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
@@ -110,6 +117,7 @@ checked against the instance's other window. Modifications apply immediately —
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
+| `FLOCI_SERVICES_RDS_DEFAULT_SQL_SERVER_IMAGE` | `mcr.microsoft.com/mssql/server:2022-latest` | Docker image for SQL Server instances |
 | `FLOCI_SERVICES_RDS_PROXY_HANDSHAKE_TIMEOUT_MILLIS` | `10000` | Max time a client has to complete the startup/auth handshake before the proxy drops it |
 | `FLOCI_SERVICES_RDS_PROXY_BACKEND_CONNECT_TIMEOUT_MILLIS` | `5000` | Max time the proxy waits for the backend TCP connect |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_CONNECTIONS` | `100` | Max concurrent connections per proxy before new ones are refused |
@@ -348,6 +356,36 @@ connections drop while the container, endpoint and data stay. Deleting a source 
 same-region replicas; a cross-region replica keeps its link with the replication status
 `terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
 replica drops it from its source's list.
+
+## Global clusters
+
+`CreateGlobalCluster` creates an Aurora global database (`aurora-mysql` or `aurora-postgresql`),
+either empty or with an existing Aurora cluster as its primary through `SourceDBClusterIdentifier`
+(an ARN, or an identifier in the request's region), in which case engine, version, database name
+and encryption come from that cluster and may not be given, as on AWS. The record is account wide:
+its ARN has no region and `DescribeGlobalClusters` lists it from any region.
+
+`CreateDBCluster` with `GlobalClusterIdentifier` joins a cluster: the first one becomes the
+primary, every later one a secondary. A secondary must be in a region that holds neither the
+primary nor another secondary, may not carry its own master credentials or database name (it takes
+the primary's), and its database is initialised from a `pg_dumpall` of the primary the way a read
+replica is, so only `aurora-postgresql` primaries accept secondaries; writes after that are not
+streamed. `DescribeGlobalClusters` reports every member with `IsWriter` and, on the primary, the
+secondaries under `Readers`; `DescribeDBClusters` reports `GlobalClusterIdentifier` on members.
+
+`SwitchoverGlobalCluster`, and `FailoverGlobalCluster` with or without `AllowDataLoss`, promote
+the named secondary and demote the current primary to a secondary, the topology AWS keeps for a
+switchover and restores after a managed failover once the old primary region is healthy again.
+The response is the completed state; AWS answers with a pending `FailoverState` because the
+operation runs asynchronously there. `RemoveFromGlobalCluster` detaches a member into a standalone
+cluster; the primary can only be removed once every secondary is gone, and deleting the primary
+cluster while secondaries remain is refused the same way. `DeleteGlobalCluster` needs an empty
+global cluster with deletion protection off.
+
+`FailoverDBCluster` moves the writer role inside a DB cluster to the named reader instance, or to
+the first reader when none is named; a cluster with no reader has nothing to fail over to and is
+refused. `DescribeDBClusters` reports the role as `IsClusterWriter`, and deleting the writer
+promotes a remaining member, as Aurora does on its own.
 
 ## Persistence
 
