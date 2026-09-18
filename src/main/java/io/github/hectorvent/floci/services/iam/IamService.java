@@ -2129,15 +2129,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      *
      * <p>Sessions are keyed by a globally-unique access key (e.g. {@code ASIA...}) but stored in
      * the minting account's namespace. Account routing must resolve the session <em>before</em> the
-     * request's account is known, so a normal account-scoped {@code get} would miss it. This scans
-     * across all accounts; the access key's global uniqueness keeps the result unambiguous.
+     * request's account is known, so a normal account-scoped {@code get} would miss it. The
+     * lookup spans all accounts; the access key's global uniqueness keeps the result unambiguous.
      */
     private Optional<SessionCredential> findSessionAnyAccount(String accessKeyId) {
         if (!isTemporaryAccessKey(accessKeyId)) {
             return Optional.empty();
         }
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
-            return Optional.ofNullable(aware.scanAllAccountsAsMap().get(accessKeyId));
+            return aware.findAnyAccount(accessKeyId);
         }
         return sessions.get(accessKeyId);
     }
