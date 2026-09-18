@@ -140,6 +140,43 @@ class CloudFormationLogStreamTest {
         assertThat(streamNames(secondGroup)).containsExactly("unrelated");
     }
 
+    @Test
+    void noValueGeneratesANameUntilTheConditionSelectsAnExplicitName() throws InterruptedException {
+        String group = createLogGroup("conditional");
+        String template = """
+                {
+                  "Parameters": {"UseName": {"Type": "String"}},
+                  "Conditions": {"Named": {"Fn::Equals": [{"Ref": "UseName"}, "true"]}},
+                  "Resources": {
+                    "Stream": {
+                      "Type": "AWS::Logs::LogStream",
+                      "Properties": {
+                        "LogGroupName": "%s",
+                        "LogStreamName": {"Fn::If": ["Named", "application", {"Ref": "AWS::NoValue"}]}
+                      }
+                    }
+                  },
+                  "Outputs": {"StreamRef": {"Value": {"Ref": "Stream"}}}
+                }
+                """.formatted(group);
+
+        createStack(template, List.of(Parameter.builder().parameterKey("UseName").parameterValue("false").build()));
+        String generated = output();
+        assertThat(generated).startsWith(stackName + "-Stream-");
+        assertIdentity(generated);
+        assertThat(streamNames(group)).containsExactly(generated);
+        assertWritable(group, generated, "generated from NoValue");
+
+        cfn.updateStack(r -> r.stackName(stackName).templateBody(template)
+                .parameters(Parameter.builder().parameterKey("UseName").parameterValue("true").build()));
+        awaitStatus("UPDATE_COMPLETE");
+        assertIdentity("application");
+        assertThat(streamNames(group)).containsExactly("application");
+
+        deleteStack();
+        assertThat(streamNames(group)).isEmpty();
+    }
+
     private void createStack(String template, List<Parameter> parameters) throws InterruptedException {
         cfn.createStack(r -> r.stackName(stackName).templateBody(template).parameters(parameters));
         stackCreated = true;

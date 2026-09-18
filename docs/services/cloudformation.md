@@ -56,8 +56,9 @@ Operation IDs are recorded and validated. Duplicate IDs return `OperationIdAlrea
 ## CloudWatch Logs log streams
 
 `AWS::Logs::LogStream` creates a stream in the required `LogGroupName`. `LogStreamName` is optional;
-when omitted, CloudFormation generates a name and keeps it across updates. `Ref` returns the stream
-name. The resource has no `Fn::GetAtt` attributes.
+when omitted, including through `Fn::If` returning `AWS::NoValue`, CloudFormation generates a name
+and keeps it across updates. An explicit empty name remains invalid. `Ref` returns the stream name.
+The resource has no `Fn::GetAtt` attributes.
 
 Changing either name replaces the stream. The previous stream and its events remain available
 until the update commits; a failed stack update restores the previous stream. `UpdateReplacePolicy:

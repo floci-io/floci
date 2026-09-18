@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -35,7 +37,7 @@ public class LogsLogStreamCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource resource, JsonNode properties, ProvisionContext ctx) {
-        JsonNode resolved = ctx.engine().resolveNode(properties);
+        JsonNode resolved = ctx.engine().resolveNode(markNoValue(properties));
         String group = property(resolved, "LogGroupName", true);
         String explicitName = property(resolved, "LogStreamName", false);
         if (!group.matches("[.\\-_/#A-Za-z0-9]+")) {
@@ -70,6 +72,27 @@ public class LogsLogStreamCfnProvisioner implements CfnResourceProvisioner {
         }
         setIdentity(resource, target, explicitName == null ? "generated" : "explicit");
         resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+    }
+
+    // Keep conditional omission distinct from an explicitly empty name during intrinsic resolution.
+    private static JsonNode markNoValue(JsonNode node) {
+        if (node == null) {
+            return null;
+        }
+        if (node.isObject()) {
+            if ("AWS::NoValue".equals(node.path("Ref").asText())) {
+                return MissingNode.getInstance();
+            }
+            ObjectNode marked = MAPPER.createObjectNode();
+            node.fields().forEachRemaining(entry -> marked.set(entry.getKey(), markNoValue(entry.getValue())));
+            return marked;
+        }
+        if (node.isArray()) {
+            ArrayNode marked = MAPPER.createArrayNode();
+            node.forEach(item -> marked.add(markNoValue(item)));
+            return marked;
+        }
+        return node;
     }
 
     private static String property(JsonNode properties, String key, boolean required) {

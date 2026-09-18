@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
@@ -75,6 +76,57 @@ class CloudFormationLogStreamIntegrationTest {
         logs("CreateLogStream", Map.of("logGroupName", group, "logStreamName", stream))
                 .then().statusCode(200);
         assertTrue(messages(group, stream).isEmpty(), "Deleted stream events must not reappear on recreation");
+    }
+
+    @Test
+    void conditionalNameOmissionReplacesExplicitNameAndKeepsGeneratedNameStable() throws Exception {
+        String group = createGroup();
+        String stack = createStack(conditionalTemplate(group, true, "first"), "CREATE_COMPLETE");
+        assertEquals("application", streamRef(awaitStatus(stack, "CREATE_COMPLETE")));
+
+        updateStack(stack, conditionalTemplate(group, false, "first"));
+        String generated = streamRef(awaitStatus(stack, "UPDATE_COMPLETE"));
+        assertTrue(generated.startsWith(stack + "-Stream-"), generated);
+        assertEquals(List.of(generated), streams(group));
+        putEvent(group, generated, "keep conditional stream");
+
+        updateStack(stack, conditionalTemplate(group, false, "second"));
+        assertEquals(generated, streamRef(awaitStatus(stack, "UPDATE_COMPLETE")));
+        assertEquals(List.of("keep conditional stream"), messages(group, generated));
+
+        updateStack(stack, conditionalTemplate(group, true, "second"));
+        assertEquals("application", streamRef(awaitStatus(stack, "UPDATE_COMPLETE")));
+        assertEquals(List.of("application"), streams(group));
+    }
+
+    @Test
+    void nestedConditionCanOmitTheStreamName() throws Exception {
+        String group = createGroup();
+        ObjectNode document = (ObjectNode) MAPPER.readTree(conditionalTemplate(group, false, null));
+        document.withObject("/Conditions").set("Outer", MAPPER.valueToTree(Map.of("Fn::Equals", List.of(1, 1))));
+        ObjectNode properties = document.withObject("/Resources/Stream/Properties");
+        properties.set("LogStreamName", MAPPER.valueToTree(Map.of("Fn::If", List.of("Outer",
+                properties.get("LogStreamName"), "unused"))));
+
+        String stack = createStack(document.toString(), "CREATE_COMPLETE");
+        String generated = streamRef(awaitStatus(stack, "CREATE_COMPLETE"));
+        assertTrue(generated.startsWith(stack + "-Stream-"), generated);
+        assertEquals(List.of(generated), streams(group));
+    }
+
+    @Test
+    void conditionalEmptyNameAndOmittedRequiredGroupStillFailValidation() throws Exception {
+        String group = createGroup();
+        ObjectNode emptyName = (ObjectNode) MAPPER.readTree(conditionalTemplate(group, true, null));
+        emptyName.withObject("/Resources/Stream/Properties").set("LogStreamName",
+                MAPPER.valueToTree(Map.of("Fn::If", List.of("UseName", "", Map.of("Ref", "AWS::NoValue")))));
+        createStack(emptyName.toString(), "ROLLBACK_COMPLETE");
+
+        ObjectNode missingGroup = (ObjectNode) MAPPER.readTree(conditionalTemplate(group, false, null));
+        missingGroup.withObject("/Resources/Stream/Properties").set("LogGroupName",
+                MAPPER.valueToTree(Map.of("Fn::If", List.of("UseName", group, Map.of("Ref", "AWS::NoValue")))));
+        createStack(missingGroup.toString(), "ROLLBACK_COMPLETE");
+        assertTrue(streams(group).isEmpty());
     }
 
     @Test
@@ -227,6 +279,15 @@ class CloudFormationLogStreamIntegrationTest {
     private static List<String> messages(String group, String stream) throws Exception {
         return logs("GetLogEvents", Map.of("logGroupName", group, "logStreamName", stream, "startFromHead", true))
                 .then().statusCode(200).extract().jsonPath().getList("events.message", String.class);
+    }
+
+    private static String conditionalTemplate(String group, boolean useName, String revision) throws Exception {
+        ObjectNode document = (ObjectNode) MAPPER.readTree(template(group, null, revision, false, false));
+        document.set("Conditions", MAPPER.valueToTree(Map.of("UseName",
+                Map.of("Fn::Equals", List.of(useName, true)))));
+        document.withObject("/Resources/Stream/Properties").set("LogStreamName",
+                MAPPER.valueToTree(Map.of("Fn::If", List.of("UseName", "application", Map.of("Ref", "AWS::NoValue")))));
+        return document.toString();
     }
 
     private static String template(String group, String name, String revision, boolean retain, boolean fail)
