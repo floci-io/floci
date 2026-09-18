@@ -373,7 +373,7 @@ class RedshiftClusterCfnProvisionerTest {
 
         p.provision(r, json("""
             {"NodeType":"ra3.large","MasterUsername":"admin","ManageMasterPassword":true,
-             "MasterUserSecret":{"KmsKeyId":"alias/redshift-key"}}"""), ctx(null));
+             "MasterPasswordSecretKmsKeyId":"alias/redshift-key"}"""), ctx(null));
 
         verify(service).createClusterWithManagedMasterPassword(anyString(), eq("ra3.large"), eq("admin"),
                 isNull(), anyList(), eq(List.of()), eq("alias/redshift-key"), eq("us-east-1"));

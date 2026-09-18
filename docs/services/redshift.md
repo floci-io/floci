@@ -71,7 +71,7 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 - `DBName` other than `dev` is ignored: the emulated PostgreSQL container database is always `dev`.
 - `NumberOfNodes` is not stored on cluster create: every emulated cluster is backed by a single PostgreSQL container.
 - `ManageMasterPassword` creates a Redshift-owned Secrets Manager secret. The secret contains the
-  managed username, password, endpoint, port, and database name. `MasterUserSecret.KmsKeyId`
+  managed username, password, endpoint, port, and database name. `MasterPasswordSecretKmsKeyId`
   selects the KMS key used for the secret metadata and is validated through KMS.
 - `SnapshotIdentifier` is ignored: a fresh cluster is created instead of restoring from a snapshot.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.

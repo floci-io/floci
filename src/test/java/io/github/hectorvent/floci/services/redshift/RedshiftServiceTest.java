@@ -119,13 +119,27 @@ class RedshiftServiceTest {
                 "admin", null, List.of(), List.of(),
                 "arn:aws:kms:us-east-1:111111111111:key/key-1", "us-east-1");
 
-        assertEquals(secret.getArn(), cluster.getMasterUserSecretArn());
-        assertEquals("version-1", cluster.getMasterUserSecretVersionId());
-        assertEquals("arn:aws:kms:us-east-1:111111111111:key/key-1", cluster.getMasterUserSecretKmsKeyId());
-        assertEquals("available", cluster.getMasterUserSecretStatus());
+        assertEquals(secret.getArn(), cluster.getMasterPasswordSecretArn());
+        assertEquals("arn:aws:kms:us-east-1:111111111111:key/key-1", cluster.getMasterPasswordSecretKmsKeyId());
         verify(secretsManagerService).createSecret(eq("redshift/managed-cluster"),
                 contains("\"username\":\"admin\""), isNull(), anyString(),
                 eq("arn:aws:kms:us-east-1:111111111111:key/key-1"), anyList(), eq("redshift"), eq("us-east-1"));
+    }
+
+    @Test
+    void managedMasterPasswordRollsBackClusterWhenSecretCreationFails() {
+        when(cm.start(eq("111111111111"), eq("failed-managed-cluster"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "failed-managed-cluster", "localhost", 5432));
+        when(secretsManagerService.createSecret(eq("redshift/failed-managed-cluster"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1")))
+                .thenThrow(new AwsException("InternalFailure", "secret store unavailable", 500));
+
+        assertThrows(AwsException.class, () -> service.createClusterWithManagedMasterPassword(
+                "failed-managed-cluster", "dc2.large", "admin", null, List.of(), List.of(), null, "us-east-1"));
+
+        verify(cm).stop("111111111111", "failed-managed-cluster");
+        verify(clusterBackend).delete("failed-managed-cluster");
+        assertThrows(AwsException.class, () -> service.describeClusters("failed-managed-cluster"));
     }
 
     @Test

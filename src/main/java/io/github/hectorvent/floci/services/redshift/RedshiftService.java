@@ -26,7 +26,6 @@ import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.RandomPasswordGenerator;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
-import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -256,16 +255,39 @@ public class RedshiftService {
                 clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
         String secretName = "redshift/" + identifier;
         String secretString = managedMasterSecret(cluster, password);
-        Secret secret = secretsManagerService.createSecret(secretName, secretString, null,
-                        "Managed master user secret for Redshift cluster " + identifier,
-                        kmsKeyId, List.of(), "redshift", region);
-        cluster.setMasterUserSecretArn(secret.getArn());
-        cluster.setMasterUserSecretVersionId(secret.getCurrentVersionId());
-        cluster.setMasterUserSecretKmsKeyId(kmsKeyId);
-        cluster.setMasterUserSecretStatus("available");
+        Secret secret;
+        try {
+            secret = secretsManagerService.createSecret(secretName, secretString, null,
+                            "Managed master user secret for Redshift cluster " + identifier,
+                            kmsKeyId, List.of(), "redshift", region);
+        } catch (RuntimeException e) {
+            rollbackManagedMasterPasswordCluster(cluster);
+            throw e;
+        }
+        cluster.setMasterPasswordSecretArn(secret.getArn());
+        cluster.setMasterPasswordSecretKmsKeyId(kmsKeyId);
         clusters.put(identifier, cluster);
         clusters.flush();
         return cluster;
+    }
+
+    private void rollbackManagedMasterPasswordCluster(Cluster cluster) {
+        boolean proxyStopped = stopProxyAndReleasePortSafely(
+                cluster.getClusterIdentifier(), cluster.getProxyPort());
+        try {
+            containerManager.stop(clusters.accountId(), cluster.getClusterIdentifier());
+        } catch (Exception e) {
+            LOG.warnv(e, "Failed to stop managed-password cluster container {0} during rollback",
+                    cluster.getClusterIdentifier());
+        }
+        if (proxyStopped) {
+            clusters.delete(cluster.getClusterIdentifier());
+            credentialBroker.revokeCluster(clusters.accountId(), cluster.getClusterIdentifier());
+        } else {
+            cluster.setClusterStatus("failed");
+            clusters.put(cluster.getClusterIdentifier(), cluster);
+        }
+        clusters.flush();
     }
 
     // ── Zero-ETL integrations ────────────────────────────────────
@@ -467,9 +489,9 @@ public class RedshiftService {
         // identifier does not accept them as master-equivalent.
         credentialBroker.revokeCluster(clusters.accountId(), identifier);
 
-        if (cluster.getMasterUserSecretArn() != null && secretsManagerService != null) {
+        if (cluster.getMasterPasswordSecretArn() != null && secretsManagerService != null) {
             try {
-                secretsManagerService.deleteSecret(cluster.getMasterUserSecretArn(), null, true,
+                secretsManagerService.deleteSecret(cluster.getMasterPasswordSecretArn(), null, true,
                         regionResolver.getRegion());
             } catch (AwsException e) {
                 LOG.warnv(e, "Failed to remove managed master secret for cluster {0}", identifier);
@@ -517,13 +539,12 @@ public class RedshiftService {
     }
 
     private void updateManagedMasterSecret(Cluster cluster, String password) {
-        if (cluster.getMasterUserSecretArn() == null || secretsManagerService == null) {
+        if (cluster.getMasterPasswordSecretArn() == null || secretsManagerService == null) {
             return;
         }
-        SecretVersion version = secretsManagerService.putSecretValue(cluster.getMasterUserSecretArn(),
+        secretsManagerService.putSecretValue(cluster.getMasterPasswordSecretArn(),
                         managedMasterSecret(cluster, password), null, null, regionResolver.getRegion(),
                         List.of("AWSCURRENT"));
-        cluster.setMasterUserSecretVersionId(version.getVersionId());
     }
 
     private String managedMasterSecret(Cluster cluster, String password) {

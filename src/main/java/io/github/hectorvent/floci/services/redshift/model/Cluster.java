@@ -12,10 +12,8 @@ public class Cluster {
     private String nodeType;
     private String masterUsername;
     private String masterPassword;
-    private String masterUserSecretArn;
-    private String masterUserSecretVersionId;
-    private String masterUserSecretKmsKeyId;
-    private String masterUserSecretStatus;
+    private String masterPasswordSecretArn;
+    private String masterPasswordSecretKmsKeyId;
     private String clusterStatus;
     private Endpoint endpoint;
     private String clusterSubnetGroupName;
@@ -31,14 +29,10 @@ public class Cluster {
     public void setMasterUsername(String masterUsername) { this.masterUsername = masterUsername; }
     public String getMasterPassword() { return masterPassword; }
     public void setMasterPassword(String masterPassword) { this.masterPassword = masterPassword; }
-    public String getMasterUserSecretArn() { return masterUserSecretArn; }
-    public void setMasterUserSecretArn(String masterUserSecretArn) { this.masterUserSecretArn = masterUserSecretArn; }
-    public String getMasterUserSecretVersionId() { return masterUserSecretVersionId; }
-    public void setMasterUserSecretVersionId(String masterUserSecretVersionId) { this.masterUserSecretVersionId = masterUserSecretVersionId; }
-    public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
-    public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) { this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId; }
-    public String getMasterUserSecretStatus() { return masterUserSecretStatus; }
-    public void setMasterUserSecretStatus(String masterUserSecretStatus) { this.masterUserSecretStatus = masterUserSecretStatus; }
+    public String getMasterPasswordSecretArn() { return masterPasswordSecretArn; }
+    public void setMasterPasswordSecretArn(String masterPasswordSecretArn) { this.masterPasswordSecretArn = masterPasswordSecretArn; }
+    public String getMasterPasswordSecretKmsKeyId() { return masterPasswordSecretKmsKeyId; }
+    public void setMasterPasswordSecretKmsKeyId(String masterPasswordSecretKmsKeyId) { this.masterPasswordSecretKmsKeyId = masterPasswordSecretKmsKeyId; }
     public String getClusterStatus() { return clusterStatus; }
     public void setClusterStatus(String clusterStatus) { this.clusterStatus = clusterStatus; }
     public Endpoint getEndpoint() { return endpoint; }

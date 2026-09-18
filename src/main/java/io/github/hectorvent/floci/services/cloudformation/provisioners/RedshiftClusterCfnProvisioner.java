@@ -138,8 +138,7 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
                     masterUserPassword, ctx.resolveOptional(props, "ClusterParameterGroupName"),
                     securityGroups);
         } else if (manageMasterPassword) {
-            JsonNode masterUserSecret = props.path("MasterUserSecret");
-            String kmsKeyId = masterUserSecret.path("KmsKeyId").asText(null);
+            String kmsKeyId = props.path("MasterPasswordSecretKmsKeyId").asText(null);
             cluster = redshiftService.createClusterWithManagedMasterPassword(id, nodeType, masterUsername,
                     subnetGroup, securityGroups, List.of(), kmsKeyId, ctx.region());
         } else {

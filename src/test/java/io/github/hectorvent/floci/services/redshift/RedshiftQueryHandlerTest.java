@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -85,15 +86,13 @@ class RedshiftQueryHandlerTest {
         params.putSingle("NodeType", "dc2.large");
         params.putSingle("MasterUsername", "admin");
         params.putSingle("ManageMasterPassword", "true");
-        params.putSingle("MasterUserSecret.KmsKeyId", "arn:aws:kms:us-east-1:acc:key/key-1");
+        params.putSingle("MasterPasswordSecretKmsKeyId", "arn:aws:kms:us-east-1:acc:key/key-1");
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("managed-cluster");
         cluster.setClusterStatus("available");
-        cluster.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed");
-        cluster.setMasterUserSecretVersionId("version-1");
-        cluster.setMasterUserSecretKmsKeyId("arn:aws:kms:us-east-1:acc:key/key-1");
-        cluster.setMasterUserSecretStatus("available");
+        cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed");
+        cluster.setMasterPasswordSecretKmsKeyId("arn:aws:kms:us-east-1:acc:key/key-1");
         when(service.createClusterWithManagedMasterPassword(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(cluster);
 
@@ -102,8 +101,9 @@ class RedshiftQueryHandlerTest {
 
         assertEquals(200, response.getStatus());
         String xml = (String) response.getEntity();
-        assertTrue(xml.contains("<SecretArn>arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed</SecretArn>"));
-        assertTrue(xml.contains("<SecretStatus>available</SecretStatus>"));
+        assertTrue(xml.contains("<MasterPasswordSecretArn>arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed</MasterPasswordSecretArn>"));
+        assertTrue(xml.contains("<MasterPasswordSecretKmsKeyId>arn:aws:kms:us-east-1:acc:key/key-1</MasterPasswordSecretKmsKeyId>"));
+        assertFalse(xml.contains("<MasterUserSecret>"));
         verify(service).createClusterWithManagedMasterPassword(eq("managed-cluster"), eq("dc2.large"),
                 eq("admin"), isNull(), eq(List.of()), eq(List.of()),
                 eq("arn:aws:kms:us-east-1:acc:key/key-1"), eq("us-east-1"));

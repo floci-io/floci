@@ -74,7 +74,7 @@ public class RedshiftQueryHandler {
             Cluster cluster = manageMasterPassword
                     ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
                             clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
-                            params.getFirst("MasterUserSecret.KmsKeyId"), region)
+                            params.getFirst("MasterPasswordSecretKmsKeyId"), region)
                     : iamRoleArns.isEmpty()
                     ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
                             clusterSubnetGroupName, vpcSecurityGroupIds)
@@ -624,13 +624,9 @@ public class RedshiftQueryHandler {
             .elem("AvailabilityZoneRelocationStatus", "disabled")
             .elem("ClusterSubnetGroupName", cluster.getClusterSubnetGroupName());
 
-        if (cluster.getMasterUserSecretArn() != null) {
-            builder.start("MasterUserSecret")
-                .elem("SecretArn", cluster.getMasterUserSecretArn())
-                .elem("SecretVersionId", cluster.getMasterUserSecretVersionId())
-                .elem("KmsKeyId", cluster.getMasterUserSecretKmsKeyId())
-                .elem("SecretStatus", cluster.getMasterUserSecretStatus())
-              .end("MasterUserSecret");
+        if (cluster.getMasterPasswordSecretArn() != null) {
+            builder.elem("MasterPasswordSecretArn", cluster.getMasterPasswordSecretArn())
+                .elem("MasterPasswordSecretKmsKeyId", cluster.getMasterPasswordSecretKmsKeyId());
         }
 
         if (cluster.getVpcSecurityGroupIds() != null && !cluster.getVpcSecurityGroupIds().isEmpty()) {
