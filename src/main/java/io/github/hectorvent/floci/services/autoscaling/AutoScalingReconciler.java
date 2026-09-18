@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
@@ -79,12 +80,30 @@ public class AutoScalingReconciler {
     }
 
     void reconcileAll() {
-        for (AutoScalingGroup asg : asgService.describeAutoScalingGroups(null, null)) {
-            try {
-                reconcile(asg);
-            } catch (Exception e) {
-                LOG.warnv("Reconcile failed for ASG {0}: {1}", asg.getAutoScalingGroupName(), e.getMessage());
+        Set<String> accountIds;
+        try {
+            accountIds = asgService.autoScalingGroupAccountIds();
+        } catch (Exception e) {
+            LOG.warnv("Could not enumerate Auto Scaling group accounts: {0}", e.getMessage());
+            return;
+        }
+        for (String accountId : accountIds) {
+            RequestScopes.runAs(accountId, () -> reconcileAccount(accountId));
+        }
+    }
+
+    private void reconcileAccount(String accountId) {
+        try {
+            for (AutoScalingGroup asg : asgService.describeAutoScalingGroups(null, null)) {
+                try {
+                    reconcile(asg);
+                } catch (Exception e) {
+                    LOG.warnv("Reconcile failed for ASG {0} in account {1}: {2}",
+                            asg.getAutoScalingGroupName(), accountId, e.getMessage());
+                }
             }
+        } catch (Exception e) {
+            LOG.warnv("Could not reconcile Auto Scaling groups in account {0}: {1}", accountId, e.getMessage());
         }
     }
 
