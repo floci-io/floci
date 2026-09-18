@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.kms;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -1813,6 +1814,99 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("InvalidKeyUsageException"))
                 .body("message", equalTo("Algorithm ECDSA_SHA_384 is incompatible with key spec ECC_NIST_P256."));
+    }
+
+    /** Checked against real AWS in us-east-1. The key state is checked before the algorithm. */
+    @ParameterizedTest
+    @CsvSource({
+            "RSA_2048, SIGN_VERIFY, Sign, RSASSA_PSS_SHA_256",
+            "RSA_2048, SIGN_VERIFY, Verify, RSASSA_PSS_SHA_256",
+            "RSA_2048, SIGN_VERIFY, Sign, ECDSA_SHA_256",
+            "HMAC_256, GENERATE_VERIFY_MAC, GenerateMac, HMAC_SHA_256",
+            "HMAC_256, GENERATE_VERIFY_MAC, VerifyMac, HMAC_SHA_256",
+            "HMAC_256, GENERATE_VERIFY_MAC, GenerateMac, HMAC_SHA_512",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, Encrypt, SYMMETRIC_DEFAULT",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, GenerateDataKey, SYMMETRIC_DEFAULT",
+            "RSA_2048, ENCRYPT_DECRYPT, Encrypt, RSAES_OAEP_SHA_256",
+            "RSA_2048, ENCRYPT_DECRYPT, Decrypt, RSAES_OAEP_SHA_256",
+    })
+    void cryptoOperationsRejectADisabledKey(String keySpec, String keyUsage, String operation, String algorithm) {
+        String keyArn = createKeyArn(keySpec, keyUsage);
+        callKms("DisableKey", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
+
+        callKms(operation, cryptoRequest(operation, keyArn, algorithm))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("DisabledException"))
+                .body("message", equalTo(keyArn + " is disabled."));
+    }
+
+    /** Checked against real AWS in us-east-1. The key state is checked before the algorithm. */
+    @ParameterizedTest
+    @CsvSource({
+            "ECC_NIST_P256, SIGN_VERIFY, Sign, ECDSA_SHA_256",
+            "ECC_NIST_P256, SIGN_VERIFY, Verify, ECDSA_SHA_256",
+            "ECC_NIST_P256, SIGN_VERIFY, Sign, ECDSA_SHA_384",
+            "HMAC_256, GENERATE_VERIFY_MAC, GenerateMac, HMAC_SHA_256",
+            "HMAC_256, GENERATE_VERIFY_MAC, VerifyMac, HMAC_SHA_256",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, Encrypt, SYMMETRIC_DEFAULT",
+    })
+    void cryptoOperationsRejectAKeyPendingDeletion(String keySpec, String keyUsage, String operation,
+                                                   String algorithm) {
+        String keyArn = createKeyArn(keySpec, keyUsage);
+        callKms("ScheduleKeyDeletion", "{\"KeyId\":\"%s\",\"PendingWindowInDays\":7}".formatted(keyArn))
+                .then().statusCode(200);
+
+        callKms(operation, cryptoRequest(operation, keyArn, algorithm))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo(keyArn + " is pending deletion."));
+    }
+
+    /** Checked against real AWS in us-east-1. The key usage is checked before the key state. */
+    @ParameterizedTest
+    @CsvSource({
+            "HMAC_256, GENERATE_VERIFY_MAC, DisableKey, Sign, RSASSA_PSS_SHA_256",
+            "HMAC_256, GENERATE_VERIFY_MAC, ScheduleKeyDeletion, Sign, RSASSA_PSS_SHA_256",
+            "RSA_2048, SIGN_VERIFY, DisableKey, Encrypt, RSAES_OAEP_SHA_256",
+    })
+    void keyUsageIsCheckedBeforeTheKeyState(String keySpec, String keyUsage, String stateChange, String operation,
+                                            String algorithm) {
+        String keyArn = createKeyArn(keySpec, keyUsage);
+        callKms(stateChange, "{\"KeyId\":\"%s\",\"PendingWindowInDays\":7}".formatted(keyArn)).then().statusCode(200);
+
+        callKms(operation, cryptoRequest(operation, keyArn, algorithm))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
+    }
+
+    private static String cryptoRequest(String operation, String keyArn, String algorithm) {
+        String blob = Base64.getEncoder().encodeToString(new byte[64]);
+        return switch (operation) {
+            case "Sign", "Verify" ->
+                    "{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                            .formatted(keyArn, blob, algorithm);
+            case "GenerateMac", "VerifyMac" ->
+                    "{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"Mac\":\"%s\",\"MacAlgorithm\":\"%s\"}"
+                            .formatted(keyArn, blob, algorithm);
+            case "Encrypt" -> "{\"KeyId\":\"%s\",\"Plaintext\":\"bWVzc2FnZQ==\",\"EncryptionAlgorithm\":\"%s\"}"
+                    .formatted(keyArn, algorithm);
+            case "Decrypt" -> "{\"KeyId\":\"%s\",\"CiphertextBlob\":\"%s\",\"EncryptionAlgorithm\":\"%s\"}"
+                    .formatted(keyArn, blob, algorithm);
+            case "GenerateDataKey" -> "{\"KeyId\":\"%s\",\"KeySpec\":\"AES_256\"}".formatted(keyArn);
+            default -> throw new IllegalArgumentException(operation);
+        };
+    }
+
+    private static Response callKms(String operation, String body) {
+        return given()
+                .header("X-Amz-Target", "TrentService." + operation)
+                .contentType(KMS_CONTENT_TYPE)
+                .body(body)
+                .when().post("/");
     }
 
     private static String createKeyArn(String keySpec, String keyUsage) {

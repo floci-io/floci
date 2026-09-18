@@ -1164,8 +1164,8 @@ public class KmsService implements ResourceProvider {
         KmsKeySpec.Algorithm algorithm = resolveEncryptionAlgorithm(encryptionAlgorithm);
         validatePlaintextLength(plaintext, operation);
         KmsKey kmsKey = resolveKey(keyId, region);
-        validateKeyIsUsableForCryptoOperations(kmsKey);
         validateKeyUsage(kmsKey, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
+        validateKeyIsUsableForCryptoOperations(kmsKey);
         validateAlgorithmForSpec(algorithm, kmsKey.getKeySpec());
 
         if (algorithm != KmsKeySpec.Algorithm.SYMMETRIC_DEFAULT) {
@@ -1231,8 +1231,8 @@ public class KmsService implements ResourceProvider {
                 throw new AwsException("ValidationException", "KeyId must not be null", 400);
             }
             KmsKey requestKey = resolveKey(requestKeyId, region);
-            validateKeyIsUsableForCryptoOperations(requestKey);
             validateKeyUsage(requestKey, KmsKeyUsage.ENCRYPT_DECRYPT, "Decrypt");
+            validateKeyIsUsableForCryptoOperations(requestKey);
             validateAlgorithmForSpec(algorithm, requestKey.getKeySpec());
             rejectEncryptionContextForAsymmetricKey(encryptionContext);
             byte[] plaintext = keyTypes.of(requestKey.getKeySpec()).decrypt(requestKey, algorithm, ciphertext);
@@ -1603,6 +1603,7 @@ public class KmsService implements ResourceProvider {
         KmsKeySpec.Algorithm signingAlgorithm = resolveSigningAlgorithm(algorithm);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Sign");
+        validateKeyIsUsableForCryptoOperations(kmsKey);
         validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
         validateDigestLength(signingAlgorithm, messageType, message);
         try {
@@ -1646,6 +1647,7 @@ public class KmsService implements ResourceProvider {
         KmsKeySpec.Algorithm signingAlgorithm = resolveSigningAlgorithm(algorithm);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Verify");
+        validateKeyIsUsableForCryptoOperations(kmsKey);
         validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
         validateDigestLength(signingAlgorithm, messageType, message);
         try {
@@ -1708,6 +1710,7 @@ public class KmsService implements ResourceProvider {
             throw new AwsException("InvalidKeyUsageException",
                     "MAC operations require an HMAC key with KeyUsage GENERATE_VERIFY_MAC.", 400);
         }
+        validateKeyIsUsableForCryptoOperations(kmsKey);
 
         String expectedAlgorithm = kmsKey.getKeySpec().getAlgorithm().getFirst().getAlgName();
         if (!Objects.equals(expectedAlgorithm, algorithm)) {
@@ -1803,7 +1806,7 @@ public class KmsService implements ResourceProvider {
         if (PENDING_DELETION.equals(key.getKeyState())) {
             throw new AwsException(
                     "KMSInvalidStateException",
-                    "KMS key " + key.getKeyId() + " is pending deletion.",
+                    key.getArn() + " is pending deletion.",
                     400
             );
         }
@@ -1811,7 +1814,7 @@ public class KmsService implements ResourceProvider {
         if (!key.isEnabled()) {
             throw new AwsException(
                     "DisabledException",
-                    "The request was rejected because the specified KMS key is not enabled.",
+                    key.getArn() + " is disabled.",
                     400
             );
         }
