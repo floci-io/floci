@@ -17,11 +17,14 @@ import software.amazon.awssdk.services.redshift.model.CreateClusterResponse;
 import software.amazon.awssdk.services.redshift.model.CreateClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.CreateClusterSnapshotResponse;
 import software.amazon.awssdk.services.redshift.model.CreateClusterSubnetGroupRequest;
+import software.amazon.awssdk.services.redshift.model.CreateSnapshotCopyGrantRequest;
+import software.amazon.awssdk.services.redshift.model.CreateSnapshotCopyGrantResponse;
 import software.amazon.awssdk.services.redshift.model.CreateTagsRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterParameterGroupRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterSubnetGroupRequest;
+import software.amazon.awssdk.services.redshift.model.DeleteSnapshotCopyGrantRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteTagsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterParameterGroupsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterParameterGroupsResponse;
@@ -30,12 +33,17 @@ import software.amazon.awssdk.services.redshift.model.DescribeClusterSnapshotsRe
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersResponse;
+import software.amazon.awssdk.services.redshift.model.DescribeSnapshotCopyGrantsRequest;
+import software.amazon.awssdk.services.redshift.model.DescribeSnapshotCopyGrantsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeTagsRequest;
 import software.amazon.awssdk.services.redshift.model.ModifyClusterRequest;
 import software.amazon.awssdk.services.redshift.model.RebootClusterRequest;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotResponse;
 import software.amazon.awssdk.services.redshift.model.Snapshot;
+import software.amazon.awssdk.services.redshift.model.SnapshotCopyGrant;
+import software.amazon.awssdk.services.redshift.model.SnapshotCopyGrantAlreadyExistsException;
+import software.amazon.awssdk.services.redshift.model.SnapshotCopyGrantNotFoundException;
 import software.amazon.awssdk.services.redshift.model.Tag;
 
 import java.sql.Connection;
@@ -52,6 +60,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("Redshift Operations")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -68,6 +77,7 @@ class RedshiftOperationsTest {
     private static final List<String> snapshotsToCleanup = new ArrayList<>();
     private static final List<String> parameterGroupsToCleanup = new ArrayList<>();
     private static final List<String> subnetGroupsToCleanup = new ArrayList<>();
+    private static final List<String> snapshotCopyGrantsToCleanup = new ArrayList<>();
 
     @BeforeAll
     static void setup() {
@@ -111,6 +121,15 @@ class RedshiftOperationsTest {
                             .build());
                 } catch (Exception e) {
                     LOG.log(Level.WARNING, "Failed to clean up Redshift cluster subnet group " + subnetGroupName, e);
+                }
+            }
+            for (String grantName : snapshotCopyGrantsToCleanup) {
+                try {
+                    client.deleteSnapshotCopyGrant(DeleteSnapshotCopyGrantRequest.builder()
+                            .snapshotCopyGrantName(grantName)
+                            .build());
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up Redshift snapshot copy grant " + grantName, e);
                 }
             }
             client.close();
@@ -313,6 +332,104 @@ class RedshiftOperationsTest {
                 .clusterIdentifier(clusterId)
                 .build());
         assertThat(rebooted.cluster().clusterStatus()).isEqualTo("available");
+    }
+
+    @Test
+    @Order(4)
+    void testSnapshotCopyGrantLifecycle() {
+        String grantName = TestFixtures.uniqueName("rs-copy-grant");
+        String otherGrantName = TestFixtures.uniqueName("rs-copy-grant-other");
+
+        CreateSnapshotCopyGrantResponse created = client.createSnapshotCopyGrant(
+                CreateSnapshotCopyGrantRequest.builder()
+                        .snapshotCopyGrantName(grantName)
+                        .kmsKeyId("key-abc")
+                        .tags(Tag.builder().key("env").value("test").build())
+                        .build());
+        snapshotCopyGrantsToCleanup.add(grantName);
+
+        assertThat(created.snapshotCopyGrant().snapshotCopyGrantName()).isEqualTo(grantName);
+        assertThat(created.snapshotCopyGrant().kmsKeyId()).isEqualTo("key-abc");
+        assertThat(created.snapshotCopyGrant().tags())
+                .anyMatch(t -> "env".equals(t.key()) && "test".equals(t.value()));
+
+        // KmsKeyId is optional: AWS substitutes the account's default Redshift key.
+        CreateSnapshotCopyGrantResponse withDefaultKey = client.createSnapshotCopyGrant(
+                CreateSnapshotCopyGrantRequest.builder()
+                        .snapshotCopyGrantName(otherGrantName)
+                        .build());
+        snapshotCopyGrantsToCleanup.add(otherGrantName);
+        assertThat(withDefaultKey.snapshotCopyGrant().kmsKeyId()).isNotBlank();
+
+        assertThatThrownBy(() -> client.createSnapshotCopyGrant(CreateSnapshotCopyGrantRequest.builder()
+                .snapshotCopyGrantName(grantName)
+                .build()))
+                .isInstanceOf(SnapshotCopyGrantAlreadyExistsException.class);
+
+        // Filtered describe returns only the named grant, with its fields intact through
+        // the real unmarshaller.
+        DescribeSnapshotCopyGrantsResponse filtered = client.describeSnapshotCopyGrants(
+                DescribeSnapshotCopyGrantsRequest.builder()
+                        .snapshotCopyGrantName(grantName)
+                        .build());
+        assertThat(filtered.snapshotCopyGrants()).hasSize(1);
+        SnapshotCopyGrant found = filtered.snapshotCopyGrants().get(0);
+        assertThat(found.snapshotCopyGrantName()).isEqualTo(grantName);
+        assertThat(found.kmsKeyId()).isEqualTo("key-abc");
+        assertThat(found.tags()).anyMatch(t -> "env".equals(t.key()) && "test".equals(t.value()));
+
+        DescribeSnapshotCopyGrantsResponse all = client.describeSnapshotCopyGrants(
+                DescribeSnapshotCopyGrantsRequest.builder().build());
+        assertThat(all.snapshotCopyGrants())
+                .extracting(SnapshotCopyGrant::snapshotCopyGrantName)
+                .contains(grantName, otherGrantName);
+
+        client.deleteSnapshotCopyGrant(DeleteSnapshotCopyGrantRequest.builder()
+                .snapshotCopyGrantName(grantName)
+                .build());
+        snapshotCopyGrantsToCleanup.remove(grantName);
+
+        assertThatThrownBy(() -> client.describeSnapshotCopyGrants(DescribeSnapshotCopyGrantsRequest.builder()
+                .snapshotCopyGrantName(grantName)
+                .build()))
+                .isInstanceOf(SnapshotCopyGrantNotFoundException.class);
+
+        assertThatThrownBy(() -> client.deleteSnapshotCopyGrant(DeleteSnapshotCopyGrantRequest.builder()
+                .snapshotCopyGrantName(grantName)
+                .build()))
+                .isInstanceOf(SnapshotCopyGrantNotFoundException.class);
+    }
+
+    @Test
+    @Order(5)
+    void testSnapshotCopyGrantPaginator() {
+        String prefix = TestFixtures.uniqueName("rs-page-grant");
+        int total = 21;
+        for (int i = 1; i <= total; i++) {
+            String name = String.format("%s-%02d", prefix, i);
+            client.createSnapshotCopyGrant(CreateSnapshotCopyGrantRequest.builder()
+                    .snapshotCopyGrantName(name)
+                    .build());
+            snapshotCopyGrantsToCleanup.add(name);
+        }
+
+        // MaxRecords below the number of grants forces the SDK's paginator to follow a
+        // Marker, which is the only way to prove the continuation token round-trips.
+        int pages = 0;
+        List<String> paged = new ArrayList<>();
+        for (DescribeSnapshotCopyGrantsResponse page : client.describeSnapshotCopyGrantsPaginator(
+                DescribeSnapshotCopyGrantsRequest.builder().maxRecords(20).build())) {
+            pages++;
+            page.snapshotCopyGrants().stream()
+                    .map(SnapshotCopyGrant::snapshotCopyGrantName)
+                    .filter(name -> name.startsWith(prefix))
+                    .forEach(paged::add);
+        }
+
+        assertThat(pages).isGreaterThan(1);
+        assertThat(paged).hasSize(total);
+        assertThat(paged).doesNotHaveDuplicates();
+        assertThat(paged).isSorted();
     }
 
     private static Connection awaitPostgresConnection(String host, int port, String username, String password) throws Exception {
