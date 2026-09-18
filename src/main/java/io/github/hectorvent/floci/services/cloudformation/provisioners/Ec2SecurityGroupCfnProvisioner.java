@@ -10,11 +10,16 @@ import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -39,6 +44,11 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(Ec2SecurityGroupCfnProvisioner.class);
 
     private static final String SECURITY_GROUP = "AWS::EC2::SecurityGroup";
+    // Internal, like the other __Floci attributes: the inline rule keys this resource last
+    // authorized, so a later update can revoke the ones it dropped without touching rules a
+    // standalone SecurityGroupIngress/Egress resource owns.
+    static final String INGRESS_RULES_ATTR = "__FlociSgIngressRules";
+    static final String EGRESS_RULES_ATTR = "__FlociSgEgressRules";
 
     private final Ec2Service ec2Service;
 
@@ -80,28 +90,21 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
             r.getAttributes().put("VpcId", sg.getVpcId());
         }
 
-        // Inline rule properties: previously dropped, leaving the group empty. The mapping is
-        // shared with the standalone SecurityGroupIngress/Egress resource types, which live in
-        // Ec2SecurityGroupRuleCfnProvisioner.
-        // Authorize appends without a duplicate check, so re-running this on a reused group would
-        // stack another copy of every inline rule on each update. Only authorize what the group
-        // does not already carry.
-        //
-        // Deliberately additive: a rule dropped from the template is not revoked here. Revoking
-        // the difference would mean revoking permissions this resource cannot prove it owns - a
-        // group can also carry rules from standalone AWS::EC2::SecurityGroupIngress/Egress
-        // resources, and clearing them on an unrelated update would close ports another stack
-        // resource is responsible for. Removing a rule the template no longer declares needs the
-        // provisioner to record what it authorized; noted as a follow-up.
+        // Inline rule properties, shared with the standalone SecurityGroupIngress/Egress types in
+        // Ec2SecurityGroupRuleCfnProvisioner. Reconcile in both directions: authorize what the
+        // group does not already carry, and revoke a rule this resource authorized on a prior run
+        // that the template no longer declares. Ownership is scoped by the keys recorded in the
+        // internal attributes, so a rule owned by a standalone resource is never revoked here.
         UnaryOperator<String> peerGroupId = peerGroupIdResolver(region, sg.getVpcId());
-        if (props != null && props.has("SecurityGroupIngress")) {
-            authorizeMissing(props.get("SecurityGroupIngress"), sg.getIpPermissions(), engine, peerGroupId,
-                    perms -> ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), perms));
-        }
-        if (props != null && props.has("SecurityGroupEgress")) {
-            authorizeMissing(props.get("SecurityGroupEgress"), sg.getIpPermissionsEgress(), engine, peerGroupId,
-                    perms -> ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), perms));
-        }
+        reconcileRules(props, "SecurityGroupIngress", sg.getIpPermissions(), engine, peerGroupId, r,
+                INGRESS_RULES_ATTR,
+                perms -> ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), perms),
+                perms -> ec2Service.revokeSecurityGroupIngress(region, sg.getGroupId(), perms));
+        reconcileRules(props, "SecurityGroupEgress", sg.getIpPermissionsEgress(), engine, peerGroupId, r,
+                EGRESS_RULES_ATTR,
+                perms -> ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), perms),
+                perms -> ec2Service.revokeSecurityGroupEgress(region, sg.getGroupId(), perms));
+        reconcileTags(props, sg.getGroupId(), region, ctx);
     }
 
     @Override
@@ -118,21 +121,81 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Authorizes each declared rule that the group does not already carry, one call per rule so a
-     * rejected rule cannot take its siblings down with it.
+     * Reconciles one direction's inline rules: authorizes each declared rule the group does not
+     * already carry (one call per rule so a reject cannot take its siblings down), and revokes a
+     * rule this resource authorized on a prior run that the template no longer declares. The keys
+     * this resource declared are recorded in {@code attrKey}, so only its own rules are revoked;
+     * a rule a standalone SecurityGroupIngress/Egress resource added is never in that set.
      */
-    private void authorizeMissing(JsonNode declared, List<IpPermission> existing,
-                                  CloudFormationTemplateEngine engine,
-                                  UnaryOperator<String> peerGroupId,
-                                  Consumer<List<IpPermission>> authorize) {
+    private void reconcileRules(JsonNode props, String property, List<IpPermission> existing,
+                                CloudFormationTemplateEngine engine, UnaryOperator<String> peerGroupId,
+                                StackResource r, String attrKey,
+                                Consumer<List<IpPermission>> authorize,
+                                Consumer<List<IpPermission>> revoke) {
+        List<IpPermission> declared = new ArrayList<>();
+        if (props != null && props.has(property)) {
+            for (JsonNode rule : props.get(property)) {
+                declared.add(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine));
+            }
+        }
+        Set<String> declaredKeys = new LinkedHashSet<>();
+        for (IpPermission perm : declared) {
+            declaredKeys.add(permissionKey(perm, peerGroupId));
+        }
         Set<String> present = existing.stream()
                 .map(p -> permissionKey(p, peerGroupId))
                 .collect(Collectors.toSet());
-        for (JsonNode rule : declared) {
-            IpPermission perm = Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine);
+        for (IpPermission perm : declared) {
             if (present.add(permissionKey(perm, peerGroupId))) {
                 authorize.accept(List.of(perm));
             }
+        }
+        Set<String> priorKeys = parseRuleKeys(r.getAttributes().get(attrKey));
+        for (IpPermission existingPermission : existing) {
+            String key = permissionKey(existingPermission, peerGroupId);
+            if (priorKeys.contains(key) && !declaredKeys.contains(key)) {
+                revoke.accept(List.of(existingPermission));
+            }
+        }
+        if (declaredKeys.isEmpty()) {
+            r.getAttributes().remove(attrKey);
+        } else {
+            r.getAttributes().put(attrKey, String.join("\n", declaredKeys));
+        }
+    }
+
+    private static Set<String> parseRuleKeys(String stored) {
+        if (stored == null || stored.isEmpty()) {
+            return Set.of();
+        }
+        return new LinkedHashSet<>(Arrays.asList(stored.split("\n", -1)));
+    }
+
+    /**
+     * Reconciles the group's tags to the template on create and update: adds or overwrites the
+     * declared tags and removes any the template dropped. AWS treats SecurityGroup Tags as an
+     * in-place (no interruption) update.
+     */
+    private void reconcileTags(JsonNode props, String groupId, String region, ProvisionContext ctx) {
+        Map<String, String> desired = ctx.resolveTags(props, "Tags");
+        Map<String, String> current = new LinkedHashMap<>();
+        for (Map<String, String> entry : ec2Service.describeTags(region, Map.of("resource-id", List.of(groupId)))) {
+            current.put(entry.get("key"), entry.get("value"));
+        }
+        List<String> stale = ProvisionContext.staleTagKeys(current, desired);
+        if (!stale.isEmpty()) {
+            List<Tag> remove = new ArrayList<>();
+            for (String key : stale) {
+                remove.add(new Tag(key, current.get(key)));
+            }
+            ec2Service.deleteTags(region, List.of(groupId), remove);
+        }
+        if (!desired.isEmpty()) {
+            List<Tag> add = new ArrayList<>();
+            for (Map.Entry<String, String> entry : desired.entrySet()) {
+                add.add(new Tag(entry.getKey(), entry.getValue()));
+            }
+            ec2Service.createTags(region, List.of(groupId), add);
         }
     }
 

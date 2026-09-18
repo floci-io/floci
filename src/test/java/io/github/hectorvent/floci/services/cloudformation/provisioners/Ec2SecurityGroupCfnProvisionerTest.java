@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -139,12 +140,103 @@ class Ec2SecurityGroupCfnProvisionerTest {
         assertEquals("DependencyViolation", failure.getErrorCode());
     }
 
+    @Test
+    void createTagsTheGroup() throws Exception {
+        when(ec2.createSecurityGroup("us-east-1", "web", "web tier", "vpc-1"))
+                .thenReturn(group("sg-1", "web", "web tier", "vpc-1"));
+        StackResource r = resource("WebSg");
+
+        provisioner.provision(r, props("""
+                {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1",
+                 "Tags": [{"Key": "env", "Value": "prod"}, {"Key": "team", "Value": "web"}]}
+                """), ctx(null));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> created = ArgumentCaptor.forClass(List.class);
+        verify(ec2).createTags(eq("us-east-1"), eq(List.of("sg-1")), created.capture());
+        Map<String, String> tags = new HashMap<>();
+        for (Tag t : created.getValue()) {
+            tags.put(t.getKey(), t.getValue());
+        }
+        assertEquals(Map.of("env", "prod", "team", "web"), tags);
+        verify(ec2, never()).deleteTags(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void updateRemovesAndReconcilesTags() throws Exception {
+        when(ec2.describeSecurityGroups("us-east-1", List.of("sg-1"), List.of(), Map.of()))
+                .thenReturn(List.of(group("sg-1", "web", "web tier", "vpc-1")));
+        when(ec2.describeTags(eq("us-east-1"), any())).thenReturn(List.of(
+                tagEntry("sg-1", "env", "prod"), tagEntry("sg-1", "old", "stale")));
+        StackResource r = resource("WebSg");
+        r.setPhysicalId("sg-1");
+
+        provisioner.provision(r, props("""
+                {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1",
+                 "Tags": [{"Key": "env", "Value": "prod"}]}
+                """), ctx("sg-1"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.forClass(List.class);
+        verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("sg-1")), removed.capture());
+        assertEquals(1, removed.getValue().size());
+        assertEquals("old", removed.getValue().get(0).getKey());
+    }
+
+    @Test
+    void updateRevokesOnlyRulesThisResourceAuthorized() throws Exception {
+        // First provision authorizes ports 80 and 443 and records them on the resource.
+        SecurityGroup created = group("sg-1", "web", "web tier", "vpc-1");
+        when(ec2.createSecurityGroup("us-east-1", "web", "web tier", "vpc-1")).thenReturn(created);
+        StackResource r = resource("WebSg");
+        provisioner.provision(r, props("""
+                {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1",
+                 "SecurityGroupIngress": [
+                   {"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "CidrIp": "0.0.0.0/0"},
+                   {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "CidrIp": "0.0.0.0/0"}
+                 ]}
+                """), ctx(null));
+
+        // The group now carries 80, 443, and a rule a standalone resource added (port 22) that
+        // this provisioner never authorized.
+        SecurityGroup existing = group("sg-1", "web", "web tier", "vpc-1");
+        existing.getIpPermissions().add(tcp(80, "0.0.0.0/0"));
+        existing.getIpPermissions().add(tcp(443, "0.0.0.0/0"));
+        existing.getIpPermissions().add(tcp(22, "10.0.0.0/8"));
+        when(ec2.describeSecurityGroups("us-east-1", List.of("sg-1"), List.of(), Map.of()))
+                .thenReturn(List.of(existing));
+        r.setPhysicalId("sg-1");
+
+        // Second provision drops 443 from the template.
+        provisioner.provision(r, props("""
+                {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1",
+                 "SecurityGroupIngress": [
+                   {"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "CidrIp": "0.0.0.0/0"}
+                 ]}
+                """), ctx("sg-1"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<IpPermission>> revoked = ArgumentCaptor.forClass(List.class);
+        verify(ec2).revokeSecurityGroupIngress(eq("us-east-1"), eq("sg-1"), revoked.capture());
+        assertEquals(1, revoked.getAllValues().size());
+        assertEquals(443, revoked.getValue().get(0).getFromPort());
+    }
+
+    private static Map<String, String> tagEntry(String resourceId, String key, String value) {
+        Map<String, String> entry = new HashMap<>();
+        entry.put("resourceId", resourceId);
+        entry.put("key", key);
+        entry.put("value", value);
+        return entry;
+    }
+
     private ProvisionContext ctx(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
         });
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
     }
 
