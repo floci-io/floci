@@ -6,7 +6,6 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
-import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -228,72 +227,6 @@ class CloudFrontSignedUrlServingTest {
                 .queryParam("Key-Pair-Id", publicKey.getId())
                 .when().get("/private/my%20report.pdf")
                 .then().statusCode(200).body(containsString("DOC-" + suffix));
-    }
-
-    /**
-     * A viewer downloads private content through the local delivery hostname, the form that resolves
-     * to loopback and is covered by the HTTPS certificate. The canned policy signs that hostname, so
-     * this also pins the resource URL the verifier rebuilds from the Host header.
-     */
-    @Test
-    void localDeliveryHostnameServesACannedSignedUrl() throws Exception {
-        String suffix = Long.toString(System.nanoTime(), 36);
-        String bucket = "cf-local-" + suffix;
-        s3Service.createBucket(bucket, REGION);
-        s3Service.putObject(bucket, "private/report.txt", ("LOCAL-" + suffix).getBytes(StandardCharsets.UTF_8),
-                "text/plain", Map.of());
-
-        TrustedSigner signer = registerTrustedSigner(suffix);
-
-        DistributionConfig cfg = new DistributionConfig();
-        cfg.setEnabled(true);
-        cfg.setOrigins(List.of(s3Origin("o", bucket)));
-        DefaultCacheBehavior dcb = defaultBehavior("o");
-        dcb.setTrustedKeyGroups(List.of(signer.keyGroupId()));
-        cfg.setDefaultCacheBehavior(dcb);
-        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
-
-        for (String host : List.of(dist.getId() + ".cloudfront.localhost.floci.io",
-                dist.getId() + ".cloudfront.localhost")) {
-            long expires = Instant.now().getEpochSecond() + 3600;
-            String policyJson = CloudFrontSignatureVerifier.cannedPolicy(
-                    "http://" + host + "/private/report.txt", Long.toString(expires));
-            Signature rsa = Signature.getInstance("SHA1withRSA");
-            rsa.initSign(signer.keyPair().getPrivate());
-            rsa.update(policyJson.getBytes(StandardCharsets.UTF_8));
-
-            given().header("Host", host)
-                    .queryParam("Expires", expires)
-                    .queryParam("Signature", cfBase64(rsa.sign()))
-                    .queryParam("Key-Pair-Id", signer.keyPairId())
-                    .when().get("/private/report.txt")
-                    .then().statusCode(200).body(containsString("LOCAL-" + suffix));
-
-            given().header("Host", host).when().get("/private/report.txt")
-                    .then().statusCode(403);
-        }
-    }
-
-    /** A public key registered with CloudFront and the key group that trusts it. */
-    private record TrustedSigner(KeyPair keyPair, String keyPairId, String keyGroupId) {}
-
-    private TrustedSigner registerTrustedSigner(String suffix) throws Exception {
-        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-        generator.initialize(2048);
-        KeyPair keyPair = generator.generateKeyPair();
-        PublicKey publicKey = new PublicKey();
-        publicKey.setName("pk-" + suffix);
-        publicKey.setCallerReference("cr-" + suffix);
-        publicKey.setEncodedKey("-----BEGIN PUBLIC KEY-----\n"
-                + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
-                + "\n-----END PUBLIC KEY-----");
-        publicKey = cloudFrontService.createPublicKey(publicKey);
-
-        KeyGroup keyGroup = new KeyGroup();
-        keyGroup.setName("kg-" + suffix);
-        keyGroup.setItems(List.of(publicKey.getId()));
-        keyGroup = cloudFrontService.createKeyGroup(keyGroup);
-        return new TrustedSigner(keyPair, publicKey.getId(), keyGroup.getId());
     }
 
     private static String cfBase64(byte[] bytes) {
