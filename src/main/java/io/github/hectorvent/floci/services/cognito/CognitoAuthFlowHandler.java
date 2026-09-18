@@ -144,7 +144,7 @@ final class CognitoAuthFlowHandler {
                 if (!adminApi) {
                     throw unsupportedAuthFlow(authFlow);
                 }
-                yield "ALLOW_ADMIN_NO_SRP_AUTH";
+                yield "ADMIN_NO_SRP_AUTH";
             }
             case "USER_SRP_AUTH", "ADMIN_USER_SRP_AUTH" -> "ALLOW_USER_SRP_AUTH";
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> "ALLOW_REFRESH_TOKEN_AUTH";
@@ -155,8 +155,10 @@ final class CognitoAuthFlowHandler {
 
     private static void ensureAuthFlowEnabled(UserPoolClient client, String requiredFlow) {
         List<String> explicitAuthFlows = client.getExplicitAuthFlows();
-        if (explicitAuthFlows != null && !explicitAuthFlows.isEmpty()
-                && !explicitAuthFlows.contains(requiredFlow)) {
+        boolean enabled = explicitAuthFlows != null && (explicitAuthFlows.contains(requiredFlow)
+                || ("ADMIN_NO_SRP_AUTH".equals(requiredFlow)
+                && explicitAuthFlows.contains("ALLOW_ADMIN_USER_PASSWORD_AUTH")));
+        if (!enabled) {
             throw new AwsException("UnsupportedOperationException",
                     requiredFlow + " flow not enabled for this client", 400);
         }

@@ -532,6 +532,9 @@ class CognitoCfnProvisionerTest {
 
         provisioner.provision(r, mapper.createObjectNode().put("UserPoolId", POOL_ID).put("ClientName", "web"), ctx());
 
+        verify(cognito).createUserPoolClient(eq(POOL_ID), eq("web"), eq(false), eq(false), eq(List.of()),
+                eq(List.of()), isNull(), eq(List.of()), isNull(), isNull(), isNull(), isNull(), eq(List.of()),
+                isNull(), eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()), isNull(), isNull());
         assertEquals(Set.of("ClientId", "Name"), r.getAttributes().keySet());
     }
 
@@ -560,7 +563,7 @@ class CognitoCfnProvisionerTest {
         provisioner.provision(r, props, ctx(CLIENT_ID));
 
         verify(cognito).updateUserPoolClient(eq(POOL_ID), eq(CLIENT_ID), eq("web"), eq(false),
-                eq(List.of()), eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()), isNull(), isNull(),
+                eq(List.of()), eq(List.of()), isNull(), eq(List.of()), isNull(), isNull(), isNull(), isNull(),
                 eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()), isNull(), eq(List.of()),
                 isNull(), eq(Boolean.TRUE));
         verifyNoClientCreate();

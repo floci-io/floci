@@ -215,7 +215,9 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         Map<String, Object> analyticsConfiguration = resolveMapOrNull(props, "AnalyticsConfiguration", ctx);
         List<String> callbackURLs = ctx.resolveStringList(props, "CallbackURLs");
         String defaultRedirectURI = ctx.resolveOptional(props, "DefaultRedirectURI");
-        List<String> explicitAuthFlows = ctx.resolveStringList(props, "ExplicitAuthFlows");
+        List<String> explicitAuthFlows = props.has("ExplicitAuthFlows")
+                ? ctx.resolveStringList(props, "ExplicitAuthFlows")
+                : null;
         Integer accessTokenValidity = parseInteger(props, "AccessTokenValidity", ctx);
         Integer idTokenValidity = parseInteger(props, "IdTokenValidity", ctx);
         List<String> logoutURLs = ctx.resolveStringList(props, "LogoutURLs");
