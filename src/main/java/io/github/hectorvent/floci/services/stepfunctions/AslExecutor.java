@@ -115,6 +115,7 @@ public class AslExecutor {
 
     /** AWS starts no child execution with an input over 256 KiB, batched or not. */
     private static final int MAX_BATCH_INPUT_BYTES = 256 * 1024;
+    private static final int ITEM_READER_MAX_ITEMS = 100_000_000;
 
     private enum MapItemsSource {
         DEFAULT,
@@ -3075,8 +3076,7 @@ public class AslExecutor {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
         }
 
-        int maxItems = resolveMapIntegerField(
-                itemReader.path("ReaderConfig"), "MaxItems", 0, input, jsonata, context, variables);
+        int maxItems = resolveItemReaderMaxItems(itemReader, input, jsonata, context, variables);
         if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
             return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems);
         }
@@ -3097,11 +3097,11 @@ public class AslExecutor {
         try {
             S3Object object = s3Service.getObject(bucket, key);
             if ("JSONL".equals(inputType)) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, readJsonLines(object.getData())),
+                return new ResolvedMapItems(applyMaxItems(maxItems, readJsonLines(object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);
             }
             if ("CSV".equals(inputType)) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, readCsvRows(itemReader, object.getData())),
+                return new ResolvedMapItems(applyMaxItems(maxItems, readCsvRows(itemReader, object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);
             }
             JsonNode items = objectMapper.readTree(object.getData());
@@ -3187,6 +3187,35 @@ public class AslExecutor {
             default -> throw new FailStateException("States.ItemReaderFailed",
                     "ItemReader CSVDelimiter " + delimiter + " is not supported");
         };
+    }
+
+    private int resolveItemReaderMaxItems(JsonNode itemReader, JsonNode mapInput, boolean jsonata,
+                                          JsonNode context, ObjectNode variables) {
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        boolean hasMaxItems = readerConfig.has("MaxItems");
+        boolean hasMaxItemsPath = readerConfig.has("MaxItemsPath");
+        if (hasMaxItems && hasMaxItemsPath) {
+            throw new FailStateException("States.Runtime",
+                    "ReaderConfig cannot specify both MaxItems and MaxItemsPath", "MaxItems");
+        }
+        if (jsonata && hasMaxItemsPath) {
+            throw new FailStateException("States.Runtime",
+                    "ReaderConfig.MaxItemsPath is not supported by JSONata state machines", "MaxItemsPath");
+        }
+
+        int maxItems = resolveMapIntegerField(
+                readerConfig, "MaxItems", 0, mapInput, jsonata, context, variables);
+        if (maxItems > ITEM_READER_MAX_ITEMS) {
+            JsonNode maxItemsNode = readerConfig.path("MaxItems");
+            boolean jsonataExpression = jsonata
+                    && maxItemsNode.isTextual()
+                    && JsonataEvaluator.isExpression(maxItemsNode.asText());
+            throw new FailStateException(
+                    jsonataExpression ? "States.QueryEvaluationError" : "States.Runtime",
+                    "MaxItems must resolve to an integer of " + ITEM_READER_MAX_ITEMS + " or less",
+                    "MaxItems");
+        }
+        return maxItems;
     }
 
     private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,

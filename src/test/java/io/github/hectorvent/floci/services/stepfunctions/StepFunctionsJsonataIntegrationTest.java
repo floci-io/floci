@@ -3675,9 +3675,122 @@ class StepFunctionsJsonataIntegrationTest {
         assertEquals("workers/b.json", items.get(1).path("key").asText());
     }
 
+    @Test
+    void distributedMapWithItemReader_rejectsMaxItemsAndMaxItemsPathTogether() throws Exception {
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItems": 1,
+                    "MaxItemsPath": "$.limit"
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-max-items-conflict"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-max-items-conflict-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":1}"));
+
+        assertEquals("States.Runtime", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("both MaxItems and MaxItemsPath"));
+    }
+
+    @Test
+    void distributedMapWithItemReader_rejectsMaxItemsPathForJsonata() throws Exception {
+        String definition = listObjectsDefinition("\"QueryLanguage\": \"JSONata\",", """
+                "ReaderConfig": {
+                    "MaxItemsPath": "$.limit"
+                },
+                "Arguments": {
+                    "Bucket": "map-inputs-jsonata-max-items-path"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-jsonata-max-items-path-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":1}"));
+
+        assertEquals("States.Runtime", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("not supported by JSONata"));
+    }
+
+    @Test
+    void distributedMapWithItemReader_acceptsOneHundredMillionMaxItems() throws Exception {
+        createBucket("map-inputs-max-items-boundary");
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItems": 100000000
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-max-items-boundary"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-max-items-boundary-test", definition);
+
+        assertEquals("[]", waitForExecution(startExecution(smArn, "{}")));
+    }
+
+    @Test
+    void distributedMapWithItemReader_rejectsLiteralMaxItemsAboveOneHundredMillion() throws Exception {
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItems": 100000001
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-max-items-literal-over-limit"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-max-items-literal-over-limit-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{}"));
+
+        assertEquals("States.Runtime", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("100000000 or less"));
+    }
+
+    @Test
+    void distributedMapWithItemReader_rejectsMaxItemsPathAboveOneHundredMillion() throws Exception {
+        String definition = listObjectsDefinition("""
+                "ReaderConfig": {
+                    "MaxItemsPath": "$.limit"
+                },
+                "Parameters": {
+                    "Bucket": "map-inputs-max-items-path-over-limit"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-max-items-path-over-limit-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":100000001}"));
+
+        assertEquals("States.Runtime", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("100000000 or less"));
+    }
+
+    @Test
+    void distributedMapWithItemReader_rejectsJsonataMaxItemsAboveOneHundredMillion() throws Exception {
+        String definition = listObjectsDefinition("\"QueryLanguage\": \"JSONata\",", """
+                "ReaderConfig": {
+                    "MaxItems": "{% $states.input.limit %}"
+                },
+                "Arguments": {
+                    "Bucket": "map-inputs-jsonata-max-items-over-limit"
+                }
+                """);
+
+        String smArn = createStateMachine("map-itemreader-jsonata-max-items-over-limit-test", definition);
+        Response failure = waitForExecutionFailure(startExecution(smArn, "{\"limit\":100000001}"));
+
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("100000000 or less"));
+    }
+
     private static String listObjectsDefinition(String itemReaderFields) {
+        return listObjectsDefinition("", itemReaderFields);
+    }
+
+    private static String listObjectsDefinition(String topLevelFields, String itemReaderFields) {
         return String.format("""
                 {
+                    %s
                     "StartAt": "ProcessWorkers",
                     "States": {
                         "ProcessWorkers": {
@@ -3703,7 +3816,7 @@ class StepFunctionsJsonataIntegrationTest {
                         }
                     }
                 }
-                """, itemReaderFields);
+                """, topLevelFields, itemReaderFields);
     }
 
     @Test
