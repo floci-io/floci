@@ -2,9 +2,14 @@ package io.github.hectorvent.floci.services.redshift;
 
 import java.util.ArrayList;
 import java.util.List;
-import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
+import io.restassured.RestAssured;
 import io.restassured.response.Response;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.config.HttpClientConfig;
+import io.restassured.config.RestAssuredConfig;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -26,9 +31,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @QuarkusTest
 class RedshiftIntegrationsIntegrationTest {
 
-    private static final String SOURCE = "arn:aws:dynamodb:us-east-1:000000000000:table/keystone-main";
-    private static final String TARGET =
-            "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/8445f0c7-d2b1-4c1c-916c-0eeaa68fd487";
+    private static String source;
+    private static String otherSource;
+    private static final String TARGET = "arn:aws:redshift:us-east-1:000000000000:cluster:zero-etl-cluster";
 
     /**
      * The Authorization header is what routes a Query request to a service; without it the
@@ -48,9 +53,50 @@ class RedshiftIntegrationsIntegrationTest {
         return spec.when().post("/");
     }
 
+    @BeforeEach
+    void createZeroEtlResources() {
+        if (source != null) {
+            return;
+        }
+        RestAssured.config = RestAssuredConfig.config()
+                .httpClient(HttpClientConfig.httpClientConfig().setParam("http.socket.timeout", 180_000));
+        RestAssuredJsonUtils.configureAwsContentTypes();
+        String newSource = createDynamoTable("keystone-main");
+        String newOtherSource = createDynamoTable("keystone-other");
+        query("Action", "CreateCluster", "ClusterIdentifier", "zero-etl-cluster",
+                "NodeType", "dc2.large", "MasterUsername", "admin", "MasterUserPassword", "password123")
+                .then().statusCode(200);
+        source = newSource;
+        otherSource = newOtherSource;
+    }
+
+    private static String createDynamoTable(String tableName) {
+        Response response = given()
+                .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+                .contentType("application/x-amz-json-1.0")
+                .body("""
+                        {
+                          "TableName": "%s",
+                          "KeySchema": [{"AttributeName":"id","KeyType":"HASH"}],
+                          "AttributeDefinitions": [{"AttributeName":"id","AttributeType":"S"}],
+                          "BillingMode": "PAY_PER_REQUEST",
+                          "StreamSpecification": {"StreamEnabled": true, "StreamViewType": "NEW_AND_OLD_IMAGES"}
+                        }
+                        """.formatted(tableName))
+                .when().post("/");
+        if (response.statusCode() != 200) {
+            response = given()
+                    .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+                    .contentType("application/x-amz-json-1.0")
+                    .body("{\"TableName\":\"%s\"}".formatted(tableName))
+                    .when().post("/");
+        }
+        return response.then().statusCode(200).extract().path("TableDescription.LatestStreamArn");
+    }
+
     private static String createIntegration(String name) {
         return query("Action", "CreateIntegration", "IntegrationName", name,
-                "SourceArn", SOURCE, "TargetArn", TARGET)
+                "SourceArn", source, "TargetArn", TARGET)
                 .then().statusCode(200)
                 .extract().body().asString();
     }
@@ -67,7 +113,7 @@ class RedshiftIntegrationsIntegrationTest {
         query("Action", "DescribeIntegrations")
                 .then().statusCode(200)
                 .body(containsString("zetl-described"))
-                .body(containsString(SOURCE))
+                .body(containsString(source))
                 .body(containsString(TARGET))
                 // Lower case on real Redshift, not ACTIVE.
                 .body(containsString("<Status>active</Status>"))
@@ -119,7 +165,7 @@ class RedshiftIntegrationsIntegrationTest {
         createIntegration("zetl-duplicate");
 
         query("Action", "CreateIntegration", "IntegrationName", "zetl-duplicate",
-                "SourceArn", SOURCE, "TargetArn", TARGET)
+                "SourceArn", source, "TargetArn", TARGET)
                 .then().statusCode(400)
                 .body(containsString("IntegrationAlreadyExistsFault"));
     }
@@ -132,7 +178,7 @@ class RedshiftIntegrationsIntegrationTest {
         // trailing hyphen are each outside it, so AWS refuses names floci used to accept.
         for (String name : new String[] {"1zetl", "-zetl", "zetl_name", "zetl--name", "zetl-"}) {
             query("Action", "CreateIntegration", "IntegrationName", name,
-                    "SourceArn", SOURCE, "TargetArn", TARGET)
+                    "SourceArn", source, "TargetArn", TARGET)
                     .then().statusCode(400)
                     .body(containsString("InvalidParameterValue"))
                     .body(containsString("IntegrationName"));
@@ -142,7 +188,7 @@ class RedshiftIntegrationsIntegrationTest {
     @Test
     void anIntegrationNameOverTheModelledLengthIsRejected() {
         query("Action", "CreateIntegration", "IntegrationName", "z".repeat(64),
-                "SourceArn", SOURCE, "TargetArn", TARGET)
+                "SourceArn", source, "TargetArn", TARGET)
                 .then().statusCode(400)
                 .body(containsString("InvalidParameterValue"));
     }
@@ -166,7 +212,7 @@ class RedshiftIntegrationsIntegrationTest {
     void tagsSurviveTheRoundTrip() {
         // The Query member is TagList, not Tags: an SDK serialises the list under its own name.
         query("Action", "CreateIntegration", "IntegrationName", "zetl-tagged",
-                "SourceArn", SOURCE, "TargetArn", TARGET,
+                "SourceArn", source, "TargetArn", TARGET,
                 "TagList.Tag.1.Key", "Environment", "TagList.Tag.1.Value", "dev")
                 .then().statusCode(200);
 
@@ -187,7 +233,7 @@ class RedshiftIntegrationsIntegrationTest {
     @Test
     void descriptionAndEncryptionContextAreStoredAndReturned() {
         query("Action", "CreateIntegration", "IntegrationName", "zetl-full",
-                "SourceArn", SOURCE, "TargetArn", TARGET,
+                "SourceArn", source, "TargetArn", TARGET,
                 "Description", "nightly replica",
                 "KMSKeyId", "arn:aws:kms:us-east-1:000000000000:key/abc",
                 "AdditionalEncryptionContext.entry.1.key", "team",
@@ -204,7 +250,7 @@ class RedshiftIntegrationsIntegrationTest {
     @Test
     void encryptionContextWithoutAKmsKeyIsRejected() {
         query("Action", "CreateIntegration", "IntegrationName", "zetl-nokms",
-                "SourceArn", SOURCE, "TargetArn", TARGET,
+                "SourceArn", source, "TargetArn", TARGET,
                 "AdditionalEncryptionContext.entry.1.key", "team",
                 "AdditionalEncryptionContext.entry.1.value", "data")
                 .then().statusCode(400)
@@ -218,7 +264,7 @@ class RedshiftIntegrationsIntegrationTest {
         // rather than absolute counts.
         for (int i = 0; i < 21; i++) {
             query("Action", "CreateIntegration", "IntegrationName", String.format("zetl-page-%02d", i),
-                    "SourceArn", SOURCE + "-" + i, "TargetArn", TARGET)
+                    "SourceArn", source, "TargetArn", TARGET)
                     .then().statusCode(200);
         }
 
@@ -283,15 +329,15 @@ class RedshiftIntegrationsIntegrationTest {
     @Test
     void filteringBySourceArnNarrowsTheResult() {
         query("Action", "CreateIntegration", "IntegrationName", "zetl-filtered",
-                "SourceArn", SOURCE + "-filtered", "TargetArn", TARGET)
+                "SourceArn", otherSource, "TargetArn", TARGET)
                 .then().statusCode(200);
         query("Action", "CreateIntegration", "IntegrationName", "zetl-unfiltered",
-                "SourceArn", SOURCE + "-other", "TargetArn", TARGET)
+                "SourceArn", source, "TargetArn", TARGET)
                 .then().statusCode(200);
 
         query("Action", "DescribeIntegrations",
                 "Filters.DescribeIntegrationsFilter.1.Name", "source-arn",
-                "Filters.DescribeIntegrationsFilter.1.Values.Value.1", SOURCE + "-filtered")
+                "Filters.DescribeIntegrationsFilter.1.Values.Value.1", otherSource)
                 .then().statusCode(200)
                 .body(containsString("zetl-filtered"))
                 .body(not(containsString("zetl-unfiltered")));

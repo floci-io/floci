@@ -19,6 +19,13 @@ public class Integration {
     private String integrationName;
     private String sourceArn;
     private String targetArn;
+    private String sourceStreamArn;
+    private String targetClusterIdentifier;
+    private String landingTableName;
+    private String checkpointSequenceNumber;
+    private int retryCount;
+    private String lastError;
+    private boolean pollingEnabled;
     private String description;
     private String status;
     private String kmsKeyId;
@@ -37,6 +44,20 @@ public class Integration {
     public void setSourceArn(String sourceArn) { this.sourceArn = sourceArn; }
     public String getTargetArn() { return targetArn; }
     public void setTargetArn(String targetArn) { this.targetArn = targetArn; }
+    public String getSourceStreamArn() { return sourceStreamArn; }
+    public void setSourceStreamArn(String sourceStreamArn) { this.sourceStreamArn = sourceStreamArn; }
+    public String getTargetClusterIdentifier() { return targetClusterIdentifier; }
+    public void setTargetClusterIdentifier(String targetClusterIdentifier) { this.targetClusterIdentifier = targetClusterIdentifier; }
+    public String getLandingTableName() { return landingTableName; }
+    public void setLandingTableName(String landingTableName) { this.landingTableName = landingTableName; }
+    public String getCheckpointSequenceNumber() { return checkpointSequenceNumber; }
+    public void setCheckpointSequenceNumber(String checkpointSequenceNumber) { this.checkpointSequenceNumber = checkpointSequenceNumber; }
+    public int getRetryCount() { return retryCount; }
+    public void setRetryCount(int retryCount) { this.retryCount = retryCount; }
+    public String getLastError() { return lastError; }
+    public void setLastError(String lastError) { this.lastError = lastError; }
+    public boolean isPollingEnabled() { return pollingEnabled; }
+    public void setPollingEnabled(boolean pollingEnabled) { this.pollingEnabled = pollingEnabled; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
     public String getStatus() { return status; }

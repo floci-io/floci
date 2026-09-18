@@ -33,7 +33,7 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DeleteTags` | Remove tags by key from a resource |
 | `DescribeTags` | List tagged resources and their tags |
 | `CreateClusterSubnetGroup` | Register a cluster subnet group (metadata only) |
-| `CreateIntegration` | Register a zero-ETL integration (metadata only; no data is replicated). Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
+| `CreateIntegration` | Create a DynamoDB Streams to provisioned Redshift zero-ETL integration. Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
 | `DescribeIntegrations` | List integrations with `Filters`, `MaxRecords` and `Marker` pagination, or the one an `IntegrationArn` names |
 | `DeleteIntegration` | Remove a zero-ETL integration |
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
@@ -44,6 +44,21 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
+
+## DynamoDB zero-ETL
+
+The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN
+must identify an enabled local DynamoDB stream, and the target ARN must identify an existing
+provisioned Redshift cluster.
+
+Each stream record is written to a stable landing table named `floci_zetl_<integration-id>`.
+The landing table stores the event id, event name, source, region, sequence number, creation time,
+and DynamoDB keys and images as JSON text. Record event ids are unique, so retries are idempotent.
+
+The integration consumer has its own stream checkpoint and does not share Lambda event source
+mapping state. Deleting an integration stops its consumer while retaining the landing table.
+Serverless Redshift targets, backfill, schema inference, and relational projection are not supported
+in this first implementation.
 
 ## CloudFormation
 

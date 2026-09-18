@@ -42,16 +42,25 @@ public class RedshiftQueryHandler {
     private final EmulatorConfig config;
     private final RedshiftIamDbUserResolver iamDbUserResolver;
     private final RegionResolver regionResolver;
+    private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                                 EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
-                                RegionResolver regionResolver) {
+                                RegionResolver regionResolver,
+                                RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
         this.iamDbUserResolver = iamDbUserResolver;
         this.regionResolver = regionResolver;
+        this.zeroEtlConsumer = zeroEtlConsumer;
+    }
+
+    RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
+                         EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
+                         RegionResolver regionResolver) {
+        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -372,6 +381,9 @@ public class RedshiftQueryHandler {
                     encryptionContextMap(params),
                     tagMap(params),
                     regionResolver.resolveRegionFromAuth(authorizationHeader));
+            if (zeroEtlConsumer != null) {
+                zeroEtlConsumer.startPolling(integration);
+            }
             String xml = new XmlBuilder()
                     .start("CreateIntegrationResponse")
                       .start("CreateIntegrationResult")
@@ -414,6 +426,9 @@ public class RedshiftQueryHandler {
         }
         case "DeleteIntegration" -> {
             Integration integration = service.deleteIntegration(params.getFirst("IntegrationArn"));
+            if (zeroEtlConsumer != null) {
+                zeroEtlConsumer.stopPolling(integration.getIntegrationArn());
+            }
             String xml = new XmlBuilder()
                     .start("DeleteIntegrationResponse")
                       .start("DeleteIntegrationResult")

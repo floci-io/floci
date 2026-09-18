@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
@@ -74,6 +75,7 @@ public class RedshiftService {
     private final RedshiftCredentialBroker credentialBroker;
     private final SecretsManagerService secretsManagerService;
     private final ObjectMapper objectMapper;
+    private final DynamoDbStreamService streamService;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
@@ -82,7 +84,8 @@ public class RedshiftService {
                             EmulatorConfig config, RegionResolver regionResolver,
                             RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
                             RedshiftCredentialBroker credentialBroker,
-                            SecretsManagerService secretsManagerService, ObjectMapper objectMapper) {
+                            SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                            DynamoDbStreamService streamService) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -96,6 +99,7 @@ public class RedshiftService {
         this.credentialBroker = credentialBroker;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
+        this.streamService = streamService;
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -103,7 +107,7 @@ public class RedshiftService {
                     RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
                     RedshiftCredentialBroker credentialBroker) {
         this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
-                credentialBroker, null, new ObjectMapper());
+                credentialBroker, null, new ObjectMapper(), null);
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
@@ -314,6 +318,26 @@ public class RedshiftService {
         if (targetArn == null || targetArn.isBlank()) {
             throw new AwsException("InvalidParameterValue", "TargetArn is required.", 400);
         }
+        AwsArnUtils.Arn source = parseZeroEtlArn(sourceArn, "DynamoDB stream");
+        if (!"dynamodb".equals(source.service()) || !source.resource().startsWith("table/")
+                || !source.resource().contains("/stream/")) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceArn must identify a DynamoDB stream.", 400);
+        }
+        if (streamService == null) {
+            throw new AwsException("InternalFailure", "DynamoDB stream service is unavailable.", 500);
+        }
+        streamService.describeStream(sourceArn);
+        AwsArnUtils.Arn target = parseZeroEtlArn(targetArn, "Redshift cluster");
+        if (!"redshift".equals(target.service()) || !target.resource().startsWith("cluster:")) {
+            throw new AwsException("InvalidParameterValue",
+                    "TargetArn must identify a provisioned Redshift cluster.", 400);
+        }
+        String clusterIdentifier = target.resource().substring("cluster:".length());
+        if (clusterIdentifier.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetArn must identify a Redshift cluster.", 400);
+        }
+        describeClusters(clusterIdentifier);
         if (description != null && description.length() > MAX_INTEGRATION_DESCRIPTION) {
             throw new AwsException("InvalidParameterValue",
                     "Description must be at most " + MAX_INTEGRATION_DESCRIPTION + " characters.", 400);
@@ -339,6 +363,13 @@ public class RedshiftService {
         integration.setIntegrationName(integrationName);
         integration.setSourceArn(sourceArn);
         integration.setTargetArn(targetArn);
+        integration.setSourceStreamArn(sourceArn);
+        integration.setTargetClusterIdentifier(clusterIdentifier);
+        integration.setLandingTableName("floci_zetl_" + integrationId.replace('-', '_'));
+        integration.setCheckpointSequenceNumber(null);
+        integration.setRetryCount(0);
+        integration.setLastError(null);
+        integration.setPollingEnabled(true);
         // Real integrations pass through creating before settling; nothing here has work to do.
         integration.setStatus("active");
         integration.setKmsKeyId(kmsKeyId);
@@ -349,6 +380,14 @@ public class RedshiftService {
         integrations.put(integrationId, integration);
         LOG.infov("Created Redshift zero-ETL integration: {0}", integration.getIntegrationArn());
         return integration;
+    }
+
+    private static AwsArnUtils.Arn parseZeroEtlArn(String arn, String resourceType) {
+        try {
+            return AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue", resourceType + " ARN is invalid.", 400);
+        }
     }
 
     /**
@@ -399,6 +438,37 @@ public class RedshiftService {
         // rather than at an offset a concurrent create could shift.
         String next = more && !page.isEmpty() ? page.get(page.size() - 1).getIntegrationArn() : null;
         return new IntegrationPage(List.copyOf(page), next);
+    }
+
+    public List<Integration> listDynamoDbZeroEtlIntegrations() {
+        return integrations.scan(key -> true).stream()
+                .filter(integration -> integration.getSourceStreamArn() != null
+                        && !integration.getSourceStreamArn().isBlank())
+                .toList();
+    }
+
+    public synchronized void updateIntegrationRuntime(String integrationArn, String checkpointSequenceNumber,
+                                                       boolean successful, String error) {
+        for (String key : integrations.keys()) {
+            Optional<Integration> stored = integrations.get(key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            if (successful) {
+                integration.setCheckpointSequenceNumber(checkpointSequenceNumber);
+                integration.setRetryCount(0);
+                integration.setLastError(null);
+                integration.setStatus("active");
+            } else {
+                integration.setRetryCount(integration.getRetryCount() + 1);
+                integration.setLastError(error);
+                integration.setStatus("failed");
+            }
+            integrations.put(key, integration);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
     }
 
     /** One page of integrations plus the marker to continue with, or {@code null} at the end. */

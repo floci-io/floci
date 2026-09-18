@@ -6,12 +6,15 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
@@ -45,12 +48,14 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<String> snapshotDumpBackend;
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
+    private AccountAwareStorageBackend<Integration> integrationBackend;
     private RedshiftContainerManager cm;
     private RegionResolver regionResolver;
     private RedshiftProxyManager proxyManager;
     private DockerHostResolver dockerHostResolver;
     private RedshiftCredentialBroker credentialBroker;
     private SecretsManagerService secretsManagerService;
+    private DynamoDbStreamService streamService;
     private RedshiftService service;
 
     @BeforeEach
@@ -62,6 +67,7 @@ class RedshiftServiceTest {
         snapshotDumpBackend = mock(AccountAwareStorageBackend.class);
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
+        integrationBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
         proxyManager = mock(RedshiftProxyManager.class);
         dockerHostResolver = mock(DockerHostResolver.class);
@@ -86,15 +92,49 @@ class RedshiftServiceTest {
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
         when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
+        when(sf.<Integration>create(eq("redshift"), eq("redshift-integrations.json"), any())).thenReturn(integrationBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
 
         regionResolver = new RegionResolver("us-east-1", "111111111111");
 
         credentialBroker = new RedshiftCredentialBroker();
         secretsManagerService = mock(SecretsManagerService.class);
+        streamService = mock(DynamoDbStreamService.class);
 
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
-                credentialBroker, secretsManagerService, new com.fasterxml.jackson.databind.ObjectMapper());
+                credentialBroker, secretsManagerService, new com.fasterxml.jackson.databind.ObjectMapper(),
+                streamService);
+    }
+
+    @Test
+    void createDynamoDbZeroEtlIntegrationRequiresExistingProvisionedResources() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+        String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+        StreamDescription stream = new StreamDescription();
+        stream.setStreamArn(streamArn);
+        stream.setTableName("orders");
+        stream.setStreamStatus("ENABLED");
+        when(streamService.describeStream(streamArn)).thenReturn(stream);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", streamArn, targetArn,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        assertEquals(streamArn, integration.getSourceStreamArn());
+        assertEquals("warehouse", integration.getTargetClusterIdentifier());
+        assertNotNull(integration.getLandingTableName());
+    }
+
+    @Test
+    void createDynamoDbZeroEtlIntegrationRejectsServerlessTarget() {
+        assertThrows(AwsException.class, () -> service.createIntegration(
+                "orders-to-serverless",
+                "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000",
+                "arn:aws:redshift-serverless:us-east-1:111111111111:workgroup/analytics",
+                null, null, Map.of(), Map.of(), "us-east-1"));
     }
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
