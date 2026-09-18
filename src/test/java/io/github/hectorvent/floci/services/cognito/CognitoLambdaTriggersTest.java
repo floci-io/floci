@@ -20,6 +20,9 @@ import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import javax.crypto.Mac;
@@ -31,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -158,8 +162,9 @@ class CognitoLambdaTriggersTest {
                 .invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), eq(InvocationType.RequestResponse));
     }
 
-    @Test
-    void preAuthenticationIncludesCognitoUserStatusAttribute() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preAuthenticationIncludesCognitoUserStatusAttribute(boolean adminAuth) throws Exception {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
         seedUser(pool, "alice", "Perm1234!");
         UserPoolClient client = createClient(pool);
@@ -168,8 +173,13 @@ class CognitoLambdaTriggersTest {
                 eq(InvocationType.RequestResponse)))
                 .thenReturn(ok(Map.of()));
 
-        service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
-                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        if (adminAuth) {
+            service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        } else {
+            service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        }
 
         ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre"), payloadCaptor.capture(),
@@ -181,6 +191,9 @@ class CognitoLambdaTriggersTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> userAttributes = (Map<String, Object>) request.get("userAttributes");
         assertEquals("CONFIRMED", userAttributes.get("cognito:user_status"));
+        assertEquals("alice@example.com", userAttributes.get("email"));
+        assertFalse(service.adminGetUser(pool.getId(), "alice").getAttributes()
+                .containsKey("cognito:user_status"));
     }
 
     @Test
@@ -199,8 +212,9 @@ class CognitoLambdaTriggersTest {
         assertEquals("PreAuthentication failed with error Unhandled.", ex.getMessage());
     }
 
-    @Test
-    void preAuthenticationLambdaErrorPreservesThrownMessage() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preAuthenticationLambdaErrorPreservesThrownMessage(boolean adminAuth) {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
         seedUser(pool, "alice", "Perm1234!");
         UserPoolClient client = createClient(pool);
@@ -208,12 +222,41 @@ class CognitoLambdaTriggersTest {
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
                 .thenReturn(lambdaError("Unhandled", "Email not verified"));
 
+        AwsException ex = assertThrows(AwsException.class, () -> {
+            if (adminAuth) {
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+            } else {
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+            }
+        });
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("PreAuthentication failed with error Email not verified.", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"not-json", "{}", "{\"errorMessage\":null}",
+            "{\"errorMessage\":\"\"}", "{\"errorMessage\":\" \"}",
+            "{\"errorMessage\":123}", "{\"errorMessage\":true}",
+            "{\"errorMessage\":[]}", "{\"errorMessage\":{}}"})
+    void preAuthenticationLambdaErrorFallsBackWithoutUsableMessage(String errorPayload) {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        byte[] payload = errorPayload == null ? null : errorPayload.getBytes(StandardCharsets.UTF_8);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenReturn(new InvokeResult(200, "Unhandled", payload, null, "req-id"));
+
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
 
         assertEquals("NotAuthorizedException", ex.getErrorCode());
-        assertEquals("PreAuthentication failed with error Email not verified.", ex.getMessage());
+        assertEquals("PreAuthentication failed with error Unhandled.", ex.getMessage());
     }
 
     // =========================================================================
@@ -313,7 +356,7 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
 
     @Test
-    void preSignUpFiresOnSignUp() {
+    void preSignUpFiresOnSignUp() throws Exception {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
         UserPoolClient client = createClient(pool);
 
@@ -324,9 +367,11 @@ class CognitoLambdaTriggersTest {
         service.signUp(client.getClientId(), "alice", "Perm1234!",
                 Map.of("email", "alice@example.com"));
 
-        verify(lambdaService, atLeastOnce())
-                .invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
-                        any(byte[].class), eq(InvocationType.RequestResponse));
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                payloadCaptor.capture(), eq(InvocationType.RequestResponse));
+        assertFalse(MAPPER.readTree(payloadCaptor.getValue()).path("request")
+                .path("userAttributes").has("cognito:user_status"));
     }
 
     @Test

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -741,10 +742,9 @@ final class CognitoAuthFlowHandler {
             if (user.getAttributes() != null) {
                 userAttributes.putAll(user.getAttributes());
             }
-            // Cognito exposes the persisted status as a reserved user attribute in
-            // authentication trigger events. Keep it derived from the user model so
-            // trigger code sees the same value as AdminGetUser.
-            userAttributes.put("cognito:user_status", user.getUserStatus());
+            if ("PreAuthentication".equals(triggerKey)) {
+                userAttributes.put("cognito:user_status", user.getUserStatus());
+            }
             req.put("userAttributes", userAttributes);
         }
         event.put("request", req);
@@ -782,10 +782,14 @@ final class CognitoAuthFlowHandler {
 
     private static String lambdaFunctionErrorMessage(InvokeResult result) {
         byte[] payload = result.getPayload();
-        if (payload == null || payload.length == 0) return result.getFunctionError();
+        if (payload == null || payload.length == 0) {
+            return result.getFunctionError();
+        }
         try {
-            String errorMessage = MAPPER.readTree(payload).path("errorMessage").asText(null);
-            if (errorMessage != null && !errorMessage.isBlank()) return errorMessage;
+            JsonNode errorMessage = MAPPER.readTree(payload).path("errorMessage");
+            if (errorMessage.isTextual() && !errorMessage.asText().isBlank()) {
+                return errorMessage.asText();
+            }
         } catch (Exception e) {
             LOG.debugv(e, "Unable to parse Cognito Lambda function error payload");
         }
