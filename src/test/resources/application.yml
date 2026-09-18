@@ -326,6 +326,7 @@ floci:
       mock: true
     codebuild:
       enabled: true
+      # max-concurrent-builds: 4
       # docker-network: floci-network
     sagemaker:
       enabled: true
