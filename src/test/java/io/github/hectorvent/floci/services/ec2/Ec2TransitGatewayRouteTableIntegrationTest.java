@@ -376,4 +376,29 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
         .then().statusCode(200).extract().asString();
         assertThat(byPropagation, not(containsString("<item>")));
     }
+
+    @Test
+    @Order(10)
+    void propagationFiltersPickOutASingleAttachment() {
+        given()
+            .formParam("Action", "GetTransitGatewayRouteTablePropagations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "transit-gateway-attachment-id")
+            .formParam("Filter.1.Value.1", attachmentId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("GetTransitGatewayRouteTablePropagationsResponse.transitGatewayRouteTablePropagations"
+                    + ".item.transitGatewayAttachmentId", equalTo(attachmentId));
+
+        String unmatched = given()
+            .formParam("Action", "GetTransitGatewayRouteTablePropagations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "transit-gateway-attachment-id")
+            .formParam("Filter.1.Value.1", "tgw-attach-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(unmatched, not(containsString("<item>")));
+    }
 }
