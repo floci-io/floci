@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -18,7 +19,12 @@ import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
+/**
+ * Runs against the real GraphQL sidecar image, started by {@link GraphqlSidecarManager}:
+ * {@code StartSchemaCreation} validates against it, so it needs to be up.
+ */
 @QuarkusTest
+@TestProfile(AppSyncGraphqlSidecarProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class AppSyncIntegrationTest {
 
@@ -31,6 +37,7 @@ class AppSyncIntegrationTest {
 
     @BeforeAll
     static void configureRestAssured() {
+        AppSyncGraphqlSidecarProfile.requireDockerAndTheSidecarImage();
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 

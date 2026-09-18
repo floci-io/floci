@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
@@ -220,5 +222,36 @@ class EcsContainerManagerPortMappingsTest {
         verify(builder, times(1)).withExposedPort(9090);
         verify(builder, never()).withDynamicPort(9090);
         verify(builder, never()).withPortBinding(eq(9090), anyInt());
+    }
+
+    @Test
+    void firelensRouterUsesLoopbackOnlyDynamicPortBinding() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+
+        ContainerDefinition router = new ContainerDefinition();
+        router.setName("router");
+        router.setImage("fluent/fluent-bit:latest");
+        router.setFirelensConfiguration(new FirelensConfiguration("fluentbit", Map.of()));
+
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setLogConfiguration(new LogConfiguration("awsfirelens", Map.of(), null));
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(app, router));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerInfo("router-id", Map.of(), Map.of(24224, 32768)))
+                .thenReturn(new ContainerInfo("app-id", Map.of()));
+
+        manager.startTask(task, taskDef, List.of(), "us-east-1");
+
+        verify(builder).withLoopbackPortBinding(24224, 0);
+        verify(builder, never()).withDynamicPort(24224);
     }
 }

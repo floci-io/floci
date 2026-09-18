@@ -604,8 +604,10 @@ starts from empty data and is how a template moves between the two selection mod
 Two behaviours worth calling out, because they are what Terraform reads back:
 
 - **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as
-  `Name`, not rewritten to `Arn`. The instance-profile ARN is derived at launch time instead, so
-  `aws_launch_template.iam_instance_profile.name` converges.
+  `Name`, not rewritten to `Arn`. At launch time, Floci resolves that name against IAM in the
+  caller's account and preserves the profile's full path in its ARN. A name missing from that
+  account is rejected with `InvalidParameterValue`. This also applies to direct `RunInstances`
+  requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
   resolves its security groups from whichever of the two is populated.

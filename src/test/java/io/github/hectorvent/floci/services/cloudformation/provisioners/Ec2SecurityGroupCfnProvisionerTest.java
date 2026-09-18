@@ -27,6 +27,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import io.github.hectorvent.floci.core.common.AwsException;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * {@code AWS::EC2::SecurityGroup} in isolation: the attributes Ref and Fn::GetAtt read, the
@@ -115,6 +119,24 @@ class Ec2SecurityGroupCfnProvisionerTest {
         provisioner.delete(TYPE, "sg-1", "us-east-1");
 
         verify(ec2).deleteSecurityGroup("us-east-1", "sg-1");
+    }
+
+    @Test
+    void deleteToleratesAGroupAlreadyGone() {
+        doThrow(new AwsException("InvalidGroup.NotFound", "gone", 400))
+                .when(ec2).deleteSecurityGroup("us-east-1", "sg-1");
+
+        assertDoesNotThrow(() -> provisioner.delete(TYPE, "sg-1", "us-east-1"));
+    }
+
+    @Test
+    void deletePropagatesAnUnexpectedError() {
+        doThrow(new AwsException("DependencyViolation", "in use", 400))
+                .when(ec2).deleteSecurityGroup("us-east-1", "sg-1");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.delete(TYPE, "sg-1", "us-east-1"));
+        assertEquals("DependencyViolation", failure.getErrorCode());
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {

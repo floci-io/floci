@@ -106,7 +106,10 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        ec2Service.deleteSecurityGroup(region, physicalId);
+        // Tolerate a group already deleted out of band, so DeleteStack does not fail on it.
+        CfnDeletes.safeDelete("security group", physicalId,
+                () -> ec2Service.deleteSecurityGroup(region, physicalId),
+                "InvalidGroup.NotFound");
     }
 
     /** The VPC a security group would land in for this template value: the default when omitted. */

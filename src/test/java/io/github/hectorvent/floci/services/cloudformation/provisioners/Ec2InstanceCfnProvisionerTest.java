@@ -24,6 +24,10 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import io.github.hectorvent.floci.core.common.AwsException;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * {@code AWS::EC2::Instance} in isolation: the attributes Ref and Fn::GetAtt read once the launch
@@ -100,6 +104,24 @@ class Ec2InstanceCfnProvisionerTest {
         provisioner.delete(TYPE, "i-1", "us-east-1");
 
         verify(ec2).terminateInstances("us-east-1", List.of("i-1"));
+    }
+
+    @Test
+    void deleteToleratesAnInstanceAlreadyGone() {
+        doThrow(new AwsException("InvalidInstanceID.NotFound", "gone", 400))
+                .when(ec2).terminateInstances("us-east-1", List.of("i-1"));
+
+        assertDoesNotThrow(() -> provisioner.delete(TYPE, "i-1", "us-east-1"));
+    }
+
+    @Test
+    void deletePropagatesAnUnexpectedError() {
+        doThrow(new AwsException("DependencyViolation", "still in use", 400))
+                .when(ec2).terminateInstances("us-east-1", List.of("i-1"));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.delete(TYPE, "i-1", "us-east-1"));
+        assertEquals("DependencyViolation", failure.getErrorCode());
     }
 
     private void stubLaunch(Instance instance) {

@@ -419,6 +419,7 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | OpenSearch | `opensearchproject/opensearch:2` | Full OpenSearch engine with REST API |
 | ECR | `registry:2` | OCI-compatible registry for docker push and docker pull |
 | Verified Permissions | `floci/floci-sidecar-cedar:1.1.0` | Cedar 4 policy parsing, schema validation and authorization decisions, via a [Floci sidecar](https://github.com/floci-io/floci-sidecars) |
+| AppSync | `floci/floci-sidecar-graphql:0.2.0` | graphql-java schema validation, query planning and execution, via a [Floci sidecar](https://github.com/floci-io/floci-sidecars) |
 
 Docker-backed services require the Docker socket:
 

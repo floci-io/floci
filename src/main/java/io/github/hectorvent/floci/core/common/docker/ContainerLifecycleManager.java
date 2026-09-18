@@ -86,12 +86,13 @@ public class ContainerLifecycleManager {
      * filesystem modifications are needed between creation and start.
      *
      * @param spec the container specification
-     * @return information about the created container including resolved endpoints
+     * @return information about the created container including resolved endpoints and published ports
      */
     public ContainerInfo createAndStart(ContainerSpec spec) {
         String containerId = create(spec);
         try {
-            return startCreated(containerId, spec);
+            ContainerInfo info = startCreated(containerId, spec);
+            return withPublishedHostPorts(info, spec);
         } catch (Exception e) {
             // A failed start (e.g. host-port conflict) must not leak the created
             // container: retrying callers would accumulate Created containers and
@@ -245,6 +246,22 @@ public class ContainerLifecycleManager {
 
         Map<Integer, EndpointInfo> endpoints = resolveEndpoints(containerId, spec);
         return new ContainerInfo(containerId, endpoints);
+    }
+
+    private ContainerInfo withPublishedHostPorts(ContainerInfo info, ContainerSpec spec) {
+        if (spec.portBindings() == null || spec.portBindings().isEmpty()) {
+            return info;
+        }
+
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(info.containerId()).exec();
+        Map<Integer, Integer> publishedHostPorts = new HashMap<>();
+        for (Integer containerPort : spec.portBindings().keySet()) {
+            OptionalInt published = readPublishedHostPort(inspect, containerPort);
+            if (published.isPresent()) {
+                publishedHostPorts.put(containerPort, published.getAsInt());
+            }
+        }
+        return new ContainerInfo(info.containerId(), info.endpoints(), publishedHostPorts);
     }
 
     /**
@@ -937,8 +954,10 @@ public class ContainerLifecycleManager {
             hostConfig.withBinds(spec.binds().toArray(new Bind[0]));
         }
 
-        // Extra hosts (e.g., host.docker.internal on Linux)
-        if (spec.extraHosts() != null && !spec.extraHosts().isEmpty()) {
+        // Docker rejects extra_hosts together with container:<id> network mode. Containers
+        // sharing another container's network namespace already inherit its network path.
+        if (spec.extraHosts() != null && !spec.extraHosts().isEmpty()
+                && !isContainerNetworkMode(spec.networkMode())) {
             hostConfig.withExtraHosts(spec.extraHosts().toArray(new String[0]));
         }
 
@@ -961,6 +980,10 @@ public class ContainerLifecycleManager {
         }
 
         return hostConfig;
+    }
+
+    private static boolean isContainerNetworkMode(String networkMode) {
+        return networkMode != null && networkMode.startsWith("container:");
     }
 
     private Map<Integer, EndpointInfo> resolveEndpoints(String containerId, ContainerSpec spec) {

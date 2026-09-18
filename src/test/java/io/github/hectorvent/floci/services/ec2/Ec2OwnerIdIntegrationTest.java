@@ -76,8 +76,8 @@ class Ec2OwnerIdIntegrationTest {
 
     @Test
     void instanceProfileArnBuiltFromANameCarriesTheCallersAccount() {
-        // RunInstances accepts IamInstanceProfile.Name and builds the ARN itself. Built from the
-        // default account, the instance would claim a profile in an account the caller does not use.
+        given().header("Authorization", AUTH.replace("/ec2/", "/iam/")).formParam("Action", "CreateInstanceProfile")
+                .formParam("InstanceProfileName", "owner-profile").post("/").then().statusCode(200);
         given()
             .formParam("Action", "RunInstances")
             .formParam("ImageId", "ami-0abcdef1234567890")
