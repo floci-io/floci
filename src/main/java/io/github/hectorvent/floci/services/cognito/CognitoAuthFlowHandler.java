@@ -737,7 +737,15 @@ final class CognitoAuthFlowHandler {
         event.put("triggerSource", triggerSource);
         Map<String, Object> req = new HashMap<>(request);
         if (user != null) {
-            req.put("userAttributes", user.getAttributes() == null ? Map.of() : user.getAttributes());
+            Map<String, String> userAttributes = new LinkedHashMap<>();
+            if (user.getAttributes() != null) {
+                userAttributes.putAll(user.getAttributes());
+            }
+            // Cognito exposes the persisted status as a reserved user attribute in
+            // authentication trigger events. Keep it derived from the user model so
+            // trigger code sees the same value as AdminGetUser.
+            userAttributes.put("cognito:user_status", user.getUserStatus());
+            req.put("userAttributes", userAttributes);
         }
         event.put("request", req);
         event.put("response", new HashMap<>());
