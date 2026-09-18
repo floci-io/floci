@@ -25,6 +25,7 @@ class SesSuppressionLegacyKeyTest {
     private static final String CANONICAL_KEY = "suppression::" + REGION + "::Foo.Bar@example.com";
 
     private SesService service;
+    private SesSuppressionService suppression;
     private InMemoryStorage<String, SuppressedDestination> suppressionStore;
 
     @BeforeEach
@@ -32,6 +33,7 @@ class SesSuppressionLegacyKeyTest {
         SesServiceTestBuilder builder = SesServiceTestBuilder.create();
         suppressionStore = builder.suppressionStore();
         service = builder.build();
+        suppression = builder.suppressionService();
     }
 
     private void seedLegacyEntry() {
@@ -41,7 +43,7 @@ class SesSuppressionLegacyKeyTest {
     @Test
     void getReachesLegacyEntryByExactAddress() {
         seedLegacyEntry();
-        SuppressedDestination got = service.getSuppressedDestination(REGION, LEGACY_ADDR);
+        SuppressedDestination got = suppression.getSuppressedDestination(REGION, LEGACY_ADDR);
         assertEquals(LEGACY_ADDR, got.getEmailAddress());
         assertEquals("BOUNCE", got.getReason());
     }
@@ -49,7 +51,7 @@ class SesSuppressionLegacyKeyTest {
     @Test
     void deleteRemovesLegacyEntry() {
         seedLegacyEntry();
-        service.deleteSuppressedDestination(REGION, LEGACY_ADDR);
+        suppression.deleteSuppressedDestination(REGION, LEGACY_ADDR);
         assertFalse(suppressionStore.get(LEGACY_KEY).isPresent());
     }
 
@@ -65,7 +67,7 @@ class SesSuppressionLegacyKeyTest {
     @Test
     void putMigratesLegacyEntryOntoCanonicalKeyWithoutDuplicate() {
         seedLegacyEntry();
-        service.putSuppressedDestination(REGION, LEGACY_ADDR, "COMPLAINT");
+        suppression.putSuppressedDestination(REGION, LEGACY_ADDR, "COMPLAINT");
         assertFalse(suppressionStore.get(LEGACY_KEY).isPresent(), "legacy key should be migrated away");
         assertTrue(suppressionStore.get(CANONICAL_KEY).isPresent(), "entry should live under canonical key");
         SuppressedDestination migrated = suppressionStore.get(CANONICAL_KEY).orElseThrow();

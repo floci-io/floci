@@ -613,8 +613,6 @@ public class SesService {
         return cs;
     }
 
-
-
     // ──────────────────────────── Templates ────────────────────────────
 
     // Email templates live in SesTemplateService, which the v2 controller and the v1 handler call
@@ -1053,7 +1051,6 @@ public class SesService {
                 suppressionService.getAccountSuppressionAttributes(region).getSuppressedReasons());
     }
 
-
     public List<Tag> listResourceTags(String arn, String region) {
         ResourceRef ref = parseSesArn(arn);
         requireCallerAccount(ref);
@@ -1172,31 +1169,13 @@ public class SesService {
                 resource.substring(0, slash), resource.substring(slash + 1));
     }
 
-    // ──────────────────── Suppression (account attributes + list) ────────────────────
-    // Storage lives in SesSuppressionService; the account attributes are read and written by the v2
-    // controller directly, the list operations below keep the tenant routing here, and the send
-    // filters (collectSuppressedReasons / resolveSuppressionReason) read entries back through it.
-
-    // A TenantName routes each suppression-list operation to that tenant's own list (fully separate
-    // from the account list on AWS); the reason/address validation still runs first, matching the
-    // probed precedence where request validation precedes tenant existence.
-
-    public void putSuppressedDestination(String region, String emailAddress, String reason) {
-        putSuppressedDestination(region, emailAddress, reason, null);
-    }
-
-    public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
-        return getSuppressedDestination(region, emailAddress, null);
-    }
-
-    public void deleteSuppressedDestination(String region, String emailAddress) {
-        deleteSuppressedDestination(region, emailAddress, null);
-    }
-
-    public List<SuppressedDestination> listSuppressedDestinations(String region,
-                                                                  List<String> reasonFilters) {
-        return listSuppressedDestinations(region, reasonFilters, null);
-    }
+    // ──────────────────────────── Suppression list ────────────────────────────
+    // Storage lives in SesSuppressionService, and the account-level attributes are read and
+    // written by the v2 controller through it directly. What stays here is the tenant routing: a
+    // TenantName sends the operation to that tenant's own list, which is fully separate from the
+    // account list on AWS, and the reason and address validation still runs first, matching the
+    // probed precedence where request validation precedes tenant existence. The send filters
+    // (collectSuppressedReasons, resolveSuppressionReason) read entries back through the service.
 
     public void putSuppressedDestination(String region, String emailAddress, String reason,
                                          String tenantName) {
@@ -1352,7 +1331,6 @@ public class SesService {
         return out;
     }
 
-
     /**
      * Filter out recipients whose effective suppression reason is non-null. Returns a new
      * list containing only the addresses that should reach the SMTP relay, mirroring AWS
@@ -1410,8 +1388,6 @@ public class SesService {
         }
         return effective.contains(entry.getReason()) ? entry.getReason() : null;
     }
-
-
 
     public String sendTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                                      List<String> bccAddresses, List<String> replyToAddresses,
