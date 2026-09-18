@@ -1206,7 +1206,7 @@ public class CloudFormationService implements ResourceProvider {
                     if ("AWS::CloudFormation::Stack".equals(type)) {
                         resource = executeNestedStack(stack, logicalId,
                                 props.isMissingNode() ? null : props,
-                                engine, region, accountId, isCreate);
+                                engine, region, accountId, isCreate, previousResource);
                     } else {
                         resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
                                 engine, region, accountId, stack.getStackName(),
@@ -2293,7 +2293,8 @@ public class CloudFormationService implements ResourceProvider {
 
     private StackResource executeNestedStack(Stack parentStack, String logicalId, JsonNode props,
                                              CloudFormationTemplateEngine engine, String region,
-                                             String accountId, boolean isCreate) {
+                                             String accountId, boolean isCreate,
+                                             StackResource previousResource) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType("AWS::CloudFormation::Stack");
@@ -2308,9 +2309,18 @@ public class CloudFormationService implements ResourceProvider {
         String childTemplate = fetchTemplateFromS3(templateUrl);
         String childStackName = parentStack.getStackName() + "-" + logicalId;
 
-        Stack childStack = newStack(childStackName, region, accountId);
-        childStack.setStatus("CREATE_IN_PROGRESS");
-        stacks.put(stackKey(accountId, childStackName, region), childStack);
+        Stack childStack = null;
+        boolean childCreate = isCreate || previousResource == null
+                || previousResource.getPhysicalId() == null;
+        if (!childCreate) {
+            childStack = resolveStack(previousResource.getPhysicalId(), region, accountId);
+            childCreate = childStack == null;
+        }
+        if (childCreate) {
+            childStack = newStack(childStackName, region, accountId);
+            childStack.setStatus("CREATE_IN_PROGRESS");
+            stacks.put(stackKey(accountId, childStackName, region), childStack);
+        }
 
         Map<String, String> childParams = new LinkedHashMap<>();
         if (props != null && props.has("Parameters") && props.get("Parameters").isObject()) {
@@ -2318,7 +2328,7 @@ public class CloudFormationService implements ResourceProvider {
                     childParams.put(e.getKey(), engine.resolve(e.getValue())));
         }
 
-        executeTemplate(childStack, childTemplate, childParams, isCreate, region, accountId);
+        executeTemplate(childStack, childTemplate, childParams, childCreate, region, accountId);
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());

@@ -367,6 +367,50 @@ class CloudFormationDeletionPolicyIntegrationTest {
     }
 
     @Test
+    void updateNestedStackReusesChildStackAndUpdatesNamedLambda() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String functionName = "cfn-nested-update-func-" + suffix;
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-lambda-update.json";
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+        """.formatted(templateUrl);
+        String stackName = "parent-nested-lambda-update-" + suffix;
+
+        given().header("Authorization", CUSTOM_AUTH)
+                .when().put("/" + bucketName).then().statusCode(200);
+        given().header("Authorization", CUSTOM_AUTH)
+                .contentType("application/json").body(nestedLambdaTemplate(functionName, 3))
+                .when().put("/" + templateUrl).then().statusCode(200);
+        String parentStackId = createStack(stackName, parentTemplate, CUSTOM_AUTH);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
+            String childStackId = getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH);
+
+            given().header("Authorization", CUSTOM_AUTH)
+                    .contentType("application/json").body(nestedLambdaTemplate(functionName, 9))
+                    .when().put("/" + templateUrl).then().statusCode(200);
+            updateStack(stackName, parentTemplate, CUSTOM_AUTH);
+            awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
+
+            assertThat(getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH), equalTo(childStackId));
+            given().header("Authorization", CUSTOM_AUTH)
+                    .when().get("/2015-03-31/functions/" + functionName)
+                    .then().statusCode(200)
+                    .body("Configuration.Timeout", equalTo(9));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
     void nestedStackWithNonEmptyBucketFailsDeletionOnUpdate_leavesChildAsDeleteFailedAndTracksInParent() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucketName = "cfn-nested-orphan-" + suffix;
@@ -965,6 +1009,25 @@ class CloudFormationDeletionPolicyIntegrationTest {
         int physStart = xml.indexOf("<PhysicalResourceId>", logIdx) + "<PhysicalResourceId>".length();
         int physEnd = xml.indexOf("</PhysicalResourceId>", physStart);
         return xml.substring(physStart, physEnd);
+    }
+
+    private static String nestedLambdaTemplate(String functionName, int timeout) {
+        return """
+            {
+              "Resources": {
+                "Function": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Timeout": %d,
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role"
+                  }
+                }
+              }
+            }
+            """.formatted(functionName, timeout);
     }
 
     private static String createStack(String stackName, String template) {
