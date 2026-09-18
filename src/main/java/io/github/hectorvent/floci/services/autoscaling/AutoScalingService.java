@@ -69,6 +69,8 @@ public class AutoScalingService {
     private Map<String, InstanceRefresh> instanceRefreshes = new ConcurrentHashMap<>();
     private Map<String, ScheduledAction> scheduledActions = new ConcurrentHashMap<>();
     private Map<String, WarmPoolConfiguration> warmPools = new ConcurrentHashMap<>();
+    private final Object groupMutationLock = new Object();
+    private final Set<String> deletingGroupKeys = new HashSet<>();
 
     @PostConstruct
     void initializeStorage()
@@ -328,36 +330,50 @@ public class AutoScalingService {
     }
 
     public void deleteAutoScalingGroup(String region, String name, boolean forceDelete) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        List<AsgInstance> active = asg.getInstances().stream()
-                .filter(i -> !"Terminated".equals(i.getLifecycleState()))
-                .collect(Collectors.toList());
-        if (!active.isEmpty() && !forceDelete) {
-            throw new AwsException("ResourceInUse",
-                    "Auto Scaling group '" + name + "' has " + active.size()
-                            + " instance(s). Set ForceDelete=true to delete anyway.", 400);
+        String groupKey = asgKey(region, name);
+        AutoScalingGroup asg;
+        List<AsgInstance> active;
+        synchronized (groupMutationLock) {
+            asg = requireGroup(region, name);
+            active = asg.getInstances().stream()
+                    .filter(i -> !"Terminated".equals(i.getLifecycleState()))
+                    .collect(Collectors.toList());
+            if (!active.isEmpty() && !forceDelete) {
+                throw new AwsException("ResourceInUse",
+                        "Auto Scaling group '" + name + "' has " + active.size()
+                                + " instance(s). Set ForceDelete=true to delete anyway.", 400);
+            }
+            deletingGroupKeys.add(groupKey);
         }
-        if (forceDelete && ec2Service != null && !active.isEmpty()) {
-            active.stream()
-                    .map(AsgInstance::getInstanceId)
-                    .filter(Objects::nonNull)
-                    .forEach(instanceId -> {
-                        try {
-                            ec2Service.terminateInstances(region, List.of(instanceId));
-                        }
-                        catch (AwsException ignored) {
-                            // ForceDelete should remove stale ASG membership even if EC2 no longer has the instance.
-                        }
-                    });
+        try {
+            if (forceDelete && ec2Service != null && !active.isEmpty()) {
+                active.stream()
+                        .map(AsgInstance::getInstanceId)
+                        .filter(Objects::nonNull)
+                        .forEach(instanceId -> {
+                            try {
+                                ec2Service.terminateInstances(region, List.of(instanceId));
+                            }
+                            catch (AwsException ignored) {
+                                // ForceDelete should remove stale ASG membership even if EC2 no longer has the instance.
+                            }
+                        });
+            }
+            synchronized (groupMutationLock) {
+                groups.remove(groupKey);
+            }
+            // clean up associated hooks and policies
+            hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
+            policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
+            instanceRefreshes.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
+            scheduledActions.entrySet().removeIf(e -> region.equals(e.getValue().getRegion())
+                    && name.equals(e.getValue().getAutoScalingGroupName()));
+            warmPools.remove(warmPoolKey(region, name));
+        } finally {
+            synchronized (groupMutationLock) {
+                deletingGroupKeys.remove(groupKey);
+            }
         }
-        groups.remove(asgKey(region, name));
-        // clean up associated hooks and policies
-        hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
-        policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
-        instanceRefreshes.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
-        scheduledActions.entrySet().removeIf(e -> region.equals(e.getValue().getRegion())
-                && name.equals(e.getValue().getAutoScalingGroupName()));
-        warmPools.remove(warmPoolKey(region, name));
     }
 
     public List<AutoScalingGroup> describeAutoScalingGroups(String region, List<String> names) {
@@ -372,8 +388,15 @@ public class AutoScalingService {
                 .collect(Collectors.toList());
     }
 
-    public void saveAutoScalingGroup(AutoScalingGroup asg) {
-        groups.put(asgKey(asg.getRegion(), asg.getAutoScalingGroupName()), asg);
+    public boolean saveAutoScalingGroup(AutoScalingGroup asg) {
+        String groupKey = asgKey(asg.getRegion(), asg.getAutoScalingGroupName());
+        synchronized (groupMutationLock) {
+            if (deletingGroupKeys.contains(groupKey) || groups.get(groupKey) != asg) {
+                return false;
+            }
+            groups.put(groupKey, asg);
+            return true;
+        }
     }
 
     public void setDesiredCapacity(String region, String name, int desiredCapacity) {

@@ -25,6 +25,7 @@ import io.quarkus.runtime.StartupEvent;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -102,8 +103,9 @@ public class AutoScalingReconciler {
         } else if (activeCapacity > desired) {
             scaleIn(asg, (int) (activeCapacity - desired));
         }
-        asgService.saveAutoScalingGroup(asg);
-        asgService.completeInstanceRefreshIfSettled(asg.getRegion(), asg.getAutoScalingGroupName());
+        if (asgService.saveAutoScalingGroup(asg)) {
+            asgService.completeInstanceRefreshIfSettled(asg.getRegion(), asg.getAutoScalingGroupName());
+        }
     }
 
     static long activeCapacity(AutoScalingGroup asg) {
@@ -333,7 +335,21 @@ public class AutoScalingReconciler {
                 LOG.infov("ASG {0}: launched instance {1} (Pending)",
                         asg.getAutoScalingGroupName(), ec2Inst.getInstanceId());
             }
-            asgService.saveAutoScalingGroup(asg);
+            if (!asgService.saveAutoScalingGroup(asg)) {
+                List<String> launchedInstanceIds = reservation.getInstances().stream()
+                        .map(Instance::getInstanceId)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toList());
+                asg.getInstances().removeIf(instance -> launchedInstanceIds.contains(instance.getInstanceId()));
+                try {
+                    ec2Service.terminateInstances(asg.getRegion(), launchedInstanceIds);
+                } catch (Exception cleanupFailure) {
+                    LOG.warnv("ASG {0}: failed to terminate instance(s) launched during deletion {1}: {2}",
+                            asg.getAutoScalingGroupName(), launchedInstanceIds, cleanupFailure.getMessage());
+                }
+                LOG.infov("ASG {0}: discarded instance(s) launched during group deletion {1}",
+                        asg.getAutoScalingGroupName(), launchedInstanceIds);
+            }
         } catch (Exception e) {
             LOG.warnv("ASG {0}: failed to launch instances: {1}",
                     asg.getAutoScalingGroupName(), e.getMessage());

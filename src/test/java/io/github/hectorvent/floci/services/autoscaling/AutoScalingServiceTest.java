@@ -18,8 +18,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -613,6 +616,35 @@ class AutoScalingServiceTest {
         service.deleteAutoScalingGroup(REGION, "test-asg", true);
 
         verify(ec2Service).terminateInstances(REGION, List.of("i-stale"));
+        assertTrue(service.describeAutoScalingGroups(REGION, List.of("test-asg")).isEmpty());
+    }
+
+    @Test
+    void reconcilerWriteBackCannotResurrectAGroupBeingDeleted() throws Exception {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        service.ec2Service = ec2Service;
+        AutoScalingGroupFixture.addInstance(
+                service, REGION, "test-asg", "i-active", "InService", "lt-original", "1");
+        AutoScalingGroup staleGroup = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        CountDownLatch deletionStarted = new CountDownLatch(1);
+        CountDownLatch allowDeletion = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            deletionStarted.countDown();
+            assertTrue(allowDeletion.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(ec2Service).terminateInstances(REGION, List.of("i-active"));
+
+        Thread deleteThread = new Thread(
+                () -> service.deleteAutoScalingGroup(REGION, "test-asg", true),
+                "asg-delete-test");
+        deleteThread.start();
+        assertTrue(deletionStarted.await(5, TimeUnit.SECONDS));
+
+        assertFalse(service.saveAutoScalingGroup(staleGroup));
+        allowDeletion.countDown();
+        deleteThread.join(5_000);
+
+        assertFalse(deleteThread.isAlive());
         assertTrue(service.describeAutoScalingGroups(REGION, List.of("test-asg")).isEmpty());
     }
 
