@@ -364,11 +364,11 @@ public class KmsJsonHandler {
         String algorithm = request.path("SigningAlgorithm").asText(null);
         KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
-        boolean valid = service.verify(keyId, message, signature, algorithm, messageType, region);
+        service.verify(keyId, message, signature, algorithm, messageType, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("KeyId", service.describeKey(keyId, region).getArn());
-        response.put("SignatureValid", valid);
+        response.put("SignatureValid", true);
         response.put("SigningAlgorithm", algorithm);
         return Response.ok(response).build();
     }

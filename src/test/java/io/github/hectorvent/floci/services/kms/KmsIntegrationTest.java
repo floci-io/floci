@@ -26,6 +26,7 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -1881,6 +1882,29 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("InvalidKeyUsageException"))
                 .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
+    }
+
+    /** Checked against real AWS in us-east-1. The error has no message. */
+    @ParameterizedTest
+    @CsvSource({
+            "ECC_NIST_P256, ECDSA_SHA_256, true",
+            "ECC_NIST_P256, ECDSA_SHA_256, false",
+            "RSA_2048, RSASSA_PSS_SHA_256, true",
+            "RSA_2048, RSASSA_PSS_SHA_256, false",
+    })
+    void verifyRejectsASignatureThatDoesNotMatch(String keySpec, String algorithm, boolean realSignature) {
+        String keyArn = createKeyArn(keySpec, "SIGN_VERIFY");
+        String signature = realSignature
+                ? callKms("Sign", "{\"KeyId\":\"%s\",\"Message\":\"b3RoZXI=\",\"SigningAlgorithm\":\"%s\"}"
+                        .formatted(keyArn, algorithm)).then().statusCode(200).extract().path("Signature")
+                : "AAAAAAAAAAAAAA==";
+
+        callKms("Verify", "{\"KeyId\":\"%s\",\"Message\":\"bWVzc2FnZQ==\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                .formatted(keyArn, signature, algorithm))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidSignatureException"))
+                .body("message", nullValue());
     }
 
     private static String cryptoRequest(String operation, String keyArn, String algorithm) {

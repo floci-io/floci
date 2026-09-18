@@ -125,7 +125,7 @@ class KmsServiceTest {
         assertEquals(KmsKeyUsage.SIGN_VERIFY, key.getKeyUsage());
         assertNotNull(key.getPrivateKeyEncoded());
         assertNotNull(key.getPublicKeyEncoded());
-        assertTrue(kmsService.verify(key.getKeyId(), message, signature, "SM2DSA", region));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, signature, "SM2DSA", region));
     }
 
     @Test
@@ -1571,7 +1571,7 @@ class KmsServiceTest {
 
         byte[] sig = kmsService.sign(key.getKeyId(), message, algorithm, REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig, algorithm, REGION));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, sig, algorithm, REGION));
     }
 
     @Test
@@ -1581,7 +1581,7 @@ class KmsServiceTest {
 
         byte[] sig = kmsService.sign(key.getKeyId(), message, "RSASSA_PKCS1_V1_5_SHA_256", REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig, "RSASSA_PKCS1_V1_5_SHA_256", REGION));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, sig, "RSASSA_PKCS1_V1_5_SHA_256", REGION));
     }
 
     @Test
@@ -1594,7 +1594,7 @@ class KmsServiceTest {
                 "RSASSA_PKCS1_V1_5_SHA_512", KmsMessageType.DIGEST, REGION);
 
         // floci's own Verify round-trips.
-        assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), digest, sig,
                 "RSASSA_PKCS1_V1_5_SHA_512", KmsMessageType.DIGEST, REGION));
 
         // External verifier (standard JCA, standing in for openssl/python) reconstructs
@@ -1637,9 +1637,9 @@ class KmsServiceTest {
                 "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION);
 
         // floci's own Verify round-trips, against the digest and against the raw message.
-        assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), digest, sig,
                 "RSASSA_PSS_SHA_256", KmsMessageType.DIGEST, REGION));
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig,
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, sig,
                 "RSASSA_PSS_SHA_256", KmsMessageType.RAW, REGION));
 
         // External verifier with the PSS parameters AWS documents for RSASSA_PSS_SHA_256.
@@ -1677,12 +1677,15 @@ class KmsServiceTest {
     }
 
     @Test
-    void verifyWithWrongSignatureReturnsFalse() {
+    void verifyWithWrongSignatureThrowsInvalidSignature() {
         KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
         byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);
 
-        assertFalse(kmsService.verify(key.getKeyId(), message,
+        AwsException ex = assertThrows(AwsException.class, () -> kmsService.verify(key.getKeyId(), message,
                 "not-a-valid-sig".getBytes(StandardCharsets.UTF_8), "ECDSA_SHA_256", REGION));
+
+        assertEquals("KMSInvalidSignatureException", ex.getErrorCode());
+        assertNull(ex.getMessage());
     }
 
     @Test
@@ -2140,7 +2143,7 @@ class KmsServiceTest {
         String algo = "RSASSA_PKCS1_V1_5_SHA_256";
         byte[] sig = kmsService.sign(key.getKeyId(), message, algo, REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), message, sig, algo, REGION));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), message, sig, algo, REGION));
     }
 
     @ParameterizedTest
@@ -2158,7 +2161,7 @@ class KmsServiceTest {
 
         byte[] sig = kmsService.sign(key.getKeyId(), digest, algorithm.getAlgName(), KmsMessageType.DIGEST, REGION);
         assertNotNull(sig);
-        assertTrue(kmsService.verify(key.getKeyId(), digest, sig, algorithm.getAlgName(), KmsMessageType.DIGEST, REGION));
+        assertDoesNotThrow(() -> kmsService.verify(key.getKeyId(), digest, sig, algorithm.getAlgName(), KmsMessageType.DIGEST, REGION));
     }
 
     @Test

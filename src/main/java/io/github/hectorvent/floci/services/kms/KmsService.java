@@ -1639,24 +1639,28 @@ public class KmsService implements ResourceProvider {
         return KmsKeySpec.Algorithm.valueOf(algorithm);
     }
 
-    public boolean verify(String keyId, byte[] message, byte[] signature, String algorithm, String region) {
-        return verify(keyId, message, signature, algorithm, RAW, region);
+    public void verify(String keyId, byte[] message, byte[] signature, String algorithm, String region) {
+        verify(keyId, message, signature, algorithm, RAW, region);
     }
 
-    public boolean verify(String keyId, byte[] message, byte[] signature, String algorithm, KmsMessageType messageType, String region) {
+    public void verify(String keyId, byte[] message, byte[] signature, String algorithm, KmsMessageType messageType, String region) {
         KmsKeySpec.Algorithm signingAlgorithm = resolveSigningAlgorithm(algorithm);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Verify");
         validateKeyIsUsableForCryptoOperations(kmsKey);
         validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
         validateDigestLength(signingAlgorithm, messageType, message);
+        boolean valid;
         try {
-            return keyTypes.of(kmsKey.getKeySpec()).verify(kmsKey, message, signature, signingAlgorithm, messageType);
+            valid = keyTypes.of(kmsKey.getKeySpec()).verify(kmsKey, message, signature, signingAlgorithm, messageType);
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
-            LOG.warnv("Verification failed for key {0}: {1}", keyId, e.getMessage());
-            return false;
+            LOG.debugv(e, "Verification failed for key {0}", kmsKey.getKeyId());
+            valid = false;
+        }
+        if (!valid) {
+            throw new AwsException("KMSInvalidSignatureException", null, 400);
         }
     }
 
