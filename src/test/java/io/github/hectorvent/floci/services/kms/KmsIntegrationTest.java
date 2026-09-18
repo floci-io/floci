@@ -1926,6 +1926,32 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
     }
 
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({"GenerateMac, FOO", "VerifyMac, FOO", "GenerateMac, hmac_sha_256"})
+    void macOperationsRejectAnUnknownMacAlgorithmBeforeLookingUpTheKey(String operation, String algorithm) {
+        callKms(operation, cryptoRequest(operation, "00000000-0000-0000-0000-000000000000", algorithm))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value '" + algorithm + "' at 'macAlgorithm' "
+                        + "failed to satisfy constraint: Member must satisfy enum value set: "
+                        + "[HMAC_SHA_384, HMAC_SHA_256, HMAC_SHA_224, HMAC_SHA_512]"));
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({"GenerateMac", "VerifyMac"})
+    void macOperationsRequireAMacAlgorithm(String operation) {
+        callKms(operation, "{\"KeyId\":\"00000000-0000-0000-0000-000000000000\",\"Message\":\"bWVzc2FnZQ==\",\"Mac\":\"%s\"}"
+                .formatted(Base64.getEncoder().encodeToString(new byte[32])))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value null at 'macAlgorithm' failed to "
+                        + "satisfy constraint: Member must not be null"));
+    }
+
     private static String cryptoRequest(String operation, String keyArn, String algorithm) {
         String blob = Base64.getEncoder().encodeToString(new byte[64]);
         return switch (operation) {

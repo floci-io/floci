@@ -1583,6 +1583,9 @@ public class KmsService implements ResourceProvider {
             "ECDSA_SHA_256", "ECDSA_SHA_384", "ECDSA_SHA_512", "ED25519_SHA_512", "ED25519_PH_SHA_512",
             "SM2DSA", "ML_DSA_SHAKE_256");
 
+    private static final List<String> MAC_ALGORITHMS =
+            List.of("HMAC_SHA_384", "HMAC_SHA_256", "HMAC_SHA_224", "HMAC_SHA_512");
+
     private static final Map<KmsKeySpec.Algorithm, Integer> DIGEST_BYTES = Map.of(
             KmsKeySpec.Algorithm.RSASSA_PSS_SHA_256, 32,
             KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_256, 32,
@@ -1625,18 +1628,24 @@ public class KmsService implements ResourceProvider {
     }
 
     private static KmsKeySpec.Algorithm resolveSigningAlgorithm(String algorithm) {
-        if (algorithm == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'signingAlgorithm' failed to satisfy "
-                            + "constraint: Member must not be null", 400);
-        }
-        if (!SIGNING_ALGORITHMS.contains(algorithm) && !"SYMMETRIC_DEFAULT".equals(algorithm)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + algorithm + "' at 'signingAlgorithm' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: ["
-                            + String.join(", ", SIGNING_ALGORITHMS) + "]", 400);
+        if (!"SYMMETRIC_DEFAULT".equals(algorithm)) {
+            validateEnumMember("signingAlgorithm", algorithm, SIGNING_ALGORITHMS);
         }
         return KmsKeySpec.Algorithm.valueOf(algorithm);
+    }
+
+    private static void validateEnumMember(String member, String value, List<String> allowed) {
+        if (value == null) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at '" + member + "' failed to satisfy "
+                            + "constraint: Member must not be null", 400);
+        }
+        if (!allowed.contains(value)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + value + "' at '" + member + "' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: ["
+                            + String.join(", ", allowed) + "]", 400);
+        }
     }
 
     public void verify(String keyId, byte[] message, byte[] signature, String algorithm, String region) {
@@ -1707,6 +1716,7 @@ public class KmsService implements ResourceProvider {
     }
 
     private KmsKey validateMacOperationKey(String keyId, String algorithm, String operation, String region) {
+        validateEnumMember("macAlgorithm", algorithm, MAC_ALGORITHMS);
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.GENERATE_VERIFY_MAC, operation);
         requireImportedKeyMaterial(kmsKey, "MAC operations");

@@ -376,7 +376,7 @@ public class KmsJsonHandler {
     private Response handleGenerateMac(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
         byte[] message = decodeBlob(request, "Message");
-        String algorithm = request.path("MacAlgorithm").asText();
+        String algorithm = request.path("MacAlgorithm").asText(null);
 
         KmsService.GenerateMacResult result = service.generateMacAndResolveKey(keyId, message, algorithm, region);
 
@@ -391,7 +391,7 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         byte[] message = decodeBlob(request, "Message");
         byte[] mac = decodeBlob(request, "Mac");
-        String algorithm = request.path("MacAlgorithm").asText();
+        String algorithm = request.path("MacAlgorithm").asText(null);
 
         KmsService.VerifyMacResult result = service.verifyMacAndResolveKey(keyId, message, mac, algorithm, region);
 
