@@ -1496,7 +1496,8 @@ public class EcsJsonHandler {
             }
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
             def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
-            def.setFirelensConfiguration(parseFirelensConfiguration(item.path("firelensConfiguration")));
+            def.setFirelensConfiguration(parseFirelensConfiguration(
+                    item.path("firelensConfiguration"), result.size() + 1));
             if (item.has("healthCheck")) {
                 def.setHealthCheck(parseHealthCheck(item.path("healthCheck")));
             }
@@ -1584,13 +1585,23 @@ public class EcsJsonHandler {
         return new LogConfiguration(logDriver, options, secretOptions);
     }
 
-    private FirelensConfiguration parseFirelensConfiguration(JsonNode node) {
+    private FirelensConfiguration parseFirelensConfiguration(JsonNode node, int containerIndex) {
         if (node == null || !node.isObject()) {
             return null;
         }
-        String type = node.path("type").asText(null);
-        if (type == null) {
-            return null;
+        if (!node.hasNonNull("type")) {
+            throw new AwsException("ClientException",
+                    "1 validation error detected: Value null at 'containerDefinitions." + containerIndex
+                            + ".member.firelensConfiguration.type' failed to satisfy constraint: Member must not be null",
+                    400);
+        }
+        String type = node.path("type").asText();
+        if (!"fluentd".equals(type) && !"fluentbit".equals(type)) {
+            throw new AwsException("ClientException",
+                    "1 validation error detected: Value '" + type + "' at 'containerDefinitions." + containerIndex
+                            + ".member.firelensConfiguration.type' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [fluentd, fluentbit]",
+                    400);
         }
         Map<String, String> options = null;
         if (node.path("options").isObject()) {
