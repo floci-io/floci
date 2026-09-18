@@ -257,7 +257,7 @@ public class EcsContainerManager {
                 specBuilder.withNetworkMode("container:" + routerId);
             }
             if (def == firelensRouter) {
-                specBuilder.withDynamicPort(24224);
+                specBuilder.withLoopbackPortBinding(24224, 0);
             }
 
             // Add memory limit if specified

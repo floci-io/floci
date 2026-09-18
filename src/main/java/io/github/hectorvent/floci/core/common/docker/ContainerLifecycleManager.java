@@ -86,12 +86,13 @@ public class ContainerLifecycleManager {
      * filesystem modifications are needed between creation and start.
      *
      * @param spec the container specification
-     * @return information about the created container including resolved endpoints
+     * @return information about the created container including resolved endpoints and published ports
      */
     public ContainerInfo createAndStart(ContainerSpec spec) {
         String containerId = create(spec);
         try {
-            return startCreated(containerId, spec);
+            ContainerInfo info = startCreated(containerId, spec);
+            return withPublishedHostPorts(info, spec);
         } catch (Exception e) {
             // A failed start (e.g. host-port conflict) must not leak the created
             // container: retrying callers would accumulate Created containers and
@@ -243,18 +244,24 @@ public class ContainerLifecycleManager {
             }
         }
 
-        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
-        Map<Integer, EndpointInfo> endpoints = resolveEndpoints(inspect, spec);
+        Map<Integer, EndpointInfo> endpoints = resolveEndpoints(containerId, spec);
+        return new ContainerInfo(containerId, endpoints);
+    }
+
+    private ContainerInfo withPublishedHostPorts(ContainerInfo info, ContainerSpec spec) {
+        if (spec.portBindings() == null || spec.portBindings().isEmpty()) {
+            return info;
+        }
+
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(info.containerId()).exec();
         Map<Integer, Integer> publishedHostPorts = new HashMap<>();
-        if (spec.portBindings() != null) {
-            for (Integer containerPort : spec.portBindings().keySet()) {
-                OptionalInt published = readPublishedHostPort(inspect, containerPort);
-                if (published.isPresent()) {
-                    publishedHostPorts.put(containerPort, published.getAsInt());
-                }
+        for (Integer containerPort : spec.portBindings().keySet()) {
+            OptionalInt published = readPublishedHostPort(inspect, containerPort);
+            if (published.isPresent()) {
+                publishedHostPorts.put(containerPort, published.getAsInt());
             }
         }
-        return new ContainerInfo(containerId, endpoints, publishedHostPorts);
+        return new ContainerInfo(info.containerId(), info.endpoints(), publishedHostPorts);
     }
 
     /**
@@ -978,15 +985,6 @@ public class ContainerLifecycleManager {
         }
 
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
-        return resolveEndpoints(inspect, spec);
-    }
-
-    private Map<Integer, EndpointInfo> resolveEndpoints(InspectContainerResponse inspect,
-                                                        ContainerSpec spec) {
-        if (spec.exposedPorts() == null || spec.exposedPorts().isEmpty()) {
-            return Map.of();
-        }
-
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
 
         for (int containerPort : spec.exposedPorts()) {
