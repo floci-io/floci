@@ -1769,6 +1769,52 @@ class KmsIntegrationTest {
                 .body("message", startsWith("1 validation error detected: Value 'RSAES_OAEP_SHA_256' at 'signingAlgorithm'"));
     }
 
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({
+            "ECC_NIST_P256, ECDSA_SHA_256, 20, Sign",
+            "ECC_NIST_P256, ECDSA_SHA_256, 48, Sign",
+            "ECC_NIST_P256, ECDSA_SHA_256, 20, Verify",
+            "RSA_2048, RSASSA_PKCS1_V1_5_SHA_256, 20, Sign",
+            "RSA_2048, RSASSA_PSS_SHA_256, 20, Sign",
+            "RSA_2048, RSASSA_PSS_SHA_384, 32, Sign",
+            "RSA_2048, RSASSA_PKCS1_V1_5_SHA_384, 64, Sign",
+            "RSA_2048, RSASSA_PSS_SHA_256, 20, Verify",
+    })
+    void signAndVerifyRejectADigestOfTheWrongLength(String keySpec, String algorithm, int digestBytes,
+                                                    String operation) {
+        String keyArn = createKeyArn(keySpec, "SIGN_VERIFY");
+
+        given()
+                .header("X-Amz-Target", "TrentService." + operation)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"DIGEST\",\"Signature\":\"%s\",\"SigningAlgorithm\":\"%s\"}"
+                        .formatted(keyArn, Base64.getEncoder().encodeToString(new byte[digestBytes]),
+                                Base64.getEncoder().encodeToString(new byte[64]), algorithm))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Digest is invalid length for algorithm " + algorithm + "."));
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @Test
+    void signChecksTheKeySpecBeforeTheDigestLength() {
+        String keyArn = createKeyArn("ECC_NIST_P256", "SIGN_VERIFY");
+
+        given()
+                .header("X-Amz-Target", "TrentService.Sign")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"DIGEST\",\"SigningAlgorithm\":\"ECDSA_SHA_384\"}"
+                        .formatted(keyArn, Base64.getEncoder().encodeToString(new byte[20])))
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo("Algorithm ECDSA_SHA_384 is incompatible with key spec ECC_NIST_P256."));
+    }
+
     private static String createKeyArn(String keySpec, String keyUsage) {
         return given()
                 .header("X-Amz-Target", "TrentService.CreateKey")

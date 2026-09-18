@@ -19,8 +19,6 @@ import java.security.interfaces.EdECPrivateKey;
 
 final class Ed25519KeyType implements KmsKeyType {
 
-    private static final int SHA_512_DIGEST_BYTES = 64;
-
     @Override
     public void generateKeyMaterial(KmsKey key, String region) throws GeneralSecurityException {
         AsymmetricKeys.store(key, KeyPairGenerator.getInstance("Ed25519").generateKeyPair());
@@ -30,7 +28,7 @@ final class Ed25519KeyType implements KmsKeyType {
     @Override
     public byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws GeneralSecurityException, CryptoException {
-        validateRequest(algorithm, messageType, message);
+        validateMessageType(algorithm, messageType);
         PrivateKey privateKey = AsymmetricKeys.privateKey(key, "Ed25519");
         if (algorithm == KmsKeySpec.Algorithm.ED25519_SHA_512) {
             return AsymmetricKeys.sign(privateKey, "Ed25519", message);
@@ -44,7 +42,7 @@ final class Ed25519KeyType implements KmsKeyType {
     @Override
     public boolean verify(KmsKey key, byte[] message, byte[] signature, KmsKeySpec.Algorithm algorithm,
                           KmsMessageType messageType) throws GeneralSecurityException {
-        validateRequest(algorithm, messageType, message);
+        validateMessageType(algorithm, messageType);
         PublicKey publicKey = AsymmetricKeys.publicKey(key, "Ed25519");
         if (algorithm == KmsKeySpec.Algorithm.ED25519_SHA_512) {
             return AsymmetricKeys.verify(publicKey, "Ed25519", message, signature);
@@ -55,16 +53,12 @@ final class Ed25519KeyType implements KmsKeyType {
         return verifier.verifySignature(signature);
     }
 
-    private static void validateRequest(KmsKeySpec.Algorithm algorithm, KmsMessageType messageType, byte[] message) {
+    private static void validateMessageType(KmsKeySpec.Algorithm algorithm, KmsMessageType messageType) {
         KmsMessageType required = algorithm == KmsKeySpec.Algorithm.ED25519_SHA_512
                 ? KmsMessageType.RAW : KmsMessageType.DIGEST;
         if (messageType != required) {
             throw new AwsException("ValidationException",
                     "Message type " + messageType + " is incompatible with algorithm " + algorithm.getAlgName() + ".", 400);
-        }
-        if (algorithm == KmsKeySpec.Algorithm.ED25519_PH_SHA_512 && message.length != SHA_512_DIGEST_BYTES) {
-            throw new AwsException("ValidationException",
-                    "Digest is invalid length for algorithm " + algorithm.getAlgName() + ".", 400);
         }
     }
 

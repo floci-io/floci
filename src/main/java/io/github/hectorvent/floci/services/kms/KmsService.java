@@ -1583,6 +1583,18 @@ public class KmsService implements ResourceProvider {
             "ECDSA_SHA_256", "ECDSA_SHA_384", "ECDSA_SHA_512", "ED25519_SHA_512", "ED25519_PH_SHA_512",
             "SM2DSA", "ML_DSA_SHAKE_256");
 
+    private static final Map<KmsKeySpec.Algorithm, Integer> DIGEST_BYTES = Map.of(
+            KmsKeySpec.Algorithm.RSASSA_PSS_SHA_256, 32,
+            KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_256, 32,
+            KmsKeySpec.Algorithm.ECDSA_SHA_256, 32,
+            KmsKeySpec.Algorithm.RSASSA_PSS_SHA_384, 48,
+            KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_384, 48,
+            KmsKeySpec.Algorithm.ECDSA_SHA_384, 48,
+            KmsKeySpec.Algorithm.RSASSA_PSS_SHA_512, 64,
+            KmsKeySpec.Algorithm.RSASSA_PKCS1_V1_5_SHA_512, 64,
+            KmsKeySpec.Algorithm.ECDSA_SHA_512, 64,
+            KmsKeySpec.Algorithm.ED25519_PH_SHA_512, 64);
+
     public byte[] sign(String keyId, byte[] message, String algorithm, String region) {
         return sign(keyId, message, algorithm, RAW, region);
     }
@@ -1592,12 +1604,22 @@ public class KmsService implements ResourceProvider {
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Sign");
         validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
+        validateDigestLength(signingAlgorithm, messageType, message);
         try {
             return keyTypes.of(kmsKey.getKeySpec()).sign(kmsKey, message, signingAlgorithm, messageType);
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
             throw new AwsException("InternalFailure", "Failed to sign message: " + e.getMessage(), 500);
+        }
+    }
+
+    private static void validateDigestLength(KmsKeySpec.Algorithm algorithm, KmsMessageType messageType,
+                                             byte[] message) {
+        Integer expected = DIGEST_BYTES.get(algorithm);
+        if (messageType == KmsMessageType.DIGEST && expected != null && expected != message.length) {
+            throw new AwsException("ValidationException",
+                    "Digest is invalid length for algorithm " + algorithm.getAlgName() + ".", 400);
         }
     }
 
@@ -1625,6 +1647,7 @@ public class KmsService implements ResourceProvider {
         KmsKey kmsKey = resolveKey(keyId, region);
         validateKeyUsage(kmsKey, KmsKeyUsage.SIGN_VERIFY, "Verify");
         validateAlgorithmForSpec(signingAlgorithm, kmsKey.getKeySpec());
+        validateDigestLength(signingAlgorithm, messageType, message);
         try {
             return keyTypes.of(kmsKey.getKeySpec()).verify(kmsKey, message, signature, signingAlgorithm, messageType);
         } catch (AwsException e) {
