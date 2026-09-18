@@ -150,9 +150,11 @@ GET/HEAD/OPTIONS delivery from S3 or custom origins.
 - Viewer GET/HEAD requests, and OPTIONS requests allowed by the matched cache behavior, addressed to
   an enabled distribution's generated domain or alias are routed to the matching S3 or custom
   origin. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
-- Every distribution is also served under `{id}.cloudfront.localhost.floci.io` and
-  `{id}.cloudfront.localhost`. Both resolve to loopback with no host-file edit, and the generated
-  HTTPS certificate covers both, so a signed URL can be downloaded over `https://`. See
+- Every distribution is also served as `{id}.cloudfront.{host}` for each endpoint host Floci
+  resolves: `localhost`, `localhost.floci.io`, `localhost.localstack.cloud`, `FLOCI_HOSTNAME` and
+  every `FLOCI_DNS_EXTRA_SUFFIXES` entry. `{id}.cloudfront.localhost.floci.io` and
+  `{id}.cloudfront.localhost` reach loopback with no host-file edit and are covered by the generated
+  HTTPS certificate, so a signed URL for either can be downloaded over `https://`. See
   [Downloading over HTTPS](#downloading-over-https).
 - Origin custom headers are persisted through the CloudFront API and CloudFormation. They replace
   same-named viewer headers on custom-origin GET/HEAD/OPTIONS requests. For in-process S3 origins, a

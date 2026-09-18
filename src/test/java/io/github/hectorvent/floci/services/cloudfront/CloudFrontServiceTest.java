@@ -31,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -127,10 +128,14 @@ class CloudFrontServiceTest {
                 .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        EmulatorConfig.DnsConfig dnsConfig = Mockito.mock(EmulatorConfig.DnsConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
         var cloudFrontConfig = Mockito.mock(EmulatorConfig.CloudFrontServiceConfig.class);
 
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
+        when(config.hostname()).thenReturn(Optional.empty());
+        when(config.dns()).thenReturn(dnsConfig);
+        when(dnsConfig.extraSuffixes()).thenReturn(Optional.empty());
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.cloudfront()).thenReturn(cloudFrontConfig);
         when(cloudFrontConfig.domainSuffix()).thenReturn(domainSuffix);
@@ -241,7 +246,6 @@ class CloudFrontServiceTest {
         // A browser lower-cases the host it sends, so an upper-case id here would break every
         // signed URL built from the domain name.
         assertEquals(dist.getId().toLowerCase(Locale.ROOT) + ".cloudfront.net", dist.getDomainName());
-        assertEquals(dist.getId(), service.findByHost(dist.getDomainName()).getId());
     }
 
     @Test

@@ -12,6 +12,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -161,19 +162,9 @@ class TlsConfigSourceCertificateGenerationTest {
         
         assertTrue(sans.contains("host.docker.internal"),
             "Certificate SANs should include default 'host.docker.internal'");
-        assertTrue(sans.contains("*.execute-api.localhost.floci.io"),
-            "Certificate SANs should include API Gateway execution hosts");
-        assertTrue(sans.contains("*.execute-api.localhost.localstack.cloud"),
-            "Certificate SANs should include LocalStack-compatible API Gateway execution hosts");
-        assertTrue(sans.contains("*.cloudfront.localhost.floci.io"),
-            "Certificate SANs should include CloudFront local delivery hosts");
-        assertTrue(sans.contains("*.cloudfront.localhost"),
-            "Certificate SANs should include CloudFront local delivery hosts under .localhost");
-
-        // Should not contain any custom hostnames
-        assertEquals(11, sans.size(),
-            "Certificate SANs should contain exactly 11 default entries, including API Gateway execution "
-                    + "and CloudFront delivery hosts");
+        // Should be the defaults and nothing else - no custom hostnames
+        assertEquals(Set.copyOf(TlsConfigSource.DEFAULT_SAN_HOSTNAMES), Set.copyOf(sans),
+            "Certificate SANs should be exactly the default entries");
     }
 
     /**

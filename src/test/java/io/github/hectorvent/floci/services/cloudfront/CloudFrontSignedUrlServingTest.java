@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
+import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -242,29 +243,13 @@ class CloudFrontSignedUrlServingTest {
         s3Service.putObject(bucket, "private/report.txt", ("LOCAL-" + suffix).getBytes(StandardCharsets.UTF_8),
                 "text/plain", Map.of());
 
-        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-        generator.initialize(2048);
-        KeyPair keyPair = generator.generateKeyPair();
-        String pem = "-----BEGIN PUBLIC KEY-----\n"
-                + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
-                + "\n-----END PUBLIC KEY-----";
-        io.github.hectorvent.floci.services.cloudfront.model.PublicKey publicKey =
-                new io.github.hectorvent.floci.services.cloudfront.model.PublicKey();
-        publicKey.setName("pk-" + suffix);
-        publicKey.setCallerReference("cr-" + suffix);
-        publicKey.setEncodedKey(pem);
-        publicKey = cloudFrontService.createPublicKey(publicKey);
-
-        KeyGroup keyGroup = new KeyGroup();
-        keyGroup.setName("kg-" + suffix);
-        keyGroup.setItems(List.of(publicKey.getId()));
-        keyGroup = cloudFrontService.createKeyGroup(keyGroup);
+        TrustedSigner signer = registerTrustedSigner(suffix);
 
         DistributionConfig cfg = new DistributionConfig();
         cfg.setEnabled(true);
         cfg.setOrigins(List.of(s3Origin("o", bucket)));
         DefaultCacheBehavior dcb = defaultBehavior("o");
-        dcb.setTrustedKeyGroups(List.of(keyGroup.getId()));
+        dcb.setTrustedKeyGroups(List.of(signer.keyGroupId()));
         cfg.setDefaultCacheBehavior(dcb);
         Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
 
@@ -273,20 +258,42 @@ class CloudFrontSignedUrlServingTest {
             long expires = Instant.now().getEpochSecond() + 3600;
             String policyJson = CloudFrontSignatureVerifier.cannedPolicy(
                     "http://" + host + "/private/report.txt", Long.toString(expires));
-            Signature signer = Signature.getInstance("SHA1withRSA");
-            signer.initSign(keyPair.getPrivate());
-            signer.update(policyJson.getBytes(StandardCharsets.UTF_8));
+            Signature rsa = Signature.getInstance("SHA1withRSA");
+            rsa.initSign(signer.keyPair().getPrivate());
+            rsa.update(policyJson.getBytes(StandardCharsets.UTF_8));
 
             given().header("Host", host)
                     .queryParam("Expires", expires)
-                    .queryParam("Signature", cfBase64(signer.sign()))
-                    .queryParam("Key-Pair-Id", publicKey.getId())
+                    .queryParam("Signature", cfBase64(rsa.sign()))
+                    .queryParam("Key-Pair-Id", signer.keyPairId())
                     .when().get("/private/report.txt")
                     .then().statusCode(200).body(containsString("LOCAL-" + suffix));
 
             given().header("Host", host).when().get("/private/report.txt")
                     .then().statusCode(403);
         }
+    }
+
+    /** A public key registered with CloudFront and the key group that trusts it. */
+    private record TrustedSigner(KeyPair keyPair, String keyPairId, String keyGroupId) {}
+
+    private TrustedSigner registerTrustedSigner(String suffix) throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        KeyPair keyPair = generator.generateKeyPair();
+        PublicKey publicKey = new PublicKey();
+        publicKey.setName("pk-" + suffix);
+        publicKey.setCallerReference("cr-" + suffix);
+        publicKey.setEncodedKey("-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----");
+        publicKey = cloudFrontService.createPublicKey(publicKey);
+
+        KeyGroup keyGroup = new KeyGroup();
+        keyGroup.setName("kg-" + suffix);
+        keyGroup.setItems(List.of(publicKey.getId()));
+        keyGroup = cloudFrontService.createKeyGroup(keyGroup);
+        return new TrustedSigner(keyPair, publicKey.getId(), keyGroup.getId());
     }
 
     private static String cfBase64(byte[] bytes) {

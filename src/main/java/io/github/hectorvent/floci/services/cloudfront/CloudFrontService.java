@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
@@ -41,6 +42,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.SequencedSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -81,16 +83,6 @@ public class CloudFrontService {
             "60669652-455b-4ae9-85a4-c4c02393f86c";
     private static final Map<String, ResponseHeadersPolicy> MANAGED_RESPONSE_HEADERS_POLICIES =
             managedResponseHeadersPolicies();
-    /**
-     * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
-     * {@code floci.services.cloudfront.domain-suffix} makes the assigned domain name. Both
-     * resolve to loopback with no host-file edit — {@code localhost.floci.io} through its public
-     * wildcard record and Floci's embedded DNS, {@code localhost} through the resolver itself —
-     * and both are covered by the SANs of the generated HTTPS certificate, so a signed URL can be
-     * downloaded over HTTPS the way a viewer downloads one from CloudFront.
-     */
-    private static final List<String> LOCAL_DELIVERY_SUFFIXES =
-            List.of(".cloudfront.localhost.floci.io", ".cloudfront.localhost");
 
     private final StorageBackend<String, Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
@@ -111,6 +103,16 @@ public class CloudFrontService {
     private final StorageBackend<String, MonitoringSubscription> monitoringStore;
     private final String accountId;
     private final String domainSuffix;
+    /**
+     * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
+     * {@code floci.services.cloudfront.domain-suffix} makes the assigned domain name. They carry the
+     * {@code cloudfront} service label on the endpoint hosts the embedded DNS resolves, the same
+     * derivation API Gateway uses for {@code <id>.execute-api.<host>}, so a name that resolves to
+     * Floci is also routed by it. {@code <id>.cloudfront.localhost.floci.io} and
+     * {@code <id>.cloudfront.localhost} are additionally covered by the generated HTTPS
+     * certificate, so a signed URL for either can be downloaded over HTTPS.
+     */
+    private final List<String> localDeliverySuffixes;
 
     @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config) {
@@ -150,6 +152,7 @@ public class CloudFrontService {
                 new TypeReference<Map<String, MonitoringSubscription>>() {});
         this.accountId = config.defaultAccountId();
         this.domainSuffix = config.services().cloudfront().domainSuffix();
+        this.localDeliverySuffixes = localDeliverySuffixes(config);
     }
 
     // ── Distributions ─────────────────────────────────────────────────────────
@@ -330,7 +333,7 @@ public class CloudFrontService {
             return null;
         }
         String hostname = stripPort(host);
-        List<Distribution> distributions = new ArrayList<>(distStore.scan(k -> true));
+        List<Distribution> distributions = distStore.scan(k -> true);
         for (Distribution dist : distributions) {
             if (hostname.equalsIgnoreCase(dist.getDomainName())) {
                 return dist;
@@ -346,9 +349,10 @@ public class CloudFrontService {
                 }
             }
         }
-        Distribution local = findByLocalDeliveryHost(hostname);
-        if (local != null) {
-            return local;
+        for (Distribution dist : distributions) {
+            if (matchesLocalDeliveryHost(hostname, dist.getId())) {
+                return dist;
+            }
         }
         Distribution best = null;
         int bestSpecificity = -1;
@@ -376,29 +380,25 @@ public class CloudFrontService {
         return id.toLowerCase(Locale.ROOT) + "." + domainSuffix;
     }
 
-    /**
-     * Resolves {@code <id>.cloudfront.localhost.floci.io} or {@code <id>.cloudfront.localhost} to
-     * its distribution. The label standing for the id must be a single label, so a longer name
-     * such as {@code a.b.cloudfront.localhost} belongs to nothing.
-     */
-    private Distribution findByLocalDeliveryHost(String hostname) {
-        for (String suffix : LOCAL_DELIVERY_SUFFIXES) {
-            if (hostname.length() <= suffix.length()
-                    || !hostname.regionMatches(true, hostname.length() - suffix.length(),
-                            suffix, 0, suffix.length())) {
-                continue;
-            }
-            String id = hostname.substring(0, hostname.length() - suffix.length());
-            if (id.indexOf('.') >= 0) {
-                continue;
-            }
-            // Distribution ids are uppercase; a client that lower-cased the hostname still resolves.
-            Optional<Distribution> dist = distStore.get(id.toUpperCase(Locale.ROOT));
-            if (dist.isPresent()) {
-                return dist.get();
+    private static List<String> localDeliverySuffixes(EmulatorConfig config) {
+        SequencedSet<String> endpointHosts = new LinkedHashSet<>();
+        endpointHosts.add("localhost");
+        EmbeddedDnsServer.BUILTIN_SUFFIXES.forEach(endpointHosts::add);
+        config.hostname().ifPresent(endpointHosts::add);
+        config.dns().extraSuffixes().ifPresent(endpointHosts::addAll);
+        return endpointHosts.stream()
+                .map(host -> ".cloudfront." + host.toLowerCase(Locale.ROOT))
+                .toList();
+    }
+
+    /** True when {@code hostname} is the local delivery host of the distribution with this id. */
+    private boolean matchesLocalDeliveryHost(String hostname, String id) {
+        for (String suffix : localDeliverySuffixes) {
+            if (hostname.equalsIgnoreCase(id + suffix)) {
+                return true;
             }
         }
-        return null;
+        return false;
     }
 
     private void ensureAliasesAvailable(DistributionConfig config, String currentDistributionId) {

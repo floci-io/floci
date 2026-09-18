@@ -12,16 +12,12 @@ import jakarta.enterprise.event.Observes;
  * Copies the HTTP/2 {@code :authority} pseudo-header into a {@code Host} header.
  *
  * <p>HTTP/2 (RFC 9113 section 8.3.1) carries the authority in {@code :authority} and sends no
- * {@code Host} header, while HTTP/1.1 sends {@code Host}. Floci routes many requests by the host
- * a client addressed: CloudFront distribution domains, S3 virtual-hosted buckets, API Gateway
- * execute-api and custom domains, Lambda function URLs, and Cognito custom domains. Those lookups
- * read the {@code Host} header, so without this filter every one of them falls through whenever a
- * client negotiates HTTP/2, which curl, the AWS SDK for Java and Go, and browsers all do over
- * HTTPS.
+ * {@code Host} header. Floci routes by host header, so without this every host-based lookup falls
+ * through over HTTPS, where curl, the AWS SDKs and browsers negotiate HTTP/2.
  *
- * <p>The header is set on the Vert.x request itself, so both JAX-RS filters and the handlers that
- * read the raw request see the same value. A request that already carries {@code Host} is left
- * alone.
+ * <p>The header is set on the Vert.x request, so JAX-RS filters and raw request handlers see the
+ * same value. Reverse-proxy rewriting is a separate question, answered by {@code X-Forwarded-Host}
+ * where a service reads it.
  */
 @ApplicationScoped
 public class Http2HostHeaderFilter {
