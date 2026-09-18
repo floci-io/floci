@@ -1577,7 +1577,6 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    /** SigningAlgorithmSpec from the KMS model, in the order KMS lists it in validation errors. */
     private static final List<String> SIGNING_ALGORITHMS = List.of(
             "RSASSA_PSS_SHA_256", "RSASSA_PSS_SHA_384", "RSASSA_PSS_SHA_512",
             "RSASSA_PKCS1_V1_5_SHA_256", "RSASSA_PKCS1_V1_5_SHA_384", "RSASSA_PKCS1_V1_5_SHA_512",
@@ -1602,10 +1601,6 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    /**
-     * SYMMETRIC_DEFAULT is not in the modeled enum, but real KMS lets it through to the key spec
-     * check instead of failing validation.
-     */
     private static KmsKeySpec.Algorithm resolveSigningAlgorithm(String algorithm) {
         if (algorithm == null) {
             throw new AwsException("ValidationException",

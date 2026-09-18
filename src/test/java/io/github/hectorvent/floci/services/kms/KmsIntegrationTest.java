@@ -1652,11 +1652,7 @@ class KmsIntegrationTest {
                 .body("message", equalTo("Digest is invalid length for algorithm ED25519_PH_SHA_512."));
     }
 
-    /**
-     * Real KMS answers Sign and Verify on a key whose KeyUsage is not SIGN_VERIFY with an
-     * InvalidKeyUsageException, whatever the key spec and the signing algorithm. Checked against
-     * real AWS in us-east-1.
-     */
+    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({
             "HMAC_256, GENERATE_VERIFY_MAC, Sign",
@@ -1690,7 +1686,7 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
     }
 
-    /** Checked against real AWS in us-east-1. KMS validates the name before it looks up the key. */
+    /** Checked against real AWS in us-east-1. */
     @Test
     void signRejectsAnUnknownSigningAlgorithmBeforeLookingUpTheKey() {
         given()

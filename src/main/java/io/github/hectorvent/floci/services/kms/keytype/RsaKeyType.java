@@ -60,9 +60,6 @@ final class RsaKeyType implements KmsKeyType {
         if (isPss(algorithm)) {
             return signPssDigest(privateKey, message, algorithm);
         }
-        // RFC 8017 9.2: PKCS#1 v1.5 signs DigestInfo{hashOID, digest}, not the
-        // bare digest, so the signature validates with external verifiers and
-        // real KMS (NONEwithRSA only pads the bytes it is given).
         return AsymmetricKeys.sign(privateKey, "NONEwithRSA", wrapInDigestInfo(message, algorithm));
     }
 
@@ -76,7 +73,6 @@ final class RsaKeyType implements KmsKeyType {
         if (isPss(algorithm)) {
             return verifyPssDigest(publicKey, message, signature, algorithm);
         }
-        // Mirror sign(): verify against DigestInfo{hashOID, digest} (RFC 8017 9.2).
         return AsymmetricKeys.verify(publicKey, "NONEwithRSA", wrapInDigestInfo(message, algorithm), signature);
     }
 
@@ -95,7 +91,6 @@ final class RsaKeyType implements KmsKeyType {
         return Integer.parseInt(spec.name().substring("RSA_".length()));
     }
 
-    /** RFC 8017 7.1.1: OAEP holds at most k - 2*hLen - 2 bytes, k being the modulus length. */
     private static void validatePlaintextLength(byte[] plaintext, KmsKeySpec.Algorithm algorithm, KmsKeySpec spec) {
         int modulusBytes = keySize(spec) / 8;
         int digestBytes = algorithm == KmsKeySpec.Algorithm.RSAES_OAEP_SHA_1 ? 20 : 32;
