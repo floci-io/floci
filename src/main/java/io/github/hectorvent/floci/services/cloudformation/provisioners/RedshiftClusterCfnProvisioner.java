@@ -159,6 +159,9 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             r.getAttributes().put("Endpoint.Address", cluster.getEndpoint().getAddress());
             r.getAttributes().put("Endpoint.Port", String.valueOf(cluster.getEndpoint().getPort()));
         }
+        if (cluster.getMasterPasswordSecretArn() != null) {
+            r.getAttributes().put("MasterPasswordSecretArn", cluster.getMasterPasswordSecretArn());
+        }
         r.getAttributes().put("ClusterNamespaceArn", namespaceArn(ctx, id));
     }
 

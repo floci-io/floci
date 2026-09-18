@@ -365,7 +365,11 @@ class RedshiftClusterCfnProvisionerTest {
     void provisionSupportsManageMasterPassword() {
         RedshiftService service = mock(RedshiftService.class);
         when(service.createClusterWithManagedMasterPassword(anyString(), anyString(), anyString(), isNull(),
-                anyList(), anyList(), any(), anyString())).thenAnswer(inv -> availableCluster(inv.getArgument(0)));
+                anyList(), anyList(), any(), anyString())).thenAnswer(inv -> {
+            Cluster cluster = availableCluster(inv.getArgument(0));
+            cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:redshift-managed");
+            return cluster;
+        });
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::Cluster");
@@ -377,6 +381,8 @@ class RedshiftClusterCfnProvisionerTest {
 
         verify(service).createClusterWithManagedMasterPassword(anyString(), eq("ra3.large"), eq("admin"),
                 isNull(), anyList(), eq(List.of()), eq("alias/redshift-key"), eq("us-east-1"));
+        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:redshift-managed",
+                r.getAttributes().get("MasterPasswordSecretArn"));
     }
 
     @Test
