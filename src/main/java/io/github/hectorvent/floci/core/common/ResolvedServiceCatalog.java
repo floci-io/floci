@@ -39,6 +39,7 @@ import io.github.hectorvent.floci.services.ses.SesContactController;
 import io.github.hectorvent.floci.services.ses.SesCvetController;
 import io.github.hectorvent.floci.services.ses.SesDedicatedIpController;
 import io.github.hectorvent.floci.services.ses.SesIdentityController;
+import io.github.hectorvent.floci.services.ses.SesImportJobController;
 import io.github.hectorvent.floci.services.ses.SesSendController;
 import io.github.hectorvent.floci.services.ses.SesSuppressionController;
 import io.github.hectorvent.floci.services.ses.SesTagController;
@@ -301,7 +302,7 @@ public class ResolvedServiceCatalog {
                                 SesDedicatedIpController.class, SesIdentityController.class,
                                 SesSendController.class, SesSuppressionController.class,
                                 SesTagController.class, SesTemplateController.class,
-                                SesTenantController.class)),
+                                SesImportJobController.class, SesTenantController.class)),
                 descriptor("es", "opensearch", config.services().opensearch().enabled(), true,
                         "opensearch", storageMode(config.storage().services().opensearch().mode(), config.storage().mode()),
                         config.storage().services().opensearch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
