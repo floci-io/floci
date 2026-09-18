@@ -21,7 +21,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class SesServiceDkimLookupCacheTest {
+class SesIdentityDkimLookupCacheTest {
 
     private static final String REGION = "us-east-1";
     private static final String DOMAIN = "example.com";

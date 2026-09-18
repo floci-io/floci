@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.services.ses;
 
-import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -23,19 +23,20 @@ import java.util.List;
 @Produces(MediaType.APPLICATION_JSON)
 public class SesInspectionController {
 
-    private final SesService sesService;
+    private final SesSentEmailService sentEmailService;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public SesInspectionController(SesService sesService, ObjectMapper objectMapper) {
-        this.sesService = sesService;
+    public SesInspectionController(SesSentEmailService sentEmailService,
+                                   ObjectMapper objectMapper) {
+        this.sentEmailService = sentEmailService;
         this.objectMapper = objectMapper;
     }
 
     @GET
     public Response getEmails(@QueryParam("id") String messageId,
                               @QueryParam("email") String recipient) {
-        List<SentEmail> emails = sesService.getEmails();
+        List<SentEmail> emails = sentEmailService.listAll();
 
         ArrayNode messages = objectMapper.createArrayNode();
         for (SentEmail email : emails) {
@@ -120,7 +121,7 @@ public class SesInspectionController {
 
     @DELETE
     public Response clearEmails() {
-        sesService.clearEmails();
+        sentEmailService.clear();
         return Response.ok().build();
     }
 }

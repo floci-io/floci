@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class SesServiceLegacyDkimTokensTest {
+class SesIdentityLegacyDkimTokensTest {
 
     private static final String REGION = "us-east-1";
 

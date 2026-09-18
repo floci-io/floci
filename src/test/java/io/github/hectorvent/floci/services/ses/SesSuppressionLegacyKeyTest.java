@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the legacy key, and PUT migrates it onto the canonical key. Only reachable by seeding
  * the store directly (the HTTP API always normalizes), so it lives at the unit layer.
  */
-class SesServiceSuppressionLegacyKeyTest {
+class SesSuppressionLegacyKeyTest {
 
     private static final String REGION = "us-east-1";
     // A pre-canonicalization entry: trim-only key with an upper-case domain.

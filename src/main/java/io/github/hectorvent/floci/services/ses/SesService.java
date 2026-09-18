@@ -4,23 +4,19 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
-import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
-import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
@@ -39,8 +35,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -68,8 +62,7 @@ import java.util.UUID;
  *   <li>the ARN dispatch behind the tag operations, which routes one ARN to one of seven
  *       domains;</li>
  *   <li>the tenant-scoped suppression routing, which picks the tenant store or the account-wide
- *       one from a {@code TenantName};</li>
- *   <li>the inspection reads over recorded mail.</li>
+ *       one from a {@code TenantName}.</li>
  * </ul>
  *
  * <p>The name is historical. This is not the service for SES as a whole: SES is served by the
@@ -89,9 +82,8 @@ public class SesService {
     // check, the tenant-guarded delete with its policy cascade, the default configuration set) and
     // the send-path reads, reaching the store through its find/save.
     private final SesIdentityService identityService;
-    // Sent-email records extracted to SesSentEmailService. The send path records finished emails via
-    // it; the account and v1 statistics reads go to the service directly, inspection still reads
-    // back through the facade.
+    // Sent-email records extracted to SesSentEmailService. The send path records finished emails
+    // via it; every read goes to the service directly.
     private final SesSentEmailService sentEmailService;
     // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
     // reads via it, and ARN-dispatched tagging reads/writes via its find/save.
@@ -621,13 +613,7 @@ public class SesService {
         return cs;
     }
 
-    public List<SentEmail> getEmails() {
-        return sentEmailService.listAll();
-    }
 
-    public void clearEmails() {
-        sentEmailService.clear();
-    }
 
     // ──────────────────────────── Templates ────────────────────────────
 

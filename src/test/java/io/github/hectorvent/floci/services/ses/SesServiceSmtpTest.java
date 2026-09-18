@@ -23,6 +23,7 @@ class SesServiceSmtpTest {
 
     private SesService service;
     private SesConfigurationSetService configSets;
+    private SesSentEmailService sentEmails;
     private InMemoryStorage<String, SentEmail> emailStore;
 
     @BeforeEach
@@ -31,10 +32,11 @@ class SesServiceSmtpTest {
         emailStore = builder.emailStore();
         service = builder.build();
         configSets = builder.configSetService();
+        sentEmails = builder.sentEmailService();
     }
 
     private SentEmail storedEmail(String messageId) {
-        return service.getEmails().stream()
+        return sentEmails.listAll().stream()
                 .filter(e -> messageId.equals(e.getMessageId()))
                 .findFirst()
                 .orElseThrow();
