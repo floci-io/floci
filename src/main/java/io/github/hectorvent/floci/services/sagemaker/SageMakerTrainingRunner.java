@@ -7,6 +7,7 @@ import com.github.dockerjava.core.command.LogContainerResultCallback;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -42,7 +43,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @ApplicationScoped
-public class SageMakerTrainingRunner implements ContainerTeardown {
+public class SageMakerTrainingRunner implements ContainerTeardown, Resettable {
     private static final Logger LOG = Logger.getLogger(SageMakerTrainingRunner.class);
     private static final String LOG_GROUP = "/aws/sagemaker/TrainingJobs";
 
@@ -53,7 +54,8 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
     private final ContainerDetector containerDetector;
     private final S3Service s3Service;
     private final ObjectMapper mapper;
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    // Replaced by clear() after a state reset, whose container teardown shuts this pool down.
+    private volatile ExecutorService executor = Executors.newCachedThreadPool();
     private final ConcurrentHashMap<String, String> containers = new ConcurrentHashMap<>();
     // Names a stop that stop() has already committed to the store as "Stopped": run()'s exit-code
     // handling checks this before persisting, since a stop races the removal of the very container
@@ -146,6 +148,10 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
             job.failureReason = e.getMessage();
             job.trainingEndTime = System.currentTimeMillis();
             service.updateTrainingJob(job);
+            if (e instanceof InterruptedException) {
+                // Interrupted by a teardown's shutdownNow(): keep the flag for the pool thread.
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -158,10 +164,27 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
     }
 
     @Override
-    public void stopManagedContainers() {
+    public synchronized void stopManagedContainers() {
         containers.forEach((name, id) -> lifecycleManager.stopAndRemove(id, null));
         containers.clear();
         executor.shutdownNow();
+    }
+
+    /**
+     * Runs after a state reset has torn the containers down and wiped the store, never on
+     * shutdown. The teardown shut the worker pool down, so without a new one every later
+     * CreateTrainingJob would be rejected until the emulator restarted.
+     */
+    @Override
+    public synchronized void clear() {
+        stopRequested.clear();
+        if (executor.isShutdown()) {
+            executor = Executors.newCachedThreadPool();
+        }
+    }
+
+    boolean acceptsWork() {
+        return !executor.isShutdown();
     }
 
     private List<String> environment(TrainingJobResource job) {

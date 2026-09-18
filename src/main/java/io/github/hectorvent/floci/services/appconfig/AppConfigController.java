@@ -3,14 +3,26 @@ package io.github.hectorvent.floci.services.appconfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.appconfig.model.*;
+import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.services.appconfig.model.Application;
+import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
+import io.github.hectorvent.floci.services.appconfig.model.Deployment;
+import io.github.hectorvent.floci.services.appconfig.model.DeploymentStrategy;
+import io.github.hectorvent.floci.services.appconfig.model.Environment;
+import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersion;
+import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersionSummary;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import org.jboss.logging.Logger;
-
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
@@ -19,8 +31,6 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class AppConfigController {
-    private static final Logger LOG = Logger.getLogger(AppConfigController.class);
-
     private final AppConfigService service;
     private final ObjectMapper objectMapper;
 
@@ -226,6 +236,23 @@ public class AppConfigController {
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         Deployment deployment = service.startDeployment(appId, envId, request);
         return Response.status(201).entity(deployment).build();
+    }
+
+    @GET
+    @Path("/applications/{appId}/environments/{envId}/deployments")
+    public Response listDeployments(@PathParam("appId") String appId,
+                                     @PathParam("envId") String envId,
+                                     @QueryParam("max_results") String maxResults,
+                                     @QueryParam("next_token") String nextToken) {
+        AppConfigService.DeploymentPage page = service.listDeployments(appId, envId,
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("Items");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
+        return Response.ok(root).build();
     }
 
     @GET

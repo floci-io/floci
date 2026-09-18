@@ -1883,6 +1883,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .map(AccessKey::getSecretAccessKey);
     }
 
+    public record EksSessionIdentity(String accountId, String roleArn, String roleId, String instanceId) {}
+
+    /** Returns only identity metadata, never the session secret or token. */
+    public Optional<EksSessionIdentity> findEksSessionIdentity(String accessKeyId) {
+        return currentSession(accessKeyId).map(session -> new EksSessionIdentity(
+                session.getOriginAccountId(), session.getRoleArn(), session.getEc2RoleId(), session.getEc2InstanceId()));
+    }
+
     private Optional<SessionCredential> currentSession(String accessKeyId) {
         return findSessionAnyAccount(accessKeyId)
                 .filter(session -> session.getExpiration() == null || Instant.now().isBefore(session.getExpiration()));

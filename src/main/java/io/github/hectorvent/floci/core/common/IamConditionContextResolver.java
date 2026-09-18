@@ -81,6 +81,41 @@ public class IamConditionContextResolver {
         };
     }
 
+    public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
+                                                        String resourceArn, String region,
+                                                        String accountId, String resourceOwnerAccountId) {
+        Map<String, List<String>> conditions = serviceContext == null
+                ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(serviceContext);
+        // aws:ResourceAccount is the account that OWNS the resource, which is not always the
+        // caller's. Some ARNs carry it; S3 bucket and object ARNs deliberately do not, and there
+        // the owner has to come from service state. When neither source knows it, the key is left
+        // out rather than guessed: an absent key fails a Condition that tests it, whereas a wrong
+        // one would silently authorize cross-account access the policy meant to refuse.
+        String resourceAccount = accountFromArn(resourceArn);
+        if (resourceAccount == null || resourceAccount.isBlank()) {
+            resourceAccount = resourceOwnerAccountId;
+        }
+        putIfPresent(conditions, "aws:ResourceAccount", resourceAccount);
+        putIfPresent(conditions, "aws:PrincipalAccount", accountId);
+        putIfPresent(conditions, "aws:RequestedRegion", region);
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    private static String accountFromArn(String arn) {
+        if (arn == null || !arn.startsWith("arn:")) {
+            return null;
+        }
+        String[] segments = arn.split(":", 6);
+        return segments.length > 4 ? segments[4] : null;
+    }
+
+    private static void putIfPresent(Map<String, List<String>> conditions, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            conditions.put(key, List.of(value));
+        }
+    }
+
     // ── S3 ──────────────────────────────────────────────────────────────────────
 
     private Map<String, List<String>> s3ConditionContext(String action, ContainerRequestContext ctx) {

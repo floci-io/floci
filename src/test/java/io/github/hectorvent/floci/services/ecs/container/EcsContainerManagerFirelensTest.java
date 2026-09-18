@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
+import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -313,6 +314,86 @@ class EcsContainerManagerFirelensTest {
                 failure.getMessage());
         verify(lifecycleManager, never()).create(any(ContainerSpec.class));
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void rejectsAwsfirelensApplicationWithoutRouter() {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setLogConfiguration(new LogConfiguration("awsfirelens", Map.of(), null));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> manager.startTask(task(), taskDefinition(List.of(app)), null, "us-east-1"));
+
+        assertEquals("ClientException", failure.getErrorCode());
+        assertEquals("awsfirelens log driver requires a firelensConfiguration container",
+                failure.getMessage());
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void rejectsTwoFirelensRouters() {
+        AwsException failure = assertThrows(AwsException.class, () -> manager.startTask(
+                task(),
+                taskDefinition(List.of(
+                        router("fluentbit", List.of()),
+                        router("fluentd", List.of()))),
+                null, "us-east-1"));
+
+        assertEquals("ClientException", failure.getErrorCode());
+        assertEquals("A task definition can have only one FireLens log router.", failure.getMessage());
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void rejectsFirelensRouterExposingPort24224() {
+        AwsException failure = assertThrows(AwsException.class, () -> manager.startTask(
+                task(),
+                taskDefinition(List.of(router("fluentbit", List.of(new PortMapping(24224, 0, "tcp"))))),
+                null, "us-east-1"));
+
+        assertEquals("ClientException", failure.getErrorCode());
+        assertEquals("FireLens port 24224 must not be exposed.", failure.getMessage());
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+    }
+
+    @Test
+    void rejectsUnsupportedFirelensRouterType() {
+        AwsException failure = assertThrows(AwsException.class, () -> manager.startTask(
+                task(),
+                taskDefinition(List.of(router("fluent-plugin", List.of()))),
+                null, "us-east-1"));
+
+        assertEquals("ClientException", failure.getErrorCode());
+        assertEquals("FireLens configuration type must be fluentbit or fluentd.", failure.getMessage());
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+    }
+
+    private static ContainerDefinition router(String type, List<PortMapping> portMappings) {
+        ContainerDefinition router = new ContainerDefinition();
+        router.setName("log_router");
+        router.setImage("amazon/aws-for-fluent-bit:stable");
+        router.setFirelensConfiguration(new FirelensConfiguration(type, Map.of()));
+        router.setPortMappings(portMappings);
+        return router;
+    }
+
+    private static TaskDefinition taskDefinition(List<ContainerDefinition> definitions) {
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("firelens-family");
+        taskDef.setRevision(1);
+        taskDef.setNetworkMode(NetworkMode.awsvpc);
+        taskDef.setContainerDefinitions(definitions);
+        return taskDef;
+    }
+
+    private static EcsTask task() {
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+        task.setClusterArn("arn:aws:ecs:us-east-1:000000000000:cluster/test-cluster");
+        return task;
     }
 
     private static Map<String, String> readFirelensArchive(InputStream archive) {

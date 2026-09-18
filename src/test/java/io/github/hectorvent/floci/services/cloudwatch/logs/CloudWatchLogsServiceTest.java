@@ -32,6 +32,7 @@ class CloudWatchLogsServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 10000,
                 new RegionResolver("us-east-1", "000000000000")
         );
@@ -80,6 +81,7 @@ class CloudWatchLogsServiceTest {
                 new AccountAwareStorageBackend<>(rawStreams, null, "000000000000"),
                 new AccountAwareStorageBackend<>(rawEvents, null, "000000000000"),
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
                 10_000, new RegionResolver(REGION, "000000000000"));
         String accountA = "111111111111";
         String accountB = "222222222222";
@@ -120,6 +122,7 @@ class CloudWatchLogsServiceTest {
                 new AccountAwareStorageBackend<>(rawStreams, null, accountB),
                 new AccountAwareStorageBackend<>(rawEvents, null, accountB),
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
                 10_000, new RegionResolver(REGION, accountB));
         long now = System.currentTimeMillis();
         long twoDaysAgo = now - 2 * 86_400_000L;
@@ -153,6 +156,7 @@ class CloudWatchLogsServiceTest {
                 new AccountAwareStorageBackend<>(rawGroups, null, accountB),
                 new AccountAwareStorageBackend<>(rawStreams, null, accountB),
                 new AccountAwareStorageBackend<>(rawEvents, null, accountB),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
                 10_000, 2, new RegionResolver(REGION, accountB));
 
@@ -240,6 +244,7 @@ class CloudWatchLogsServiceTest {
 
     private static CloudWatchLogsService serviceWithStoredEventCeiling(int maxStoredEvents) {
         return new CloudWatchLogsService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -820,6 +825,7 @@ class CloudWatchLogsServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 2,
                 new RegionResolver("us-east-1", "000000000000")
         );
@@ -900,6 +906,7 @@ class CloudWatchLogsServiceTest {
     @Test
     void getLogEventsPagesForwardWithAnUnboundedMaxEventsPerQuery() {
         CloudWatchLogsService unboundedService = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -1195,6 +1202,7 @@ class CloudWatchLogsServiceTest {
     @Test
     void filterLogEventsNeverEmitsACursorThatCannotAdvance() {
         CloudWatchLogsService capped = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),

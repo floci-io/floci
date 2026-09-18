@@ -1,0 +1,79 @@
+name: Signed Commits
+
+# The repo's branch protection already requires every commit to be signed
+# and verified before a PR can merge, but that only shows up as a generic
+# red status on the merge button - it doesn't say which commit, or why. This
+# job front-runs that with a per-commit annotation in the Checks tab, using
+# the same signal GitHub's own merge gate uses (the commit's `verification`
+# field from the API), so a contributor gets a specific, actionable failure
+# instead of discovering the block only when they try to merge.
+#
+# 'edited' is deliberately left out of the trigger: editing the PR title or
+# body doesn't change which commits are on the branch, so there's nothing
+# new to check.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  check-signatures:
+    name: Commits are signed and verified
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check commit signatures
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Local `git log --show-signature` only verifies against keys the
+          # runner already trusts, which is nobody's - it would report every
+          # commit as unsigned regardless of reality. GitHub's own merge gate
+          # checks the commit's `verification` field instead (matched against
+          # the key the author uploaded to their GitHub account), so this
+          # checks the same field via the API to give the same verdict the
+          # merge button will, just earlier and per-commit.
+          #
+          # Merge commits are skipped via --no-merges, matching the
+          # Conventional Commits and AI Attribution jobs.
+
+          FAILED=0
+
+          for sha in $(git log --no-merges --format=%H "$BASE_SHA".."$HEAD_SHA"); do
+            subject=$(git show -s --format=%s "$sha")
+            verification=$(gh api "repos/$REPO/commits/$sha" --jq '.commit.verification')
+            verified=$(echo "$verification" | jq -r '.verified')
+            reason=$(echo "$verification" | jq -r '.reason')
+
+            if [ "$verified" = "true" ]; then
+              echo "ok: $sha $subject"
+            else
+              echo "::error::Commit is not signed/verified: $sha $subject ($reason)"
+              FAILED=1
+            fi
+          done
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo ""
+            echo "  This repo requires every commit to be GPG or SSH signed and verified"
+            echo "  by GitHub before a PR can merge - the commit(s) flagged above aren't."
+            echo ""
+            echo "  Set up commit signing (GPG or SSH):"
+            echo "    https://docs.github.com/en/authentication/managing-commit-signature-verification"
+            echo ""
+            echo "  Then re-sign the commits this PR adds and force-push:"
+            echo "    git rebase --exec 'git commit --amend --no-edit -S' origin/main"
+            echo "    git push --force-with-lease"
+          fi
+
+          exit $FAILED

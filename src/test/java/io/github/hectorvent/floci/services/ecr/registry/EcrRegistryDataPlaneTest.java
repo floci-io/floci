@@ -167,11 +167,9 @@ class EcrRegistryDataPlaneTest {
 
             assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
 
-            var rejected = putManifest(dataPlane.actualPort());
+            ManifestResponse rejected = putManifest(dataPlane.actualPort());
             assertEquals(400, rejected.statusCode());
-            String responseBody = rejected.body()
-                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS).toString();
-            JsonObject json = new JsonObject(responseBody);
+            JsonObject json = new JsonObject(rejected.body());
             JsonArray errors = json.getJsonArray("errors");
             assertNotNull(errors);
             assertEquals(1, errors.size());
@@ -192,7 +190,10 @@ class EcrRegistryDataPlaneTest {
         }
     }
 
-    private io.vertx.core.http.HttpClientResponse putManifest(int port) throws Exception {
+    private record ManifestResponse(int statusCode, String body) {
+    }
+
+    private ManifestResponse putManifest(int port) throws Exception {
         HttpClient client = vertx.createHttpClient();
         return client.request(new RequestOptions()
                         .setHost("127.0.0.1")
@@ -204,6 +205,11 @@ class EcrRegistryDataPlaneTest {
                     request.setChunked(true);
                     return request.send(Buffer.buffer("{}"));
                 })
+                // Read the body inside the response's own future chain. A body() registered from
+                // the test thread after get() races the event loop, which may already have
+                // delivered the whole response, and then yields an empty buffer.
+                .compose(response -> response.body()
+                        .map(body -> new ManifestResponse(response.statusCode(), body.toString())))
                 .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
     }
 }

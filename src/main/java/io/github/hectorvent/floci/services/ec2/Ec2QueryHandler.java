@@ -754,8 +754,9 @@ public class Ec2QueryHandler {
                 userData = launchTemplateData.getUserData();
                 userDataEncoded = launchTemplateData.getEncodedUserData();
             }
-            iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn,
-                    service.iamInstanceProfileArn(launchTemplateData));
+            if (iamInstanceProfileArn == null) {
+                iamInstanceProfileArn = service.iamInstanceProfileArn(launchTemplateData);
+            }
             if (sgIds.isEmpty()) {
                 sgIds = new ArrayList<>(launchTemplateData.effectiveSecurityGroupIds());
             }
@@ -3170,6 +3171,7 @@ public class Ec2QueryHandler {
                     .elem("imageOwnerAlias", img.getImageOwnerAlias())
                     .elem("creationDate", img.getCreationDate())
                     .raw(blockDeviceMappingXml(img.getBlockDeviceMappings()))
+                    .raw(tagSetXml(img.getTags()))
                     .end("item");
         }
         xml.end("imagesSet").end("DescribeImagesResponse");
@@ -3203,7 +3205,7 @@ public class Ec2QueryHandler {
                 .stream().findFirst()
                 .orElseGet(() -> firstFilterValue(filters, "owner-alias", AMAZON_OWNER_ID));
         return switch (requested) {
-            case "self" -> config.defaultAccountId();
+            case "self" -> service.callerAccountId();
             case "amazon" -> AMAZON_OWNER_ID;
             case "aws-marketplace" -> AWS_MARKETPLACE_OWNER_ID;
             default -> requested;
@@ -4477,7 +4479,7 @@ public class Ec2QueryHandler {
         if (name == null || name.isBlank()) {
             return null;
         }
-        return AwsArnUtils.Arn.of("iam", "", config.defaultAccountId(), "instance-profile/" + name).toString();
+        return service.resolveIamInstanceProfileName(name);
     }
 
     private String vpcXml(Vpc vpc) {

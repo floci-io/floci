@@ -39,8 +39,8 @@ class SesV2ControllerRegistrationTest {
     @Test
     void everyV2EmailResourceClassIsRegisteredOnTheSesDescriptor() throws Exception {
         List<Class<?>> v2Controllers = v2EmailResourceClasses();
-        assertTrue(v2Controllers.contains(SesController.class),
-                "scan must at least find SesController; found " + v2Controllers);
+        assertTrue(v2Controllers.contains(SesSendController.class),
+                "scan must at least find SesSendController; found " + v2Controllers);
 
         List<String> unregistered = new ArrayList<>();
         for (Class<?> controller : v2Controllers) {
@@ -66,10 +66,10 @@ class SesV2ControllerRegistrationTest {
     }
 
     private List<Class<?>> v2EmailResourceClasses() throws Exception {
-        URI codeSource = SesController.class.getProtectionDomain().getCodeSource()
+        URI codeSource = SesSendController.class.getProtectionDomain().getCodeSource()
                 .getLocation().toURI();
         Path classesDir = Path.of(codeSource);
-        String packagePrefix = SesController.class.getPackageName() + ".";
+        String packagePrefix = SesSendController.class.getPackageName() + ".";
         List<Class<?>> found = new ArrayList<>();
         try (Stream<Path> paths = Files.walk(classesDir)) {
             List<Path> classFiles = paths.filter(p -> p.toString().endsWith(".class")).toList();

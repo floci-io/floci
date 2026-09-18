@@ -31,8 +31,8 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObjec
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
- * SES V2 suppression-list endpoints ({@code /v2/email/suppression/addresses}), split out of
- * {@link SesController}. Every operation keeps going through the {@link SesService} facade,
+ * SES V2 suppression-list endpoints ({@code /v2/email/suppression/addresses}). Every operation
+ * keeps going through the {@link SesService} facade,
  * because an optional {@code TenantName} routes it to that tenant's own list, which spans the
  * suppression and tenant domains; the account-level suppression attributes live under
  * {@code /account}.

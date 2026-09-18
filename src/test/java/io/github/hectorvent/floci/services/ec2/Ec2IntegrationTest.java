@@ -2254,6 +2254,9 @@ class Ec2IntegrationTest {
     @Test
     @Order(49)
     void runInstancesResolvesLaunchTemplateDefaultsWithRequestOverrides() {
+        given().header("Authorization", AUTH_HEADER.replace("/ec2/", "/iam/"))
+                .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", "sample-profile-v2")
+                .post("/").then().statusCode(200);
         String launchedInstanceId = given()
             .formParam("Action", "RunInstances")
             .formParam("LaunchTemplate.LaunchTemplateId", launchTemplateId)

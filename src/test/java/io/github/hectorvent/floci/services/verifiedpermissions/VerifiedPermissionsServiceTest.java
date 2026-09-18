@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.verifiedpermissions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
-import io.github.hectorvent.floci.cedar.CedarSidecarServer;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -20,6 +19,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -30,18 +33,32 @@ class VerifiedPermissionsServiceTest {
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
 
-    private static HttpServer cedarServer;
+    /**
+     * A stand-in for the Cedar sidecar that rejects every schema. These tests cover the service's
+     * ordering (reject before persist), not Cedar itself; Cedar semantics are covered by
+     * {@code VerifiedPermissionsIntegrationTest} against the real image.
+     */
+    private static HttpServer fakeCedar;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private VerifiedPermissionsService service;
 
     @BeforeAll
-    static void startCedarSidecar() throws Exception {
-        cedarServer = CedarSidecarServer.start(18181);
+    static void startFakeCedar() throws Exception {
+        fakeCedar = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        fakeCedar.createContext("/v1/schema/validate", exchange -> {
+            byte[] bytes = "{\"error\":\"entityTypes must be an object\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(400, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        });
+        fakeCedar.start();
     }
 
     @AfterAll
-    static void stopCedarSidecar() {
-        cedarServer.stop(0);
+    static void stopFakeCedar() {
+        fakeCedar.stop(0);
     }
 
     @BeforeEach
@@ -53,7 +70,7 @@ class VerifiedPermissionsServiceTest {
         StorageBackend<String, IdempotencyRecord> idempotency = AccountAwareStorageBackend.inMemory(ACCOUNT);
         StorageBackend<String, IdentitySource> identitySources = AccountAwareStorageBackend.inMemory(ACCOUNT);
         CedarSidecarManager manager = mock(CedarSidecarManager.class);
-        when(manager.ensureReady()).thenReturn("http://127.0.0.1:18181");
+        when(manager.ensureReady()).thenReturn("http://127.0.0.1:" + fakeCedar.getAddress().getPort());
         CedarSidecarClient cedarClient = new CedarSidecarClient(manager, objectMapper);
         service = new VerifiedPermissionsService(policyStores, aliases, policies, templates, idempotency,
                 identitySources, new RegionResolver(REGION, ACCOUNT), objectMapper, mock(KmsService.class), cedarClient);

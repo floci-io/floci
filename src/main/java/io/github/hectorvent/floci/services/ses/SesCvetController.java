@@ -31,7 +31,7 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObjec
 
 /**
  * SES V2 custom verification email template endpoints
- * ({@code /v2/email/custom-verification-email-templates}), split out of {@link SesController}.
+ * ({@code /v2/email/custom-verification-email-templates}).
  * Get, list and delete call {@link SesCvetService} directly; create and update go through the
  * {@link SesService} facade, which validates the template (including the From-address verified
  * check against the identity domain) before the store write. Sending one of these templates stays

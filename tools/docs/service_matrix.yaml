@@ -65,4 +65,5 @@ aliases:
 deferred: []
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
-facet_pages: []
+facet_pages:
+  - cloudwatch-metric-filters-verification

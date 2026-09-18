@@ -21,4 +21,11 @@ grep -q '/memorydb/'    "$SHARD_FILE" && pull valkey/valkey:8
 grep -q '/ecr/'         "$SHARD_FILE" && pull registry:2
 grep -q '/ec2/'         "$SHARD_FILE" && { pull busybox:stable; pull alpine:latest; }
 grep -q '/common/docker/' "$SHARD_FILE" && pull public.ecr.aws/docker/library/python:3.12-alpine
+# The Cedar sidecar pin lives in application.yml; read it rather than duplicate it.
+CEDAR_IMAGE="$(grep -oE 'cedar-image: *"[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
+grep -q '/verifiedpermissions/' "$SHARD_FILE" && [ -n "$CEDAR_IMAGE" ] && pull "$CEDAR_IMAGE"
+# Same for the GraphQL sidecar. AppSyncCfnIntegrationTest also starts it but lives under
+# services/cloudformation/, so it needs its own token alongside the /appsync/ path match.
+GRAPHQL_IMAGE="$(grep -oE 'graphql-image: *"[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
+grep -qE '/appsync/|AppSyncCfnIntegrationTest' "$SHARD_FILE" && [ -n "$GRAPHQL_IMAGE" ] && pull "$GRAPHQL_IMAGE"
 exit 0

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AiMockConfigLoader;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsGeometry;
 import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -162,7 +163,7 @@ public class TextractService implements Resettable {
         word.put("Id", wordId);
         word.put("Confidence", 99.9);
         word.put("Text", "Floci");
-        word.set("Geometry", buildGeometry(0.1, 0.1, 0.15, 0.05));
+        word.set("Geometry", AwsGeometry.buildGeometry(0.1, 0.1, 0.15, 0.05));
         word.put("Page", 1);
         blocks.add(word);
         // LINE block (child: WORD)
@@ -171,7 +172,7 @@ public class TextractService implements Resettable {
         line.put("Id", lineId);
         line.put("Confidence", 99.9);
         line.put("Text", "Floci");
-        line.set("Geometry", buildGeometry(0.1, 0.1, 0.15, 0.05));
+        line.set("Geometry", AwsGeometry.buildGeometry(0.1, 0.1, 0.15, 0.05));
         line.set("Relationships", buildRelationships("CHILD", wordId));
         line.put("Page", 1);
         blocks.add(line);
@@ -180,34 +181,11 @@ public class TextractService implements Resettable {
         page.put("BlockType", "PAGE");
         page.put("Id", pageId);
         page.put("Confidence", 99.9);
-        page.set("Geometry", buildGeometry(0.0, 0.0, 1.0, 1.0));
+        page.set("Geometry", AwsGeometry.buildGeometry(0.0, 0.0, 1.0, 1.0));
         page.set("Relationships", buildRelationships("CHILD", lineId));
         page.put("Page", 1);
         blocks.add(page);
         return blocks;
-    }
-    /**
-     * Builds a Geometry object with BoundingBox and a 4-point Polygon.
-     * @see <a href="https://docs.aws.amazon.com/textract/latest/dg/API_Geometry.html">Geometry</a>
-     */
-    private ObjectNode buildGeometry(double left, double top, double width, double height) {
-        ObjectNode geometry = objectMapper.createObjectNode();
-        ObjectNode bbox = geometry.putObject("BoundingBox");
-        bbox.put("Width", width);
-        bbox.put("Height", height);
-        bbox.put("Left", left);
-        bbox.put("Top", top);
-        ArrayNode polygon = geometry.putArray("Polygon");
-        addPoint(polygon, left, top);
-        addPoint(polygon, left + width, top);
-        addPoint(polygon, left + width, top + height);
-        addPoint(polygon, left, top + height);
-        return geometry;
-    }
-    private void addPoint(ArrayNode polygon, double x, double y) {
-        ObjectNode point = polygon.addObject();
-        point.put("X", x);
-        point.put("Y", y);
     }
     /**
      * Builds a single Relationship entry.

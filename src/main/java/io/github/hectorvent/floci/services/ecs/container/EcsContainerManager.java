@@ -527,19 +527,34 @@ public class EcsContainerManager {
         if (defs == null) {
             return null;
         }
+        ContainerDefinition router = null;
         for (ContainerDefinition def : defs) {
             FirelensConfiguration firelens = def.getFirelensConfiguration();
-            if (firelens != null && ("fluentbit".equals(firelens.type()) || "fluentd".equals(firelens.type()))) {
-                return def;
+            if (firelens == null) {
+                continue;
             }
+            if (!"fluentbit".equalsIgnoreCase(firelens.type()) && !"fluentd".equalsIgnoreCase(firelens.type())) {
+                throw new AwsException("ClientException",
+                        "FireLens configuration type must be fluentbit or fluentd.", 400);
+            }
+            if (router != null) {
+                throw new AwsException("ClientException",
+                        "A task definition can have only one FireLens log router.", 400);
+            }
+            if (def.getPortMappings() != null && def.getPortMappings().stream()
+                    .anyMatch(port -> port.containerPort() == 24224)) {
+                throw new AwsException("ClientException",
+                        "FireLens port 24224 must not be exposed.", 400);
+            }
+            router = def;
         }
-        return null;
+        return router;
     }
 
     private static boolean isFluentdRouter(ContainerDefinition router) {
         return router != null
                 && router.getFirelensConfiguration() != null
-                && "fluentd".equals(router.getFirelensConfiguration().type());
+                && "fluentd".equalsIgnoreCase(router.getFirelensConfiguration().type());
     }
 
     private static Map<String, Map<String, String>> awsFirelensLogOptions(List<ContainerDefinition> defs) {

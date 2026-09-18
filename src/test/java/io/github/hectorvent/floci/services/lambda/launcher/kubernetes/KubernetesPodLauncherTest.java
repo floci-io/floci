@@ -119,8 +119,8 @@ class KubernetesPodLauncherTest {
 
         layerService = mock(LambdaLayerService.class);
         logStreamer = mock(KubernetesPodLogStreamer.class);
-        lenient().when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(),
-                anyString(), anyString())).thenReturn(() -> { });
+        lenient().when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString())).thenReturn(() -> { });
         lenient().when(logStreamer.logStreamName(anyString())).thenReturn("2026/07/25/[$LATEST]test");
         s3Service = mock(S3Service.class);
 
@@ -237,6 +237,10 @@ class KubernetesPodLauncherTest {
                 .contains(tuple("AWS_LAMBDA_RUNTIME_API", "10.0.0.5:9200"));
         assertThat(pod.getSpec().getInitContainers().getFirst().getCommand().get(2))
                 .contains("http://10.0.0.5:4566/awslambda-us-east-1-tasks/snapshots/000000000000/my-fn");
+        verify(logStreamer).attachForAccount(
+                eq("000000000000"), eq("default"), eq(handle.getContainerId()),
+                eq("/aws/lambda/my-fn"), eq("2026/07/25/[$LATEST]test"),
+                eq("us-east-1"), eq("lambda:my-fn"));
     }
 
     @Test

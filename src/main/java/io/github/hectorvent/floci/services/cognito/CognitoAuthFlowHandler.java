@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -737,7 +738,14 @@ final class CognitoAuthFlowHandler {
         event.put("triggerSource", triggerSource);
         Map<String, Object> req = new HashMap<>(request);
         if (user != null) {
-            req.put("userAttributes", user.getAttributes() == null ? Map.of() : user.getAttributes());
+            Map<String, String> userAttributes = new LinkedHashMap<>();
+            if (user.getAttributes() != null) {
+                userAttributes.putAll(user.getAttributes());
+            }
+            if ("PreAuthentication".equals(triggerKey)) {
+                userAttributes.put("cognito:user_status", user.getUserStatus());
+            }
+            req.put("userAttributes", userAttributes);
         }
         event.put("request", req);
         event.put("response", new HashMap<>());
@@ -746,10 +754,11 @@ final class CognitoAuthFlowHandler {
             byte[] payload = MAPPER.writeValueAsBytes(event);
             InvokeResult result = lambdaService.invoke(region, functionRef, payload, InvocationType.RequestResponse);
             if (result.getFunctionError() != null) {
+                String errorMessage = lambdaFunctionErrorMessage(result);
                 String msg = String.format("trigger %s (%s) returned error: %s",
-                        triggerKey, functionRef, result.getFunctionError());
+                        triggerKey, functionRef, errorMessage);
                 LOG.warnv("Cognito {0}", msg);
-                return TriggerResult.error(TriggerErrorKind.USER_VALIDATION, result.getFunctionError());
+                return TriggerResult.error(TriggerErrorKind.USER_VALIDATION, errorMessage);
             }
             if (result.getPayload() == null || result.getPayload().length == 0) {
                 return TriggerResult.success(Map.of());
@@ -769,6 +778,22 @@ final class CognitoAuthFlowHandler {
             LOG.warnv(e, "Cognito trigger {0} invocation failed", triggerKey);
             return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, e.getMessage());
         }
+    }
+
+    private static String lambdaFunctionErrorMessage(InvokeResult result) {
+        byte[] payload = result.getPayload();
+        if (payload == null || payload.length == 0) {
+            return result.getFunctionError();
+        }
+        try {
+            JsonNode errorMessage = MAPPER.readTree(payload).path("errorMessage");
+            if (errorMessage.isTextual() && !errorMessage.asText().isBlank()) {
+                return errorMessage.asText();
+            }
+        } catch (Exception e) {
+            LOG.debugv(e, "Unable to parse Cognito Lambda function error payload");
+        }
+        return result.getFunctionError();
     }
 
     private Map<String, Object> requireCustomAuthTriggerResponse(TriggerResult result, String triggerName) {
@@ -810,7 +835,7 @@ final class CognitoAuthFlowHandler {
                 "PreAuthentication", "PreAuthentication_Authentication", req);
         if (result.errored()) {
             throw new AwsException("NotAuthorizedException",
-                    "PreAuthentication trigger denied authentication: " + result.errorMessage(), 400);
+                    "PreAuthentication failed with error " + result.errorMessage() + ".", 400);
         }
     }
 

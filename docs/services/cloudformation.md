@@ -53,6 +53,52 @@ StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` 
 
 Operation IDs are recorded and validated. Duplicate IDs return `OperationIdAlreadyExistsException`, missing stack sets return `StackSetNotFoundException`, and missing operation IDs return `OperationNotFoundException`. Invalid targets and request shapes use the CloudFormation query-protocol validation errors. Operations complete locally, so `OperationInProgressException` is only reachable when local operation state actually overlaps; Floci does not inject concurrency failures solely to exercise an error code.
 
+## CloudWatch Logs metric filters
+
+`AWS::Logs::MetricFilter` returns the filter name alone for both `Ref` and
+`PhysicalResourceId`. Floci stores the log group separately for cleanup, including when names
+contain `|`. Mutable updates keep generated names stable.
+
+Changing `FilterName` or `LogGroupName` deletes the old filter before creating the replacement.
+This works at the 100-filter group limit without temporarily exceeding the quota. The resource's
+DELETE and CREATE events precede its final UPDATE event. The
+[recorded AWS observations](cloudwatch-metric-filters-verification.md) also show this ordering
+with an already-installed `UpdateReplacePolicy: Retain`. This is specific to metric-filter
+replacement, not a change to ordinary stack `DeletionPolicy: Retain`.
+
+Rollback restores the complete prior backing definition, not just its reference. A replacement
+recreates the deleted filter and receives a new creation time. Failed restoration keeps its
+snapshot for retry; a filter absent before the update remains absent after rollback.
+That absence is retained as private nonownership metadata: later stack operations cannot adopt
+or delete another filter that reuses the same group and name.
+Named creates reject an existing filter rather than adopting it through Logs' upsert API.
+If storage fails both the write and its ownership inspection, cleanup reports failure rather
+than guessing ownership. The snapshot remains available, but an indeterminate surviving filter
+requires operator reconciliation before rollback or deletion can finish.
+`DeleteStack` preserves failed-rollback metadata until resource-aware cleanup runs. It removes
+confirmed owned restorations or newly created filters whose rollback deletion failed. An
+indeterminate outcome keeps the stack in `DELETE_FAILED` with its metadata available for retry.
+
+CFN mutations record `APPLIED`, `NOT_APPLIED`, or `UNKNOWN` while holding the canonical filter
+storage lock, including when storage throws after applying a write or delete. Each group/name
+address tracks confirmed ownership, nonownership, or uncertainty. A confirmed delete relinquishes
+ownership before another creator can enter, so neither rollback nor a later delete retry can
+adopt that creator's filter. Unknown outcomes cannot authorize an upsert or deletion of a
+surviving row. Confirmed absence permits safe recovery and finishes account-scoped pending
+publication cleanup. Older private rollback flags that cannot establish an outcome are treated
+conservatively as unknown.
+Baseline snapshots containing `logGroupName` and `filterName` are retained as historical metadata,
+not replayed as compensation for a new update: that older format could survive a successful
+in-place update. Its explicit group/name fields preserve pipe-containing names without ambiguity.
+After confirmed absence, a new update creates the requested definition rather than reviving
+the stale snapshot.
+
+CloudFormation dimensions use a `[{Key, Value}]` array, not the Logs API's object shape.
+CFN model validation precedes mutation, while provider validation (such as parsing a replacement
+filter pattern) can fail after deletion and trigger restoration. The CFN schema allows a
+256-character metric namespace, but Floci's Logs API validation currently accepts at most 255:
+passing model validation does not imply provider acceptance.
+
 ## Supported Resource Types
 
 Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
@@ -103,7 +149,7 @@ cross-resource references.
 | IoT Core | `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
 | CloudFront | `CachePolicy`, `Distribution`, `OriginAccessControl`, `OriginRequestPolicy`, `ResponseHeadersPolicy` |
 | CloudWatch | `Alarm`, `Dashboard` |
-| CloudWatch Logs | `LogGroup` |
+| CloudWatch Logs | `LogGroup`, `MetricFilter` |
 | WAFv2 | `WebACL` |
 | Config | `ConfigRule` |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |

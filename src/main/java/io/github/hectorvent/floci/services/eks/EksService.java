@@ -38,6 +38,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -300,6 +301,11 @@ public class EksService implements TagHandler, ResourceProvider {
     private void markMetadataOnlyActive(Cluster cluster) {
         cluster.setStatus(ClusterStatus.ACTIVE);
         cluster.setEndpoint("https://localhost:" + config.services().eks().apiServerBasePort());
+    }
+
+    public Optional<Cluster> findAuthenticationCluster(String accountId, String name) {
+        return storage instanceof AccountAwareStorageBackend<Cluster> aware
+                ? aware.getForAccount(accountId, name) : storage.get(name);
     }
 
     public Cluster describeCluster(String name) {

@@ -395,7 +395,7 @@ public class RdsDataService implements Resettable {
     private static boolean returnsGeneratedKeys(DatabaseEngine engine) {
         return switch (engine) {
             case MYSQL, MARIADB -> true;
-            case POSTGRES -> false;
+            case POSTGRES, SQLSERVER -> false;
         };
     }
 
@@ -407,7 +407,7 @@ public class RdsDataService implements Resettable {
     private static boolean usesBackslashEscapes(DatabaseEngine engine) {
         return switch (engine) {
             case MYSQL, MARIADB -> true;
-            case POSTGRES -> false;
+            case POSTGRES, SQLSERVER -> false;
         };
     }
 

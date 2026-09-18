@@ -33,8 +33,8 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrA
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
- * SES V2 account-level endpoints ({@code /v2/email/account}), split out of {@link SesController}.
- * The settings live in {@link SesAccountService}; {@code GetAccount} also reads the account
+ * SES V2 account-level endpoints ({@code /v2/email/account}). The settings live in
+ * {@link SesAccountService}; {@code GetAccount} also reads the account
  * suppression attributes from {@link SesSuppressionService} and the sent-mail count from
  * {@link SesSentEmailService}, a read-only composition that needs no facade orchestration, so this
  * controller does not depend on {@link SesService}.

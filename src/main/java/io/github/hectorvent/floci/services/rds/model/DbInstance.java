@@ -54,6 +54,14 @@ public class DbInstance {
     private Map<String, String> tags = new LinkedHashMap<>();
     private Instant createdAt;
     private int proxyPort;
+    // Read replication links, kept on both ends the way DescribeDBInstances reports them: a
+    // replica names its source, a source lists its replicas, by identifier within a Region and
+    // by ARN across Regions. Null and empty on a standalone. The status is the "read
+    // replication" StatusInfos entry: replicating, or terminated once a cross-Region source is
+    // gone.
+    private String readReplicaSourceDbInstanceIdentifier;
+    private List<String> readReplicaDbInstanceIdentifiers = new ArrayList<>();
+    private String readReplicationStatus;
 
     private String dockerVolumeName;
     private String volumeId;
@@ -199,6 +207,26 @@ public class DbInstance {
 
     public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
     public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) { this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId; }
+
+    public String getReadReplicaSourceDbInstanceIdentifier() { return readReplicaSourceDbInstanceIdentifier; }
+    public void setReadReplicaSourceDbInstanceIdentifier(String readReplicaSourceDbInstanceIdentifier) {
+        this.readReplicaSourceDbInstanceIdentifier = readReplicaSourceDbInstanceIdentifier;
+    }
+
+    public List<String> getReadReplicaDbInstanceIdentifiers() { return readReplicaDbInstanceIdentifiers; }
+    public void setReadReplicaDbInstanceIdentifiers(List<String> readReplicaDbInstanceIdentifiers) {
+        this.readReplicaDbInstanceIdentifiers = readReplicaDbInstanceIdentifiers != null
+                ? new ArrayList<>(readReplicaDbInstanceIdentifiers) : new ArrayList<>();
+    }
+
+    public String getReadReplicationStatus() { return readReplicationStatus; }
+    public void setReadReplicationStatus(String readReplicationStatus) { this.readReplicationStatus = readReplicationStatus; }
+
+    // Not a bean getter on purpose: the persisted form must carry only settable properties.
+    public boolean hasReadReplicaSource() {
+        return readReplicaSourceDbInstanceIdentifier != null
+                && !readReplicaSourceDbInstanceIdentifier.isBlank();
+    }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }

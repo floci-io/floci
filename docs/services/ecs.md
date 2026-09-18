@@ -36,7 +36,9 @@ own `RegisterTaskDefinition`) sees no drift. `runtimePlatform` does not change w
 runs: Floci launches every task on the host's own architecture.
 
 `firelensConfiguration` is stored and returned the same way. `RegisterTaskDefinition` rejects a
-missing or unsupported `type` (`fluentd` and `fluentbit` only). A `fluentbit` or `fluentd` FireLens
+missing or unsupported `type` (`fluentd` and `fluentbit` only), and a task using `awsfirelens`
+must name exactly one router: a task definition with two FireLens routers, or a router publishing
+port `24224`, is rejected at launch. A `fluentbit` or `fluentd` FireLens
 container is acted on at launch: Floci generates the router config (unix socket input, TCP forward
 on bridge/awsvpc, ECS metadata, optional include of a `config-file-type=file` or `s3` extra
 config, and one output per `awsfirelens` container), starts that router first, and points application

@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -160,11 +161,51 @@ class SageMakerServiceTest {
         assertThrows(IllegalArgumentException.class, () -> S3Uri.parse("http://bucket/key"));
     }
 
+    @Test
+    void trainingRunUpdatesApplyOnlyWhileTheirJobIsStillStored() throws Exception {
+        InMemoryStorage<String, TrainingJobResource> jobs = new InMemoryStorage<>();
+        SageMakerService service = service(jobs);
+        String request = """
+                {"TrainingJobName":"reset-job",
+                 "AlgorithmSpecification":{"TrainingImage":"busybox:stable"},
+                 "OutputDataConfig":{"S3OutputPath":"s3://bucket/out"}}
+                """;
+        service.createTrainingJob(mapper.readTree(request), "us-east-1");
+        TrainingJobResource run = jobs.scan(key -> true).get(0);
+
+        run.trainingJobStatus = "Completed";
+        assertTrue(service.updateTrainingJob(run));
+        assertEquals("Completed", describeStatus(service, "reset-job"));
+
+        // A state reset wipes the store while the run is still finishing.
+        jobs.clear();
+        run.trainingJobStatus = "Failed";
+        assertFalse(service.updateTrainingJob(run));
+        assertTrue(jobs.scan(key -> true).isEmpty());
+        assertThrows(AwsException.class, () -> describeStatus(service, "reset-job"));
+
+        // A same-named job created after the reset is not overwritten by the old run.
+        service.createTrainingJob(mapper.readTree(request), "us-east-1");
+        TrainingJobResource recreated = jobs.scan(key -> true).get(0);
+        run.creationTime = recreated.creationTime - 1;
+        assertFalse(service.updateTrainingJob(run));
+        assertEquals("InProgress", describeStatus(service, "reset-job"));
+    }
+
+    private String describeStatus(SageMakerService service, String name) throws Exception {
+        return service.describeTrainingJob(mapper.readTree("{\"TrainingJobName\":\"" + name + "\"}"), "us-east-1")
+                .path("TrainingJobStatus").asText();
+    }
+
     private SageMakerService service() {
+        return service(new InMemoryStorage<String, TrainingJobResource>());
+    }
+
+    private SageMakerService service(InMemoryStorage<String, TrainingJobResource> trainingJobs) {
         return new SageMakerService(new InMemoryStorage<String, ModelResource>(),
                 new InMemoryStorage<String, EndpointConfigResource>(),
                 new InMemoryStorage<String, EndpointResource>(),
-                new InMemoryStorage<String, TrainingJobResource>(),
+                trainingJobs,
                 new RegionResolver("us-east-1", "000000000000"), mapper,
                 mock(SageMakerEndpointManager.class), mock(SageMakerTrainingRunner.class));
     }

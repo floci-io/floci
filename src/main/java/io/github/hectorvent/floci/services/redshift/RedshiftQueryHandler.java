@@ -67,9 +67,13 @@ public class RedshiftQueryHandler {
             String masterUserPassword = params.getFirst("MasterUserPassword");
             String clusterSubnetGroupName = params.getFirst("ClusterSubnetGroupName");
             List<String> vpcSecurityGroupIds = memberList(params, "VpcSecurityGroupIds");
+            List<String> iamRoleArns = memberList(params, "IamRoles");
 
-            Cluster cluster = service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                    clusterSubnetGroupName, vpcSecurityGroupIds);
+            Cluster cluster = iamRoleArns.isEmpty()
+                    ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
+                            clusterSubnetGroupName, vpcSecurityGroupIds)
+                    : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
             String xml = new XmlBuilder()
                     .start("CreateClusterResponse")
                       .start("CreateClusterResult")
@@ -622,6 +626,14 @@ public class RedshiftQueryHandler {
             builder.end("VpcSecurityGroups");
         }
 
+        if (cluster.getIamRoleArns() != null && !cluster.getIamRoleArns().isEmpty()) {
+            builder.start("IamRoles");
+            for (String iamRoleArn : cluster.getIamRoleArns()) {
+                builder.start("IamRole").elem("IamRoleArn", iamRoleArn).end("IamRole");
+            }
+            builder.end("IamRoles");
+        }
+
         if (cluster.getClusterParameterGroupName() != null) {
             builder.start("ClusterParameterGroups")
                 .start("ClusterParameterGroup")
@@ -848,6 +860,7 @@ public class RedshiftQueryHandler {
         return switch (baseName) {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
             case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
+            case "IamRoles" -> quoted + "(\\.member|\\.IamRoleArn)?\\.\\d+";
             case "TagKeys" -> quoted + "(\\.member|\\.TagKey)?\\.\\d+";
             case "DbGroups" -> quoted + "(\\.member|\\.DbGroup)?\\.\\d+";
             default -> quoted + "(\\.member)?\\.\\d+";

@@ -164,6 +164,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             var shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
             podName = LambdaPodSpecFactory.podName(fn.getFunctionName(), shortId);
             var region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), config.defaultRegion());
+            String accountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
             var cwLogGroup = "/aws/lambda/" + fn.getFunctionName();
             var cwLogStream = logStreamer.logStreamName(shortId);
 
@@ -222,8 +223,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             // so a failure here (e.g. a missing pods/log RBAC verb) must not tear down a
             // healthy execution environment.
             try {
-                var logHandle = logStreamer.attach(namespace, podName, cwLogGroup, cwLogStream,
-                        region, "lambda:" + fn.getFunctionName());
+                var logHandle = logStreamer.attachForAccount(accountId, namespace, podName,
+                        cwLogGroup, cwLogStream, region, "lambda:" + fn.getFunctionName());
                 handle.setLogStream(logHandle);
             } catch (Exception logFailure) {
                 LOG.warnv("Log streaming for pod {0} could not start; the environment still "
