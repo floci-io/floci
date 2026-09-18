@@ -119,6 +119,17 @@ class CognitoLambdaTriggersTest {
         return new InvokeResult(200, error, new byte[0], null, "req-id");
     }
 
+    private static InvokeResult lambdaError(String error, String errorMessage) {
+        try {
+            byte[] payload = MAPPER.writeValueAsBytes(Map.of(
+                    "errorType", "Error",
+                    "errorMessage", errorMessage));
+            return new InvokeResult(200, error, payload, null, "req-id");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     private static InvokeResult rawPayload(String payload) {
         return new InvokeResult(200, null, payload.getBytes(StandardCharsets.UTF_8), null, "req-id");
     }
@@ -185,6 +196,24 @@ class CognitoLambdaTriggersTest {
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
         assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("PreAuthentication failed with error Unhandled.", ex.getMessage());
+    }
+
+    @Test
+    void preAuthenticationLambdaErrorPreservesThrownMessage() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled", "Email not verified"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("PreAuthentication failed with error Email not verified.", ex.getMessage());
     }
 
     // =========================================================================
