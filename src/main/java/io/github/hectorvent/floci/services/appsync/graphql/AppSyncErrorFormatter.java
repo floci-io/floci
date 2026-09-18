@@ -5,6 +5,7 @@ import graphql.ExecutionResult;
 import graphql.GraphQLError;
 import graphql.ErrorClassification;
 import graphql.language.SourceLocation;
+import io.github.hectorvent.floci.services.appsync.graphql.execution.AppSyncGraphQlError;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.ArrayList;
@@ -57,6 +58,9 @@ public class AppSyncErrorFormatter {
     }
 
     private Map<String, Object> formatError(GraphQLError error) {
+        if (error instanceof AppSyncGraphQlError appSyncError) {
+            return appSyncError.toEntry();
+        }
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("message", error.getMessage());
         List<SourceLocation> locations = error.getLocations();

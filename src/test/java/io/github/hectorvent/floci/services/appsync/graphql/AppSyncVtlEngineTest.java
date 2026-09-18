@@ -843,4 +843,46 @@ class AppSyncVtlEngineTest {
                     "expected output exceeding the configured vtlMaxOutputChars to throw");
         }
     }
+
+    @Nested
+    class CategoryZ_ExecutionRuntimeSupport {
+
+        @Test
+        void ctxArgsAliasesArguments() {
+            AppSyncVtlContext ctx = ctxWith(b -> b.arguments(Map.of("id", "42")));
+            AppSyncVtlResult result = engine.evaluate("$ctx.args.id/$context.args.id/$ctx.arguments.id", ctx);
+            assertEquals("42/42/42", result.output());
+        }
+
+        @Test
+        void ctxErrorExposesDataSourceError() {
+            AppSyncVtlContext ctx = ctxWith(b -> b.error(Map.of("message", "failed", "type", "DynamoDB:ConditionalCheckFailedException")));
+            AppSyncVtlResult result = engine.evaluate("#if($ctx.error)$ctx.error.type|$ctx.error.message#end", ctx);
+            assertEquals("DynamoDB:ConditionalCheckFailedException|failed", result.output());
+        }
+
+        @Test
+        void ctxErrorIsNullByDefault() {
+            AppSyncVtlResult result = engine.evaluate("#if($ctx.error)yes#{else}no#end", defaultCtx());
+            assertEquals("no", result.output());
+        }
+
+        @Test
+        void identityIsNullUnlessProvided() {
+            assertEquals("null", engine.evaluate("#if($util.isNull($ctx.identity))null#{else}set#end", ctxWith(b -> {})).output());
+            assertEquals("null", engine.evaluate("$util.toJson($ctx.identity)", ctxWith(b -> {})).output());
+            assertEquals("set", engine.evaluate("#if($util.isNull($ctx.identity))null#{else}set#end",
+                    ctxWith(b -> b.identity(Map.of("username", "u")))).output());
+        }
+
+        @Test
+        void returnedFlagIsSetOnlyByReturnDirective() {
+            assertTrue(engine.evaluate("#return(\"x\")", defaultCtx()).returned());
+            assertTrue(engine.evaluate("#return", defaultCtx()).returned());
+            AppSyncVtlResult rendered = engine.evaluate("x", defaultCtx());
+            assertFalse(rendered.returned());
+            assertEquals("x", rendered.output());
+            assertFalse(engine.evaluate("", defaultCtx()).returned());
+        }
+    }
 }

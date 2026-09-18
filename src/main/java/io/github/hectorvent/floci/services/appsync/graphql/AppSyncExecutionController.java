@@ -3,12 +3,15 @@ package io.github.hectorvent.floci.services.appsync.graphql;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.core.common.AwsException;
+import graphql.introspection.Introspection;
+import graphql.GraphQL;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuthContext;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthMiddleware;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthRequestInfo;
+import io.github.hectorvent.floci.services.appsync.graphql.execution.GraphQlRequestContext;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.POST;
@@ -23,9 +26,11 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -82,39 +87,49 @@ public class AppSyncExecutionController {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
             }
 
-            GraphqlApi api;
+            GraphqlApi discoveredApi = appSyncService.findGraphqlApiAnyAccount(apiId).orElse(null);
+            if (discoveredApi == null) {
+                return graphqlError(404, "NotFoundException", "GraphQL API not found: " + apiId);
+            }
+
+            String previousAccount = requestContext.getAccountId();
+            String previousRegion = requestContext.getRegion();
+            String callerAccount = previousAccount != null ? previousAccount : "000000000000";
+            String apiAccount = AwsArnUtils.accountOrDefault(discoveredApi.getArn(), callerAccount);
+            String apiRegion = AwsArnUtils.regionOrDefault(discoveredApi.getArn(),
+                    previousRegion != null ? previousRegion : "us-east-1");
             try {
-                api = appSyncService.getGraphqlApi(apiId);
-            } catch (AwsException e) {
-                if (e.getHttpStatus() == 404) {
-                    return graphqlError(404, "NotFoundException", e.getMessage());
+                requestContext.setAccountId(apiAccount);
+                requestContext.setRegion(apiRegion);
+                // Refresh dynamic endpoint URIs only after entering the API owner's namespace.
+                GraphqlApi api = appSyncService.getGraphqlApi(apiId);
+
+                AppSyncAuthContext authContext;
+                try {
+                    authContext = authMiddleware.authenticate(
+                            headerMap(headers), api,
+                            authRequestInfo(parsed, headers, body, apiAccount, apiRegion, callerAccount));
+                } catch (AppSyncTransportException e) {
+                    return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
                 }
-                // Stay on the data-plane errors envelope; never leak to AwsExceptionMapper (__type).
-                LOG.errorv(e, "Unexpected AwsException looking up API {0}", apiId);
-                return graphqlError(500, "InternalFailure", "InternalFailure");
-            }
 
-            AppSyncAuthContext authContext;
-            try {
-                authContext = authMiddleware.authenticate(
-                        headerMap(headers), api, authRequestInfo(parsed, headers, body));
-            } catch (AppSyncTransportException e) {
-                return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
-            }
+                Optional<GraphQL> graphQLOpt = schemaRegistry.getGraphQL(apiId);
+                if (graphQLOpt.isEmpty()) {
+                    return graphqlError(502, "GraphQLSchemaException",
+                            AppSyncErrorFormatter.MSG_NO_SCHEMA);
+                }
 
-            var graphQLOpt = schemaRegistry.getGraphQL(apiId);
-            if (graphQLOpt.isEmpty()) {
-                return graphqlError(502, "GraphQLSchemaException",
-                        AppSyncErrorFormatter.MSG_NO_SCHEMA);
-            }
-
-            try {
-                Map<String, Object> result = queryExecutor.execute(
-                        graphQLOpt.get(), parsed.query(), parsed.variables(), parsed.operationName(),
-                        graphQlContext(authContext));
-                return Response.ok(result).type(MediaType.APPLICATION_JSON).build();
-            } catch (AppSyncTransportException e) {
-                return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
+                try {
+                    Map<String, Object> result = queryExecutor.execute(
+                            graphQLOpt.get(), parsed.query(), parsed.variables(), parsed.operationName(),
+                            graphQlContext(authContext, parsed, headers));
+                    return Response.ok(result).type(MediaType.APPLICATION_JSON).build();
+                } catch (AppSyncTransportException e) {
+                    return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
+                }
+            } finally {
+                requestContext.setAccountId(previousAccount);
+                requestContext.setRegion(previousRegion);
             }
         } catch (RuntimeException e) {
             LOG.errorv(e, "Unexpected error executing GraphQL for API {0}", apiId);
@@ -203,9 +218,8 @@ public class AppSyncExecutionController {
         return map;
     }
 
-    private AuthRequestInfo authRequestInfo(ParsedRequest parsed, HttpHeaders headers, String rawBody) {
-        String accountId = requestContext.getAccountId() != null ? requestContext.getAccountId() : "000000000000";
-        String region = requestContext.getRegion() != null ? requestContext.getRegion() : "us-east-1";
+    private AuthRequestInfo authRequestInfo(ParsedRequest parsed, HttpHeaders headers, String rawBody,
+                                            String apiAccount, String apiRegion, String callerAccount) {
         String requestId = headers.getHeaderString("x-amzn-RequestId");
         if (requestId == null || requestId.isBlank()) {
             requestId = UUID.randomUUID().toString();
@@ -216,8 +230,9 @@ public class AppSyncExecutionController {
                 parsed.variables() == null ? Map.of() : parsed.variables(),
                 sourceIp(headers),
                 requestId,
-                accountId,
-                region,
+                apiAccount,
+                apiRegion,
+                callerAccount,
                 headerMap(headers),
                 rawBody);
     }
@@ -238,7 +253,9 @@ public class AppSyncExecutionController {
         return ips;
     }
 
-    private static Map<Object, Object> graphQlContext(AppSyncAuthContext authContext) {
+    private static Map<Object, Object> graphQlContext(AppSyncAuthContext authContext,
+                                                       ParsedRequest parsed,
+                                                       HttpHeaders headers) {
         Map<Object, Object> context = new HashMap<>();
         context.put(AppSyncAuthContext.KEY, authContext);
         if (authContext.identity() != null) {
@@ -246,7 +263,32 @@ public class AppSyncExecutionController {
         }
         context.put("authType", authContext.authType());
         context.put("deniedFields", authContext.deniedFieldsList());
+        context.put(GraphQlRequestContext.CONTEXT_KEY, new GraphQlRequestContext(
+                authContext.graphqlApi().getApiId(),
+                authContext.accountId(),
+                authContext.region(),
+                authContext.authType(),
+                authContext.identity(),
+                resolverHeaders(headers),
+                parsed.variables() == null ? Map.of() : parsed.variables()));
+        if ("DISABLED".equals(authContext.graphqlApi().getIntrospectionConfig())) {
+            context.put(Introspection.INTROSPECTION_DISABLED, true);
+        }
         return context;
+    }
+
+    private static Map<String, Object> resolverHeaders(HttpHeaders headers) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (headers == null || headers.getRequestHeaders() == null) {
+            return result;
+        }
+        headers.getRequestHeaders().forEach((name, values) -> {
+            if (name == null || "cookie".equalsIgnoreCase(name) || values == null || values.isEmpty()) {
+                return;
+            }
+            result.put(name.toLowerCase(Locale.ROOT), values.size() == 1 ? values.getFirst() : List.copyOf(values));
+        });
+        return result;
     }
 
     private Response graphqlError(int status, String errorType, String message) {

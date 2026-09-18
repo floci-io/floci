@@ -88,6 +88,31 @@ class IamAuthValidatorTest {
     }
 
     @Test
+    void crossAccountIdentityUsesSignerWhilePolicyTargetsApiOwner() throws Exception {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                 "Action":"appsync:GraphQL",
+                 "Resource":"arn:aws:appsync:us-east-1:222222222222:apis/api-1/*"}]}
+                """;
+        when(iamService.findSecretKeyForAccount("111111111111", "AKIAGOOD"))
+                .thenReturn(Optional.of("good-secret"));
+        when(iamService.resolveCallerContextForAccount("111111111111", "AKIAGOOD"))
+                .thenReturn(CallerContext.of(List.of(policy)));
+        when(iamService.resolveCallerArnForAccount("111111111111", "AKIAGOOD"))
+                .thenReturn(Optional.of("arn:aws:iam::111111111111:user/alice"));
+        Map<String, String> signed = AppSyncRequestSigner.signedHeaders(
+                "api-1", HOST, BODY, "AKIAGOOD", "good-secret", REGION, Instant.now());
+        AuthRequestInfo info = new AuthRequestInfo(
+                "{ hello }", null, Map.of(), List.of("10.0.0.1"), "req-1",
+                "222222222222", "us-east-1", "111111111111", signed, BODY);
+
+        Map<String, Object> identity = validator.validateRequest(authorization(signed), "api-1", info);
+
+        assertEquals("111111111111", identity.get("accountId"));
+        assertEquals("arn:aws:iam::111111111111:user/alice", identity.get("userArn"));
+    }
+
+    @Test
     void knownRequestDenyThrows401() throws Exception {
         when(iamService.resolveCallerContext("AKIDDENY")).thenReturn(CallerContext.of(List.of(DENY)));
         Map<String, String> signed = AppSyncRequestSigner.signedHeaders(

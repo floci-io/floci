@@ -7,6 +7,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
@@ -18,9 +19,10 @@ import java.util.regex.Pattern;
  * evaluator matches each statement's {@code Action} and {@code Principal} against the caller and
  * applies AWS precedence: an explicit {@code Deny} wins, otherwise a matching {@code Allow} grants.
  *
- * <p>Only AWS principals are modeled (account-root, bare account id, exact principal ARN, and
- * {@code "*"}); {@code Service} and {@code Federated} principals never match a SigV4 caller and are
- * ignored. A caller using assumed-role temporary credentials (whose ARN is an STS
+ * <p>The normal caller path models AWS principals (account-root, bare account id, exact principal
+ * ARN, and {@code "*"}). {@link #allowsService} separately evaluates service principals for AWS
+ * services that assume an execution role. Federated principals are not modeled. A caller using
+ * assumed-role temporary credentials (whose ARN is an STS
  * {@code assumed-role} ARN) also matches a trust policy that names the underlying IAM role ARN, as
  * AWS resolves the session back to its role for trust-policy evaluation.
  */
@@ -48,6 +50,24 @@ public class AssumeRolePolicyEvaluator {
      * <p>A null/blank/unparseable document or one with no matching {@code Allow} denies.
      */
     public boolean allows(String trustPolicyDocument, String callerArn, String callerAccount) {
+        return allowsPrincipal(trustPolicyDocument,
+                principal -> matchesPrincipal(principal, callerArn, callerAccount));
+    }
+
+    /**
+     * Returns true when a role trust policy lets the named AWS service call
+     * {@code sts:AssumeRole}. This is used by service data planes, such as AppSync resolvers, before
+     * evaluating the role's identity policies against the backing resource.
+     */
+    public boolean allowsService(String trustPolicyDocument, String servicePrincipal) {
+        if (servicePrincipal == null || servicePrincipal.isBlank()) {
+            return false;
+        }
+        return allowsPrincipal(trustPolicyDocument,
+                principal -> matchesServicePrincipal(principal, servicePrincipal));
+    }
+
+    private boolean allowsPrincipal(String trustPolicyDocument, Predicate<JsonNode> principalMatcher) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return false;
         }
@@ -62,25 +82,25 @@ public class AssumeRolePolicyEvaluator {
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode stmt : statements) {
-                switch (evaluateStatement(stmt, callerArn, callerAccount)) {
+                switch (evaluateStatement(stmt, principalMatcher)) {
                     case DENY -> { return false; }
                     case ALLOW -> allow = true;
                     case NO_MATCH -> { }
                 }
             }
         } else if (statements.isObject()) {
-            return evaluateStatement(statements, callerArn, callerAccount) == Match.ALLOW;
+            return evaluateStatement(statements, principalMatcher) == Match.ALLOW;
         }
         return allow;
     }
 
     private enum Match { ALLOW, DENY, NO_MATCH }
 
-    private Match evaluateStatement(JsonNode stmt, String callerArn, String callerAccount) {
+    private Match evaluateStatement(JsonNode stmt, Predicate<JsonNode> principalMatcher) {
         if (!actionApplies(stmt)) {
             return Match.NO_MATCH;
         }
-        if (!matchesPrincipal(stmt.get("Principal"), callerArn, callerAccount)) {
+        if (!principalMatcher.test(stmt.get("Principal"))) {
             return Match.NO_MATCH;
         }
         return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
@@ -143,6 +163,34 @@ public class AssumeRolePolicyEvaluator {
         if (aws.isArray()) {
             for (JsonNode entry : aws) {
                 if (entry.isTextual() && matchesAwsPrincipal(entry.asText(), callerArn, callerAccount)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesServicePrincipal(JsonNode principalNode, String servicePrincipal) {
+        if (principalNode == null) {
+            return false;
+        }
+        if (principalNode.isTextual()) {
+            return "*".equals(principalNode.asText());
+        }
+        if (!principalNode.isObject()) {
+            return false;
+        }
+        JsonNode service = principalNode.get("Service");
+        if (service == null) {
+            return false;
+        }
+        if (service.isTextual()) {
+            return IamPolicyEvaluator.globMatches(service.asText(), servicePrincipal);
+        }
+        if (service.isArray()) {
+            for (JsonNode entry : service) {
+                if (entry.isTextual()
+                        && IamPolicyEvaluator.globMatches(entry.asText(), servicePrincipal)) {
                     return true;
                 }
             }

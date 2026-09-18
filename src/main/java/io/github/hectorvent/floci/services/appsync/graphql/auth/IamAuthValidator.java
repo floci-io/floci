@@ -20,6 +20,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Verifies the SigV4 signature on an AppSync GraphQL data-plane request, so {@code AWS_IAM} auth
@@ -71,9 +73,9 @@ public class IamAuthValidator {
         }
         verifySignature(authorization, apiId, info, accessKeyId);
         if (!isEmulatorAllow(accessKeyId)) {
-            CallerContext caller = iamService.resolveCallerContext(accessKeyId);
+            CallerContext caller = resolveCallerContext(accessKeyId, info);
             if (caller != null) {
-                String resource = requestArn(info.region(), info.accountId(), apiId);
+                String resource = requestArn(info.apiRegion(), info.apiAccountId(), apiId);
                 IamPolicyEvaluator.Decision decision = iamPolicyEvaluator.evaluate(
                         caller, null, "appsync:GraphQL", resource, null);
                 if (decision == IamPolicyEvaluator.Decision.DENY) {
@@ -81,8 +83,9 @@ public class IamAuthValidator {
                 }
             }
         }
-        String userArn = iamService.resolveCallerArn(accessKeyId).orElseGet(
-                () -> isEmulatorAllow(accessKeyId) ? "arn:aws:iam::" + nullToEmpty(info.accountId()) + ":root"
+        String userArn = resolveCallerArn(accessKeyId, info).orElseGet(
+                () -> isEmulatorAllow(accessKeyId)
+                        ? "arn:aws:iam::" + nullToEmpty(info.callerAccountId()) + ":root"
                         : null);
         if (userArn == null) {
             // resolveSecretKey already proved the key is registered, so this is unreachable for any
@@ -90,7 +93,8 @@ public class IamAuthValidator {
             throw AppSyncAuth.unauthorized();
         }
         String username = usernameFromArn(userArn, accessKeyId);
-        return IdentityBuilder.iam(info.accountId(), accessKeyId, username, userArn, info.sourceIp());
+        return IdentityBuilder.iam(
+                info.callerAccountId(), accessKeyId, username, userArn, info.sourceIp());
     }
 
     /**
@@ -117,7 +121,7 @@ public class IamAuthValidator {
         if (Math.abs(Instant.now().getEpochSecond() - signedAt.getEpochSecond()) > MAX_CLOCK_SKEW_SECONDS) {
             throw AppSyncAuth.unauthorized();
         }
-        String secretKey = resolveSecretKey(accessKeyId);
+        String secretKey = resolveSecretKey(accessKeyId, info);
         if (secretKey == null) {
             LOG.debugv("AppSync SigV4 request references unregistered access key={0}",
                     SigV4RequestValidator.sanitizeForLog(accessKeyId));
@@ -156,11 +160,29 @@ public class IamAuthValidator {
      * mints a secret for a key {@link IamService} does not know: that is exactly what let an
      * unregistered key sign its own requests before this fix.
      */
-    private String resolveSecretKey(String accessKeyId) {
+    private String resolveSecretKey(String accessKeyId, AuthRequestInfo info) {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return LEGACY_SECRET_KEY;
         }
-        return iamService.findSecretKey(accessKeyId).orElse(null);
+        return isCrossAccount(info)
+                ? iamService.findSecretKeyForAccount(info.callerAccountId(), accessKeyId).orElse(null)
+                : iamService.findSecretKey(accessKeyId).orElse(null);
+    }
+
+    private CallerContext resolveCallerContext(String accessKeyId, AuthRequestInfo info) {
+        return isCrossAccount(info)
+                ? iamService.resolveCallerContextForAccount(info.callerAccountId(), accessKeyId)
+                : iamService.resolveCallerContext(accessKeyId);
+    }
+
+    private Optional<String> resolveCallerArn(String accessKeyId, AuthRequestInfo info) {
+        return isCrossAccount(info)
+                ? iamService.resolveCallerArnForAccount(info.callerAccountId(), accessKeyId)
+                : iamService.resolveCallerArn(accessKeyId);
+    }
+
+    private static boolean isCrossAccount(AuthRequestInfo info) {
+        return !Objects.equals(info.callerAccountId(), info.apiAccountId());
     }
 
     /**
@@ -255,10 +277,17 @@ public class IamAuthValidator {
     }
 
     public boolean isFieldDenied(String accessKeyId, String fieldArn) {
+        String callerAccount = iamService.resolveAccountId(accessKeyId).orElse(null);
+        return isFieldDenied(accessKeyId, callerAccount, fieldArn);
+    }
+
+    public boolean isFieldDenied(String accessKeyId, String callerAccountId, String fieldArn) {
         if (accessKeyId == null || isEmulatorAllow(accessKeyId)) {
             return false;
         }
-        CallerContext caller = iamService.resolveCallerContext(accessKeyId);
+        CallerContext caller = callerAccountId == null
+                ? iamService.resolveCallerContext(accessKeyId)
+                : iamService.resolveCallerContextForAccount(callerAccountId, accessKeyId);
         if (caller == null) {
             return false;
         }

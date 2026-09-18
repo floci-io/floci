@@ -63,7 +63,9 @@ public class AuthorizationDataFetcher implements DataFetcher<Object> {
         if (auth.authenticationType() == AuthenticationType.AWS_IAM && iamAuthValidator != null) {
             String fieldArn = IamAuthValidator.fieldArn(
                     auth.region(), auth.accountId(), auth.graphqlApi().getApiId(), typeName, fieldName);
-            if (iamAuthValidator.isFieldDenied(auth.accessKeyId(), fieldArn)) {
+            Object identityAccount = auth.identity() == null ? null : auth.identity().get("accountId");
+            if (iamAuthValidator.isFieldDenied(
+                    auth.accessKeyId(), identityAccount == null ? null : identityAccount.toString(), fieldArn)) {
                 return false;
             }
         }

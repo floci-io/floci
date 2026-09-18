@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuth;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuthContext;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthMiddleware;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthRequestInfo;
 import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -16,6 +17,7 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -31,6 +33,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -70,6 +73,7 @@ class AppSyncExecutionControllerTest {
     void unexpectedExecutorFailureReturns500InternalFailure() {
         GraphqlApi api = new GraphqlApi();
         api.setApiId("api-1");
+        when(appSyncService.findGraphqlApiAnyAccount("api-1")).thenReturn(Optional.of(api));
         when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
         when(authMiddleware.authenticate(any(), any(), any())).thenReturn(authContext(api));
         when(schemaRegistry.getGraphQL("api-1")).thenReturn(Optional.of(mock(GraphQL.class)));
@@ -105,8 +109,7 @@ class AppSyncExecutionControllerTest {
 
     @Test
     void unknownApiReturns404WithErrorTypeHeader() {
-        when(appSyncService.getGraphqlApi("missing"))
-                .thenThrow(new AwsException("NotFoundException", "API not found", 404));
+        when(appSyncService.findGraphqlApiAnyAccount("missing")).thenReturn(Optional.empty());
 
         Response response = controller.execute("missing", jsonHeaders, "{\"query\":\"{ hello }\"}");
 
@@ -121,7 +124,7 @@ class AppSyncExecutionControllerTest {
 
     @Test
     void non404AwsExceptionFromLookupReturnsDataPlaneInternalFailure() {
-        when(appSyncService.getGraphqlApi("api-1"))
+        when(appSyncService.findGraphqlApiAnyAccount("api-1"))
                 .thenThrow(new AwsException("BadRequestException", "unexpected management error", 400));
 
         Response response = controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
@@ -141,6 +144,7 @@ class AppSyncExecutionControllerTest {
     void authFailureReturns401WithoutCallingExecutor() {
         GraphqlApi api = new GraphqlApi();
         api.setApiId("api-1");
+        when(appSyncService.findGraphqlApiAnyAccount("api-1")).thenReturn(Optional.of(api));
         when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
         when(authMiddleware.authenticate(any(), any(), any())).thenThrow(AppSyncAuth.unauthorized());
 
@@ -154,6 +158,26 @@ class AppSyncExecutionControllerTest {
         Map<String, Object> error = ((List<Map<String, Object>>) body.get("errors")).get(0);
         assertEquals("UnauthorizedException", error.get("errorType"));
         assertEquals("You are not authorized to make this call.", error.get("message"));
+    }
+
+    @Test
+    void authReceivesCallerAccountSeparatelyFromApiOwner() {
+        GraphqlApi api = new GraphqlApi();
+        api.setApiId("api-1");
+        api.setArn("arn:aws:appsync:us-east-1:222222222222:apis/api-1");
+        when(requestContext.getAccountId()).thenReturn("111111111111");
+        when(requestContext.getRegion()).thenReturn("eu-west-1");
+        when(appSyncService.findGraphqlApiAnyAccount("api-1")).thenReturn(Optional.of(api));
+        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(authMiddleware.authenticate(any(), any(), any())).thenThrow(AppSyncAuth.unauthorized());
+
+        controller.execute("api-1", jsonHeaders, "{\"query\":\"{ hello }\"}");
+
+        ArgumentCaptor<AuthRequestInfo> info = ArgumentCaptor.forClass(AuthRequestInfo.class);
+        verify(authMiddleware).authenticate(any(), eq(api), info.capture());
+        assertEquals("111111111111", info.getValue().callerAccountId());
+        assertEquals("222222222222", info.getValue().apiAccountId());
+        assertEquals("us-east-1", info.getValue().apiRegion());
     }
 
     private static AppSyncAuthContext authContext(GraphqlApi api) {

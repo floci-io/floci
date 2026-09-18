@@ -36,7 +36,7 @@ public class AppSyncService {
     private static final String API_KEY_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
     private static final int API_KEY_RANDOM_LENGTH = 26;
 
-    private final StorageBackend<String, GraphqlApi> apiStore;
+    private final AccountAwareStorageBackend<GraphqlApi> apiStore;
     private final AccountAwareStorageBackend<String> schemaStore;
     private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
     private final StorageBackend<String, DataSource> dataSourceStore;
@@ -156,6 +156,16 @@ public class AppSyncService {
         return apiStore.get(apiId)
                 .map(this::refreshGraphqlApiUris)
                 .orElseThrow(() -> new AwsException("NotFoundException", "GraphQL API not found: " + apiId, 404));
+    }
+
+    /**
+     * Finds an API for the GraphQL data plane before its owner account is known. API-key and JWT
+     * requests are unsigned, so the normal request context initially points at the default account.
+     */
+    public Optional<GraphqlApi> findGraphqlApiAnyAccount(String apiId) {
+        return apiStore.scanAllAccountEntries(apiId::equals).stream()
+                .map(AccountAwareStorageBackend.AccountEntry::value)
+                .findFirst();
     }
 
     public Page<GraphqlApi> listGraphqlApis(Integer maxResults, String nextToken) {
@@ -298,6 +308,16 @@ public class AppSyncService {
         } catch (Exception e) {
             return "000000000000";
         }
+    }
+
+    /** Data-plane lookup that stays available while an asynchronous schema update is running. */
+    public Optional<Resolver> findResolver(String apiId, String typeName, String fieldName) {
+        return resolverStore.get(resolverKey(apiId, typeName, fieldName));
+    }
+
+    /** Data-plane lookup that stays available while an asynchronous schema update is running. */
+    public Optional<DataSource> findDataSource(String apiId, String dataSourceName) {
+        return dataSourceStore.get(apiKey(apiId, dataSourceName));
     }
 
     // ──────────────────────────── Data Sources ────────────────────────────
