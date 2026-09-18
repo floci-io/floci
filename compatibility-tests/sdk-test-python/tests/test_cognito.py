@@ -126,7 +126,9 @@ class TestCognitoAuth:
         pool_id = pool_response["UserPool"]["Id"]
 
         client_response = cognito_client.create_user_pool_client(
-            UserPoolId=pool_id, ClientName=client_name
+            UserPoolId=pool_id,
+            ClientName=client_name,
+            ExplicitAuthFlows=["ADMIN_NO_SRP_AUTH"],
         )
         client_id = client_response["UserPoolClient"]["ClientId"]
 
@@ -165,7 +167,9 @@ class TestCognitoAuth:
         pool_id = pool_response["UserPool"]["Id"]
 
         client_response = cognito_client.create_user_pool_client(
-            UserPoolId=pool_id, ClientName=client_name
+            UserPoolId=pool_id,
+            ClientName=client_name,
+            ExplicitAuthFlows=["ADMIN_NO_SRP_AUTH"],
         )
         client_id = client_response["UserPoolClient"]["ClientId"]
 

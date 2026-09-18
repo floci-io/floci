@@ -62,6 +62,7 @@ describe('Cognito', () => {
       new CreateUserPoolClientCommand({
         UserPoolId: poolId,
         ClientName: `test-client-${uniqueName()}`,
+        ExplicitAuthFlows: ['ALLOW_USER_PASSWORD_AUTH'],
       })
     );
     clientId = response.UserPoolClient!.ClientId!;
