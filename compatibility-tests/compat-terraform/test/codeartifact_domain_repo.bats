@@ -29,6 +29,17 @@ setup_file() {
     echo "# --- terraform apply ---" >&3
     run terraform apply -var="endpoint=${FLOCI_ENDPOINT}" -input=false -auto-approve -no-color
     if [ "$status" -ne 0 ]; then
+        if [[ "$output" == *"Repository with name 'floci-codeartifact-consumer' already exists"* ]]; then
+            echo "# create response was lost after the repository was created; importing it before retrying" >&3
+            run terraform import -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color \
+                aws_codeartifact_repository.consumer \
+                "arn:aws:codeartifact:us-east-1:000000000000:repository/floci-codeartifact-domain/floci-codeartifact-consumer"
+            if [ "$status" -eq 0 ]; then
+                run terraform apply -var="endpoint=${FLOCI_ENDPOINT}" -input=false -auto-approve -no-color
+            fi
+        fi
+    fi
+    if [ "$status" -ne 0 ]; then
         echo "# terraform apply failed: $output" >&3
         return 1
     fi
