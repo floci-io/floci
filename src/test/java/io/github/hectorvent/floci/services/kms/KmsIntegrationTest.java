@@ -175,7 +175,8 @@ class KmsIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("KMSInvalidMacException"));
+            .body("__type", equalTo("KMSInvalidMacException"))
+            .body("message", nullValue());
     }
 
     @Test
@@ -1905,6 +1906,24 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("KMSInvalidSignatureException"))
                 .body("message", nullValue());
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({
+            "RSA_2048, SIGN_VERIFY, GenerateMac",
+            "RSA_2048, SIGN_VERIFY, VerifyMac",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, GenerateMac",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, VerifyMac",
+    })
+    void macOperationsRejectKeysWhoseUsageIsNotGenerateVerifyMac(String keySpec, String keyUsage, String operation) {
+        String keyArn = createKeyArn(keySpec, keyUsage);
+
+        callKms(operation, cryptoRequest(operation, keyArn, "HMAC_SHA_256"))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
     }
 
     private static String cryptoRequest(String operation, String keyArn, String algorithm) {

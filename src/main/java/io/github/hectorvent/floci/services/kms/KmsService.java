@@ -1665,12 +1665,12 @@ public class KmsService implements ResourceProvider {
     }
 
     public byte[] generateMac(String keyId, byte[] message, String algorithm, String region) {
-        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "GenerateMac", region);
         return generateMac(kmsKey, message, algorithm);
     }
 
     public GenerateMacResult generateMacAndResolveKey(String keyId, byte[] message, String algorithm, String region) {
-        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "GenerateMac", region);
         return new GenerateMacResult(generateMac(kmsKey, message, algorithm), kmsKey.getArn());
     }
 
@@ -1688,13 +1688,13 @@ public class KmsService implements ResourceProvider {
 
     public void verifyMac(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
         validateMacLength(mac);
-        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "VerifyMac", region);
         verifyMac(kmsKey, message, mac, algorithm);
     }
 
     public VerifyMacResult verifyMacAndResolveKey(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
         validateMacLength(mac);
-        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, "VerifyMac", region);
         verifyMac(kmsKey, message, mac, algorithm);
         return new VerifyMacResult(kmsKey.getArn());
     }
@@ -1702,19 +1702,16 @@ public class KmsService implements ResourceProvider {
     private void verifyMac(KmsKey kmsKey, byte[] message, byte[] mac, String algorithm) {
         byte[] expected = generateMac(kmsKey, message, algorithm);
         if (!MessageDigest.isEqual(expected, mac)) {
-            throw new AwsException("KMSInvalidMacException", "The MAC is not valid.", 400);
+            throw new AwsException("KMSInvalidMacException", null, 400);
         }
     }
 
-    private KmsKey validateMacOperationKey(String keyId, String algorithm, String region) {
+    private KmsKey validateMacOperationKey(String keyId, String algorithm, String operation, String region) {
         KmsKey kmsKey = resolveKey(keyId, region);
+        validateKeyUsage(kmsKey, KmsKeyUsage.GENERATE_VERIFY_MAC, operation);
         requireImportedKeyMaterial(kmsKey, "MAC operations");
-        KmsKeySpec spec = kmsKey.getKeySpec();
-        if (!isHmac(spec) || !KmsKeyUsage.GENERATE_VERIFY_MAC.equals(kmsKey.getKeyUsage())) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "MAC operations require an HMAC key with KeyUsage GENERATE_VERIFY_MAC.", 400);
-        }
         validateKeyIsUsableForCryptoOperations(kmsKey);
+        KmsKeySpec spec = kmsKey.getKeySpec();
 
         String expectedAlgorithm = kmsKey.getKeySpec().getAlgorithm().getFirst().getAlgName();
         if (!Objects.equals(expectedAlgorithm, algorithm)) {
