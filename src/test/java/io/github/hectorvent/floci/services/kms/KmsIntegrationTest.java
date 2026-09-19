@@ -1899,6 +1899,32 @@ class KmsIntegrationTest {
                 .body("message", equalTo("The key ID in the request does not identify a CMK that can perform this operation."));
     }
 
+    @ParameterizedTest
+    @CsvSource({"garbage", "wrong context", "rsa garbage", "rsa short"})
+    void decryptRejectsAnInvalidCiphertextWithoutAMessage(String kind) {
+        String body = switch (kind) {
+            case "garbage" -> "{\"CiphertextBlob\":\"AAAA\"}";
+            case "wrong context" -> {
+                String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+                String ciphertext = callKms("Encrypt", "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\",\"EncryptionContext\":{\"a\":\"b\"}}"
+                        .formatted(keyArn)).then().statusCode(200).extract().path("CiphertextBlob");
+                yield "{\"CiphertextBlob\":\"%s\",\"EncryptionContext\":{\"a\":\"c\"}}".formatted(ciphertext);
+            }
+            default -> {
+                byte[] ciphertext = new byte["rsa garbage".equals(kind) ? 256 : 10];
+                Arrays.fill(ciphertext, (byte) 1);
+                yield "{\"CiphertextBlob\":\"%s\",\"KeyId\":\"%s\",\"EncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
+                        .formatted(Base64.getEncoder().encodeToString(ciphertext), createKeyArn("RSA_2048", "ENCRYPT_DECRYPT"));
+            }
+        };
+
+        callKms("Decrypt", body)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidCiphertextException"))
+                .body("message", nullValue());
+    }
+
     @Test
     void reEncryptRejectsADestinationKeyPendingImport() {
         String sourceArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");

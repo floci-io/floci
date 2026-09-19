@@ -118,7 +118,7 @@ final class RsaKeyType implements KmsKeyType {
         } catch (Exception e) {
             if (mode == Cipher.DECRYPT_MODE) {
                 LOG.debugv(e, "RSA OAEP decrypt failed for key {0}", key.getKeyId());
-                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+                throw new AwsException("InvalidCiphertextException", null, 400);
             }
             LOG.warnv(e, "RSA OAEP encrypt failed for key {0}", key.getKeyId());
             throw new AwsException("InternalFailure", "Failed to encrypt: " + e.getMessage(), 500);

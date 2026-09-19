@@ -112,7 +112,7 @@ final class KmsKeyImport {
             return cipher.doFinal(encryptedKeyMaterial);
         } catch (Exception e) {
             LOG.debugv(e, "Unwrapping imported key material failed for wrapping algorithm {0}", wrappingAlgorithm);
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 }

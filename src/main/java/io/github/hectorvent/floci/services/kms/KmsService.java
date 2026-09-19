@@ -1192,7 +1192,7 @@ public class KmsService implements ResourceProvider {
         }
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
         return decodePayload(parsed);
     }
@@ -1272,7 +1272,7 @@ public class KmsService implements ResourceProvider {
         // InvalidCiphertextException, not InvalidKeyUsageException (measured in us-east-1).
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
         byte[] plaintext = decodePayload(parsed);
 
@@ -1339,7 +1339,7 @@ public class KmsService implements ResourceProvider {
             buffer.get(magic);
             byte version = buffer.get();
             if (version != ENVELOPE_VERSION_V3) {
-                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+                throw new AwsException("InvalidCiphertextException", null, 400);
             }
             byte[] keyIdBytes = new byte[buffer.getShort() & 0xFFFF];
             buffer.get(keyIdBytes);
@@ -1351,7 +1351,7 @@ public class KmsService implements ResourceProvider {
             byte[] ciphertextAndTag = new byte[buffer.remaining()];
             buffer.get(ciphertextAndTag);
             if (ciphertextAndTag.length == 0) {
-                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+                throw new AwsException("InvalidCiphertextException", null, 400);
             }
             byte[] aadHeader = Arrays.copyOfRange(blob, 0, headerLength + GCM_IV_BYTES);
             return new EnvelopeV3(new String(keyIdBytes, StandardCharsets.UTF_8),
@@ -1359,7 +1359,7 @@ public class KmsService implements ResourceProvider {
         } catch (AwsException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1420,7 +1420,7 @@ public class KmsService implements ResourceProvider {
         try {
             return resolveKey(keyId, region);
         } catch (AwsException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1436,7 +1436,7 @@ public class KmsService implements ResourceProvider {
             materialB64 = key.getBackingKeys() == null ? null : key.getBackingKeys().get(envelope.backingKeyId());
         }
         if (materialB64 == null) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
         byte[] dek = decodeBackingMaterial(materialB64);
         try {
@@ -1444,7 +1444,7 @@ public class KmsService implements ResourceProvider {
                     envelope.aadHeader(), contextFingerprint(encryptionContext).getBytes(StandardCharsets.UTF_8));
             return cipher.doFinal(envelope.ciphertextAndTag());
         } catch (GeneralSecurityException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1466,7 +1466,7 @@ public class KmsService implements ResourceProvider {
             }
             return material;
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 
@@ -1478,7 +1478,7 @@ public class KmsService implements ResourceProvider {
             // v2: keyId, nonce, contextFingerprint, payload
             String[] parts = data.substring(BLOB_PREFIX_V2.length()).split(":", 4);
             if (parts.length < 4) {
-                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+                throw new AwsException("InvalidCiphertextException", null, 400);
             }
             return new ParsedBlob(parts[0], parts[1], parts[2], parts[3]);
         }
@@ -1490,7 +1490,7 @@ public class KmsService implements ResourceProvider {
                 return new ParsedBlob(parts[0], "", "", parts[1]);
             }
         }
-        throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        throw new AwsException("InvalidCiphertextException", null, 400);
     }
 
     /** A blob whose payload is not valid base64 is a bad ciphertext, not a server fault. */
@@ -1498,7 +1498,7 @@ public class KmsService implements ResourceProvider {
         try {
             return Base64.getDecoder().decode(parsed.payload);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            throw new AwsException("InvalidCiphertextException", null, 400);
         }
     }
 

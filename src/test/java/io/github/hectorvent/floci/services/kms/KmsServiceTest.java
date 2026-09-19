@@ -2286,6 +2286,7 @@ class KmsServiceTest {
             AwsException ex = assertThrows(AwsException.class, () -> kmsService.importKeyMaterial(
                     keyId, token, wrongly, "KEY_MATERIAL_DOES_NOT_EXPIRE", null, null, REGION));
             assertEquals("InvalidCiphertextException", ex.getErrorCode());
+            assertNull(ex.getMessage());
             assertEquals("PendingImport", kmsService.describeKey(keyId, REGION).getKeyState());
         }
 
