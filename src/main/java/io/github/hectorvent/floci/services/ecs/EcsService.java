@@ -77,7 +77,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final EcsEventPublisher eventPublisher;
     private final boolean dockerMode;
     private final String baseUrl;
-    // Replaced by clear() after a state reset, whose container teardown shuts this scheduler down.
+    // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
     private volatile ScheduledExecutorService reconciler = newReconciler();
     private final Object reconcilerLock = new Object();
 
@@ -207,7 +207,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * state reset. Task state is transient (memory-only), so without this the containers
      * outlive the process as orphans. The reconciler is shut down first, and any in-flight
      * tick awaited, so it cannot restart drained tasks between this teardown and the final
-     * storage flush. A reset brings it back in {@link #clear()}. Handles are claimed
+     * storage flush. A reset brings it back in {@link #afterReset()}. Handles are claimed
      * atomically to avoid racing an explicit StopTask.
      */
     @Override
@@ -232,13 +232,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /**
-     * Runs after a state reset has drained the tasks and wiped the store, never on shutdown.
-     * The reset's teardown stopped the reconciler, so without a new one no service would be
-     * reconciled again until the emulator restarted.
-     */
     @Override
     public void clear() {
+        // Nothing to wipe: the stores hold the ECS state and afterReset() restarts the reconciler.
+    }
+
+    /**
+     * Runs at the end of every state reset, never on shutdown. The reset's teardown stopped the
+     * reconciler, so without a new one no service would be reconciled again until the emulator
+     * restarted. This hook rather than {@code clear()} because the controller runs it even when
+     * the storage wipe or another service's {@code clear()} threw, and a failed reset must not
+     * leave ECS without a reconciler for good.
+     */
+    @Override
+    public void afterReset() {
         synchronized (reconcilerLock) {
             if (reconciler.isShutdown()) {
                 ScheduledExecutorService replacement = newReconciler();
