@@ -2024,6 +2024,22 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"key/", "alias/floci-missing"})
+    void describeKeyRejectsAnArnFromAnotherRegion(String resource) {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String otherRegion = keyArn.contains(":us-west-2:") ? "eu-west-1" : "us-west-2";
+        String foreignArn = keyArn.replaceFirst(":kms:[^:]+:", ":kms:" + otherRegion + ":");
+        String requested = "key/".equals(resource)
+                ? foreignArn : foreignArn.substring(0, foreignArn.lastIndexOf(':') + 1) + resource;
+
+        callKms("DescribeKey", "{\"KeyId\":\"%s\"}".formatted(requested))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Invalid arn " + otherRegion));
+    }
+
+    @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
             "DescribeKey|{\"KeyId\":\"alias/floci-missing\"}|alias/floci-missing",
             "DescribeKey|{\"KeyId\":\"{arn}alias/floci-missing\"}|alias/floci-missing",

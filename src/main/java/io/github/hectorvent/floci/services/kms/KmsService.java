@@ -1808,6 +1808,12 @@ public class KmsService implements ResourceProvider {
     // ──────────────────────────── Helpers ────────────────────────────
 
     private KmsKey resolveKey(String keyIdOrArn, String region) {
+        if (AwsArnUtils.isArnFor(keyIdOrArn, "kms")) {
+            String arnRegion = AwsArnUtils.parse(keyIdOrArn).region();
+            if (!region.equals(arnRegion)) {
+                throw new AwsException("NotFoundException", "Invalid arn " + arnRegion, 400);
+            }
+        }
         String id = keyIdOrArn;
         // Alias arn
         if (id.contains(":alias/")) {
