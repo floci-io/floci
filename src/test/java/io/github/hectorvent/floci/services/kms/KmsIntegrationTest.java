@@ -230,7 +230,9 @@ class KmsIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value '0' at 'numberOfBytes' failed to satisfy "
+                    + "constraint: Member must have value greater than or equal to 1"));
     }
 
     @Test
@@ -264,7 +266,9 @@ class KmsIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value '1025' at 'numberOfBytes' failed to satisfy "
+                    + "constraint: Member must have value less than or equal to 1024"));
     }
 
     @Test

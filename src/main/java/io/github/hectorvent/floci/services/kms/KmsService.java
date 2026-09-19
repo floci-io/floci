@@ -92,10 +92,13 @@ public class KmsService implements ResourceProvider {
     }
 
     public byte[] generateRandom(int numberOfBytes) {
-        if (numberOfBytes < 1 || numberOfBytes > 1024) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + numberOfBytes + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1 and less than or equal to 1024",
-                    400);
+        if (numberOfBytes < 1) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + numberOfBytes
+                    + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1", 400);
+        }
+        if (1024 < numberOfBytes) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + numberOfBytes
+                    + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value less than or equal to 1024", 400);
         }
         byte[] bytes = new byte[numberOfBytes];
         secureRandom.nextBytes(bytes);
