@@ -127,6 +127,9 @@ public class ContainerBuilder {
         private List<String> entrypoint;
         private String workingDir;
         private Long memoryBytes;
+        private Long nanoCpus;
+        private Integer cpuShares;
+        private boolean readonlyRootfs;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
         private final List<Integer> loopbackPortBindings = new ArrayList<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
@@ -223,6 +226,30 @@ public class ContainerBuilder {
          */
         public Builder withMemoryBytes(long memoryBytes) {
             this.memoryBytes = memoryBytes;
+            return this;
+        }
+
+        /**
+         * Caps the container at a fraction of the host's CPUs, expressed the way ECS expresses it:
+         * 1024 CPU units is one vCPU.
+         */
+        public Builder withCpuUnits(int cpuUnits) {
+            this.nanoCpus = cpuUnits * 1_000_000_000L / 1024L;
+            return this;
+        }
+
+        /**
+         * Sets the container's relative CPU weight, which is what a container-level {@code cpu}
+         * means when several containers share a task's CPU allocation.
+         */
+        public Builder withCpuShares(int cpuShares) {
+            this.cpuShares = cpuShares;
+            return this;
+        }
+
+        /** Mounts the container's own filesystem read only. */
+        public Builder withReadonlyRootfs() {
+            this.readonlyRootfs = true;
             return this;
         }
 
@@ -612,7 +639,10 @@ public class ContainerBuilder {
                     workingDir,
                     user,
                     List.copyOf(groupAdd),
-                    List.copyOf(deviceRequests)
+                    List.copyOf(deviceRequests),
+                    nanoCpus,
+                    cpuShares,
+                    readonlyRootfs
             );
         }
     }

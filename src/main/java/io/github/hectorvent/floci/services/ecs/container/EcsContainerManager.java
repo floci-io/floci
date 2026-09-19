@@ -22,17 +22,20 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDependency;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.ManagedAgent;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.TaskNetworkInterface;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -67,6 +70,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 /**
@@ -77,6 +81,17 @@ import java.util.stream.Stream;
 public class EcsContainerManager {
 
     private static final Logger LOG = Logger.getLogger(EcsContainerManager.class);
+
+    private static final String ATTACHMENT_DELETED = "DELETED";
+
+    /** EC2 error codes the task ENI path can raise, none of which RunTask declares. */
+    private static final Set<String> EC2_NETWORK_LOOKUP_FAILURES =
+            Set.of("InvalidSubnetID.NotFound", "InvalidGroup.NotFound");
+    /** How long a container waits for a dependency that has to COMPLETE, SUCCEED or get HEALTHY. */
+    private static final int DEPENDENCY_WAIT_SECONDS = 60;
+    private static final long DEPENDENCY_POLL_MILLIS = 200;
+    /** How long a killed container gets to register as exited before its code is read. */
+    private static final int KILL_SETTLE_SECONDS = 5;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -210,6 +225,7 @@ public class EcsContainerManager {
 
         try {
             for (ContainerDefinition def : launchOrder) {
+                awaitDependencies(def, containerIds);
                 String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
 
                 // RunTask containerOverrides matched by container name: command replaces
@@ -252,9 +268,33 @@ public class EcsContainerManager {
                     specBuilder.withNamedVolume(firelensVolumeName, "/var/run");
                 }
 
-                // Add memory limit if specified
+                // Resource limits. A container-level memory is its own hard limit; without one the
+                // container is capped at the task's memory, which is what a Fargate task gets
+                // (the whole task shares one allocation). The task's cpu becomes a quota and a
+                // container-level cpu becomes its share of that quota, as on ECS.
                 if (def.getMemory() != null) {
                     specBuilder.withMemoryMb(def.getMemory());
+                } else {
+                    Integer taskMemoryMb = parseTaskMemoryMb(task.getMemory());
+                    if (taskMemoryMb != null) {
+                        specBuilder.withMemoryMb(taskMemoryMb);
+                    }
+                }
+                Integer taskCpuUnits = parseTaskCpuUnits(task.getCpu());
+                if (taskCpuUnits != null) {
+                    specBuilder.withCpuUnits(taskCpuUnits);
+                }
+                if (def.getCpu() != null && def.getCpu() > 0) {
+                    specBuilder.withCpuShares(def.getCpu());
+                }
+                if (def.getUser() != null) {
+                    specBuilder.withUser(def.getUser());
+                }
+                if (def.getWorkingDirectory() != null) {
+                    specBuilder.withWorkingDir(def.getWorkingDirectory());
+                }
+                if (Boolean.TRUE.equals(def.getReadonlyRootFilesystem())) {
+                    specBuilder.withReadonlyRootfs();
                 }
 
                 // Add port mappings. In bridge/host mode an explicit hostPort is
@@ -385,8 +425,7 @@ public class EcsContainerManager {
                 lifecycleManager.removeVolume(firelensVolumeName);
             }
             if (protectedNetwork != null) {
-                firewallManager.unregister(protectedNetwork.eni().getNetworkInterfaceId());
-                ec2Service.deleteNetworkInterface(region, protectedNetwork.eni().getNetworkInterfaceId());
+                releaseTaskNetwork(task, region);
             }
             throw e;
         }
@@ -402,14 +441,160 @@ public class EcsContainerManager {
                 containersInDefinitionOrder.add(container);
             }
         }
+        // An awsvpc task's containers share the task ENI, and each reports it.
+        if (task.getNetworkInterfaceId() != null) {
+            List<TaskNetworkInterface> taskInterfaces = List.of(new TaskNetworkInterface(
+                    task.getAttachmentId(), task.getPrivateIpAddress(), null));
+            containersInDefinitionOrder.forEach(container -> container.setNetworkInterfaces(taskInterfaces));
+        }
+        // ECS Exec is gated on the agent reporting RUNNING, which a client checks before it tries
+        // to open a session.
+        if (task.isEnableExecuteCommand()) {
+            List<ManagedAgent> agents = List.of(ManagedAgent.executeCommandAgent(Instant.now()));
+            containersInDefinitionOrder.forEach(container -> container.setManagedAgents(agents));
+        }
         task.setContainers(containersInDefinitionOrder);
         task.setLastStatus(TaskStatus.RUNNING.name());
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
+        Map<String, Integer> stopTimeouts = new LinkedHashMap<>();
+        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+            if (def.getStopTimeout() != null) {
+                stopTimeouts.put(def.getName(), def.getStopTimeout());
+            }
+        }
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 firelensVolumeName,
-                protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region);
+                protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region,
+                stopTimeouts);
+    }
+
+    /** A task-level {@code memory} is MiB as a plain number, or a {@code "1GB"}-style string. */
+    private static Integer parseTaskMemoryMb(String memory) {
+        if (memory == null || memory.isBlank()) {
+            return null;
+        }
+        String trimmed = memory.trim().toUpperCase();
+        try {
+            if (trimmed.endsWith("GB")) {
+                return (int) Math.round(Double.parseDouble(trimmed.substring(0, trimmed.length() - 2).trim()) * 1024);
+            }
+            return Integer.parseInt(trimmed.replaceAll("(?i)mib|mb", "").trim());
+        } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring unparseable task memory {0}", memory);
+            return null;
+        }
+    }
+
+    /** A task-level {@code cpu} is CPU units as a plain number, or a {@code "0.5vCPU"}-style string. */
+    private static Integer parseTaskCpuUnits(String cpu) {
+        if (cpu == null || cpu.isBlank()) {
+            return null;
+        }
+        String trimmed = cpu.trim().toUpperCase();
+        try {
+            if (trimmed.endsWith("VCPU")) {
+                return (int) Math.round(
+                        Double.parseDouble(trimmed.substring(0, trimmed.length() - 4).trim()) * 1024);
+            }
+            return Integer.parseInt(trimmed);
+        } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring unparseable task cpu {0}", cpu);
+            return null;
+        }
+    }
+
+    /**
+     * Holds a container's start until the containers it declared a {@code dependsOn} on have
+     * reached the state it asked for. {@code START} is satisfied by the launch order alone;
+     * {@code COMPLETE} and {@code SUCCESS} wait for the dependency to exit (and {@code SUCCESS}
+     * additionally requires it to have exited cleanly); {@code HEALTHY} waits for its health check
+     * to pass.
+     *
+     * <p>The wait is bounded by the dependent container's {@code startTimeout}, defaulting to
+     * {@value #DEPENDENCY_WAIT_SECONDS} seconds rather than AWS's longer agent default, because
+     * RunTask here is synchronous and a caller is holding the request open. A dependency that does
+     * not get there in time fails the task.
+     */
+    private void awaitDependencies(ContainerDefinition definition, Map<String, String> startedContainerIds) {
+        if (definition.getDependsOn() == null || definition.getDependsOn().isEmpty()) {
+            return;
+        }
+        long timeoutSeconds = definition.getStartTimeout() != null
+                ? definition.getStartTimeout() : DEPENDENCY_WAIT_SECONDS;
+        for (ContainerDependency dependency : definition.getDependsOn()) {
+            String condition = dependency.condition();
+            if (ContainerDependency.START.equals(condition)) {
+                continue;
+            }
+            String dockerId = startedContainerIds.get(dependency.containerName());
+            if (dockerId == null) {
+                continue;
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+            while (!dependencySatisfied(dockerId, condition)) {
+                if (System.nanoTime() > deadline) {
+                    throw new AwsException("ClientException",
+                            "Container '" + definition.getName() + "' did not start because container '"
+                                    + dependency.containerName() + "' did not reach " + condition
+                                    + " within " + timeoutSeconds + " seconds.", 400);
+                }
+                try {
+                    TimeUnit.MILLISECONDS.sleep(DEPENDENCY_POLL_MILLIS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted while waiting for ECS container dependency "
+                            + dependency.containerName(), e);
+                }
+            }
+        }
+    }
+
+    private boolean dependencySatisfied(String dockerId, String condition) {
+        if (ContainerDependency.HEALTHY.equals(condition)) {
+            return "healthy".equals(inspectHealthStatus(dockerId));
+        }
+        Integer exitCode = getExitCodeIfStopped(dockerId);
+        if (exitCode == null) {
+            return false;
+        }
+        if (ContainerDependency.SUCCESS.equals(condition) && exitCode != 0) {
+            throw new AwsException("ClientException",
+                    "A dependency container exited with code " + exitCode
+                            + ", so the containers depending on its SUCCESS were not started.", 400);
+        }
+        return true;
+    }
+
+    /**
+     * A container's health in ECS's vocabulary: {@code HEALTHY} or {@code UNHEALTHY} once its
+     * health check has reported, {@code UNKNOWN} while it is still starting or when the container
+     * declares no health check at all.
+     */
+    public String ecsHealthStatus(String dockerId) {
+        String status = inspectHealthStatus(dockerId);
+        if (status == null) {
+            return "UNKNOWN";
+        }
+        return switch (status) {
+            case "healthy" -> "HEALTHY";
+            case "unhealthy" -> "UNHEALTHY";
+            default -> "UNKNOWN";
+        };
+    }
+
+    /** The Docker health status of a container, or null when it declares no health check. */
+    private String inspectHealthStatus(String dockerId) {
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient()
+                    .inspectContainerCmd(dockerId).exec();
+            return inspect.getState() != null && inspect.getState().getHealth() != null
+                    ? inspect.getState().getHealth().getStatus() : null;
+        } catch (Exception e) {
+            LOG.debugv("Could not read the health of container {0}: {1}", dockerId, e.getMessage());
+            return null;
+        }
     }
 
     private List<ContainerDefinition> orderForDependencies(List<ContainerDefinition> definitions,
@@ -454,9 +639,113 @@ public class EcsContainerManager {
                 addAfterDependencies(source, definitionsByName, firelensRouter, visiting, visited, ordered);
             }
         }
+        if (definition.getDependsOn() != null) {
+            for (ContainerDependency dependency : definition.getDependsOn()) {
+                ContainerDefinition source = definitionsByName.get(dependency.containerName());
+                if (source == null) {
+                    throw new IllegalArgumentException("ECS dependsOn references unknown container "
+                            + dependency.containerName());
+                }
+                addAfterDependencies(source, definitionsByName, firelensRouter, visiting, visited, ordered);
+            }
+        }
         visiting.remove(definition);
         visited.add(definition);
         ordered.add(definition);
+    }
+
+    /**
+     * Gives an {@code awsvpc} task the elastic network interface AWS gives it: its own ENI in the
+     * requested subnet, with a private address of its own and the task's security groups.
+     *
+     * <p>Called for every {@code awsvpc} task, in Docker and in mock mode alike, because the ENI is
+     * control-plane state that DescribeTasks reports (a client waits on
+     * {@code attachments[].details[?name=='privateIPv4Address']} to find the task) rather than a
+     * property of the containers. Security-group enforcement, which additionally puts the task's
+     * containers in a protected network namespace, stays opt-in on top of it.
+     *
+     * <p>A subnet or security group that does not exist fails the task, reported as the
+     * {@code InvalidParameterException} RunTask declares rather than the EC2 code
+     * {@link Ec2Service#createNetworkInterface} raises.
+     */
+    public void attachTaskNetwork(EcsTask task, TaskDefinition definition, String region) {
+        if (definition.getNetworkMode() != NetworkMode.awsvpc || ec2Service == null) {
+            return;
+        }
+        AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
+                : task.getNetworkConfiguration().getAwsvpcConfiguration();
+        if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "Network Configuration must be provided when networkMode 'awsvpc' is specified.", 400);
+        }
+        String subnetId = awsvpc.getSubnets().getFirst();
+        NetworkInterface eni;
+        try {
+            eni = ec2Service.createNetworkInterface(region, subnetId,
+                    "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
+        } catch (AwsException e) {
+            throw asEcsNetworkRejection(e);
+        }
+        task.setNetworkInterfaceId(eni.getNetworkInterfaceId());
+        task.setPrivateIpAddress(eni.getPrivateIpAddress());
+        task.setMacAddress(eni.getMacAddress());
+        task.setPrivateDnsName(eni.getPrivateDnsName());
+        task.setAttachmentId("eni-attach-" + eni.getNetworkInterfaceId());
+        ec2Service.describeSubnets(region, List.of(subnetId), Map.of()).stream()
+                .findFirst()
+                .ifPresent(subnet -> task.setAvailabilityZone(subnet.getAvailabilityZone()));
+    }
+
+    /**
+     * Restates an EC2 lookup failure as the error RunTask declares. A caller naming a subnet or a
+     * security group that is not there asked for something the task cannot have, and
+     * {@code InvalidSubnetID.NotFound} is not in RunTask's error list, so an SDK sees it as an
+     * unmodelled failure rather than the InvalidParameterException AWS returns. Anything else the
+     * ENI path raises is already an ECS-shaped error and travels unchanged.
+     */
+    private static AwsException asEcsNetworkRejection(AwsException e) {
+        if (!EC2_NETWORK_LOOKUP_FAILURES.contains(e.getErrorCode())) {
+            return e;
+        }
+        return new AwsException("InvalidParameterException", e.getMessage(), 400);
+    }
+
+    /**
+     * Releases a stopped task's ENI. The interface id stays on the task, with its attachment
+     * reported as {@code DELETED}, because AWS keeps describing a stopped task's attachment.
+     * Idempotent: the status is flipped first, so a second teardown path does nothing.
+     */
+    public void releaseTaskNetwork(EcsTask task, String region) {
+        String eniId = task.getNetworkInterfaceId();
+        if (eniId == null || ec2Service == null || ATTACHMENT_DELETED.equals(task.getAttachmentStatus())) {
+            return;
+        }
+        task.setAttachmentStatus(ATTACHMENT_DELETED);
+        if (firewallManager != null) {
+            firewallManager.unregister(eniId);
+        }
+        try {
+            ec2Service.deleteNetworkInterface(region, eniId);
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not delete the ENI {0} of task {1}: {2}",
+                    eniId, task.getTaskArn(), e.getMessage());
+        }
+    }
+
+    /** The ENI {@link #attachTaskNetwork} allocated for this task, or null if it is already gone. */
+    private NetworkInterface existingTaskEni(EcsTask task, String region) {
+        if (task.getNetworkInterfaceId() == null) {
+            return null;
+        }
+        try {
+            return ec2Service.describeNetworkInterfaces(region, List.of(task.getNetworkInterfaceId()),
+                            Map.of(), 0, null)
+                    .networkInterfaces().stream().findFirst().orElse(null);
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not resolve the ENI {0} of task {1}, allocating a new one: {2}",
+                    task.getNetworkInterfaceId(), task.getTaskArn(), e.getMessage());
+            return null;
+        }
     }
 
     private PreparedNetwork prepareNetwork(EcsTask task, TaskDefinition definition, String region, String taskId) {
@@ -469,8 +758,12 @@ public class EcsContainerManager {
         if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
             throw new AwsException("ClientException", "awsvpc tasks require a subnet", 400);
         }
-        NetworkInterface eni = ec2Service.createNetworkInterface(region, awsvpc.getSubnets().getFirst(),
-                "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
+        // attachTaskNetwork already allocated the task ENI; the namespace is built around it.
+        NetworkInterface eni = existingTaskEni(task, region);
+        if (eni == null) {
+            eni = ec2Service.createNetworkInterface(region, awsvpc.getSubnets().getFirst(),
+                    "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
+        }
         String eniId = eni.getNetworkInterfaceId();
         SecurityGroupFirewallManager.Namespace namespace = null;
         try {
@@ -551,17 +844,21 @@ public class EcsContainerManager {
             return exitCodes;
         }
 
-        // Phase 1: stop all containers (no-op for those already exited).
+        // Phase 1: stop all containers (no-op for those already exited), each given the grace
+        // period its container definition asked for.
         Set<String> terminatedContainerIds = new HashSet<>();
-        for (String dockerId : handle.getContainerIds().values()) {
+        for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
+            String dockerId = entry.getValue();
             try {
-                lifecycleManager.getDockerClient().stopContainerCmd(dockerId).withTimeout(5).exec();
+                lifecycleManager.getDockerClient().stopContainerCmd(dockerId)
+                        .withTimeout(handle.stopTimeoutFor(entry.getKey())).exec();
                 terminatedContainerIds.add(dockerId);
             } catch (NotFoundException ignored) {
                 terminatedContainerIds.add(dockerId);
             } catch (Exception e) {
                 LOG.warnv("Error stopping ECS container {0}: {1}", dockerId, e.getMessage());
             }
+            killIfStillRunning(dockerId);
         }
 
         // Phase 2: inspect exit codes, then remove.
@@ -584,6 +881,37 @@ public class EcsContainerManager {
         cleanupProtectedNetwork(handle);
         removeFirelensVolume(handle);
         return exitCodes;
+    }
+
+    /**
+     * Makes sure a container really is stopped before its exit code is read.
+     *
+     * <p>A container that ignores SIGTERM only dies when its {@code stopTimeout} elapses, and the
+     * Docker client can give up on the stop request before the daemon gets there. Either way the
+     * container would still be running when the exit code is collected, and the task would report
+     * no exit code at all, so it is killed here.
+     */
+    private void killIfStillRunning(String dockerId) {
+        if (getExitCodeIfStopped(dockerId) != null) {
+            return;
+        }
+        try {
+            lifecycleManager.getDockerClient().killContainerCmd(dockerId).exec();
+        } catch (NotFoundException ignored) {
+            return; // already gone, and its exit code is whatever the earlier inspect saw
+        } catch (Exception e) {
+            LOG.warnv("Error killing ECS container {0}: {1}", dockerId, e.getMessage());
+            return;
+        }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(KILL_SETTLE_SECONDS);
+        while (System.nanoTime() < deadline && getExitCodeIfStopped(dockerId) == null) {
+            try {
+                TimeUnit.MILLISECONDS.sleep(DEPENDENCY_POLL_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     private void removeFirelensVolume(EcsTaskHandle handle) {
@@ -831,10 +1159,14 @@ public class EcsContainerManager {
         }
         return "127.0.0.1";
     }
+    /**
+     * Tears down the firewall registration of a protected task. The ENI itself outlives this:
+     * it belongs to the task, not to its containers, and {@link #releaseTaskNetwork} frees it when
+     * the task reaches STOPPED.
+     */
     private void cleanupProtectedNetwork(EcsTaskHandle handle) {
         if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
             firewallManager.unregister(handle.getNetworkInterfaceId());
-            ec2Service.deleteNetworkInterface(handle.getRegion(), handle.getNetworkInterfaceId());
         }
     }
 
@@ -1083,6 +1415,17 @@ public class EcsContainerManager {
         container.setLastStatus("RUNNING");
         container.setNetworkBindings(networkBindings);
         container.setDockerId(dockerId);
+        container.setRuntimeId(dockerId);
+        container.setHealthStatus(def.getHealthCheck() != null ? "UNKNOWN" : null);
+        if (def.getCpu() != null) {
+            container.setCpu(String.valueOf(def.getCpu()));
+        }
+        if (def.getMemory() != null) {
+            container.setMemory(String.valueOf(def.getMemory()));
+        }
+        if (def.getMemoryReservation() != null) {
+            container.setMemoryReservation(String.valueOf(def.getMemoryReservation()));
+        }
         container.setContainerArn(regionResolver.buildArn("ecs", region,
                 "container/" + extractTaskId(taskArn) + "/" + def.getName()));
         return container;

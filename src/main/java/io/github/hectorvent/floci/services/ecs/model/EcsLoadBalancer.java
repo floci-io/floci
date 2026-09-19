@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.ecs.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.Map;
+
 /**
  * A load balancer association on an ECS service ({@code CreateService}'s
  * {@code loadBalancers} block). Links a container port on the service's tasks
@@ -14,8 +16,15 @@ public class EcsLoadBalancer {
     private String loadBalancerName;
     private String containerName;
     private Integer containerPort;
+    /** {@code advancedConfiguration}, kept raw: Floci runs no blue/green traffic shifting. */
+    private Map<String, Object> advancedConfiguration;
 
     public EcsLoadBalancer() {}
+
+    public Map<String, Object> getAdvancedConfiguration() { return advancedConfiguration; }
+    public void setAdvancedConfiguration(Map<String, Object> advancedConfiguration) {
+        this.advancedConfiguration = advancedConfiguration;
+    }
 
     public String getTargetGroupArn() { return targetGroupArn; }
     public void setTargetGroupArn(String targetGroupArn) { this.targetGroupArn = targetGroupArn; }

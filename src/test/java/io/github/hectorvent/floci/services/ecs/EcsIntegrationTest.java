@@ -420,8 +420,10 @@ class EcsIntegrationTest {
     @Test
     @Order(18)
     void listTaskDefinitions() {
+        // Scoped by family: the unfiltered listing pages a hundred at a time, as it does on AWS,
+        // and the rest of the suite registers more families than fit on one page.
         ecs("ListTaskDefinitions")
-            .body("{}")
+            .body("{\"familyPrefix\":\"" + TASK_DEF_FAMILY + "\"}")
         .when()
             .post("/")
         .then()
@@ -432,8 +434,9 @@ class EcsIntegrationTest {
     @Test
     @Order(19)
     void listTaskDefinitionFamilies() {
+        // Scoped for the same reason as listTaskDefinitions: this listing pages too.
         ecs("ListTaskDefinitionFamilies")
-            .body("{}")
+            .body("{\"familyPrefix\":\"" + TASK_DEF_FAMILY + "\"}")
         .when()
             .post("/")
         .then()
@@ -452,6 +455,7 @@ class EcsIntegrationTest {
                     "cluster": "%s",
                     "taskDefinition": "%s",
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "count": 1
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
@@ -541,6 +545,7 @@ class EcsIntegrationTest {
                     "cluster": "%s",
                     "taskDefinition": "empty-containers-task",
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "count": 1
                 }
                 """.formatted(CLUSTER_NAME))
@@ -694,6 +699,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "%s",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "tags": [
                         {"key": "Environment", "value": "dev"},
                         {"key": "Project", "value": "project1"}
@@ -787,7 +793,8 @@ class EcsIntegrationTest {
                     "serviceName": "%s",
                     "taskDefinition": "%s",
                     "desiredCount": 2,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -808,7 +815,8 @@ class EcsIntegrationTest {
                     "serviceName": "%s",
                     "taskDefinition": "%s",
                     "desiredCount": 99,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -831,7 +839,8 @@ class EcsIntegrationTest {
                     "serviceName": "negative-count-svc",
                     "taskDefinition": "%s",
                     "desiredCount": -5,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -873,7 +882,8 @@ class EcsIntegrationTest {
                     "serviceName": "zero-count-svc",
                     "taskDefinition": "%s",
                     "desiredCount": 0,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -1004,7 +1014,32 @@ class EcsIntegrationTest {
 
     @Test
     @Order(53)
+    void deleteClusterRejectsAClusterThatStillHasServices() {
+        ecs("DeleteCluster")
+            .body("""
+                {"cluster": "%s"}
+                """.formatted(CLUSTER_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ClusterContainsServicesException"));
+    }
+
+    @Test
+    @Order(54)
     void deleteCluster() {
+        // zero-count-svc outlives the service tests and keeps the cluster non-empty, which is
+        // exactly what AWS refuses to delete over.
+        ecs("DeleteService")
+            .body("""
+                {"cluster": "%s", "service": "zero-count-svc"}
+                """.formatted(CLUSTER_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         ecs("DeleteCluster")
             .body("""
                 {"cluster": "%s"}
@@ -1018,7 +1053,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(54)
+    @Order(55)
     void deleteClusterNotFound() {
         ecs("DeleteCluster")
             .body("""
@@ -1074,7 +1109,8 @@ class EcsIntegrationTest {
                     "serviceName": "%s",
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(REVIEW_CLUSTER, REVIEW_SERVICE))
         .when()
@@ -1160,6 +1196,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "loadBalancers": [
                         {
                             "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg-a/1234",
@@ -1184,6 +1221,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "loadBalancers": [
                         {
                             "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg-DIFFERENT/9999",

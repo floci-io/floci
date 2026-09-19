@@ -40,6 +40,20 @@ public class EcsServiceModel {
      * it; the Service shape itself has no member for it.
      */
     private Map<String, Object> serviceConnectConfiguration;
+    private String platformVersion;
+    private String platformFamily;
+    private List<CapacityProviderStrategyItem> capacityProviderStrategy;
+    private boolean enableExecuteCommand;
+    private boolean enableECSManagedTags;
+    private String propagateTags;
+    private Integer healthCheckGracePeriodSeconds;
+    private String roleArn;
+    /** {@code deploymentConfiguration}, kept raw: Floci reports it but runs no rollout against it. */
+    private Map<String, Object> deploymentConfiguration;
+    /** {@code serviceRegistries}, kept raw: Cloud Map registration is not emulated. */
+    private List<Map<String, Object>> serviceRegistries;
+    /** Members Floci does not act on, kept verbatim so DescribeServices round-trips. */
+    private Map<String, Object> unparsed;
 
     public String getServiceArn() { return serviceArn; }
     public void setServiceArn(String serviceArn) { this.serviceArn = serviceArn; }
@@ -112,4 +126,49 @@ public class EcsServiceModel {
     public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
         this.serviceConnectConfiguration = serviceConnectConfiguration;
     }
+
+    public String getPlatformVersion() { return platformVersion; }
+    public void setPlatformVersion(String platformVersion) { this.platformVersion = platformVersion; }
+
+    public String getPlatformFamily() { return platformFamily; }
+    public void setPlatformFamily(String platformFamily) { this.platformFamily = platformFamily; }
+
+    public List<CapacityProviderStrategyItem> getCapacityProviderStrategy() { return capacityProviderStrategy; }
+    public void setCapacityProviderStrategy(List<CapacityProviderStrategyItem> capacityProviderStrategy) {
+        this.capacityProviderStrategy = capacityProviderStrategy;
+    }
+
+    public boolean isEnableExecuteCommand() { return enableExecuteCommand; }
+    public void setEnableExecuteCommand(boolean enableExecuteCommand) {
+        this.enableExecuteCommand = enableExecuteCommand;
+    }
+
+    public boolean isEnableECSManagedTags() { return enableECSManagedTags; }
+    public void setEnableECSManagedTags(boolean enableECSManagedTags) {
+        this.enableECSManagedTags = enableECSManagedTags;
+    }
+
+    public String getPropagateTags() { return propagateTags; }
+    public void setPropagateTags(String propagateTags) { this.propagateTags = propagateTags; }
+
+    public Integer getHealthCheckGracePeriodSeconds() { return healthCheckGracePeriodSeconds; }
+    public void setHealthCheckGracePeriodSeconds(Integer healthCheckGracePeriodSeconds) {
+        this.healthCheckGracePeriodSeconds = healthCheckGracePeriodSeconds;
+    }
+
+    public String getRoleArn() { return roleArn; }
+    public void setRoleArn(String roleArn) { this.roleArn = roleArn; }
+
+    public Map<String, Object> getDeploymentConfiguration() { return deploymentConfiguration; }
+    public void setDeploymentConfiguration(Map<String, Object> deploymentConfiguration) {
+        this.deploymentConfiguration = deploymentConfiguration;
+    }
+
+    public List<Map<String, Object>> getServiceRegistries() { return serviceRegistries; }
+    public void setServiceRegistries(List<Map<String, Object>> serviceRegistries) {
+        this.serviceRegistries = serviceRegistries;
+    }
+
+    public Map<String, Object> getUnparsed() { return unparsed; }
+    public void setUnparsed(Map<String, Object> unparsed) { this.unparsed = unparsed; }
 }

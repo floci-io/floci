@@ -16,6 +16,10 @@ public class ContainerOverride {
     private String name;
     private List<String> command;
     private List<KeyValuePair> environment;
+    private List<EnvironmentFile> environmentFiles;
+    private Integer cpu;
+    private Integer memory;
+    private Integer memoryReservation;
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -25,4 +29,18 @@ public class ContainerOverride {
 
     public List<KeyValuePair> getEnvironment() { return environment; }
     public void setEnvironment(List<KeyValuePair> environment) { this.environment = environment; }
+
+    public List<EnvironmentFile> getEnvironmentFiles() { return environmentFiles; }
+    public void setEnvironmentFiles(List<EnvironmentFile> environmentFiles) {
+        this.environmentFiles = environmentFiles;
+    }
+
+    public Integer getCpu() { return cpu; }
+    public void setCpu(Integer cpu) { this.cpu = cpu; }
+
+    public Integer getMemory() { return memory; }
+    public void setMemory(Integer memory) { this.memory = memory; }
+
+    public Integer getMemoryReservation() { return memoryReservation; }
+    public void setMemoryReservation(Integer memoryReservation) { this.memoryReservation = memoryReservation; }
 }

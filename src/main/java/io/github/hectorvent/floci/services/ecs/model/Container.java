@@ -15,6 +15,14 @@ public class Container {
     private Integer exitCode;
     private String reason;
     private List<NetworkBinding> networkBindings;
+    private List<TaskNetworkInterface> networkInterfaces;
+    private List<ManagedAgent> managedAgents;
+    private String healthStatus;
+    private String runtimeId;
+    private String imageDigest;
+    private String cpu;
+    private String memory;
+    private String memoryReservation;
 
     // transient — not persisted
     private transient String dockerId;
@@ -42,6 +50,32 @@ public class Container {
 
     public List<NetworkBinding> getNetworkBindings() { return networkBindings; }
     public void setNetworkBindings(List<NetworkBinding> networkBindings) { this.networkBindings = networkBindings; }
+
+    public List<TaskNetworkInterface> getNetworkInterfaces() { return networkInterfaces; }
+    public void setNetworkInterfaces(List<TaskNetworkInterface> networkInterfaces) {
+        this.networkInterfaces = networkInterfaces;
+    }
+
+    public List<ManagedAgent> getManagedAgents() { return managedAgents; }
+    public void setManagedAgents(List<ManagedAgent> managedAgents) { this.managedAgents = managedAgents; }
+
+    public String getHealthStatus() { return healthStatus; }
+    public void setHealthStatus(String healthStatus) { this.healthStatus = healthStatus; }
+
+    public String getRuntimeId() { return runtimeId; }
+    public void setRuntimeId(String runtimeId) { this.runtimeId = runtimeId; }
+
+    public String getImageDigest() { return imageDigest; }
+    public void setImageDigest(String imageDigest) { this.imageDigest = imageDigest; }
+
+    public String getCpu() { return cpu; }
+    public void setCpu(String cpu) { this.cpu = cpu; }
+
+    public String getMemory() { return memory; }
+    public void setMemory(String memory) { this.memory = memory; }
+
+    public String getMemoryReservation() { return memoryReservation; }
+    public void setMemoryReservation(String memoryReservation) { this.memoryReservation = memoryReservation; }
 
     public String getDockerId() { return dockerId; }
     public void setDockerId(String dockerId) { this.dockerId = dockerId; }

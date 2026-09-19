@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
+import io.github.hectorvent.floci.services.ecs.model.RegisterTaskDefinitionRequest;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,13 +29,16 @@ class EcsJsonHandlerFirelensTest {
     void setUp() {
         objectMapper = new ObjectMapper();
         EcsService service = mock(EcsService.class);
-        when(service.registerTaskDefinition(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyString()))
+        when(service.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), anyString()))
                 .thenAnswer(invocation -> {
+                    RegisterTaskDefinitionRequest request = invocation.getArgument(0);
                     TaskDefinition taskDefinition = new TaskDefinition();
-                    taskDefinition.setFamily(invocation.getArgument(0));
+                    taskDefinition.setFamily(request.getFamily());
                     taskDefinition.setRevision(1);
                     taskDefinition.setStatus("ACTIVE");
-                    taskDefinition.setContainerDefinitions(invocation.getArgument(1, List.class));
+                    taskDefinition.setContainerDefinitions(request.getContainerDefinitions());
+                    taskDefinition.setVolumes(request.getVolumes());
+                    taskDefinition.setRuntimePlatform(request.getRuntimePlatform());
                     return taskDefinition;
                 });
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);

@@ -92,7 +92,10 @@ class EcsServiceDaemonSchedulingTest {
         assertEquals(0, runningTasks(service).size());
 
         service.reconcileServices();
-        long attempts = service.describeTasks(null, service.listTasks(null, null, null, null, REGION), REGION).size();
+        // Both attempts died on launch, so they are the STOPPED tasks: ListTasks only returns the
+        // running ones unless a desired status is asked for, as on AWS.
+        long attempts = service.describeTasks(null,
+                service.listTasks(null, null, "STOPPED", null, REGION), REGION).size();
         assertEquals(2, attempts, "the uncovered instance is retried on the next tick");
     }
 

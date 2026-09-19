@@ -36,6 +36,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
@@ -141,7 +142,7 @@ class EcsContainerManagerSecurityGroupTest {
     }
 
     @Test
-    void stopTaskUnregistersEni() {
+    void stopTaskUnregistersEniAndReleasingTheTaskNetworkDeletesIt() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
         when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any()))
@@ -162,11 +163,17 @@ class EcsContainerManagerSecurityGroupTest {
         DockerClient stopClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient, dockerClient, stopClient);
 
-        EcsTaskHandle handle = manager.startTask(awsvpcTask(), awsvpcTaskDef(List.of()),
+        EcsTask task = awsvpcTask();
+        EcsTaskHandle handle = manager.startTask(task, awsvpcTaskDef(List.of()),
                 List.of(), "us-east-1");
         manager.stopTaskAndCollectExitCodes(handle);
 
-        verify(firewallManager).unregister("eni-1");
+        // Stopping the containers tears down their firewall registration, but the ENI belongs to
+        // the task: it lives until the task itself is released.
+        verify(firewallManager, atLeastOnce()).unregister("eni-1");
+        verify(ec2Service, never()).deleteNetworkInterface(any(), any());
+
+        manager.releaseTaskNetwork(task, "us-east-1");
         verify(ec2Service).deleteNetworkInterface("us-east-1", "eni-1");
     }
 

@@ -7,12 +7,15 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import org.junit.jupiter.api.Test;
@@ -47,10 +50,13 @@ class EcsServicePersistenceTest {
                 NetworkMode.awsvpc, "256", "512", null, null, List.of("FARGATE"),
                 Map.of("tier", "web"), REGION);
         EcsServiceModel svc = first.createService("app-cluster", "web-svc", td.getTaskDefinitionArn(),
-                0, LaunchType.FARGATE, List.of(), null, Map.of("team", "payments"), REGION);
+                0, LaunchType.FARGATE, List.of(), awsvpcConfiguration(), Map.of("team", "payments"), REGION);
+        // An attribute names a container instance of the cluster, as it must on AWS.
+        String instanceArn = first.registerContainerInstance("app-cluster", null, List.of(), REGION)
+                .getContainerInstanceArn();
         first.putAttributes("app-cluster",
-                List.of(new Attribute("stack", "prod", "container-instance", "ci-1")), REGION);
-        first.putAccountSetting("containerInsights", "enabled");
+                List.of(new Attribute("stack", "prod", "container-instance", instanceArn)), REGION);
+        first.putAccountSetting("containerInsights", "enabled", null);
 
         // Simulate restart: a fresh instance reloading from the same shared store.
         EcsService reloaded = serviceWithStorage(storage);
@@ -67,10 +73,10 @@ class EcsServicePersistenceTest {
                 List.of(svc.getServiceArn()), REGION).getFirst();
         assertEquals("payments", reloadedSvc.getTags().get("team"));
 
-        assertEquals("prod", reloaded.listAttributes("app-cluster", null, "stack", null, REGION)
-                .getFirst().value());
-        assertEquals("enabled", reloaded.listAccountSettings("containerInsights", null)
-                .getFirst().getValue());
+        assertEquals("prod", reloaded.listAttributes("app-cluster", "container-instance", "stack",
+                null, null, null, REGION).attributes().getFirst().value());
+        assertEquals("enabled", reloaded.listAccountSettings("containerInsights", null, null,
+                false, null, null).settings().getFirst().value());
 
         // latestRevisions persisted: registering the same family again yields the next revision.
         assertEquals(2, reloaded.registerTaskDefinition("web", List.of(container("app", "nginx:latest")),
@@ -85,15 +91,18 @@ class EcsServicePersistenceTest {
         EcsCluster cluster = first.createCluster("c1", Map.of(), REGION);
         first.tagResource(cluster.getClusterArn(), Map.of("env", "test", "owner", "qa"));
         first.untagResource(cluster.getClusterArn(), List.of("owner"));
-        first.putAttributes("c1", List.of(new Attribute("a", "1", "container-instance", "t1")), REGION);
-        first.deleteAttributes("c1", List.of(new Attribute("a", "1", "container-instance", "t1")), REGION);
+        String instanceArn = first.registerContainerInstance("c1", null, List.of(), REGION)
+                .getContainerInstanceArn();
+        first.putAttributes("c1", List.of(new Attribute("a", "1", "container-instance", instanceArn)), REGION);
+        first.deleteAttributes("c1", List.of(new Attribute("a", "1", "container-instance", instanceArn)), REGION);
 
         EcsService reloaded = serviceWithStorage(storage);
 
         Map<String, String> tags = reloaded.listTagsForResource(cluster.getClusterArn());
         assertEquals("test", tags.get("env"));
         assertFalse(tags.containsKey("owner"), "untagged key must not reappear after restart");
-        assertTrue(reloaded.listAttributes("c1", null, "a", null, REGION).isEmpty(),
+        assertTrue(reloaded.listAttributes("c1", "container-instance", "a", null, null, null, REGION)
+                        .attributes().isEmpty(),
                 "deleted attribute must not reappear after restart");
     }
 
@@ -102,6 +111,15 @@ class EcsServicePersistenceTest {
         cd.setName(name);
         cd.setImage(image);
         return cd;
+    }
+
+    /** An awsvpc service needs the subnets its tasks get an ENI in, as it does on AWS. */
+    private static NetworkConfiguration awsvpcConfiguration() {
+        AwsVpcConfiguration awsvpc = new AwsVpcConfiguration();
+        awsvpc.setSubnets(List.of(Ec2Service.defaultSubnetId(REGION, "a")));
+        NetworkConfiguration networkConfiguration = new NetworkConfiguration();
+        networkConfiguration.setAwsvpcConfiguration(awsvpc);
+        return networkConfiguration;
     }
 
     private static EcsService serviceWithStorage(StorageFactory storage) {

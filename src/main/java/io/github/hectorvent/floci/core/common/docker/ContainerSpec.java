@@ -36,6 +36,9 @@ import java.util.Map;
  * @param user User the container process runs as, formatted "uid[:gid]" (null = image USER)
  * @param groupAdd Supplementary group IDs added to the container process
  * @param deviceRequests Device requests for accelerators such as GPUs (empty = none)
+ * @param nanoCpus Hard CPU quota in billionths of a CPU (null = no quota)
+ * @param cpuShares Relative CPU weight against other containers (null = daemon default)
+ * @param readonlyRootfs Whether the container's own filesystem is mounted read only
  */
 public record ContainerSpec(
         String image,
@@ -60,7 +63,10 @@ public record ContainerSpec(
         String workingDir,
         String user,
         List<String> groupAdd,
-        List<DeviceRequest> deviceRequests
+        List<DeviceRequest> deviceRequests,
+        Long nanoCpus,
+        Integer cpuShares,
+        boolean readonlyRootfs
 ) {
     /**
      * Creates a minimal spec with just the image name.
@@ -69,7 +75,7 @@ public record ContainerSpec(
     public ContainerSpec(String image) {
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
                 List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(),
-                null, null, List.of(), List.of());
+                null, null, List.of(), List.of(), null, null, false);
     }
 
     /**
@@ -100,7 +106,7 @@ public record ContainerSpec(
     ) {
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, List.of(), exposedPorts,
                 networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig, privileged,
-                cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of());
+                cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(), null, null, false);
     }
 
     /**
@@ -133,7 +139,8 @@ public record ContainerSpec(
     ) {
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
                 exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
-                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of());
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(),
+                null, null, false);
     }
 
     /**
@@ -166,7 +173,8 @@ public record ContainerSpec(
     ) {
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
                 exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
-                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests);
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
+                null, null, false);
     }
 
     /**

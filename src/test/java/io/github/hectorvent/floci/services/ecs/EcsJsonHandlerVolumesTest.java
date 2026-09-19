@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.RegisterTaskDefinitionRequest;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,13 +56,16 @@ class EcsJsonHandlerVolumesTest {
         objectMapper = new ObjectMapper();
         service = mock(EcsService.class);
         // Echo the parsed container definitions (arg index 1) back inside a task definition.
-        when(service.registerTaskDefinition(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyString()))
+        when(service.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), anyString()))
                 .thenAnswer(inv -> {
+                    RegisterTaskDefinitionRequest request = inv.getArgument(0);
                     TaskDefinition td = new TaskDefinition();
-                    td.setFamily(inv.getArgument(0));
+                    td.setFamily(request.getFamily());
                     td.setRevision(1);
                     td.setStatus("ACTIVE");
-                    td.setContainerDefinitions(inv.getArgument(1, List.class));
+                    td.setContainerDefinitions(request.getContainerDefinitions());
+                    td.setVolumes(request.getVolumes());
+                    td.setRuntimePlatform(request.getRuntimePlatform());
                     return td;
                 });
 

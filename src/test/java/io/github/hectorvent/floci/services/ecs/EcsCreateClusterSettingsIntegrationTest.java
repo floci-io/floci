@@ -53,10 +53,11 @@ class EcsCreateClusterSettingsIntegrationTest {
             .body("cluster.settings[0].value", equalTo("enabled"));
 
         // The drift the issue describes is not in the CreateCluster response but in what a later
-        // read reports, which is what a client compares its configuration against.
+        // read reports, which is what a client compares its configuration against. DescribeClusters
+        // only reports settings when the request asks for them, which terraform-provider-aws does.
         ecs("DescribeClusters")
             .body("""
-                {"clusters": ["%s"]}
+                {"clusters": ["%s"], "include": ["SETTINGS"]}
                 """.formatted(cluster))
         .when()
             .post("/")
