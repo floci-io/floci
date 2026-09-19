@@ -74,12 +74,17 @@ class CloudFormationServiceRestoreIntegrationTest {
                         Map.of(), List.of(), Map.of(), REGION);
             }
 
-            for (String fillerStack : fillerStacks) {
+            for (String fillerStack : fillerStacks.subList(0, ACTIVE_OPERATIONS)) {
                 runningOperations.add(service.executeChangeSet(fillerStack, "initial", REGION));
             }
 
             assertTrue(activeOperations.await(10, TimeUnit.SECONDS),
                     "the executor did not reach its active-operation bound");
+
+            for (String fillerStack : fillerStacks.subList(ACTIVE_OPERATIONS, fillerStacks.size())) {
+                runningOperations.add(service.executeChangeSet(fillerStack, "initial", REGION));
+            }
+
             AwsException rejected = assertThrows(AwsException.class,
                     () -> service.executeChangeSet(targetStack, "initial", REGION));
             assertEquals("LimitExceededException", rejected.getErrorCode());
