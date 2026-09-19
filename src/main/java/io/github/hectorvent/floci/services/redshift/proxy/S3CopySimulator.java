@@ -301,7 +301,6 @@ public final class S3CopySimulator {
     }
 
     static void releaseCopySession(CopyInput input) {
-
         releaseRoleSession(input.roleSession(), input.spec().iamRoleArn(), input.iamService());
     }
 
@@ -472,7 +471,6 @@ public final class S3CopySimulator {
         }
     }
 
-
     private static void abortOpenCopyIn(Socket client, Socket backend, OutputStream backendOut,
                                         PostgresWireDecoder backendDecoder, Exception cause,
                                         char txStatus, IntConsumer onStatusChange) throws IOException {
@@ -515,14 +513,15 @@ public final class S3CopySimulator {
 
     private static String fabricateCopy(CopyStatementParser.S3CopyFrom spec, List<String> effectiveColumns) {
         StringBuilder sql = new StringBuilder("COPY ").append(spec.targetTable());
-        List<String> cols = (effectiveColumns != null && !effectiveColumns.isEmpty())
-                ? effectiveColumns
-                : spec.columns();
-        if (cols != null && !cols.isEmpty()) {
+        if (effectiveColumns != null && !effectiveColumns.isEmpty()) {
             sql.append(" (")
-                    .append(cols.stream()
+                    .append(effectiveColumns.stream()
                             .map(c -> "\"" + c.replace("\"", "\"\"") + "\"")
                             .collect(Collectors.joining(", ")))
+                    .append(")");
+        } else if (spec.columns() != null && !spec.columns().isEmpty()) {
+            sql.append(" (")
+                    .append(String.join(", ", spec.columns()))
                     .append(")");
         }
         boolean csv = spec.csv() || spec.jsonAuto();
@@ -534,6 +533,13 @@ public final class S3CopySimulator {
         }
         sql.append(")");
         return sql.toString();
+    }
+
+    private static String unquoteIdentifier(String identifier) {
+        if (identifier != null && identifier.length() >= 2 && identifier.startsWith("\"") && identifier.endsWith("\"")) {
+            return identifier.substring(1, identifier.length() - 1).replace("\"\"", "\"");
+        }
+        return identifier;
     }
 
     /**
@@ -563,7 +569,9 @@ public final class S3CopySimulator {
                 if (spec.jsonAuto()) {
                     List<String> targetCols = (effectiveColumns != null && !effectiveColumns.isEmpty())
                             ? effectiveColumns
-                            : spec.columns();
+                            : (spec.columns() != null
+                                    ? spec.columns().stream().map(S3CopySimulator::unquoteIdentifier).toList()
+                                    : List.of());
                     CopyDataOutputStream copyDataOut = new CopyDataOutputStream(backendOut);
                     JsonLinesToCsvConverter.convert(in, targetCols, copyDataOut, spec.jsonAutoIgnoreCase());
                     copyDataOut.flush();

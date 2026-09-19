@@ -371,7 +371,7 @@ public class RedshiftService {
         integration.setRetryCount(0);
         integration.setLastError(null);
         integration.setPollingEnabled(true);
-        // Real integrations report `syncing` while the backfill scan runs, then `active`.
+        // Floci approximation: report `syncing` while the backfill scan runs, then `active`.
         integration.setStatus("syncing");
         integration.setKmsKeyId(kmsKeyId);
         integration.setCreateTime(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));

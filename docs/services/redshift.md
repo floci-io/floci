@@ -60,10 +60,10 @@ mapping state. Deleting an integration stops its consumer while retaining the la
 
 Items already present in the source table when `CreateIntegration` runs are backfilled into the
 landing table with a paginated `Scan`, one page per poll tick, and the scan resumes after a Floci
-restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `syncing`, as real AWS
-zero-ETL integrations do; it becomes `active` once the scan is exhausted. The landing table is an
-append-only log, so an item changed while its table is still being backfilled can appear twice: once
-from the scan and once from the stream.
+restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `syncing` (as a Floci
+approximation to indicate that initial backfill is in progress); it becomes `active` once the scan is
+exhausted. The landing table is an append-only log, so an item changed while its table is still being
+backfilled can appear twice: once from the scan and once from the stream.
 
 Serverless Redshift targets, schema inference, and relational projection are not supported in this
 first implementation.

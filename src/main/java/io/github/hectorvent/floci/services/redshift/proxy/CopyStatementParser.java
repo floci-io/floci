@@ -64,7 +64,6 @@ public final class CopyStatementParser {
         }
     }
 
-
     public record S3Unload(
             String selectQuery,
             String bucket,
@@ -127,7 +126,6 @@ public final class CopyStatementParser {
     private static final Pattern JSON_AUTO_PATTERN = Pattern.compile(
             "(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?JSON(?:\\s+AS)?\\s+['\"]auto(?:\\s+(ignorecase))?['\"]");
 
-
     /**
      * Options this simulator does not implement. A COPY carrying any of these is not intercepted:
      * the original statement is forwarded so PostgreSQL rejects it, rather than the simulator
@@ -140,7 +138,6 @@ public final class CopyStatementParser {
                     + "|ACCEPTINVCHARS|ACCEPTANYDATE|BLANKSASNULL|EMPTYASNULL|FILLRECORD|TRIMBLANKS"
                     + "|TRUNCATECOLUMNS|IGNOREBLANKLINES|ESCAPE|REMOVEQUOTES|EXPLICIT_IDS|COMPUPDATE"
                     + "|STATUPDATE|NOLOAD|ROUNDEC|QUOTE|SSH|READRATIO|COMPROWS|DIMENSION)\\b");
-
 
     /** A {@code ;} followed by another statement: only a lone trailing {@code ;} is tolerated. */
     private static final Pattern TRAILING_STATEMENT = Pattern.compile(";\\s*\\S");
@@ -375,7 +372,6 @@ public final class CopyStatementParser {
         String nullAs = null;
         String delimiter = null;
         int headerLines = 0;
-
         String iamRoleArn = null;
 
         boolean seenCsv = false;

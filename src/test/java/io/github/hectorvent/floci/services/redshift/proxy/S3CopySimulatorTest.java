@@ -1346,7 +1346,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "users", List.of("id", "name"), "wh", "users.json", null, 0, false, false, null, null, true, false);
 
-        assertEquals("COPY users (\"id\", \"name\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+        assertEquals("COPY users (id, name) FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
                 S3CopySimulator.copyBackendSql(spec));
 
         String ndjson = "{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n";
@@ -1364,10 +1364,18 @@ class S3CopySimulatorTest {
     }
 
     @Test
-    void copyBackendSql_quotesColumnIdentifiers() {
+    void copyBackendSql_quotesDiscoveredColumnIdentifiers() {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
-                "orders", List.of("order", "user", "col\"name"), "wh", "orders.csv", ",", 0, false, true, null, null);
+                "orders", List.of(), "wh", "orders.csv", ",", 0, false, true, null, null);
         assertEquals("COPY orders (\"order\", \"user\", \"col\"\"name\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec, List.of("order", "user", "col\"name")));
+    }
+
+    @Test
+    void copyBackendSql_passesUserSuppliedColumnListThroughAsWritten() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "orders", List.of("\"col one\"", "MixedCase", "\"User\""), "wh", "orders.csv", ",", 0, false, true, null, null);
+        assertEquals("COPY orders (\"col one\", MixedCase, \"User\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
                 S3CopySimulator.copyBackendSql(spec));
     }
 
@@ -1376,8 +1384,28 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "users", List.of("id"), "wh", "users.json", "\t", 0, false, false, null, null, true, false);
 
-        assertEquals("COPY users (\"id\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+        assertEquals("COPY users (id) FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
                 S3CopySimulator.copyBackendSql(spec));
+    }
+
+    @Test
+    void streamCopyInput_withJsonAuto_unquotesQuotedColumnIdentifiers() throws Exception {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "users", List.of("\"col one\"", "Id"), "wh", "users.json", null, 0, false, false, null, null, true, false);
+
+        String ndjson = "{\"col one\": \"Alice\", \"Id\": 10}\n";
+        S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.getObject("wh", "users.json")).thenReturn(dataObj);
+
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        S3CopySimulator.streamCopyInput(input, out);
+
+        byte[] rawBytes = out.toByteArray();
+        assertTrue(rawBytes.length > 5);
+        assertEquals('d', rawBytes[0]);
+        String payload = new String(rawBytes, 5, rawBytes.length - 5, StandardCharsets.UTF_8);
+        assertEquals("Alice,10\n", payload);
     }
 
     @Test
