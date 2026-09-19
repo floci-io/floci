@@ -110,6 +110,34 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void deleteVpcRemovesTagsOnItsDefaultResources() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.78.0.0/16", false).getVpcId();
+        String groupId = service.describeSecurityGroups(region, List.of(), List.of(), Map.of()).stream()
+                .filter(group -> vpcId.equals(group.getVpcId()) && "default".equals(group.getGroupName()))
+                .findFirst().orElseThrow().getGroupId();
+        String routeTableId = service.describeRouteTables(region, List.of(), Map.of()).stream()
+                .filter(table -> vpcId.equals(table.getVpcId()))
+                .findFirst().orElseThrow().getRouteTableId();
+        String aclId = service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                .filter(acl -> vpcId.equals(acl.getVpcId()) && acl.isDefault())
+                .findFirst().orElseThrow().getNetworkAclId();
+        String ruleId = service.describeSecurityGroupRules(region, List.of(groupId), List.of()).getFirst()
+                .getSecurityGroupRuleId();
+        List<String> defaultIds = List.of(groupId, routeTableId, aclId, ruleId);
+        service.createTags(region, defaultIds, List.of(new Tag("Name", "doomed")));
+        assertEquals(4, service.describeTags(region, Map.of("resource-id", defaultIds)).size());
+
+        service.deleteVpc(region, vpcId);
+
+        assertTrue(service.describeTags(region, Map.of("resource-id", defaultIds)).isEmpty());
+    }
+
+    @Test
     void deleteVpcDoesNotRemoveAnotherVpcDefaults() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),

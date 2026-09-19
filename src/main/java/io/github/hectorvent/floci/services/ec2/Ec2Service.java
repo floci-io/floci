@@ -3625,8 +3625,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         .filter(rule -> group.getGroupId().equals(rule.getGroupId()))
                         .map(SecurityGroupRule::getSecurityGroupRuleId)
                         .toList();
-                ruleIds.forEach(ruleId -> securityGroupRules.delete(key(region, ruleId)));
+                ruleIds.forEach(ruleId -> {
+                    securityGroupRules.delete(key(region, ruleId));
+                    tags.delete(ruleId);
+                });
                 securityGroups.delete(key(region, group.getGroupId()));
+                tags.delete(group.getGroupId());
             }
         }
 
@@ -3637,7 +3641,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         .anyMatch(association -> association.isMain()))
                 .map(RouteTable::getRouteTableId)
                 .toList();
-        mainRouteTableIds.forEach(routeTableId -> routeTables.delete(key(region, routeTableId)));
+        mainRouteTableIds.forEach(routeTableId -> {
+            routeTables.delete(key(region, routeTableId));
+            tags.delete(routeTableId);
+        });
 
         List<String> defaultNetworkAclIds = networkAcls.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(acl -> region.equals(acl.getRegion()))
@@ -3645,7 +3652,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .filter(acl -> acl.isDefault())
                 .map(NetworkAcl::getNetworkAclId)
                 .toList();
-        defaultNetworkAclIds.forEach(aclId -> networkAcls.delete(key(region, aclId)));
+        defaultNetworkAclIds.forEach(aclId -> {
+            networkAcls.delete(key(region, aclId));
+            tags.delete(aclId);
+        });
     }
 
     public void modifyVpcAttribute(String region, String vpcId, String attribute, String value) {
