@@ -1640,7 +1640,7 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .extract().path("CreateSecurityGroupResponse.groupId");
 
-        given()
+        String decoyGroupId = given()
             .formParam("Action", "CreateSecurityGroup")
             .formParam("GroupName", "description-filter-decoy")
             .formParam("GroupDescription", "A totally different description")
@@ -1649,7 +1649,8 @@ class Ec2IntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
 
         // Positive case: filtering by the exact description of `targetGroupId` returns
         // exactly that one group out of the three now in this VPC (its own default group,
@@ -1685,6 +1686,24 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DeleteSecurityGroup")
+            .formParam("GroupId", targetGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DeleteSecurityGroup")
+            .formParam("GroupId", decoyGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
 
         given()
             .formParam("Action", "DeleteVpc")

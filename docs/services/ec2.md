@@ -194,7 +194,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, or an attached internet gateway. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
