@@ -22,6 +22,10 @@ final class JsonLinesToCsvConverter {
     }
 
     static void convert(InputStream in, List<String> targetColumns, OutputStream out) throws IOException {
+        if (targetColumns == null || targetColumns.isEmpty()) {
+            throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
+                    "Cannot convert JSON to CSV without target columns", null);
+        }
         BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
         List<String> lowerColumns = targetColumns.stream().map(String::toLowerCase).toList();
         String line;

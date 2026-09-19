@@ -1394,5 +1394,111 @@ class S3CopySimulatorTest {
         assertTrue(rawBytes.length > 0);
         assertEquals('d', rawBytes[0]);
     }
+
+    @Test
+    void runCopyFrom_withJsonAutoWithoutColumns_discoversSchemaAndCopies() throws Exception {
+        String ndjson = "{\"id\": 10, \"name\": \"Alice\"}\n";
+        S3Object dataObj = new S3Object("wh", "data.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
+        when(s3.objectExists("wh", "data.json")).thenReturn(true);
+        when(s3.getObject("wh", "data.json")).thenReturn(dataObj);
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "public.items", List.of(), "wh", "data.json", null, 0, false, false, null, null, true, false);
+
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            OutputStream out = testBackend.getOutputStream();
+
+            PostgresWireDecoder.FrontendMessage q1 = in.nextMessage();
+            assertEquals('Q', q1.type());
+            assertTrue(q1.getSql().contains("pg_catalog.pg_attribute"));
+            assertTrue(q1.getSql().contains("items"));
+
+            writeSingleColumnDataRow(out, "id");
+            writeSingleColumnDataRow(out, "name");
+            writeCommandComplete(out, "SELECT 2");
+            writeReadyForQuery(out, 'I');
+
+            PostgresWireDecoder.FrontendMessage q2 = in.nextMessage();
+            assertEquals('Q', q2.type());
+            assertEquals("COPY public.items (id, name) FROM STDIN WITH (FORMAT csv, DELIMITER ',')", q2.getSql());
+
+            out.write(new byte[]{'G', 0, 0, 0, 4});
+            out.flush();
+
+            PostgresWireDecoder.FrontendMessage d = in.nextMessage();
+            assertEquals('d', d.type());
+
+            PostgresWireDecoder.FrontendMessage c = in.nextMessage();
+            assertEquals('c', c.type());
+
+            writeCommandComplete(out, "COPY 1");
+            writeReadyForQuery(out, 'I');
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        PostgresWireDecoder clientIn = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage msg1 = clientIn.nextMessage();
+        assertEquals('C', msg1.type());
+        PostgresWireDecoder.FrontendMessage msg2 = clientIn.nextMessage();
+        assertEquals('Z', msg2.type());
+    }
+
+    @Test
+    void runCopyFrom_withJsonAutoWithoutColumns_whenTableNotFound_sendsError() throws Exception {
+        when(s3.objectExists("wh", "data.json")).thenReturn(true);
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "missing_table", List.of(), "wh", "data.json", null, 0, false, false, null, null, true, false);
+
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            OutputStream out = testBackend.getOutputStream();
+
+            PostgresWireDecoder.FrontendMessage q1 = in.nextMessage();
+            assertEquals('Q', q1.type());
+            assertTrue(q1.getSql().contains("missing_table"));
+
+            writeCommandComplete(out, "SELECT 0");
+            writeReadyForQuery(out, 'I');
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, null, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        PostgresWireDecoder clientIn = new PostgresWireDecoder(testClient.getInputStream());
+        PostgresWireDecoder.FrontendMessage err = clientIn.nextMessage();
+        assertEquals('E', err.type());
+        PostgresWireDecoder.FrontendMessage ready = clientIn.nextMessage();
+        assertEquals('Z', ready.type());
+    }
+
+    private static void writeSingleColumnDataRow(OutputStream out, String val) throws IOException {
+        byte[] b = val.getBytes(StandardCharsets.UTF_8);
+        int len = 4 + 2 + 4 + b.length;
+        out.write('D');
+        out.write(intBytes(len));
+        out.write(new byte[]{0, 1});
+        out.write(intBytes(b.length));
+        out.write(b);
+        out.flush();
+    }
+
+    private static void writeCommandComplete(OutputStream out, String tag) throws IOException {
+        byte[] b = (tag + "\0").getBytes(StandardCharsets.US_ASCII);
+        out.write('C');
+        out.write(intBytes(4 + b.length));
+        out.write(b);
+        out.flush();
+    }
+
+    private static void writeReadyForQuery(OutputStream out, char status) throws IOException {
+        out.write(new byte[]{'Z', 0, 0, 0, 5, (byte) status});
+        out.flush();
+    }
 }
 

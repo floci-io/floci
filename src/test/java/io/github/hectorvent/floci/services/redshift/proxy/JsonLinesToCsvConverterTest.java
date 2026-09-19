@@ -70,4 +70,18 @@ class JsonLinesToCsvConverterTest {
 
         org.junit.jupiter.api.Assertions.assertTrue(ex.getMessage().contains("invalid_json"));
     }
+
+    @Test
+    void convert_emptyOrNullColumns_throwsException() {
+        String ndjson = "{\"id\": 1}\n";
+        ByteArrayInputStream in = new ByteArrayInputStream(ndjson.getBytes(StandardCharsets.UTF_8));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> JsonLinesToCsvConverter.convert(in, List.of(), out));
+        org.junit.jupiter.api.Assertions.assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> JsonLinesToCsvConverter.convert(in, null, out));
+    }
 }

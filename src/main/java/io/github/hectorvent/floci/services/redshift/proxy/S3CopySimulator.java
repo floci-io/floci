@@ -588,12 +588,33 @@ public final class S3CopySimulator {
     private static List<String> discoverTableColumns(Socket client, Socket backend,
                                                      CopyStatementParser.S3CopyFrom spec,
                                                      char txStatus, IntConsumer onStatusChange) throws IOException {
-        String query = "SELECT attname FROM pg_attribute WHERE attrelid = '"
-                + quoteLiteral(spec.targetTable())
-                + "'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum";
+        String rawTable = spec.targetTable();
+        String schemaName = null;
+        String tableName = rawTable;
+        int dot = rawTable.lastIndexOf('.');
+        if (dot > 0) {
+            schemaName = rawTable.substring(0, dot).replace("\"", "").trim();
+            tableName = rawTable.substring(dot + 1).replace("\"", "").trim();
+        } else {
+            tableName = tableName.replace("\"", "").trim();
+        }
+
+        StringBuilder query = new StringBuilder(
+                "SELECT a.attname FROM pg_catalog.pg_attribute a "
+                + "JOIN pg_catalog.pg_class c ON a.attrelid = c.oid "
+                + "JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid "
+                + "WHERE lower(c.relname) = '")
+                .append(quoteLiteral(tableName.toLowerCase()))
+                .append("' AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'v', 'm', 'p')");
+        if (schemaName != null) {
+            query.append(" AND lower(n.nspname) = '").append(quoteLiteral(schemaName.toLowerCase())).append("'");
+        } else {
+            query.append(" AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')");
+        }
+        query.append(" ORDER BY a.attnum");
 
         OutputStream backendOut = backend.getOutputStream();
-        backendOut.write(PostgresWireDecoder.encodeQuery(query));
+        backendOut.write(PostgresWireDecoder.encodeQuery(query.toString()));
         backendOut.flush();
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());
@@ -625,6 +646,12 @@ public final class S3CopySimulator {
                 }
                 break;
             }
+        }
+        if (cols.isEmpty()) {
+            sendError(client, backend, "42P01",
+                    "relation \"" + spec.targetTable() + "\" does not exist or has no user columns",
+                    txStatus, onStatusChange);
+            return null;
         }
         return cols;
     }
