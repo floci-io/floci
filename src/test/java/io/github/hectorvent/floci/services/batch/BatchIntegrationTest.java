@@ -81,6 +81,49 @@ class BatchIntegrationTest {
     }
 
     @Test
+    void cancelAndTerminateJobExposeAwsRoutes() {
+        String suffix = uniqueSuffix();
+        String queueArn = createQueue("batch-control-queue-" + suffix,
+                createComputeEnvironment("batch-control-ce-" + suffix));
+        String definitionArn = registerJobDefinition("batch-control-job-" + suffix, "[]", "[]");
+        String jobId = submit(queueArn, definitionArn, "batch-control-submit-" + suffix);
+
+        givenJson("""
+                {"jobId":"%s","reason":"No longer needed"}
+                """.formatted(jobId))
+        .when()
+            .post("/v1/canceljob")
+        .then()
+            .statusCode(200);
+
+        givenJson("""
+                {"jobId":"%s","reason":"Stop requested"}
+                """.formatted(jobId))
+        .when()
+            .post("/v1/terminatejob")
+        .then()
+            .statusCode(200);
+
+        givenJson("""
+                {"jobId":"%s"}
+                """.formatted(jobId))
+        .when()
+            .post("/v1/canceljob")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ClientException"));
+
+        givenJson("""
+                {"jobId":"missing-job","reason":"Stop requested"}
+                """)
+        .when()
+            .post("/v1/terminatejob")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ClientException"));
+    }
+
+    @Test
     void jobDefinitionRevisionsAndDeregister() {
         String suffix = uniqueSuffix();
         String queueArn = createQueue("batch-rev-queue-" + suffix, createComputeEnvironment("batch-rev-ce-" + suffix));

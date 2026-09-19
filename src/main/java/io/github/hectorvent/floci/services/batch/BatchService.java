@@ -56,6 +56,7 @@ public class BatchService {
     private static final int DEFAULT_MAX_RESULTS = 1000;
     private static final int FILTERED_MAX_RESULTS = 100;
     private static final int MAX_TAGS = 50;
+    private static final int MAX_JOB_CONTROL_REASON_LENGTH = 1024;
     private static final Pattern JOB_NAME_PATTERN = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_-]{0,127}");
     private static final Set<String> SUPPORTED_JOB_DEFINITION_TYPES = Set.of("container", "multinode");
     private static final int MIN_ARRAY_SIZE = 2;
@@ -64,6 +65,8 @@ public class BatchService {
     private static final Set<String> SUPPORTED_COMPUTE_ENVIRONMENT_STATES = Set.of("ENABLED", "DISABLED");
     private static final Set<String> SUPPORTED_LIST_FILTERS = Set.of(
             "JOB_NAME", "JOB_DEFINITION", "BEFORE_CREATED_AT", "AFTER_CREATED_AT", "SHARE_IDENTIFIER");
+    private static final Set<String> TERMINAL_JOB_STATUSES = Set.of(
+            BatchStatus.SUCCEEDED.name(), BatchStatus.FAILED.name());
 
     private final StorageBackend<String, BatchJobDefinition> jobDefinitionStore;
     private final StorageBackend<String, BatchJobQueue> jobQueueStore;
@@ -456,6 +459,69 @@ public class BatchService {
         return submitJobResponse(job);
     }
 
+    public ObjectNode cancelJob(JsonNode request) {
+        return controlJob(request, false);
+    }
+
+    public ObjectNode terminateJob(JsonNode request) {
+        return controlJob(request, true);
+    }
+
+    private ObjectNode controlJob(JsonNode request, boolean terminate) {
+        String jobId = requiredText(request, "jobId");
+        String reason = requiredText(request, "reason");
+        if (reason.length() > MAX_JOB_CONTROL_REASON_LENGTH) {
+            throw client("reason must be at most " + MAX_JOB_CONTROL_REASON_LENGTH + " characters");
+        }
+        List<String> jobsToStop = new ArrayList<>();
+
+        synchronized (this) {
+            BatchJob job = getJob(jobId).orElseThrow(() -> client("Job not found: " + jobId));
+            if (job.getArraySize() != null) {
+                boolean changed = false;
+                List<BatchJob> children = jobStore.scan(k -> true).stream()
+                        .filter(child -> jobId.equals(child.getArrayJobId()))
+                        .toList();
+                for (BatchJob child : children) {
+                    boolean wasRunning = BatchStatus.RUNNING.name().equals(child.getStatus());
+                    if (controlSingleJob(child, reason, terminate)) {
+                        changed = true;
+                        if (terminate && wasRunning) {
+                            jobsToStop.add(child.getJobId());
+                        }
+                    }
+                }
+                if (changed) {
+                    job.setStatusReason(reason);
+                    putJob(job);
+                }
+            } else {
+                boolean wasRunning = BatchStatus.RUNNING.name().equals(job.getStatus());
+                if (controlSingleJob(job, reason, terminate) && terminate && wasRunning) {
+                    jobsToStop.add(job.getJobId());
+                }
+            }
+        }
+
+        jobsToStop.forEach(dockerRunner::stopJob);
+        return objectMapper.createObjectNode();
+    }
+
+    private boolean controlSingleJob(BatchJob job, String reason, boolean terminate) {
+        if (isTerminalStatus(job.getStatus())) {
+            return false;
+        }
+        if (!terminate && (BatchStatus.STARTING.name().equals(job.getStatus())
+                || BatchStatus.RUNNING.name().equals(job.getStatus()))) {
+            return false;
+        }
+        job.setStatus(BatchStatus.FAILED.name());
+        job.setStatusReason(reason);
+        job.setStoppedAt(now());
+        putJob(job);
+        return true;
+    }
+
     private ObjectNode submitArrayJob(JsonNode request, String region, String jobName, BatchJobQueue queue,
                                       BatchJobDefinition def, Map<String, String> parameters, int size) {
         BatchJob parent = new BatchJob();
@@ -800,13 +866,21 @@ public class BatchService {
             }
             int maxAttempts = maxAttempts(job);
             for (int attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
-                transition(accountId, jobId, BatchStatus.PENDING, null, false);
+                if (!transition(accountId, jobId, BatchStatus.PENDING, null, false)) {
+                    return;
+                }
                 sleepQuietly();
-                transition(accountId, jobId, BatchStatus.RUNNABLE, null, false);
+                if (!transition(accountId, jobId, BatchStatus.RUNNABLE, null, false)) {
+                    return;
+                }
                 sleepQuietly();
-                transition(accountId, jobId, BatchStatus.STARTING, null, false);
+                if (!transition(accountId, jobId, BatchStatus.STARTING, null, false)) {
+                    return;
+                }
                 sleepQuietly();
-                transition(accountId, jobId, BatchStatus.RUNNING, null, true);
+                if (!transition(accountId, jobId, BatchStatus.RUNNING, null, true)) {
+                    return;
+                }
                 BatchJob attemptJob = getJobForAccount(accountId, jobId).orElse(null);
                 if (attemptJob == null) {
                     return;
@@ -821,6 +895,8 @@ public class BatchService {
         } catch (Exception e) {
             LOG.warnv("Batch job {0} failed while running: {1}", jobId, e.getMessage());
             failJob(accountId, jobId, e.getMessage());
+        } finally {
+            dockerRunner.clearStopRequest(jobId);
         }
     }
 
@@ -840,6 +916,7 @@ public class BatchService {
         if (job == null) {
             return true;
         }
+        boolean controlledTerminal = isTerminalStatus(job.getStatus());
         BatchAttemptContainer container = new BatchAttemptContainer();
         container.setExitCode(result.exitCode());
         container.setReason(result.reason());
@@ -853,6 +930,10 @@ public class BatchService {
 
         job.getAttempts().add(attempt);
         job.setContainer(container);
+        if (controlledTerminal) {
+            putJobForAccount(accountId, job);
+            return true;
+        }
         if (result.exitCode() == 0) {
             job.setStoppedAt(result.stoppedAt());
             job.setStatus(BatchStatus.SUCCEEDED.name());
@@ -881,13 +962,21 @@ public class BatchService {
             }
             int maxAttempts = maxAttempts(job);
             for (int attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
-                transition(accountId, jobId, BatchStatus.PENDING, null, false);
+                if (!transition(accountId, jobId, BatchStatus.PENDING, null, false)) {
+                    return;
+                }
                 sleepQuietly();
-                transition(accountId, jobId, BatchStatus.RUNNABLE, null, false);
+                if (!transition(accountId, jobId, BatchStatus.RUNNABLE, null, false)) {
+                    return;
+                }
                 sleepQuietly();
-                transition(accountId, jobId, BatchStatus.STARTING, null, false);
+                if (!transition(accountId, jobId, BatchStatus.STARTING, null, false)) {
+                    return;
+                }
                 sleepQuietly();
-                transition(accountId, jobId, BatchStatus.RUNNING, null, true);
+                if (!transition(accountId, jobId, BatchStatus.RUNNING, null, true)) {
+                    return;
+                }
                 BatchJob attemptJob = getJobForAccount(accountId, jobId).orElse(null);
                 if (attemptJob == null) {
                     return;
@@ -900,6 +989,8 @@ public class BatchService {
         } catch (Exception e) {
             LOG.warnv("Batch multi-node job {0} failed while running: {1}", jobId, e.getMessage());
             failJob(accountId, jobId, e.getMessage());
+        } finally {
+            dockerRunner.clearStopRequest(jobId);
         }
     }
 
@@ -947,6 +1038,7 @@ public class BatchService {
         if (job == null) {
             return true;
         }
+        boolean controlledTerminal = isTerminalStatus(job.getStatus());
         List<BatchNodeExecution> executions = job.getNodeExecutions();
         BatchRunResult mainResult = null;
         for (int i = 0; i < executions.size(); i++) {
@@ -969,6 +1061,11 @@ public class BatchService {
         attempt.setStoppedAt(mainResult.stoppedAt());
         attempt.setStatusReason(mainResult.reason());
         job.getAttempts().add(attempt);
+
+        if (controlledTerminal) {
+            putJobForAccount(accountId, job);
+            return true;
+        }
 
         if (mainResult.exitCode() == 0) {
             job.setStoppedAt(mainResult.stoppedAt());
@@ -999,7 +1096,7 @@ public class BatchService {
 
     private synchronized void failJob(String accountId, String jobId, String reason) {
         BatchJob job = getJobForAccount(accountId, jobId).orElse(null);
-        if (job == null) {
+        if (job == null || isTerminalStatus(job.getStatus())) {
             return;
         }
         job.setStatus(BatchStatus.FAILED.name());
@@ -1008,10 +1105,11 @@ public class BatchService {
         putJobForAccount(accountId, job);
     }
 
-    private synchronized void transition(String accountId, String jobId, BatchStatus status, String reason, boolean started) {
+    private synchronized boolean transition(String accountId, String jobId, BatchStatus status,
+                                            String reason, boolean started) {
         BatchJob job = getJobForAccount(accountId, jobId).orElse(null);
-        if (job == null) {
-            return;
+        if (job == null || isTerminalStatus(job.getStatus())) {
+            return false;
         }
         job.setStatus(status.name());
         if (reason != null) {
@@ -1021,6 +1119,11 @@ public class BatchService {
             job.setStartedAt(now());
         }
         putJobForAccount(accountId, job);
+        return true;
+    }
+
+    private boolean isTerminalStatus(String status) {
+        return TERMINAL_JOB_STATUSES.contains(status);
     }
 
     private void sleepQuietly() {
@@ -1419,6 +1522,9 @@ public class BatchService {
         if (job.getArraySize() != null) {
             ArrayRollup rollup = arrayRollup(job.getJobId());
             summary.put("status", rollup.status());
+            if (job.getStatusReason() != null) {
+                summary.put("statusReason", job.getStatusReason());
+            }
             if (rollup.startedAt() != null) {
                 summary.put("startedAt", rollup.startedAt());
             }
@@ -1512,11 +1618,13 @@ public class BatchService {
         for (BatchJob child : children) {
             statusSummary.merge(child.getStatus(), 1, Integer::sum);
         }
+        boolean allTerminal = !children.isEmpty()
+                && children.stream().allMatch(child -> isTerminalStatus(child.getStatus()));
         boolean anyFailed = children.stream().anyMatch(c -> BatchStatus.FAILED.name().equals(c.getStatus()));
         boolean allSucceeded = !children.isEmpty()
                 && children.stream().allMatch(c -> BatchStatus.SUCCEEDED.name().equals(c.getStatus()));
         String status;
-        if (anyFailed) {
+        if (allTerminal && anyFailed) {
             status = BatchStatus.FAILED.name();
         } else if (allSucceeded) {
             status = BatchStatus.SUCCEEDED.name();
@@ -1616,6 +1724,9 @@ public class BatchService {
         if (job.getArraySize() != null) {
             ArrayRollup rollup = arrayRollup(job.getJobId());
             detail.put("status", rollup.status());
+            if (job.getStatusReason() != null) {
+                detail.put("statusReason", job.getStatusReason());
+            }
             if (rollup.startedAt() != null) {
                 detail.put("startedAt", rollup.startedAt());
             }
