@@ -674,7 +674,9 @@ public class KmsService implements ResourceProvider {
 
     public void enableKeyRotation(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        validateRotationSupported(key);
+        validateRotationOrigin(key);
+        validateKeyIsUsableForCryptoOperations(key);
+        validateRotationKeySpec(key);
         key.setKeyRotationEnabled(true);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Enabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
@@ -682,7 +684,9 @@ public class KmsService implements ResourceProvider {
 
     public void disableKeyRotation(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        validateRotationSupported(key);
+        validateRotationOrigin(key);
+        validateKeyIsUsableForCryptoOperations(key);
+        validateRotationKeySpec(key);
         key.setKeyRotationEnabled(false);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
@@ -712,11 +716,9 @@ public class KmsService implements ResourceProvider {
     public String rotateKeyOnDemand(String keyId, String region) {
         synchronized (backingKeyMaterialLock) {
             KmsKey key = resolveKey(keyId, region);
-            if (!key.isEnabled()) {
-                throw new AwsException("DisabledException",
-                        "KMS key " + key.getKeyId() + " is disabled.", 400);
-            }
-            validateRotationSupported(key);
+            validateKeyIsUsableForCryptoOperations(key);
+            validateRotationOrigin(key);
+            validateRotationKeySpec(key);
             if (key.getOnDemandRotationCount() >= ON_DEMAND_ROTATION_LIMIT) {
                 throw new AwsException("LimitExceededException",
                         "On-demand rotation quota for KMS key " + key.getKeyId() + " is exceeded.", 400);
@@ -730,13 +732,16 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    private void validateRotationSupported(KmsKey key) {
+    private static void validateRotationOrigin(KmsKey key) {
         if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
             throw new AwsException(
                     "UnsupportedOperationException",
                     "You cannot enable automatic rotation of imported key material.",
                     400);
         }
+    }
+
+    private static void validateRotationKeySpec(KmsKey key) {
         if (KmsKeyUsage.ENCRYPT_DECRYPT != key.getKeyUsage()
                 || KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
             throw new AwsException(

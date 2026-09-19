@@ -1990,6 +1990,54 @@ class KmsIntegrationTest {
                 .body("KeyId", equalTo(keyArn));
     }
 
+    /** The key state is checked before the key spec. */
+    @ParameterizedTest
+    @CsvSource({
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, EnableKeyRotation",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, DisableKeyRotation",
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, RotateKeyOnDemand",
+            "HMAC_256, GENERATE_VERIFY_MAC, EnableKeyRotation",
+            "HMAC_256, GENERATE_VERIFY_MAC, DisableKeyRotation",
+            "HMAC_256, GENERATE_VERIFY_MAC, RotateKeyOnDemand",
+    })
+    void rotationRejectsADisabledKey(String keySpec, String keyUsage, String operation) {
+        String keyArn = createKeyArn(keySpec, keyUsage);
+        callKms("DisableKey", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
+
+        callKms(operation, "{\"KeyId\":\"%s\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("DisabledException"))
+                .body("message", equalTo(keyArn + " is disabled."));
+    }
+
+    /** The key state is checked before the key spec. */
+    @ParameterizedTest
+    @CsvSource({"EnableKeyRotation", "DisableKeyRotation", "RotateKeyOnDemand"})
+    void rotationRejectsAKeyPendingDeletion(String operation) {
+        String keyArn = createKeyArn("HMAC_256", "GENERATE_VERIFY_MAC");
+        callKms("ScheduleKeyDeletion", "{\"KeyId\":\"%s\",\"PendingWindowInDays\":7}".formatted(keyArn))
+                .then().statusCode(200);
+
+        callKms(operation, "{\"KeyId\":\"%s\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo(keyArn + " is pending deletion."));
+    }
+
+    @Test
+    void rotateKeyOnDemandRejectsAKeyPendingImport() {
+        String keyArn = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\"}")
+                .then().statusCode(200).extract().path("KeyMetadata.Arn");
+
+        callKms("RotateKeyOnDemand", "{\"KeyId\":\"%s\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"))
+                .body("message", equalTo(keyArn + " is pending import."));
+    }
+
     private static String keyManagementRequest(String operation, String keyArn) {
         return switch (operation) {
             case "UpdateAlias" -> {
