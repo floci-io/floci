@@ -93,4 +93,37 @@ class NeptuneGremlinProxyRelayTest {
             }
         }
     }
+
+    @Test
+    void keepsHealthyIdleConnectionOpenBeyondRelayShutdownDeadline() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket freePort = new ServerSocket(0)) {
+            int proxyPort = freePort.getLocalPort();
+            NeptuneGremlinProxy proxy = new NeptuneGremlinProxy(
+                    "cluster", "127.0.0.1", backendServer.getLocalPort());
+            freePort.close();
+            proxy.start(proxyPort);
+
+            try (Socket client = new Socket("127.0.0.1", proxyPort)) {
+                client.setSoTimeout(5_000);
+                byte[] request = "PING".getBytes(StandardCharsets.US_ASCII);
+                client.getOutputStream().write(request);
+                client.getOutputStream().flush();
+
+                try (Socket backend = backendServer.accept()) {
+                    backend.setSoTimeout(5_000);
+                    assertEquals("PING", new String(backend.getInputStream().readNBytes(request.length),
+                            StandardCharsets.US_ASCII));
+                    Thread.sleep(2_200);
+
+                    backend.getOutputStream().write("PONG".getBytes(StandardCharsets.US_ASCII));
+                    backend.getOutputStream().flush();
+                    assertEquals("PONG", new String(client.getInputStream().readNBytes(4),
+                            StandardCharsets.US_ASCII));
+                }
+            } finally {
+                proxy.stop();
+            }
+        }
+    }
 }

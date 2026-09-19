@@ -8,6 +8,7 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Shared TCP auth-proxy skeleton for the Redis (RESP) wire protocol. Intercepts the
@@ -165,11 +166,25 @@ public abstract class AbstractRedisAuthProxy {
      * relays under load can stall delivery of backend responses (e.g. PING/PONG) to the client.
      */
     private void bridge(Socket client, Socket backend) {
+        CountDownLatch firstRelayDone = new CountDownLatch(1);
         Thread t1 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-c2b-" + resourceId)
-                .start(() -> relay(client, backend));
+                .start(() -> {
+                    try {
+                        relay(client, backend);
+                    } finally {
+                        firstRelayDone.countDown();
+                    }
+                });
         Thread t2 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-b2c-" + resourceId)
-                .start(() -> relay(backend, client));
+                .start(() -> {
+                    try {
+                        relay(backend, client);
+                    } finally {
+                        firstRelayDone.countDown();
+                    }
+                });
         try {
+            firstRelayDone.await();
             t1.join(RELAY_JOIN_TIMEOUT_MILLIS);
             t2.join(RELAY_JOIN_TIMEOUT_MILLIS);
         } catch (InterruptedException e) {

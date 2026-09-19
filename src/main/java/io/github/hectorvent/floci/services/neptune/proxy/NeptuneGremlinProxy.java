@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Transparent TCP proxy for a single Neptune DB cluster's Gremlin endpoint.
@@ -85,11 +86,25 @@ public class NeptuneGremlinProxy {
      * for I/O-bound work can stall WebSocket frame delivery under high concurrency.
      */
     private void bridge(Socket client, Socket backend) {
+        CountDownLatch firstRelayDone = new CountDownLatch(1);
         Thread t1 = Thread.ofPlatform().daemon(true).name("neptune-relay-c2b-" + clusterId)
-                .start(() -> pipe(client, backend));
+                .start(() -> {
+                    try {
+                        pipe(client, backend);
+                    } finally {
+                        firstRelayDone.countDown();
+                    }
+                });
         Thread t2 = Thread.ofPlatform().daemon(true).name("neptune-relay-b2c-" + clusterId)
-                .start(() -> pipe(backend, client));
+                .start(() -> {
+                    try {
+                        pipe(backend, client);
+                    } finally {
+                        firstRelayDone.countDown();
+                    }
+                });
         try {
+            firstRelayDone.await();
             t1.join(RELAY_JOIN_TIMEOUT_MILLIS);
             t2.join(RELAY_JOIN_TIMEOUT_MILLIS);
         } catch (InterruptedException e) {
