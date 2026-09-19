@@ -1655,7 +1655,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo("Digest is invalid length for algorithm ED25519_PH_SHA_512."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({
             "HMAC_256, GENERATE_VERIFY_MAC, Sign",
@@ -1689,7 +1688,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @Test
     void signRejectsAnUnknownSigningAlgorithmBeforeLookingUpTheKey() {
         given()
@@ -1707,7 +1705,6 @@ class KmsIntegrationTest {
                         + "ED25519_PH_SHA_512, SM2DSA, ML_DSA_SHAKE_256]"));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({"Sign", "Verify"})
     void signAndVerifyRequireASigningAlgorithm(String operation) {
@@ -1726,10 +1723,7 @@ class KmsIntegrationTest {
                         + "satisfy constraint: Member must not be null"));
     }
 
-    /**
-     * Checked against real AWS in us-east-1. SYMMETRIC_DEFAULT is not in the modeled enum, yet KMS
-     * answers it with the key spec error, not a validation error.
-     */
+    /** SYMMETRIC_DEFAULT is not in the modeled enum, yet KMS answers it with the key spec error. */
     @ParameterizedTest
     @CsvSource({
             "RSA_2048, ECDSA_SHA_256, Sign",
@@ -1755,7 +1749,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo("Algorithm " + algorithm + " is incompatible with key spec " + keySpec + "."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @Test
     void signRejectsAnEncryptionAlgorithmAsASigningAlgorithm() {
         String keyArn = createKeyArn("RSA_2048", "SIGN_VERIFY");
@@ -1772,7 +1765,6 @@ class KmsIntegrationTest {
                 .body("message", startsWith("1 validation error detected: Value 'RSAES_OAEP_SHA_256' at 'signingAlgorithm'"));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({
             "ECC_NIST_P256, ECDSA_SHA_256, 20, Sign",
@@ -1801,7 +1793,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo("Digest is invalid length for algorithm " + algorithm + "."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @Test
     void signChecksTheKeySpecBeforeTheDigestLength() {
         String keyArn = createKeyArn("ECC_NIST_P256", "SIGN_VERIFY");
@@ -1818,7 +1809,7 @@ class KmsIntegrationTest {
                 .body("message", equalTo("Algorithm ECDSA_SHA_384 is incompatible with key spec ECC_NIST_P256."));
     }
 
-    /** Checked against real AWS in us-east-1. The key state is checked before the algorithm. */
+    /** The key state is checked before the algorithm. */
     @ParameterizedTest
     @CsvSource({
             "RSA_2048, SIGN_VERIFY, Sign, RSASSA_PSS_SHA_256",
@@ -1843,7 +1834,7 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is disabled."));
     }
 
-    /** Checked against real AWS in us-east-1. The key state is checked before the algorithm. */
+    /** The key state is checked before the algorithm. */
     @ParameterizedTest
     @CsvSource({
             "ECC_NIST_P256, SIGN_VERIFY, Sign, ECDSA_SHA_256",
@@ -1866,7 +1857,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending deletion."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({
             "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, Encrypt, SYMMETRIC_DEFAULT",
@@ -1889,7 +1879,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending import."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @Test
     void reEncryptRejectsADestinationKeyPendingImport() {
         String sourceArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
@@ -1905,7 +1894,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo(destinationArn + " is pending import."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({"Decrypt, false", "Decrypt, true", "ReEncrypt, false"})
     void ciphertextOfDeletedKeyMaterialReportsPendingImport(String operation, boolean withKeyId) throws Exception {
@@ -1929,7 +1917,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending import."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({
             "EnableKey, AWS_KMS",
@@ -1958,7 +1945,7 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending deletion."));
     }
 
-    /** Checked against real AWS in us-east-1. The key state is checked before the key spec. */
+    /** The key state is checked before the key spec. */
     @ParameterizedTest
     @CsvSource({
             "ECC_NIST_P256, SIGN_VERIFY, AWS_KMS, is pending deletion.",
@@ -1981,7 +1968,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " " + state));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @Test
     void getPublicKeyWorksOnADisabledKey() {
         String keyArn = createKeyArn("RSA_2048", "SIGN_VERIFY");
@@ -2019,7 +2005,6 @@ class KmsIntegrationTest {
         };
     }
 
-    /** Checked against real AWS in us-east-1. The key usage is checked before the key state. */
     @ParameterizedTest
     @CsvSource({
             "HMAC_256, GENERATE_VERIFY_MAC, DisableKey, Sign, RSASSA_PSS_SHA_256",
@@ -2038,7 +2023,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
     }
 
-    /** Checked against real AWS in us-east-1. The error has no message. */
     @ParameterizedTest
     @CsvSource({
             "ECC_NIST_P256, ECDSA_SHA_256, true",
@@ -2061,7 +2045,6 @@ class KmsIntegrationTest {
                 .body("message", nullValue());
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({
             "RSA_2048, RSASSA_PSS_SHA_256, RAW, 1, 1",
@@ -2090,7 +2073,6 @@ class KmsIntegrationTest {
                 .body("message", nullValue());
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({
             "RSA_2048, SIGN_VERIFY, GenerateMac",
@@ -2108,7 +2090,6 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " key usage is " + keyUsage + " which is not valid for " + operation + "."));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({"GenerateMac, FOO", "VerifyMac, FOO", "GenerateMac, hmac_sha_256"})
     void macOperationsRejectAnUnknownMacAlgorithmBeforeLookingUpTheKey(String operation, String algorithm) {
@@ -2121,7 +2102,6 @@ class KmsIntegrationTest {
                         + "[HMAC_SHA_384, HMAC_SHA_256, HMAC_SHA_224, HMAC_SHA_512]"));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({"GenerateMac", "VerifyMac"})
     void macOperationsRequireAMacAlgorithm(String operation) {
@@ -2134,7 +2114,6 @@ class KmsIntegrationTest {
                         + "satisfy constraint: Member must not be null"));
     }
 
-    /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({"GenerateMac, HMAC_SHA_512", "GenerateMac, HMAC_SHA_224", "VerifyMac, HMAC_SHA_384"})
     void macOperationsRejectAnAlgorithmTheKeySpecDoesNotSupport(String operation, String algorithm) {
