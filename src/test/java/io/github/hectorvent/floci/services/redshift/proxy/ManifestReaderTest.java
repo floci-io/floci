@@ -59,4 +59,20 @@ class ManifestReaderTest {
                 ManifestReader.resolveManifestKeys("mybucket", "manifest.json", s3));
     }
 
+    @Test
+    void parseManifest_missingMandatoryFlagDefaultsToFalse_skipsMissingFile() {
+        S3Service s3 = Mockito.mock(S3Service.class);
+        String manifestJson = "{\"entries\": ["
+                + "{\"url\": \"s3://mybucket/data/file1.csv\"},"
+                + "{\"url\": \"s3://mybucket/data/missing.csv\"}"
+                + "]}";
+        S3Object obj = new S3Object();
+        obj.setData(manifestJson.getBytes(StandardCharsets.UTF_8));
+        when(s3.getObject("mybucket", "manifest.json")).thenReturn(obj);
+        when(s3.objectExists("mybucket", "data/file1.csv")).thenReturn(true);
+        when(s3.objectExists("mybucket", "data/missing.csv")).thenReturn(false);
+
+        List<String> keys = ManifestReader.resolveManifestKeys("mybucket", "manifest.json", s3);
+        assertEquals(List.of("data/file1.csv"), keys);
+    }
 }

@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import java.util.function.IntConsumer;
+import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -415,15 +416,15 @@ public final class S3CopySimulator {
             return true;
         }
 
-        List<String> effectiveColumns = spec.columns();
-        if (spec.jsonAuto() && (effectiveColumns == null || effectiveColumns.isEmpty())) {
-            effectiveColumns = discoverTableColumns(client, backend, spec, txStatus, onStatusChange);
-            if (effectiveColumns == null) {
-                return true;
-            }
-        }
-
         try {
+            List<String> effectiveColumns = spec.columns();
+            if (spec.jsonAuto() && (effectiveColumns == null || effectiveColumns.isEmpty())) {
+                effectiveColumns = discoverTableColumns(client, backend, spec, txStatus, onStatusChange);
+                if (effectiveColumns == null) {
+                    return true;
+                }
+            }
+
             OutputStream backendOut = backend.getOutputStream();
             backendOut.write(PostgresWireDecoder.encodeQuery(copyBackendSql(spec, effectiveColumns)));
             backendOut.flush();
@@ -518,7 +519,11 @@ public final class S3CopySimulator {
                 ? effectiveColumns
                 : spec.columns();
         if (cols != null && !cols.isEmpty()) {
-            sql.append(" (").append(String.join(", ", cols)).append(")");
+            sql.append(" (")
+                    .append(cols.stream()
+                            .map(c -> "\"" + c.replace("\"", "\"\"") + "\"")
+                            .collect(Collectors.joining(", ")))
+                    .append(")");
         }
         boolean csv = spec.csv() || spec.jsonAuto();
         sql.append(" FROM STDIN WITH (FORMAT ").append(csv ? "csv" : "text");
@@ -560,7 +565,7 @@ public final class S3CopySimulator {
                             ? effectiveColumns
                             : spec.columns();
                     CopyDataOutputStream copyDataOut = new CopyDataOutputStream(backendOut);
-                    JsonLinesToCsvConverter.convert(in, targetCols, copyDataOut);
+                    JsonLinesToCsvConverter.convert(in, targetCols, copyDataOut, spec.jsonAutoIgnoreCase());
                     copyDataOut.flush();
                 } else {
                     if (i == 0 && spec.headerLines() > 0) {
@@ -588,33 +593,13 @@ public final class S3CopySimulator {
     private static List<String> discoverTableColumns(Socket client, Socket backend,
                                                      CopyStatementParser.S3CopyFrom spec,
                                                      char txStatus, IntConsumer onStatusChange) throws IOException {
-        String rawTable = spec.targetTable();
-        String schemaName = null;
-        String tableName = rawTable;
-        int dot = rawTable.lastIndexOf('.');
-        if (dot > 0) {
-            schemaName = rawTable.substring(0, dot).replace("\"", "").trim();
-            tableName = rawTable.substring(dot + 1).replace("\"", "").trim();
-        } else {
-            tableName = tableName.replace("\"", "").trim();
-        }
-
-        StringBuilder query = new StringBuilder(
-                "SELECT a.attname FROM pg_catalog.pg_attribute a "
-                + "JOIN pg_catalog.pg_class c ON a.attrelid = c.oid "
-                + "JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid "
-                + "WHERE lower(c.relname) = '")
-                .append(quoteLiteral(tableName.toLowerCase()))
-                .append("' AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'v', 'm', 'p')");
-        if (schemaName != null) {
-            query.append(" AND lower(n.nspname) = '").append(quoteLiteral(schemaName.toLowerCase())).append("'");
-        } else {
-            query.append(" AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')");
-        }
-        query.append(" ORDER BY a.attnum");
+        String query = "SELECT a.attname FROM pg_catalog.pg_attribute a "
+                + "WHERE a.attrelid = to_regclass('" + quoteLiteral(spec.targetTable()) + "') "
+                + "AND a.attnum > 0 AND NOT a.attisdropped "
+                + "ORDER BY a.attnum";
 
         OutputStream backendOut = backend.getOutputStream();
-        backendOut.write(PostgresWireDecoder.encodeQuery(query.toString()));
+        backendOut.write(PostgresWireDecoder.encodeQuery(query));
         backendOut.flush();
 
         PostgresWireDecoder backendDecoder = new PostgresWireDecoder(backend.getInputStream());

@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
@@ -22,6 +21,10 @@ final class JsonLinesToCsvConverter {
     }
 
     static void convert(InputStream in, List<String> targetColumns, OutputStream out) throws IOException {
+        convert(in, targetColumns, out, false);
+    }
+
+    static void convert(InputStream in, List<String> targetColumns, OutputStream out, boolean ignoreCase) throws IOException {
         if (targetColumns == null || targetColumns.isEmpty()) {
             // Catalog-based column discovery for FORMAT AS JSON 'auto' only runs over the Simple
             // Query protocol; over Extended Query the column list is fixed at Parse time, before
@@ -32,61 +35,75 @@ final class JsonLinesToCsvConverter {
                             + "Extended Query protocol; specify columns, or connect with "
                             + "preferQueryMode=simple to use catalog-based column discovery", null);
         }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-        List<String> lowerColumns = targetColumns.stream().map(String::toLowerCase).toList();
-        String line;
 
-        while ((line = reader.readLine()) != null) {
-            String trimmed = line.trim();
-            if (trimmed.isEmpty()) {
-                continue;
-            }
-            JsonNode rootNode;
-            try {
-                rootNode = MAPPER.readTree(trimmed);
-            } catch (IOException e) {
-                String preview = trimmed.length() > 60 ? trimmed.substring(0, 60) + "..." : trimmed;
-                throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
-                        "JSON parse error in S3 data around '" + preview + "': " + e.getMessage(), e);
-            }
-            if (!rootNode.isObject()) {
-                continue;
-            }
-            Map<String, JsonNode> fieldMap = new HashMap<>();
-            Iterator<Map.Entry<String, JsonNode>> fields = rootNode.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> entry = fields.next();
-                fieldMap.put(entry.getKey().toLowerCase(), entry.getValue());
-            }
+        List<String> lookupColumns = ignoreCase
+                ? targetColumns.stream().map(String::toLowerCase).toList()
+                : targetColumns;
 
-            StringBuilder csvLine = new StringBuilder();
-            for (int i = 0; i < lowerColumns.size(); i++) {
-                if (i > 0) {
-                    csvLine.append(',');
+        try (JsonParser parser = MAPPER.getFactory().createParser(in)) {
+            while (parser.nextToken() != null) {
+                JsonNode rootNode;
+                try {
+                    rootNode = MAPPER.readTree(parser);
+                } catch (IOException e) {
+                    throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
+                            "JSON parse error in S3 data: " + e.getMessage(), e);
                 }
-                String col = lowerColumns.get(i);
-                JsonNode val = fieldMap.get(col);
-                if (val == null || val.isNull()) {
-                    // NULL in Postgres CSV is unquoted empty string
+                if (rootNode == null) {
                     continue;
                 }
-                if (val.isNumber() || val.isBoolean()) {
-                    csvLine.append(val.asText());
-                } else if (val.isTextual()) {
-                    String text = val.asText();
-                    if (text.isEmpty()) {
-                        csvLine.append("\"\"");
-                    } else {
-                        csvLine.append(escapeCsv(text));
+                if (!rootNode.isObject()) {
+                    String preview = rootNode.toString();
+                    if (preview.length() > 60) {
+                        preview = preview.substring(0, 60) + "...";
                     }
-                } else {
-                    // Nested Object or Array: serialize as JSON text
-                    csvLine.append(escapeCsv(MAPPER.writeValueAsString(val)));
+                    throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
+                            "JSON value is not an object: " + preview, null);
                 }
+
+                Map<String, JsonNode> fieldMap = null;
+                if (ignoreCase) {
+                    fieldMap = new HashMap<>();
+                    Iterator<Map.Entry<String, JsonNode>> fields = rootNode.fields();
+                    while (fields.hasNext()) {
+                        Map.Entry<String, JsonNode> entry = fields.next();
+                        fieldMap.put(entry.getKey().toLowerCase(), entry.getValue());
+                    }
+                }
+
+                StringBuilder csvLine = new StringBuilder();
+                for (int i = 0; i < lookupColumns.size(); i++) {
+                    if (i > 0) {
+                        csvLine.append(',');
+                    }
+                    String col = lookupColumns.get(i);
+                    JsonNode val = ignoreCase ? fieldMap.get(col) : rootNode.get(col);
+                    if (val == null || val.isNull()) {
+                        // NULL in Postgres CSV is unquoted empty string
+                        continue;
+                    }
+                    if (val.isNumber() || val.isBoolean()) {
+                        csvLine.append(val.asText());
+                    } else if (val.isTextual()) {
+                        String text = val.asText();
+                        if (text.isEmpty()) {
+                            csvLine.append("\"\"");
+                        } else {
+                            csvLine.append(escapeCsv(text));
+                        }
+                    } else {
+                        // Nested Object or Array: serialize as JSON text
+                        csvLine.append(escapeCsv(MAPPER.writeValueAsString(val)));
+                    }
+                }
+                csvLine.append('\n');
+                byte[] bytes = csvLine.toString().getBytes(StandardCharsets.UTF_8);
+                out.write(bytes);
             }
-            csvLine.append('\n');
-            byte[] bytes = csvLine.toString().getBytes(StandardCharsets.UTF_8);
-            out.write(bytes);
+        } catch (IOException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
+                    "JSON parse error in S3 data: " + cause.getMessage(), cause);
         }
         out.flush();
     }

@@ -9,6 +9,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JsonLinesToCsvConverterTest {
 
@@ -22,13 +24,63 @@ class JsonLinesToCsvConverterTest {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
         List<String> columns = List.of("id", "name", "note");
-        JsonLinesToCsvConverter.convert(in, columns, out);
+        JsonLinesToCsvConverter.convert(in, columns, out, true);
 
         String result = out.toString(StandardCharsets.UTF_8);
         String[] lines = result.split("\n");
         assertEquals("1,Alice,\"hello, world\"", lines[0].trim());
         assertEquals("2,\"Bob, \"\"The Builder\"\"\",\"multi\nline\"", lines[1].trim() + "\n" + lines[2].trim());
         assertEquals("3,,", lines[3].trim());
+    }
+
+    @Test
+    void convert_caseSensitiveDefault_matchesExactCase() throws IOException {
+        String ndjson = "{\"Id\": 1, \"id\": 10, \"NAME\": \"Alice\", \"name\": \"Bob\"}\n"
+                + "{\"Id\": 2, \"name\": \"Charlie\"}\n";
+
+        ByteArrayInputStream in = new ByteArrayInputStream(ndjson.getBytes(StandardCharsets.UTF_8));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        List<String> columns = List.of("id", "name");
+        // default ignoreCase = false
+        JsonLinesToCsvConverter.convert(in, columns, out);
+
+        String result = out.toString(StandardCharsets.UTF_8);
+        String[] lines = result.split("\n");
+        assertEquals("10,Bob", lines[0].trim());
+        // Second line has "Id" but not "id", so "id" column is null (empty)
+        assertEquals(",Charlie", lines[1].trim());
+    }
+
+    @Test
+    void convert_prettyPrintedMultilineJson() throws IOException {
+        String prettyJson = "{\n  \"id\": 1,\n  \"name\": \"Alice\"\n}\n"
+                + "{\n  \"id\": 2,\n  \"name\": \"Bob\"\n}\n";
+
+        ByteArrayInputStream in = new ByteArrayInputStream(prettyJson.getBytes(StandardCharsets.UTF_8));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        List<String> columns = List.of("id", "name");
+        JsonLinesToCsvConverter.convert(in, columns, out);
+
+        String result = out.toString(StandardCharsets.UTF_8);
+        String[] lines = result.split("\n");
+        assertEquals("1,Alice", lines[0].trim());
+        assertEquals("2,Bob", lines[1].trim());
+    }
+
+    @Test
+    void convert_nonObjectRoot_throwsException() {
+        String jsonArray = "[{\"id\": 1, \"name\": \"Alice\"}]\n";
+        ByteArrayInputStream in = new ByteArrayInputStream(jsonArray.getBytes(StandardCharsets.UTF_8));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        List<String> columns = List.of("id", "name");
+        S3CopySimulator.S3TransferException ex = assertThrows(
+                S3CopySimulator.S3TransferException.class,
+                () -> JsonLinesToCsvConverter.convert(in, columns, out));
+
+        assertTrue(ex.getMessage().contains("JSON value is not an object"));
     }
 
     @Test
@@ -64,11 +116,11 @@ class JsonLinesToCsvConverterTest {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
         List<String> columns = List.of("id", "name");
-        S3CopySimulator.S3TransferException ex = org.junit.jupiter.api.Assertions.assertThrows(
+        S3CopySimulator.S3TransferException ex = assertThrows(
                 S3CopySimulator.S3TransferException.class,
                 () -> JsonLinesToCsvConverter.convert(in, columns, out));
 
-        org.junit.jupiter.api.Assertions.assertTrue(ex.getMessage().contains("invalid_json"));
+        assertTrue(ex.getMessage().contains("invalid_json"));
     }
 
     @Test
@@ -77,10 +129,10 @@ class JsonLinesToCsvConverterTest {
         ByteArrayInputStream in = new ByteArrayInputStream(ndjson.getBytes(StandardCharsets.UTF_8));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
-        org.junit.jupiter.api.Assertions.assertThrows(
+        assertThrows(
                 S3CopySimulator.S3TransferException.class,
                 () -> JsonLinesToCsvConverter.convert(in, List.of(), out));
-        org.junit.jupiter.api.Assertions.assertThrows(
+        assertThrows(
                 S3CopySimulator.S3TransferException.class,
                 () -> JsonLinesToCsvConverter.convert(in, null, out));
     }

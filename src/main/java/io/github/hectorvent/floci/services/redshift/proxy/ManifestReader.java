@@ -43,7 +43,7 @@ final class ManifestReader {
                 continue;
             }
             String url = urlNode.asText();
-            boolean mandatory = !entry.has("mandatory") || entry.get("mandatory").asBoolean(true);
+            boolean mandatory = entry.has("mandatory") && entry.get("mandatory").asBoolean(false);
             if (!url.startsWith("s3://")) {
                 throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
                         "Invalid S3 URL in manifest: " + url, null);

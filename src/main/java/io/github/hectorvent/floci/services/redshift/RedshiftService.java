@@ -480,7 +480,6 @@ public class RedshiftService {
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
     }
 
-    /** One page of integrations plus the marker to continue with, or {@code null} at the end. */
     public synchronized void updateIntegrationBackfillProgress(String accountId, String integrationArn,
                                                                 String backfillLastEvaluatedKey,
                                                                 boolean backfillCompleted) {
@@ -501,6 +500,7 @@ public class RedshiftService {
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
     }
 
+    /** One page of integrations plus the marker to continue with, or {@code null} at the end. */
     public record IntegrationPage(List<Integration> integrations, String marker) {}
 
     /** One {@code Filters.DescribeIntegrationsFilter.N} entry. */

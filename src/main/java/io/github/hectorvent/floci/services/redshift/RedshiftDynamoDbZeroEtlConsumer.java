@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
@@ -137,27 +138,29 @@ public class RedshiftDynamoDbZeroEtlConsumer {
     }
 
     private void pollBackfillPage(Integration integration) {
-        String tableName = extractTableName(integration.getSourceStreamArn());
-        String region = AwsArnUtils.parse(integration.getSourceStreamArn()).region();
-        TableDefinition table = dynamoDbService.describeTable(tableName, region);
-        JsonNode exclusiveStartKey = parseBackfillKey(integration.getBackfillLastEvaluatedKey());
+        RequestScopes.runAs(integration.getAccountId(), () -> {
+            String tableName = extractTableName(integration.getSourceStreamArn());
+            String region = AwsArnUtils.parse(integration.getSourceStreamArn()).region();
+            TableDefinition table = dynamoDbService.describeTable(tableName, region);
+            JsonNode exclusiveStartKey = parseBackfillKey(integration.getBackfillLastEvaluatedKey());
 
-        DynamoDbService.ScanResult result = dynamoDbService.scan(tableName, null, null, null, null,
-                BATCH_SIZE, exclusiveStartKey, region);
-        if (!result.items().isEmpty()) {
-            List<DynamoDbStreamRecord> records = result.items().stream()
-                    .map(item -> toBackfillRecord(integration, item, table))
-                    .toList();
-            writer.writeBatch(integration.getAccountId(), integration.getTargetClusterIdentifier(),
-                    integration.getLandingTableName(), records);
-        }
+            DynamoDbService.ScanResult result = dynamoDbService.scan(tableName, null, null, null, null,
+                    BATCH_SIZE, exclusiveStartKey, region);
+            if (!result.items().isEmpty()) {
+                List<DynamoDbStreamRecord> records = result.items().stream()
+                        .map(item -> toBackfillRecord(integration, item, table))
+                        .toList();
+                writer.writeBatch(integration.getAccountId(), integration.getTargetClusterIdentifier(),
+                        integration.getLandingTableName(), records);
+            }
 
-        boolean completed = result.lastEvaluatedKey() == null;
-        String nextKey = completed ? null : writeAsString(result.lastEvaluatedKey());
-        redshiftService.updateIntegrationBackfillProgress(integration.getAccountId(), integration.getIntegrationArn(),
-                nextKey, completed);
-        integration.setBackfillLastEvaluatedKey(nextKey);
-        integration.setBackfillCompleted(completed);
+            boolean completed = result.lastEvaluatedKey() == null;
+            String nextKey = completed ? null : writeAsString(result.lastEvaluatedKey());
+            redshiftService.updateIntegrationBackfillProgress(integration.getAccountId(), integration.getIntegrationArn(),
+                    nextKey, completed);
+            integration.setBackfillLastEvaluatedKey(nextKey);
+            integration.setBackfillCompleted(completed);
+        });
     }
 
     private DynamoDbStreamRecord toBackfillRecord(Integration integration, JsonNode item, TableDefinition table) {

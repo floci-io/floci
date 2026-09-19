@@ -217,20 +217,25 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 `COPY ... FROM STDIN`.
 
 - Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
-  `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'` (or `JSON 'auto'`), `MANIFEST`, and an explicit column list.
+  `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'`, `FORMAT AS JSON 'auto ignorecase'` (or bare `JSON 'auto'`),
+  `MANIFEST`, and an explicit column list.
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
-- `FORMAT AS JSON 'auto'` (or `JSON 'auto'`) loads Newline-Delimited JSON (NDJSON) records, mapping
-  JSON keys to table columns case-insensitively. When columns are not specified in the COPY statement,
-  table column names and order are automatically discovered from the database catalog, but only over
-  the **Simple Query protocol**. Over Extended Query (the default for a JDBC `PreparedStatement`, and
-  for a plain `Statement` under recent pgjdbc versions) the column list is fixed by the time `Parse`
-  is sent, before any backend round trip is possible, so catalog discovery cannot run there: omitting
-  the column list fails the COPY with a clear error instead of silently guessing. Specify the column
-  list explicitly for Extended Query, or connect with `preferQueryMode=simple` to use discovery.
-  Nested objects and arrays are serialized as JSON strings.
+- `FORMAT AS JSON 'auto'` loads JSON objects, mapping JSON keys to table columns with exact case
+  sensitivity. `FORMAT AS JSON 'auto ignorecase'` performs case-insensitive key matching. Input
+  objects can be separated by any whitespace, including multiline pretty-printed JSON. Non-object root
+  values abort the load. When columns are not specified in the COPY statement, table column names and
+  order are automatically discovered from the database catalog, but only over the **Simple Query
+  protocol**. Over Extended Query (the default for a JDBC `PreparedStatement`, and for a plain
+  `Statement` under recent pgjdbc versions) the column list is fixed by the time `Parse` is sent,
+  before any backend round trip is possible, so catalog discovery cannot run there: omitting the column
+  list fails the COPY with a clear error instead of silently guessing. Specify the column list explicitly
+  for Extended Query, or connect with `preferQueryMode=simple` to use discovery. Nested objects and
+  arrays are serialized as JSON strings.
 - `MANIFEST` resolves file keys from a JSON manifest file (`{"entries": [{"url": "s3://...", "mandatory": boolean}]}`),
   compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
+  When `mandatory` is omitted, it defaults to `false`. All entries in the manifest must reside in the same S3
+  bucket as the manifest file itself; cross-bucket manifest entries are rejected as an intentional deviation.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
 - `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster, exist in

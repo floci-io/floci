@@ -969,7 +969,7 @@ class S3CopySimulatorTest {
         joinBackend(backend);
 
         String sql = fabricated.get();
-        assertTrue(sql.contains("COPY t (a, b) FROM STDIN"), sql);
+        assertTrue(sql.contains("COPY t (\"a\", \"b\") FROM STDIN"), sql);
         assertTrue(sql.toUpperCase().contains("FORMAT TEXT"), sql);
         assertTrue(sql.contains("DELIMITER '|'"), sql);
         assertFalse(sql.toUpperCase().contains("HEADER"), sql);
@@ -990,7 +990,7 @@ class S3CopySimulatorTest {
         joinBackend(backend);
 
         String sql = fabricated.get();
-        assertTrue(sql.contains("COPY t (a, b) FROM STDIN"), sql);
+        assertTrue(sql.contains("COPY t (\"a\", \"b\") FROM STDIN"), sql);
         assertTrue(sql.toUpperCase().contains("FORMAT CSV"), sql);
         assertTrue(sql.contains("DELIMITER ','"), sql);
     }
@@ -1346,7 +1346,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "users", List.of("id", "name"), "wh", "users.json", null, 0, false, false, null, null, true, false);
 
-        assertEquals("COPY users (id, name) FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+        assertEquals("COPY users (\"id\", \"name\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
                 S3CopySimulator.copyBackendSql(spec));
 
         String ndjson = "{\"id\": 1, \"name\": \"Alice\"}\n{\"id\": 2, \"name\": \"Bob\"}\n";
@@ -1364,11 +1364,19 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void copyBackendSql_quotesColumnIdentifiers() {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "orders", List.of("order", "user", "col\"name"), "wh", "orders.csv", ",", 0, false, true, null, null);
+        assertEquals("COPY orders (\"order\", \"user\", \"col\"\"name\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+                S3CopySimulator.copyBackendSql(spec));
+    }
+
+    @Test
     void copyBackendSql_withJsonAuto_forcesCommaDelimiter() {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "users", List.of("id"), "wh", "users.json", "\t", 0, false, false, null, null, true, false);
 
-        assertEquals("COPY users (id) FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
+        assertEquals("COPY users (\"id\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')",
                 S3CopySimulator.copyBackendSql(spec));
     }
 
@@ -1421,7 +1429,7 @@ class S3CopySimulatorTest {
 
             PostgresWireDecoder.FrontendMessage q2 = in.nextMessage();
             assertEquals('Q', q2.type());
-            assertEquals("COPY public.items (id, name) FROM STDIN WITH (FORMAT csv, DELIMITER ',')", q2.getSql());
+            assertEquals("COPY public.items (\"id\", \"name\") FROM STDIN WITH (FORMAT csv, DELIMITER ',')", q2.getSql());
 
             out.write(new byte[]{'G', 0, 0, 0, 4});
             out.flush();
@@ -1445,6 +1453,37 @@ class S3CopySimulatorTest {
         assertEquals('C', msg1.type());
         PostgresWireDecoder.FrontendMessage msg2 = clientIn.nextMessage();
         assertEquals('Z', msg2.type());
+    }
+
+    @Test
+    void runCopyFrom_withJsonAuto_releasesIamSessionEvenWhenCatalogDiscoveryFails() throws Exception {
+        when(s3.objectExists("wh", "data.json")).thenReturn(true);
+        IamService iamService = mock(IamService.class);
+        IamRole role = mock(IamRole.class);
+        when(role.getAssumeRolePolicyDocument()).thenReturn(
+                "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"redshift.amazonaws.com\"}}]}");
+        when(iamService.findRole("000000000000", "Role")).thenReturn(java.util.Optional.of(role));
+
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "missing_table", List.of(), "wh", "data.json", null, 0, false, false, null,
+                "arn:aws:iam::000000000000:role/Role", true, false);
+
+        Thread backend = backendThread(() -> {
+            PostgresWireDecoder in = new PostgresWireDecoder(testBackend.getInputStream());
+            OutputStream out = testBackend.getOutputStream();
+
+            PostgresWireDecoder.FrontendMessage q1 = in.nextMessage();
+            assertEquals('Q', q1.type());
+            writeCommandComplete(out, "SELECT 0");
+            writeReadyForQuery(out, 'I');
+        });
+
+        boolean handled = S3CopySimulator.runCopyFrom(simClient, simBackend, spec, s3, iamService, 'I');
+        joinBackend(backend);
+        assertTrue(handled);
+
+        verify(iamService, times(1)).registerSessionForAccount(eq("000000000000"), any(), any(), any(), any(), any(), any());
+        verify(iamService, times(1)).unregisterSession(eq("000000000000"), any());
     }
 
     @Test

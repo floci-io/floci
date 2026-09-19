@@ -28,7 +28,25 @@ public final class CopyStatementParser {
             String nullAs,
             String iamRoleArn,
             boolean jsonAuto,
+            boolean jsonAutoIgnoreCase,
             boolean manifest) implements S3Statement {
+
+        public S3CopyFrom(
+                String targetTable,
+                List<String> columns,
+                String bucket,
+                String keyOrPrefix,
+                String delimiter,
+                int headerLines,
+                boolean gzip,
+                boolean csv,
+                String nullAs,
+                String iamRoleArn,
+                boolean jsonAuto,
+                boolean manifest) {
+            this(targetTable, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
+                    nullAs, iamRoleArn, jsonAuto, false, manifest);
+        }
 
         public S3CopyFrom(
                 String targetTable,
@@ -42,7 +60,7 @@ public final class CopyStatementParser {
                 String nullAs,
                 String iamRoleArn) {
             this(targetTable, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
-                    nullAs, iamRoleArn, false, false);
+                    nullAs, iamRoleArn, false, false, false);
         }
     }
 
@@ -107,7 +125,7 @@ public final class CopyStatementParser {
     private static final Pattern GZIP_PATTERN = Pattern.compile("(?i)\\bGZIP\\b");
     private static final Pattern CSV_PATTERN = Pattern.compile("(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?CSV\\b");
     private static final Pattern JSON_AUTO_PATTERN = Pattern.compile(
-            "(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?JSON(?:\\s+AS)?\\s+['\"]auto['\"]");
+            "(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?JSON(?:\\s+AS)?\\s+['\"]auto(?:\\s+(ignorecase))?['\"]");
 
 
     /**
@@ -352,6 +370,7 @@ public final class CopyStatementParser {
         boolean csv = false;
         boolean gzip = false;
         boolean jsonAuto = false;
+        boolean jsonAutoIgnoreCase = false;
         boolean manifest = false;
         String nullAs = null;
         String delimiter = null;
@@ -401,6 +420,7 @@ public final class CopyStatementParser {
                 }
                 seenJson = true;
                 jsonAuto = true;
+                jsonAutoIgnoreCase = jsonAutoMatcher.group(1) != null;
                 offset = jsonAutoMatcher.end();
             } else if (matchClause(manifestMatcher, offset, len)) {
                 if (seenManifest) {
@@ -461,7 +481,7 @@ public final class CopyStatementParser {
         }
 
         return new S3CopyFrom(table, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
-                nullAs, iamRoleArn, jsonAuto, manifest);
+                nullAs, iamRoleArn, jsonAuto, jsonAutoIgnoreCase, manifest);
     }
 
     private static boolean matchClause(Matcher m, int start, int end) {

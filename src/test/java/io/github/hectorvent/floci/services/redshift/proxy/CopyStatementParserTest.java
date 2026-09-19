@@ -344,12 +344,23 @@ class CopyStatementParserTest {
     void parseCopy_jsonAuto_variations() {
         CopyStatementParser.S3CopyFrom c1 = copyFrom("COPY tbl FROM 's3://b/data.json' JSON 'auto'");
         assertTrue(c1.jsonAuto());
+        assertFalse(c1.jsonAutoIgnoreCase());
 
         CopyStatementParser.S3CopyFrom c2 = copyFrom("COPY tbl FROM 's3://b/data.json' JSON AS 'auto'");
         assertTrue(c2.jsonAuto());
+        assertFalse(c2.jsonAutoIgnoreCase());
 
         CopyStatementParser.S3CopyFrom c3 = copyFrom("COPY tbl FROM 's3://b/data.json' FORMAT JSON 'auto'");
         assertTrue(c3.jsonAuto());
+        assertFalse(c3.jsonAutoIgnoreCase());
+
+        CopyStatementParser.S3CopyFrom c4 = copyFrom("COPY tbl FROM 's3://b/data.json' JSON 'auto ignorecase'");
+        assertTrue(c4.jsonAuto());
+        assertTrue(c4.jsonAutoIgnoreCase());
+
+        CopyStatementParser.S3CopyFrom c5 = copyFrom("COPY tbl FROM 's3://b/data.json' FORMAT AS JSON 'auto ignorecase'");
+        assertTrue(c5.jsonAuto());
+        assertTrue(c5.jsonAutoIgnoreCase());
     }
 
     @Test
