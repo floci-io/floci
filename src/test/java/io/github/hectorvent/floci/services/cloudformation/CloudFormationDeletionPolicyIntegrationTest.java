@@ -6,12 +6,20 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * Verifies the resource-level {@code DeletionPolicy} attribute (issue #1555): {@code Retain} keeps a
@@ -26,6 +34,50 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static final String CUSTOM_AUTH =
             "AWS4-HMAC-SHA256 Credential=111122223333/20260205/eu-west-1/cloudformation/aws4_request";
+
+    @Test
+    void deletingNestedStacksDoesNotExhaustOperationWorkers() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String childTemplateKey = "child-delete-workers-" + suffix + ".json";
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("{\"Resources\":{}}")
+        .when()
+                .put("/nested-stack-templates/" + childTemplateKey)
+        .then()
+                .statusCode(200);
+
+        List<String> stackIds = new ArrayList<>();
+        List<String> stackNames = new ArrayList<>();
+        String childUrl = "http://localhost/nested-stack-templates/" + childTemplateKey;
+        for (int i = 0; i < 16; i++) {
+            String stackName = "nested-delete-worker-" + suffix + "-" + i;
+            String template = "{\"Resources\":{\"Child\":{\"Type\":\"AWS::CloudFormation::Stack\","
+                    + "\"Properties\":{\"TemplateURL\":\"" + childUrl + "\"}}}}";
+            String stackId = createStack(stackName, template);
+            awaitStackStatus(stackId, "CREATE_COMPLETE");
+            stackNames.add(stackName);
+            stackIds.add(stackId);
+        }
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> {
+            try (ExecutorService clients = Executors.newFixedThreadPool(16)) {
+                List<CompletableFuture<Void>> deletes = stackNames.stream()
+                        .map(name -> CompletableFuture.runAsync(() -> deleteStack(name), clients))
+                        .toList();
+                CompletableFuture.allOf(deletes.toArray(CompletableFuture[]::new)).join();
+                for (String stackId : stackIds) {
+                    try {
+                        awaitStackStatus(stackId, "DELETE_COMPLETE");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError("Interrupted while waiting for nested stack deletion", e);
+                    }
+                }
+            }
+        });
+    }
 
     @BeforeAll
     static void configureRestAssured() {
