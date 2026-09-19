@@ -1741,14 +1741,17 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    public Map<String, Object> generateDataKey(String keyId, String keySpec, int numberOfBytes, String region) {
+    public Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes, String region) {
         return generateDataKey(keyId, keySpec, numberOfBytes, Map.of(), region);
     }
 
-    public Map<String, Object> generateDataKey(String keyId, String keySpec, int numberOfBytes,
+    public Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes,
                                                Map<String, String> encryptionContext, String region) {
         resolveKey(keyId, region);
-        int len = (keySpec != null && keySpec.contains("256")) ? 32 : (numberOfBytes > 0 ? numberOfBytes : 32);
+        if ((keySpec == null) == (numberOfBytes == null)) {
+            throw new AwsException("ValidationException", "Please specify either number of bytes or key spec.", 400);
+        }
+        int len = (keySpec != null && keySpec.contains("256")) ? 32 : (numberOfBytes != null ? numberOfBytes : 32);
 
         byte[] plaintext = new byte[len];
         ThreadLocalRandom.current().nextBytes(plaintext);

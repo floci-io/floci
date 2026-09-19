@@ -1915,6 +1915,27 @@ class KmsIntegrationTest {
                 .body("message", equalTo("1 validation error detected: " + error));
     }
 
+    /** The key usage and the key state are checked after this. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "GenerateDataKey|SYMMETRIC_DEFAULT|ENCRYPT_DECRYPT|",
+            "GenerateDataKey|SYMMETRIC_DEFAULT|ENCRYPT_DECRYPT|,\"KeySpec\":\"AES_256\",\"NumberOfBytes\":32",
+            "GenerateDataKeyWithoutPlaintext|SYMMETRIC_DEFAULT|ENCRYPT_DECRYPT|",
+            "GenerateDataKey|RSA_2048|SIGN_VERIFY|",
+            "GenerateDataKey|HMAC_256|GENERATE_VERIFY_MAC|",
+    })
+    void generateDataKeyNeedsEitherKeySpecOrNumberOfBytes(String operation, String keySpec, String keyUsage,
+                                                          String members) {
+        String keyArn = createKeyArn(keySpec, keyUsage);
+        callKms("DisableKey", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
+
+        callKms(operation, "{\"KeyId\":\"%s\"%s}".formatted(keyArn, members == null ? "" : members))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Please specify either number of bytes or key spec."));
+    }
+
     @ParameterizedTest
     @CsvSource({"Encrypt", "Decrypt"})
     void encryptionAlgorithmValidationListsTheEnumInAwsOrder(String operation) {

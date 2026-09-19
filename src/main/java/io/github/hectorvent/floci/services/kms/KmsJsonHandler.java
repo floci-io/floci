@@ -284,7 +284,7 @@ public class KmsJsonHandler {
     private Response handleGenerateDataKey(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
         String spec = readDataKeySpec(request);
-        int numberOfBytes = readNumberOfBytes(request);
+        Integer numberOfBytes = readNumberOfBytes(request);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
         Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
@@ -299,7 +299,7 @@ public class KmsJsonHandler {
     private Response handleGenerateDataKeyWithoutPlaintext(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
         String spec = readDataKeySpec(request);
-        int numberOfBytes = readNumberOfBytes(request);
+        Integer numberOfBytes = readNumberOfBytes(request);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
         Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
@@ -633,10 +633,10 @@ public class KmsJsonHandler {
         return spec;
     }
 
-    private static int readNumberOfBytes(JsonNode request) {
+    private static Integer readNumberOfBytes(JsonNode request) {
         JsonNode numberOfBytes = request.path("NumberOfBytes");
         if (!numberOfBytes.isNumber()) {
-            return 0;
+            return null;
         }
         validateRange("numberOfBytes", numberOfBytes.asInt(), 1, 1024);
         return numberOfBytes.asInt();

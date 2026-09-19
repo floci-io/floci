@@ -1204,7 +1204,7 @@ class KmsServiceTest {
             KmsKey key = createRsaKey();
 
             AwsException ex = assertThrows(AwsException.class, () ->
-                    kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION));
+                    kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION));
 
             assertEquals("InvalidKeyUsageException", ex.getErrorCode());
             assertEquals("Algorithm SYMMETRIC_DEFAULT is incompatible with key spec RSA_2048.", ex.getMessage());
@@ -1215,7 +1215,7 @@ class KmsServiceTest {
             KmsKey key = kmsService.createKey("sign key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
 
             AwsException ex = assertThrows(AwsException.class, () ->
-                    kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION));
+                    kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION));
 
             assertEquals("InvalidKeyUsageException", ex.getErrorCode());
             assertEquals(key.getArn() + " key usage is SIGN_VERIFY which is not valid for GenerateDataKey.",
@@ -1718,7 +1718,7 @@ class KmsServiceTest {
     @Test
     void generateDataKey() {
         KmsKey key = kmsService.createKey(null, REGION);
-        Map<String, Object> result = kmsService.generateDataKey(key.getKeyId(), "AES_256", 0, REGION);
+        Map<String, Object> result = kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION);
 
         assertNotNull(result.get("Plaintext"));
         assertNotNull(result.get("CiphertextBlob"));
