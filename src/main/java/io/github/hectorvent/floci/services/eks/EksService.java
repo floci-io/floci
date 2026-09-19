@@ -212,7 +212,7 @@ public class EksService implements TagHandler, ResourceProvider {
         }
     }
 
-    private void putClusterForAccount(String accountId, Cluster cluster) {
+    void putClusterForAccount(String accountId, Cluster cluster) {
         if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
             aware.putForAccount(accountId, cluster.getName(), cluster);
             return;
@@ -220,25 +220,49 @@ public class EksService implements TagHandler, ResourceProvider {
         storage.put(cluster.getName(), cluster);
     }
 
+    void deleteClusterForAccount(String accountId, String clusterName) {
+        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+            aware.deleteForAccount(accountId, clusterName);
+            return;
+        }
+        storage.delete(clusterName);
+    }
+
     private SecurityGroup createClusterSecurityGroup(String region, String clusterName, String vpcId) {
         String suffix = randomHex(8);
         String groupName = "eks-cluster-sg-" + clusterName + "-" + suffix;
         SecurityGroup sg = ec2Service.createSecurityGroup(region, groupName, CLUSTER_SG_DESCRIPTION, vpcId);
-        List<Tag> tags = List.of(
-                new Tag("Name", groupName),
-                new Tag("kubernetes.io/cluster/" + clusterName, "owned"),
-                new Tag("aws:eks:cluster-name", clusterName)
-        );
-        ec2Service.createTags(region, List.of(sg.getGroupId()), tags);
+        try {
+            List<Tag> tags = List.of(
+                    new Tag("Name", groupName),
+                    new Tag("kubernetes.io/cluster/" + clusterName, "owned"),
+                    new Tag("aws:eks:cluster-name", clusterName)
+            );
+            ec2Service.createTags(region, List.of(sg.getGroupId()), tags);
 
-        UserIdGroupPair selfPair = new UserIdGroupPair();
-        selfPair.setGroupId(sg.getGroupId());
-        IpPermission selfIngress = new IpPermission();
-        selfIngress.setIpProtocol("-1");
-        selfIngress.setUserIdGroupPairs(List.of(selfPair));
-        ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), List.of(selfIngress));
+            UserIdGroupPair selfPair = new UserIdGroupPair();
+            selfPair.setGroupId(sg.getGroupId());
 
-        return sg;
+            IpPermission selfIngress = new IpPermission();
+            selfIngress.setIpProtocol("-1");
+            selfIngress.setUserIdGroupPairs(List.of(selfPair));
+            ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), List.of(selfIngress));
+
+            IpPermission selfEgress = new IpPermission();
+            selfEgress.setIpProtocol("-1");
+            selfEgress.setUserIdGroupPairs(List.of(selfPair));
+            ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), List.of(selfEgress));
+
+            return sg;
+        } catch (RuntimeException e) {
+            try {
+                ec2Service.deleteSecurityGroup(region, sg.getGroupId());
+            } catch (Exception cleanupEx) {
+                LOG.warnv("Failed to clean up cluster security group {0} after configuration failure: {1}",
+                        sg.getGroupId(), cleanupEx.getMessage());
+            }
+            throw e;
+        }
     }
 
     private void deleteClusterSecurityGroup(Cluster cluster) {
@@ -261,7 +285,7 @@ public class EksService implements TagHandler, ResourceProvider {
         }
     }
 
-    private void backfillClusterSecurityGroups() {
+    void backfillClusterSecurityGroups() {
         if (ec2Service == null) {
             return;
         }

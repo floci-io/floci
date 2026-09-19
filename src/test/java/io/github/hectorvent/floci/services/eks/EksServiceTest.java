@@ -48,6 +48,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -1121,6 +1122,11 @@ class EksServiceTest {
         assertEquals(1, sg.getIpPermissions().size());
         assertEquals("-1", sg.getIpPermissions().getFirst().getIpProtocol());
         assertEquals(sgId, sg.getIpPermissions().getFirst().getUserIdGroupPairs().getFirst().getGroupId());
+
+        boolean hasSelfEgress = sg.getIpPermissionsEgress().stream()
+                .anyMatch(p -> "-1".equals(p.getIpProtocol())
+                        && p.getUserIdGroupPairs().stream().anyMatch(u -> sgId.equals(u.getGroupId())));
+        assertTrue(hasSelfEgress, "Security group should have self-referencing outbound egress rule for EFA");
     }
 
     @Test
@@ -1483,5 +1489,33 @@ class EksServiceTest {
         assertNotNull(sgId);
         assertTrue(sgId.startsWith("sg-"));
         assertEquals(nonDefaultAccount, described.getAccountId());
+    }
+
+    @Test
+    void createClusterSecurityGroupCleansUpWhenTaggingFails() {
+        Ec2Service spyEc2 = spy(realEc2Service());
+        spyEc2.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+
+        doThrow(new RuntimeException("Simulated tagging failure"))
+                .when(spyEc2).createTags(any(), any(), any());
+
+        StorageFactory storageFactory = fixedStorageFactory(new InMemoryStorage<>());
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                spyEc2, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setVpcId(defaultVpc);
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("cluster-tag-fail");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        assertThrows(RuntimeException.class, () -> service.createCluster(req));
+
+        List<SecurityGroup> allSgs = spyEc2.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of());
+        boolean leaked = allSgs.stream().anyMatch(sg -> sg.getGroupName().startsWith("eks-cluster-sg-cluster-tag-fail-"));
+        assertFalse(leaked, "Cluster security group should have been deleted when tagging failed");
     }
 }

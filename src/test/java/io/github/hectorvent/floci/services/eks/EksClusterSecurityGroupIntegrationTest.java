@@ -1,17 +1,31 @@
 package io.github.hectorvent.floci.services.eks;
 
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
+import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -24,6 +38,12 @@ class EksClusterSecurityGroupIntegrationTest {
     private static String vpcId;
     private static String subnetId;
     private static String clusterSecurityGroupId;
+
+    @Inject
+    EksService eksService;
+
+    @Inject
+    Ec2Service ec2Service;
 
     @Test
     @Order(1)
@@ -91,7 +111,9 @@ class EksClusterSecurityGroupIntegrationTest {
                 .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.ipPermissions.item.ipProtocol",
                         equalTo("-1"))
                 .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.ipPermissions.item.groups.item.groupId",
-                        equalTo(clusterSecurityGroupId));
+                        equalTo(clusterSecurityGroupId))
+                .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.ipPermissionsEgress.toString()",
+                        containsString(clusterSecurityGroupId));
     }
 
     @Test
@@ -136,5 +158,52 @@ class EksClusterSecurityGroupIntegrationTest {
         given().contentType(JSON)
                 .when().delete("/clusters/" + noVpcCluster)
                 .then().statusCode(200);
+    }
+
+    @Test
+    @Order(7)
+    void backfillClusterSecurityGroupsRunsUnderAccountScopeInQuarkus() {
+        String nonDefaultAccount = "111122223333";
+        String nonDefaultVpcId = RequestScopes.callAs(nonDefaultAccount, () ->
+                ec2Service.createVpc("us-east-1", "10.10.0.0/16", false).getVpcId());
+
+        Cluster nonDefaultCluster = new Cluster();
+        nonDefaultCluster.setName("it-nondefault-cluster");
+        nonDefaultCluster.setArn("arn:aws:eks:us-east-1:" + nonDefaultAccount + ":cluster/it-nondefault-cluster");
+        nonDefaultCluster.setAccountId(nonDefaultAccount);
+        nonDefaultCluster.setStatus(ClusterStatus.ACTIVE);
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setVpcId(nonDefaultVpcId);
+        nonDefaultCluster.setResourcesVpcConfig(vpcConfig);
+
+        eksService.putClusterForAccount(nonDefaultAccount, nonDefaultCluster);
+
+        try {
+            eksService.backfillClusterSecurityGroups();
+
+            Cluster backfilled = eksService.findAuthenticationCluster(nonDefaultAccount, "it-nondefault-cluster").orElseThrow();
+            String backfilledSgId = backfilled.getResourcesVpcConfig().getClusterSecurityGroupId();
+            assertNotNull(backfilledSgId);
+            assertTrue(backfilledSgId.startsWith("sg-"));
+
+            // Verify the security group exists in EC2 under the non-default account and has ownerId matching it
+            SecurityGroup nonDefaultSg = RequestScopes.callAs(nonDefaultAccount, () ->
+                    ec2Service.describeSecurityGroups("us-east-1", List.of(backfilledSgId), List.of(), Map.of())
+                            .stream().findFirst().orElse(null));
+            assertNotNull(nonDefaultSg, "Security group should exist in EC2 under non-default account");
+            assertEquals(nonDefaultAccount, nonDefaultSg.getOwnerId(), "Security group ownerId should match non-default account");
+
+            // Verify it does NOT exist under the default account in EC2
+            SecurityGroup defaultAccountSg = RequestScopes.callAs("000000000000", () ->
+                    ec2Service.describeSecurityGroups("us-east-1", List.of(backfilledSgId), List.of(), Map.of())
+                            .stream().findFirst().orElse(null));
+            assertNull(defaultAccountSg, "Security group should not exist in EC2 under default account");
+
+            // Clean up security group
+            RequestScopes.runAs(nonDefaultAccount, () -> ec2Service.deleteSecurityGroup("us-east-1", backfilledSgId));
+        } finally {
+            RequestScopes.runAs(nonDefaultAccount, () -> ec2Service.deleteVpc("us-east-1", nonDefaultVpcId));
+            eksService.deleteClusterForAccount(nonDefaultAccount, "it-nondefault-cluster");
+        }
     }
 }
