@@ -1900,6 +1900,22 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "GenerateDataKey|\"KeySpec\":\"FOO\"|Value 'FOO' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, ML_DSA_44, ML_DSA_65, ML_DSA_87]",
+            "GenerateDataKey|\"KeySpec\":\"RSA_2048\"|Value 'RSA_2048' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, ML_DSA_44, ML_DSA_65, ML_DSA_87]",
+            "GenerateDataKeyWithoutPlaintext|\"KeySpec\":\"FOO\"|Value 'FOO' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, ML_DSA_44, ML_DSA_65, ML_DSA_87]",
+            "GenerateDataKey|\"NumberOfBytes\":0|Value '0' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1",
+            "GenerateDataKey|\"NumberOfBytes\":1025|Value '1025' at 'numberOfBytes' failed to satisfy constraint: Member must have value less than or equal to 1024",
+    })
+    void generateDataKeyValidatesItsInputBeforeLookingUpTheKey(String operation, String member, String error) {
+        callKms(operation, "{\"KeyId\":\"00000000-0000-0000-0000-000000000000\",%s}".formatted(member))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: " + error));
+    }
+
+    @ParameterizedTest
     @CsvSource({"Encrypt", "Decrypt"})
     void encryptionAlgorithmValidationListsTheEnumInAwsOrder(String operation) {
         callKms(operation, "{\"KeyId\":\"%s\",\"Plaintext\":\"aGVsbG8=\",\"CiphertextBlob\":\"AAAA\",\"EncryptionAlgorithm\":\"FOO\"}"

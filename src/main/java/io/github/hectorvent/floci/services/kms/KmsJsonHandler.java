@@ -283,8 +283,8 @@ public class KmsJsonHandler {
 
     private Response handleGenerateDataKey(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        String spec = request.path("KeySpec").asText(null);
-        int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        String spec = readDataKeySpec(request);
+        int numberOfBytes = readNumberOfBytes(request);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
         Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
@@ -298,8 +298,8 @@ public class KmsJsonHandler {
 
     private Response handleGenerateDataKeyWithoutPlaintext(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        String spec = request.path("KeySpec").asText(null);
-        int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        String spec = readDataKeySpec(request);
+        int numberOfBytes = readNumberOfBytes(request);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
         Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
@@ -618,6 +618,28 @@ public class KmsJsonHandler {
             response.put("KeyMaterialId", key.getKeyMaterialId());
         }
         return Response.ok(response).build();
+    }
+
+    // The model check lists every KMS key spec, yet only the data key specs pass.
+    private static String readDataKeySpec(JsonNode request) {
+        String spec = request.path("KeySpec").asText(null);
+        if (spec != null && !"AES_256".equals(spec) && !"AES_128".equals(spec)) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + spec
+                    + "' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, "
+                    + "RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, "
+                    + "ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, "
+                    + "ML_DSA_44, ML_DSA_65, ML_DSA_87]", 400);
+        }
+        return spec;
+    }
+
+    private static int readNumberOfBytes(JsonNode request) {
+        JsonNode numberOfBytes = request.path("NumberOfBytes");
+        if (!numberOfBytes.isNumber()) {
+            return 0;
+        }
+        validateRange("numberOfBytes", numberOfBytes.asInt(), 1, 1024);
+        return numberOfBytes.asInt();
     }
 
     private static void validateRange(String member, int value, int min, int max) {
