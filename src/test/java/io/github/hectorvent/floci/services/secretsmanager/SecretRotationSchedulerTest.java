@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -15,6 +17,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -94,9 +97,9 @@ class SecretRotationSchedulerTest {
     @Test
     void anUnparseableScheduleExpressionIsRejected() {
         service.createSecret("bad-cron", "v1", null, null, null, null, REGION);
-        io.github.hectorvent.floci.core.common.AwsException ex =
-                org.junit.jupiter.api.Assertions.assertThrows(
-                        io.github.hectorvent.floci.core.common.AwsException.class,
+        AwsException ex =
+                assertThrows(
+                        AwsException.class,
                         () -> service.rotateSecret("bad-cron", TOKEN, LAMBDA_ARN,
                                 new Secret.RotationRules(null, null, "every other tuesday"),
                                 false, REGION));
@@ -195,8 +198,8 @@ class SecretRotationSchedulerTest {
         // one. Enumerating and writing through that fallback would leave every other account's
         // secrets unrotated - and worse, write a phantom copy into the default account.
         String foreignAccount = "111122223333";
-        io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<Secret> store =
-                io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<Secret> store =
+                AccountAwareStorageBackend.inMemory("000000000000");
         SecretsManagerService accountAware = new SecretsManagerService(store, 30,
                 new RegionResolver(REGION, "000000000000"), mock(LambdaService.class), new ObjectMapper());
         SecretRotationScheduler sweep = new SecretRotationScheduler(accountAware);

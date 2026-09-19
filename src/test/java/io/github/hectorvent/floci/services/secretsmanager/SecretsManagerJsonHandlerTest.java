@@ -1,16 +1,19 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SecretsManagerJsonHandlerTest {
 
@@ -336,7 +339,7 @@ class SecretsManagerJsonHandlerTest {
         Response response = handler.handle("ListSecrets", req, REGION);
         assertThat(response.getStatus(), is(400));
         // ListSecrets does not model ValidationException; AWS returns InvalidParameterException.
-        assertThat(((io.github.hectorvent.floci.core.common.AwsErrorResponse) response.getEntity()).type(),
+        assertThat(((AwsErrorResponse) response.getEntity()).type(),
                 is("InvalidParameterException"));
     }
 
@@ -592,8 +595,8 @@ class SecretsManagerJsonHandlerTest {
         rules.put("ScheduleExpression", "cron(0 16 ? * 2 *)");
         rotateReq.set("RotationRules", rules);
 
-        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                io.github.hectorvent.floci.core.common.AwsException.class, 
+        AwsException ex = assertThrows(
+                AwsException.class, 
                 () -> handler.handle("RotateSecret", rotateReq, REGION)
         );
         assertThat(ex.getErrorCode(), is("InvalidParameterException"));
@@ -753,8 +756,8 @@ class SecretsManagerJsonHandlerTest {
         for (String action : new String[] { "GetResourcePolicy", "DeleteResourcePolicy" }) {
             ObjectNode request = MAPPER.createObjectNode();
             request.put("SecretId", "missing-secret");
-            io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                    io.github.hectorvent.floci.core.common.AwsException.class,
+            AwsException ex = assertThrows(
+                    AwsException.class,
                     () -> handler.handle(action, request, REGION));
             assertThat(ex.getErrorCode(), is("ResourceNotFoundException"));
         }
@@ -762,8 +765,8 @@ class SecretsManagerJsonHandlerTest {
         ObjectNode put = MAPPER.createObjectNode();
         put.put("SecretId", "missing-secret");
         put.put("ResourcePolicy", RESOURCE_POLICY);
-        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                io.github.hectorvent.floci.core.common.AwsException.class,
+        AwsException ex = assertThrows(
+                AwsException.class,
                 () -> handler.handle("PutResourcePolicy", put, REGION));
         assertThat(ex.getErrorCode(), is("ResourceNotFoundException"));
     }
@@ -780,8 +783,8 @@ class SecretsManagerJsonHandlerTest {
         for (String action : new String[] { "GetResourcePolicy", "DeleteResourcePolicy" }) {
             ObjectNode request = MAPPER.createObjectNode();
             request.put("SecretId", arn);
-            io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                    io.github.hectorvent.floci.core.common.AwsException.class,
+            AwsException ex = assertThrows(
+                    AwsException.class,
                     () -> handler.handle(action, request, REGION));
             assertThat(ex.getErrorCode(), is("InvalidRequestException"));
             assertThat(ex.getMessage(), containsString("marked for deletion"));
@@ -790,8 +793,8 @@ class SecretsManagerJsonHandlerTest {
         ObjectNode put = MAPPER.createObjectNode();
         put.put("SecretId", arn);
         put.put("ResourcePolicy", RESOURCE_POLICY);
-        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                io.github.hectorvent.floci.core.common.AwsException.class,
+        AwsException ex = assertThrows(
+                AwsException.class,
                 () -> handler.handle("PutResourcePolicy", put, REGION));
         assertThat(ex.getErrorCode(), is("InvalidRequestException"));
         assertThat(ex.getMessage(), containsString("marked for deletion"));
@@ -901,9 +904,9 @@ class SecretsManagerJsonHandlerTest {
     void cancelRotateSecretOnUnknownSecretThrowsResourceNotFound() {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("SecretId", "nope");
-        io.github.hectorvent.floci.core.common.AwsException ex =
-                org.junit.jupiter.api.Assertions.assertThrows(
-                        io.github.hectorvent.floci.core.common.AwsException.class,
+        AwsException ex =
+                assertThrows(
+                        AwsException.class,
                         () -> handler.handle("CancelRotateSecret", req, REGION));
         assertThat(ex.getErrorCode(), is("ResourceNotFoundException"));
     }
@@ -911,9 +914,9 @@ class SecretsManagerJsonHandlerTest {
     // ─── DeleteSecret recovery-window validation ───────────────────────────────
 
     private void assertDeleteSecretRejected(ObjectNode request) {
-        io.github.hectorvent.floci.core.common.AwsException ex =
-                org.junit.jupiter.api.Assertions.assertThrows(
-                        io.github.hectorvent.floci.core.common.AwsException.class,
+        AwsException ex =
+                assertThrows(
+                        AwsException.class,
                         () -> handler.handle("DeleteSecret", request, REGION));
         assertThat(ex.getErrorCode(), is("InvalidParameterException"));
     }
@@ -1033,7 +1036,7 @@ class SecretsManagerJsonHandlerTest {
 
         assertThat(list.get("SecretList").size(), is(2));
         ObjectNode deleted = null;
-        for (com.fasterxml.jackson.databind.JsonNode node : list.get("SecretList")) {
+        for (JsonNode node : list.get("SecretList")) {
             if ("going".equals(node.get("Name").asText())) {
                 deleted = (ObjectNode) node;
             }
@@ -1104,9 +1107,9 @@ class SecretsManagerJsonHandlerTest {
 
     /** Small helper so the filter-cap test stays readable. */
     private static final class ArrayNodeBuilder {
-        private final com.fasterxml.jackson.databind.node.ArrayNode array;
+        private final ArrayNode array;
 
-        ArrayNodeBuilder(com.fasterxml.jackson.databind.node.ArrayNode array) {
+        ArrayNodeBuilder(ArrayNode array) {
             this.array = array;
         }
 
@@ -1151,10 +1154,10 @@ class SecretsManagerJsonHandlerTest {
 
     // ─── CreateSecret / UpdateSecret validation ────────────────────────────────
 
-    private io.github.hectorvent.floci.core.common.AwsException expectAwsException(
+    private AwsException expectAwsException(
             String action, ObjectNode request) {
-        return org.junit.jupiter.api.Assertions.assertThrows(
-                io.github.hectorvent.floci.core.common.AwsException.class,
+        return assertThrows(
+                AwsException.class,
                 () -> handler.handle(action, request, REGION));
     }
 
@@ -1751,7 +1754,7 @@ class SecretsManagerJsonHandlerTest {
 
         assertThat(body.get("Versions").size(), is(2));
         ObjectNode deprecatedEntry = null;
-        for (com.fasterxml.jackson.databind.JsonNode node : body.get("Versions")) {
+        for (JsonNode node : body.get("Versions")) {
             if (deprecated.equals(node.get("VersionId").asText())) {
                 deprecatedEntry = (ObjectNode) node;
             }
@@ -1877,9 +1880,9 @@ class SecretsManagerJsonHandlerTest {
         req.put("SecretString", "value");
         req.put("ClientRequestToken", "too-short");
 
-        io.github.hectorvent.floci.core.common.AwsException ex =
-                org.junit.jupiter.api.Assertions.assertThrows(
-                        io.github.hectorvent.floci.core.common.AwsException.class,
+        AwsException ex =
+                assertThrows(
+                        AwsException.class,
                         () -> handler.handle("CreateSecret", req, REGION));
         assertThat(ex.getErrorCode(), is("InvalidParameterException"));
     }
