@@ -17,6 +17,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -174,6 +175,6 @@ class AslExecutorFailStateErrorCauseTest {
     }
 
     private static <T> T mock(Class<T> type) {
-        return org.mockito.Mockito.mock(type);
+        return Mockito.mock(type);
     }
 }

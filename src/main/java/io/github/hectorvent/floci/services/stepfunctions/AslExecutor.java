@@ -71,6 +71,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -1151,7 +1152,7 @@ public class AslExecutor {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         flattenQueryParams(input, "", params);
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = cloudFormationHandler.handle(pascalAction, params, region);
         } catch (AwsException e) {
@@ -1406,7 +1407,7 @@ public class AslExecutor {
      * which entry it was.
      */
     private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = eventBridgeHandler.handle("PutEvents", input, region);
         } catch (AwsException e) {
@@ -1875,7 +1876,7 @@ public class AslExecutor {
         // Convert camelCase to PascalCase (e.g., putItem → PutItem)
         String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = dynamoDbJsonHandler.handle(pascalAction, input, region);
         } catch (AwsException e) {
@@ -1933,7 +1934,7 @@ public class AslExecutor {
     }
 
     private JsonNode invokeSqsAction(String action, JsonNode input, String region, String errorPrefix, boolean awsSdkStyleErrors) {
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = sqsJsonHandler.handle(action, input, region);
         } catch (AwsException e) {
@@ -1981,7 +1982,7 @@ public class AslExecutor {
             request.put("Message", message.toString());
         }
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = snsJsonHandler.handle("Publish", request, region);
         } catch (AwsException e) {
