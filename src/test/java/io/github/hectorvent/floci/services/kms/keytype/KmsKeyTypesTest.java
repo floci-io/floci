@@ -15,9 +15,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -123,6 +125,35 @@ class KmsKeyTypesTest {
         assertTrue(keyType.verify(key, MESSAGE, signature, algorithm, KmsMessageType.RAW));
         assertFalse(keyType.verify(key, "another message".getBytes(StandardCharsets.UTF_8), signature,
                 algorithm, KmsMessageType.RAW));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "RSA_2048, RSASSA_PKCS1_V1_5_SHA_256",
+            "RSA_2048, RSASSA_PSS_SHA_256",
+            "ECC_NIST_P256, ECDSA_SHA_256",
+            "ECC_SECG_P256K1, ECDSA_SHA_256",
+            "ECC_NIST_EDWARDS25519, ED25519_SHA_512",
+            "ML_DSA_44, ML_DSA_SHAKE_256",
+    })
+    void malformedSignatureDoesNotVerify(KmsKeySpec spec, KmsKeySpec.Algorithm algorithm) throws Exception {
+        KmsKey key = generatedKey(spec, REGION);
+        KmsKeyType keyType = keyTypes.of(spec);
+        byte[] oversized = new byte[6144];
+        Arrays.fill(oversized, (byte) 'a');
+
+        for (byte[] signature : List.of(new byte[]{1}, new byte[64], oversized)) {
+            assertFalse(keyType.verify(key, MESSAGE, signature, algorithm, KmsMessageType.RAW));
+        }
+    }
+
+    @Test
+    void corruptPublicKeyThrowsInsteadOfFailingVerification() throws GeneralSecurityException {
+        KmsKey key = generatedKey(KmsKeySpec.ECC_NIST_P256, REGION);
+        key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(new byte[16]));
+
+        assertThrows(GeneralSecurityException.class, () -> keyTypes.of(KmsKeySpec.ECC_NIST_P256)
+                .verify(key, MESSAGE, new byte[64], KmsKeySpec.Algorithm.ECDSA_SHA_256, KmsMessageType.RAW));
     }
 
     @ParameterizedTest

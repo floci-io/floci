@@ -4,7 +4,6 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import org.bouncycastle.asn1.ASN1Integer;
-import org.bouncycastle.asn1.ASN1Primitive;
 import org.bouncycastle.asn1.ASN1Sequence;
 import org.bouncycastle.asn1.DERSequenceGenerator;
 import org.bouncycastle.crypto.params.ECPrivateKeyParameters;
@@ -58,9 +57,18 @@ final class EccSecgP256k1KeyType implements KmsKeyType {
         ECPublicKeyParameters publicKey = BcEcKeys.publicKeyParameters(key, CURVE);
         byte[] hash = hash(message, algorithm, messageType);
 
-        ASN1Sequence asn1 = ASN1Sequence.getInstance(ASN1Primitive.fromByteArray(signature));
-        BigInteger r = ASN1Integer.getInstance(asn1.getObjectAt(0)).getValue();
-        BigInteger s = ASN1Integer.getInstance(asn1.getObjectAt(1)).getValue();
+        BigInteger r;
+        BigInteger s;
+        try {
+            ASN1Sequence asn1 = ASN1Sequence.getInstance(signature);
+            if (asn1.size() != 2) {
+                return false;
+            }
+            r = ASN1Integer.getInstance(asn1.getObjectAt(0)).getValue();
+            s = ASN1Integer.getInstance(asn1.getObjectAt(1)).getValue();
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
 
         ECDSASigner verifier = new ECDSASigner();
         verifier.init(false, publicKey);

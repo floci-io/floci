@@ -13,6 +13,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.SignatureException;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.PSSParameterSpec;
@@ -58,7 +59,11 @@ final class AsymmetricKeys {
         Signature verifier = signatureFor(jcaAlgorithm);
         verifier.initVerify(publicKey);
         verifier.update(message);
-        return verifier.verify(signature);
+        try {
+            return verifier.verify(signature);
+        } catch (SignatureException e) {
+            return false;
+        }
     }
 
     // KMS RSASSA_PSS uses MGF1 over the same digest, with a salt as long as the digest.

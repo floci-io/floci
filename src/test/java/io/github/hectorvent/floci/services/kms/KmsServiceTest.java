@@ -1689,6 +1689,19 @@ class KmsServiceTest {
     }
 
     @Test
+    void verifyWithCorruptKeyMaterialIsAnInternalFailure() {
+        KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+        KmsKey stored = keyStore.get(REGION + "::" + key.getKeyId()).orElseThrow();
+        stored.setPublicKeyEncoded(Base64.getEncoder().encodeToString(new byte[16]));
+        keyStore.put(REGION + "::" + key.getKeyId(), stored);
+
+        AwsException ex = assertThrows(AwsException.class, () -> kmsService.verify(key.getKeyId(),
+                "sign me".getBytes(StandardCharsets.UTF_8), new byte[64], "ECDSA_SHA_256", REGION));
+
+        assertEquals("InternalFailure", ex.getErrorCode());
+    }
+
+    @Test
     void getPublicKeyReturnsValidDerBytes() throws Exception {
         KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
         KmsKey publicKeyInfo = kmsService.getPublicKey(key.getKeyId(), REGION);

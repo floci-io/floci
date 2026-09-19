@@ -1911,6 +1911,35 @@ class KmsIntegrationTest {
     /** Checked against real AWS in us-east-1. */
     @ParameterizedTest
     @CsvSource({
+            "RSA_2048, RSASSA_PSS_SHA_256, RAW, 1, 1",
+            "RSA_2048, RSASSA_PKCS1_V1_5_SHA_256, RAW, 6144, 97",
+            "RSA_2048, RSASSA_PKCS1_V1_5_SHA_256, DIGEST, 6144, 97",
+            "ECC_NIST_P256, ECDSA_SHA_256, RAW, 1, 1",
+            "ECC_SECG_P256K1, ECDSA_SHA_256, RAW, 1, 1",
+            "ECC_SECG_P256K1, ECDSA_SHA_256, RAW, 6144, 97",
+            "ECC_NIST_EDWARDS25519, ED25519_SHA_512, RAW, 1, 1",
+            "ML_DSA_44, ML_DSA_SHAKE_256, RAW, 6144, 97",
+    })
+    void verifyRejectsAMalformedSignature(String keySpec, String algorithm, String messageType, int length,
+                                          byte fill) {
+        String keyArn = createKeyArn(keySpec, "SIGN_VERIFY");
+        String message = "DIGEST".equals(messageType)
+                ? Base64.getEncoder().encodeToString(new byte[32]) : "bWVzc2FnZQ==";
+        byte[] signature = new byte[length];
+        Arrays.fill(signature, fill);
+
+        callKms("Verify", ("{\"KeyId\":\"%s\",\"Message\":\"%s\",\"MessageType\":\"%s\",\"Signature\":\"%s\","
+                + "\"SigningAlgorithm\":\"%s\"}").formatted(keyArn, message, messageType,
+                Base64.getEncoder().encodeToString(signature), algorithm))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidSignatureException"))
+                .body("message", nullValue());
+    }
+
+    /** Checked against real AWS in us-east-1. */
+    @ParameterizedTest
+    @CsvSource({
             "RSA_2048, SIGN_VERIFY, GenerateMac",
             "RSA_2048, SIGN_VERIFY, VerifyMac",
             "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, GenerateMac",

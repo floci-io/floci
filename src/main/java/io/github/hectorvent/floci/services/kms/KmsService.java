@@ -1665,8 +1665,7 @@ public class KmsService implements ResourceProvider {
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
-            LOG.debugv(e, "Verification failed for key {0}", kmsKey.getKeyId());
-            valid = false;
+            throw new AwsException("InternalFailure", "Failed to verify signature: " + e.getMessage(), 500);
         }
         if (!valid) {
             throw new AwsException("KMSInvalidSignatureException", null, 400);
