@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudcontrol;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -8,15 +9,12 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationResourceProvisioner;
-import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
-import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -24,8 +22,11 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -33,8 +34,12 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @ApplicationScoped
 public class CloudControlService {
@@ -56,24 +61,24 @@ public class CloudControlService {
      * properties, a nodegroup's cluster name, an inline policy's principals. Deleting one of these
      * from type and identifier alone is a no-op, so Cloud Control must not report SUCCESS for it.
      */
-    private static final java.util.Set<String> ATTRIBUTE_BACKED_DELETES =
-            java.util.Set.of("AWS::EKS::Nodegroup", "AWS::IAM::Policy");
+    private static final Set<String> ATTRIBUTE_BACKED_DELETES =
+            Set.of("AWS::EKS::Nodegroup", "AWS::IAM::Policy");
 
     /** RequestToken → ProgressEvent. Cloud Control is async; clients poll by token. */
     private final Map<String, ProgressEvent> requests = new ConcurrentHashMap<>();
     /** Token insertion order, so the map can be bounded without losing in-flight requests. */
-    private final java.util.concurrent.ConcurrentLinkedQueue<String> requestOrder =
-            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<String> requestOrder =
+            new ConcurrentLinkedQueue<>();
     /**
      * What CreateResource provisioned, keyed by region/type/identifier. Carries the attributes the
      * delete path needs and the model the read path returns for types outside {@link #listResources}.
      * Entries are dropped when the resource is deleted.
      */
     private final Map<String, CreatedResource> created = new ConcurrentHashMap<>();
-    private final java.util.concurrent.ExecutorService executor =
-            java.util.concurrent.Executors.newFixedThreadPool(4);
+    private final ExecutorService executor =
+            Executors.newFixedThreadPool(4);
 
-    @jakarta.annotation.PreDestroy
+    @PreDestroy
     void shutdown() {
         executor.shutdownNow();
     }
