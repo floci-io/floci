@@ -3,7 +3,10 @@ package io.github.hectorvent.floci.services.acm;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.pkcs.EncryptedPrivateKeyInfo;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.BasicConstraints;
@@ -20,6 +23,7 @@ import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
@@ -27,14 +31,9 @@ import org.bouncycastle.openssl.jcajce.JcePEMEncryptorBuilder;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS8EncryptedPrivateKeyInfo;
-import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.util.io.pem.PemObject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Cipher;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.PBEParameterSpec;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.math.BigInteger;
@@ -58,6 +57,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
+import javax.crypto.Cipher;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.PBEParameterSpec;
 
 @ApplicationScoped
 public class CertificateGenerator {
@@ -347,7 +350,7 @@ public class CertificateGenerator {
                 String raw = stripBrackets(san);
                 byte[] addr = InetAddress.getByName(raw).getAddress();
                 return new GeneralName(GeneralName.iPAddress,
-                        new org.bouncycastle.asn1.DEROctetString(addr));
+                        new DEROctetString(addr));
             } catch (Exception e) {
                 // Only a malformed IPv6 literal reaches this: IPv4 is range-checked before it
                 // gets here, and a value only arrives with a colon and a literal-shaped first
@@ -493,10 +496,10 @@ public class CertificateGenerator {
             Object obj = parser.readObject();
             JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
 
-            if (obj instanceof org.bouncycastle.openssl.PEMKeyPair pemKeyPair) {
+            if (obj instanceof PEMKeyPair pemKeyPair) {
                 // Only the private half is needed, and a SEC1 key may carry no public half at all.
                 return converter.getPrivateKey(pemKeyPair.getPrivateKeyInfo());
-            } else if (obj instanceof org.bouncycastle.asn1.pkcs.PrivateKeyInfo pkInfo) {
+            } else if (obj instanceof PrivateKeyInfo pkInfo) {
                 return converter.getPrivateKey(pkInfo);
             }
             throw new IllegalArgumentException("Invalid private key PEM format");

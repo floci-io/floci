@@ -7,14 +7,17 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
 import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.Security;
 import java.security.cert.X509Certificate;
+import java.security.spec.ECGenParameterSpec;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -128,7 +131,7 @@ class CertificateGeneratorIssuerTest {
         var mismatched = new CertificateGenerator.Issuer(
                 generator.parseCertificate(one.certificatePem()), generator.parsePrivateKey(other.privateKeyPem()));
 
-        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+        var refused = assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("x.example.test", List.of(), KeyAlgorithm.RSA_2048, null,
                         mismatched, CertificateGenerator.LeafUsage.SERVER));
         assertTrue(refused.getMessage().contains("Signature"), refused.getMessage());
@@ -144,7 +147,7 @@ class CertificateGeneratorIssuerTest {
         var notAPair = new KeyPair(generator.parseCertificate(a.certificatePem()).getPublicKey(),
                 generator.parsePrivateKey(b.privateKeyPem()));
 
-        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+        var refused = assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, notAPair, issuer,
                         CertificateGenerator.LeafUsage.CLIENT));
         assertTrue(refused.getMessage().contains("does not match"), refused.getMessage());
@@ -158,7 +161,7 @@ class CertificateGeneratorIssuerTest {
         var rsaPair = new KeyPair(generator.parseCertificate(rsa.certificatePem()).getPublicKey(),
                 generator.parsePrivateKey(rsa.privateKeyPem()));
 
-        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+        var refused = assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, rsaPair, issuer,
                         CertificateGenerator.LeafUsage.CLIENT));
         assertTrue(refused.getMessage().contains("not the requested EC_prime256v1"), refused.getMessage());
@@ -166,14 +169,17 @@ class CertificateGeneratorIssuerTest {
 
     @Test
     void aSuppliedEcKeyPairOnACurveOfTheSameSizeIsRefused() throws Exception {
+        // secp256k1 is an EC curve, but not the NIST P-256 prime256v1 ACM specifies: handing a
+        // k1 key to an EC_prime256v1 request must be rejected rather than issuing a certificate
+        // with the wrong curve.
         var issuer = newIssuer();
-        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("EC", "BC");
-        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp256k1"));
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", "BC");
+        kpg.initialize(new ECGenParameterSpec("secp256k1"));
         KeyPair k1 = kpg.generateKeyPair();
-        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        kpg.initialize(new ECGenParameterSpec("secp256r1"));
         KeyPair p256 = kpg.generateKeyPair();
 
-        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+        var refused = assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, k1, issuer,
                         CertificateGenerator.LeafUsage.CLIENT));
         assertTrue(refused.getMessage().contains("not the requested EC_prime256v1"), refused.getMessage());
