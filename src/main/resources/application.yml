@@ -534,6 +534,7 @@ floci:
     ecs:
       enabled: true
       mock: false
+      publish-awsvpc-ports-to-host: false
       host-volume-roots: []
       allow-unsafe-host-volumes: false
     appconfig:

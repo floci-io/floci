@@ -1853,6 +1853,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
+        /**
+         * Publish {@code awsvpc} task ports on the Docker host so local host processes can
+         * reach them. This is an emulator-only escape hatch and can cause port collisions
+         * when more than one task exposes the same port.
+         */
+        @WithDefault("false")
+        boolean publishAwsvpcPortsToHost();
+
         Optional<String> dockerNetwork();
 
         @WithDefault("512")

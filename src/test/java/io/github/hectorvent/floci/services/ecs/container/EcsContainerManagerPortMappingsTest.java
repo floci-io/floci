@@ -67,6 +67,7 @@ class EcsContainerManagerPortMappingsTest {
     private ContainerBuilder.Builder builder;
     private ContainerLifecycleManager lifecycleManager;
     private ContainerDetector containerDetector;
+    private EmulatorConfig config;
     private RegionResolver regionResolver;
     private EcsContainerManager manager;
 
@@ -86,7 +87,7 @@ class EcsContainerManagerPortMappingsTest {
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         containerDetector = mock(ContainerDetector.class);
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         regionResolver = mock(RegionResolver.class);
         LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
@@ -191,6 +192,71 @@ class EcsContainerManagerPortMappingsTest {
         verify(builder, times(1)).withExposedPort(80);
         verify(builder, never()).withPortBinding(eq(80), anyInt());
         verify(builder, never()).withDynamicPort(80);
+    }
+
+    @Test
+    void awsvpcPortCanBePublishedStablyForHostRunners() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+
+        startWith(List.of(new PortMapping(15_672)), NetworkMode.awsvpc);
+
+        verify(builder, times(1)).withPortBinding(15_672, 15_672);
+        verify(builder, never()).withExposedPort(15_672);
+        verify(builder, never()).withDynamicPort(15_672);
+    }
+
+    @Test
+    void awsvpcHostPublishingHonorsAnExplicitHostPort() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+
+        startWith(List.of(new PortMapping(8080, 18_080, "tcp")), NetworkMode.awsvpc);
+
+        verify(builder, times(1)).withPortBinding(8080, 18_080);
+    }
+
+    @Test
+    void protectedAwsvpcNamespaceUsesTheStableHostBindings() {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setPortMappings(List.of(
+                new PortMapping(6379),
+                new PortMapping(8080, 18_080, "tcp")));
+        TaskDefinition taskDefinition = new TaskDefinition();
+        taskDefinition.setContainerDefinitions(List.of(app));
+
+        Map<Integer, Integer> bindings = EcsContainerManager.namespacePortBindings(
+                taskDefinition, true, true);
+
+        assertEquals(Map.of(6379, 6379, 8080, 18_080), bindings);
+    }
+
+    @Test
+    void protectedAwsvpcNamespaceKeepsDefaultContainerModePrivate() {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setPortMappings(List.of(new PortMapping(6379)));
+        TaskDefinition taskDefinition = new TaskDefinition();
+        taskDefinition.setContainerDefinitions(List.of(app));
+
+        Map<Integer, Integer> bindings = EcsContainerManager.namespacePortBindings(
+                taskDefinition, true, false);
+
+        assertEquals(Map.of(), bindings);
+    }
+
+    @Test
+    void protectedAwsvpcNamespaceUsesStableBindingsInNativeModeWithOptIn() {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setPortMappings(List.of(
+                new PortMapping(6379),
+                new PortMapping(8080, 18_080, "tcp")));
+        TaskDefinition taskDefinition = new TaskDefinition();
+        taskDefinition.setContainerDefinitions(List.of(app));
+
+        Map<Integer, Integer> bindings = EcsContainerManager.namespacePortBindings(
+                taskDefinition, false, true);
+
+        assertEquals(Map.of(6379, 6379, 8080, 18_080), bindings);
     }
 
     @Test
