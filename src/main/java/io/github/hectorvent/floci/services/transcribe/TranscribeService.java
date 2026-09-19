@@ -100,6 +100,11 @@ public class TranscribeService implements Resettable {
 
     public ListTranscriptionJobsResult listTranscriptionJobs(String statusFilter, String jobNameContains,
                                                              Integer maxResults) {
+        return listTranscriptionJobs(statusFilter, jobNameContains, null, maxResults);
+    }
+
+    public ListTranscriptionJobsResult listTranscriptionJobs(String statusFilter, String jobNameContains,
+                                                             String nextToken, Integer maxResults) {
         int limit = maxResults != null ? Math.min(maxResults, 100) : 100;
 
         String currentPrefix = currentJobPrefix();
@@ -112,11 +117,13 @@ public class TranscribeService implements Resettable {
                 .map(TranscriptionJobSummary::from)
                 .toList();
 
-        List<TranscriptionJobSummary> page = filtered.subList(0, Math.min(limit, filtered.size()));
-        String nextToken = page.size() < filtered.size()
+        int startIndex = transcriptionJobStartIndex(filtered, nextToken);
+        int endIndex = Math.min(startIndex + limit, filtered.size());
+        List<TranscriptionJobSummary> page = filtered.subList(startIndex, endIndex);
+        String resultNextToken = endIndex < filtered.size()
                 ? page.get(page.size() - 1).transcriptionJobName() : null;
 
-        return new ListTranscriptionJobsResult(page, statusFilter, nextToken);
+        return new ListTranscriptionJobsResult(page, statusFilter, resultNextToken);
     }
 
     public void deleteTranscriptionJob(String jobName) {
@@ -154,6 +161,11 @@ public class TranscribeService implements Resettable {
 
     public ListVocabulariesResult listVocabularies(String stateEquals, String nameContains,
                                                    Integer maxResults) {
+        return listVocabularies(stateEquals, nameContains, null, maxResults);
+    }
+
+    public ListVocabulariesResult listVocabularies(String stateEquals, String nameContains,
+                                                   String nextToken, Integer maxResults) {
         int limit = maxResults != null ? Math.min(maxResults, 100) : 100;
 
         migrateDefaultScopeVocabularies();
@@ -167,11 +179,13 @@ public class TranscribeService implements Resettable {
                 .sorted(Comparator.comparing(VocabularyInfo::vocabularyName))
                 .toList();
 
-        List<VocabularyInfo> page = filtered.subList(0, Math.min(limit, filtered.size()));
-        String nextToken = page.size() < filtered.size()
+        int startIndex = vocabularyStartIndex(filtered, nextToken);
+        int endIndex = Math.min(startIndex + limit, filtered.size());
+        List<VocabularyInfo> page = filtered.subList(startIndex, endIndex);
+        String resultNextToken = endIndex < filtered.size()
                 ? page.get(page.size() - 1).vocabularyName() : null;
 
-        return new ListVocabulariesResult(page, stateEquals, nextToken);
+        return new ListVocabulariesResult(page, stateEquals, resultNextToken);
     }
 
     public void deleteVocabulary(String vocabularyName) {
@@ -223,6 +237,34 @@ public class TranscribeService implements Resettable {
         vocabularies.keysForAccount(regionResolver.getAccountId()).stream()
                 .filter(key -> !key.contains("/"))
                 .forEach(this::getStoredVocabulary);
+    }
+
+    private int transcriptionJobStartIndex(List<TranscriptionJobSummary> jobs, String nextToken) {
+        if (nextToken == null) {
+            return 0;
+        }
+        for (int index = 0; index < jobs.size(); index++) {
+            if (nextToken.equals(jobs.get(index).transcriptionJobName())) {
+                return index + 1;
+            }
+        }
+        throw invalidNextToken();
+    }
+
+    private int vocabularyStartIndex(List<VocabularyInfo> vocabularyList, String nextToken) {
+        if (nextToken == null) {
+            return 0;
+        }
+        for (int index = 0; index < vocabularyList.size(); index++) {
+            if (nextToken.equals(vocabularyList.get(index).vocabularyName())) {
+                return index + 1;
+            }
+        }
+        throw invalidNextToken();
+    }
+
+    private AwsException invalidNextToken() {
+        return new AwsException("BadRequestException", "The next token is invalid.", 400);
     }
 
     private void requireNonBlank(String value, String fieldName) {
