@@ -126,7 +126,9 @@ public class CloudWatchLogsHandler {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("logGroupName", g.getLogGroupName());
             node.put("createdTime", g.getCreatedTime());
-            node.put("arn", logsService.buildArn(g.getLogGroupName(), region));
+            String logGroupArn = logsService.buildArn(g.getLogGroupName(), region);
+            node.put("arn", logGroupArn + ":*");
+            node.put("logGroupArn", logGroupArn);
             if (g.getRetentionInDays() != null) {
                 node.put("retentionInDays", g.getRetentionInDays());
             }
