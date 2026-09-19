@@ -58,6 +58,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -107,6 +112,133 @@ class Ec2ServiceTest {
         assertTrue(service.describeNetworkAcls(region, List.of(), Map.of()).stream()
                 .noneMatch(acl -> vpcId.equals(acl.getVpcId())));
         assertTrue(service.describeSecurityGroupRules(region, List.of(defaultGroup.getGroupId()), List.of()).isEmpty());
+    }
+
+    @Test
+    void deleteVpcFailsWhileCallerCreatedResourcesRemain() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+
+        String subnetId = service.createSubnet(region, vpcId, "10.79.1.0/24", "us-east-1a").getSubnetId();
+        String groupId = service.createSecurityGroup(region, "app", "app sg", vpcId).getGroupId();
+        String routeTableId = service.createRouteTable(region, vpcId).getRouteTableId();
+        String aclId = service.createNetworkAcl(region, vpcId).getNetworkAclId();
+
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteVpc(region, vpcId)).getErrorCode());
+
+        service.deleteSubnet(region, subnetId);
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteVpc(region, vpcId)).getErrorCode());
+        service.deleteSecurityGroup(region, groupId);
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteVpc(region, vpcId)).getErrorCode());
+        service.deleteRouteTable(region, routeTableId);
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteVpc(region, vpcId)).getErrorCode());
+        service.deleteNetworkAcl(region, aclId);
+
+        service.deleteVpc(region, vpcId);
+        assertTrue(service.describeVpcs(region, List.of(), Map.of()).stream()
+                .noneMatch(vpc -> vpcId.equals(vpc.getVpcId())));
+    }
+
+    @Test
+    void deleteVpcFailsWhileAnInternetGatewayIsAttached() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.80.0.0/16", false).getVpcId();
+        String igwId = service.createInternetGateway(region).getInternetGatewayId();
+        service.attachInternetGateway(region, igwId, vpcId);
+
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteVpc(region, vpcId)).getErrorCode());
+
+        service.detachInternetGateway(region, igwId, vpcId);
+        service.deleteVpc(region, vpcId);
+    }
+
+    @Test
+    void attachingAnInternetGatewayToAMissingVpcFails() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String igwId = service.createInternetGateway("us-east-1").getInternetGatewayId();
+
+        assertEquals("InvalidVpcID.NotFound", assertThrows(AwsException.class,
+                () -> service.attachInternetGateway("us-east-1", igwId, "vpc-0000000000000dead")).getErrorCode());
+    }
+
+    /**
+     * DeleteVpc checks for dependents and then deletes. A create that resolved the VPC before that
+     * check and stored its resource after it would leave a subnet, group, route table, network ACL or
+     * gateway attachment naming a VPC that no longer exists.
+     */
+    @Test
+    void creatingInAVpcNeverRacesAheadOfDeletingIt() throws Exception {
+        String region = "us-east-1";
+        Map<String, BiConsumer<Ec2Service, String>> creators = Map.of(
+                "subnet", (service, vpcId) -> service.createSubnet(region, vpcId, "10.81.1.0/24", "us-east-1a"),
+                "security group", (service, vpcId) -> service.createSecurityGroup(region, "raced", "raced", vpcId),
+                "route table", (service, vpcId) -> service.createRouteTable(region, vpcId),
+                "network ACL", (service, vpcId) -> service.createNetworkAcl(region, vpcId),
+                "internet gateway", (service, vpcId) -> service.attachInternetGateway(
+                        region, service.createInternetGateway(region).getInternetGatewayId(), vpcId));
+        for (Map.Entry<String, BiConsumer<Ec2Service, String>> creator : creators.entrySet()) {
+            for (int trial = 0; trial < 25; trial++) {
+                Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                        mock(Ec2PortForwardManager.class),
+                        mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                        new InMemoryStorageFactory());
+                String vpcId = service.createVpc(region, "10.81.0.0/16", false).getVpcId();
+                CountDownLatch start = new CountDownLatch(1);
+                ExecutorService pool = Executors.newFixedThreadPool(2);
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                        creator.getValue().accept(service, vpcId);
+                    } catch (AwsException | InterruptedException ignored) {
+                        // Losing the race is a legitimate outcome; the invariant is checked below.
+                    }
+                });
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                        service.deleteVpc(region, vpcId);
+                    } catch (AwsException | InterruptedException ignored) {
+                        // Same.
+                    }
+                });
+                start.countDown();
+                pool.shutdown();
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
+
+                boolean vpcExists = service.describeVpcs(region, List.of(), Map.of()).stream()
+                        .anyMatch(vpc -> vpcId.equals(vpc.getVpcId()));
+                if (!vpcExists) {
+                    String label = creator.getKey() + " trial " + trial + ": left behind by the deleted VPC";
+                    assertTrue(service.describeSubnets(region, List.of(), Map.of()).stream()
+                            .noneMatch(subnet -> vpcId.equals(subnet.getVpcId())), label);
+                    assertTrue(service.describeSecurityGroups(region, List.of(), List.of(), Map.of()).stream()
+                            .noneMatch(group -> vpcId.equals(group.getVpcId())), label);
+                    assertTrue(service.describeRouteTables(region, List.of(), Map.of()).stream()
+                            .noneMatch(table -> vpcId.equals(table.getVpcId())), label);
+                    assertTrue(service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                            .noneMatch(acl -> vpcId.equals(acl.getVpcId())), label);
+                    assertTrue(service.describeInternetGateways(region, List.of(), Map.of()).stream()
+                            .noneMatch(igw -> igw.getAttachments().stream()
+                                    .anyMatch(attachment -> vpcId.equals(attachment.getVpcId()))), label);
+                }
+            }
+        }
     }
 
     @Test
