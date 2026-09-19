@@ -1207,7 +1207,7 @@ class KmsServiceTest {
                     kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION));
 
             assertEquals("InvalidKeyUsageException", ex.getErrorCode());
-            assertEquals("Algorithm SYMMETRIC_DEFAULT is incompatible with key spec RSA_2048.", ex.getMessage());
+            assertEquals("You cannot generate a data key with an asymmetric CMK", ex.getMessage());
         }
 
         @Test

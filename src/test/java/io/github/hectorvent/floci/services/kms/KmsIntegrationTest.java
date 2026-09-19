@@ -1929,6 +1929,28 @@ class KmsIntegrationTest {
         assertEquals(length, Base64.getDecoder().decode(plaintext).length);
     }
 
+    @ParameterizedTest
+    @CsvSource({"GenerateDataKey", "GenerateDataKeyWithoutPlaintext"})
+    void generateDataKeyRejectsAnAsymmetricKey(String operation) {
+        callKms(operation, "{\"KeyId\":\"%s\",\"KeySpec\":\"AES_256\"}".formatted(createKeyArn("RSA_2048", "ENCRYPT_DECRYPT")))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo("You cannot generate a data key with an asymmetric CMK"));
+    }
+
+    @Test
+    void generateDataKeyChecksTheKeyStateBeforeTheKeySpec() {
+        String keyArn = createKeyArn("RSA_2048", "ENCRYPT_DECRYPT");
+        callKms("DisableKey", "{\"KeyId\":\"%s\"}".formatted(keyArn)).then().statusCode(200);
+
+        callKms("GenerateDataKey", "{\"KeyId\":\"%s\",\"KeySpec\":\"AES_256\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("DisabledException"))
+                .body("message", equalTo(keyArn + " is disabled."));
+    }
+
     /** The key usage and the key state are checked after this. */
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {

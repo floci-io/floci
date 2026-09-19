@@ -1747,9 +1747,14 @@ public class KmsService implements ResourceProvider {
 
     public Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes,
                                                Map<String, String> encryptionContext, String region) {
-        resolveKey(keyId, region);
+        KmsKey key = resolveKey(keyId, region);
         if ((keySpec == null) == (numberOfBytes == null)) {
             throw new AwsException("ValidationException", "Please specify either number of bytes or key spec.", 400);
+        }
+        validateKeyUsage(key, KmsKeyUsage.ENCRYPT_DECRYPT, "GenerateDataKey");
+        validateKeyIsUsableForCryptoOperations(key);
+        if (KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
+            throw new AwsException("InvalidKeyUsageException", "You cannot generate a data key with an asymmetric CMK", 400);
         }
         int len = keySpec == null ? numberOfBytes : "AES_128".equals(keySpec) ? 16 : 32;
 
