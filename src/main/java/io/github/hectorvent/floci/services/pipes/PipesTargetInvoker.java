@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -118,7 +119,7 @@ public class PipesTargetInvoker {
                 if ((node.isObject() || node.isArray()) && node.isEmpty()) {
                     return null;
                 }
-            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            } catch (JsonProcessingException e) {
                 // Non-JSON textual enrichment response — forward as-is.
             }
             LOG.debugv("Pipe {0}: enrichment {1} produced target payload", pipe.getName(), enrichment);

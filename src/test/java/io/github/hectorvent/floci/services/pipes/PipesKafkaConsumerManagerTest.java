@@ -3,19 +3,21 @@ package io.github.hectorvent.floci.services.pipes;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.msk.MskService;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 
 import java.net.URI;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -30,9 +32,9 @@ class PipesKafkaConsumerManagerTest {
 
     @BeforeEach
     void setUp() {
-        mskService = Mockito.mock(MskService.class);
-        karapaceManager = Mockito.mock(KarapaceManager.class);
-        restClient = Mockito.mock(PipesKafkaRestClient.class);
+        mskService = mock(MskService.class);
+        karapaceManager = mock(KarapaceManager.class);
+        restClient = mock(PipesKafkaRestClient.class);
         manager = new PipesKafkaConsumerManager(mskService, karapaceManager, restClient);
     }
 
@@ -55,7 +57,7 @@ class PipesKafkaConsumerManagerTest {
                 URI.create("http://localhost:8082/consumers/g/instances/instance-1"));
         when(karapaceManager.ensureStarted("broker-1:9092")).thenReturn(restBaseUri);
         when(restClient.createConsumer(eq(restBaseUri), anyString(), anyString())).thenReturn(handle);
-        Mockito.doThrow(new RuntimeException("subscribe failed"))
+        doThrow(new RuntimeException("subscribe failed"))
                 .when(restClient).subscribe(eq(handle), anyList());
 
         assertThrows(RuntimeException.class, () -> manager.poll(pipe));
@@ -197,7 +199,7 @@ class PipesKafkaConsumerManagerTest {
 
         String fallbackGroupId = manager.resolveConsumerGroupId(fallback);
         assertEquals(fallbackGroupId, manager.resolveConsumerGroupId(fallback));
-        org.junit.jupiter.api.Assertions.assertTrue(
+        assertTrue(
                 fallbackGroupId.startsWith("floci-pipes-orders-pipe-"),
                 "Expected generated consumer group id prefix, got: " + fallbackGroupId);
     }

@@ -16,6 +16,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,6 +27,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -173,11 +176,11 @@ class PipesPollerTest {
     void pollKafka_doesNotCommitWhenDeliveryFails() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
         KafkaRecordDto record = kafkaRecord("orders", 0, 7L, null,
-                "{\"status\":\"active\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "{\"status\":\"active\"}".getBytes(StandardCharsets.UTF_8));
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(record));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
-        org.mockito.Mockito.doThrow(new RuntimeException("boom"))
+        doThrow(new RuntimeException("boom"))
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
         poller.pollKafka(pipe, "us-east-1");
@@ -189,13 +192,13 @@ class PipesPollerTest {
     void pollKafka_commitsDeliveredPrefixWhenLaterRecordFails() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
         KafkaRecordDto first = kafkaRecord("orders", 0, 0L, null,
-                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8));
         KafkaRecordDto second = kafkaRecord("orders", 0, 1L, null,
-                "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(StandardCharsets.UTF_8));
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, second));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
-        org.mockito.Mockito.doNothing()
+        doNothing()
                 .doThrow(new RuntimeException("boom"))
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
@@ -216,13 +219,13 @@ class PipesPollerTest {
         Pipe pipe = selfManagedKafkaPipe();
         when(kafkaConsumerManager.resolveBatchSize(eq(pipe), anyInt())).thenReturn(1);
         KafkaRecordDto first = kafkaRecord("orders", 0, 0L, null,
-                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8));
         KafkaRecordDto second = kafkaRecord("orders", 0, 1L, null,
-                "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(StandardCharsets.UTF_8));
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, second));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
-        org.mockito.Mockito.doThrow(new RuntimeException("boom"))
+        doThrow(new RuntimeException("boom"))
                 .doNothing()
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
@@ -252,15 +255,15 @@ class PipesPollerTest {
     void pollKafka_lambdaCommitsSuccessfulPrefixBeforeLaterFailure() throws Exception {
         Pipe pipe = lambdaSelfManagedKafkaPipe();
         KafkaRecordDto first = kafkaRecord("orders", 0, 0L, null,
-                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8));
         KafkaRecordDto skipped = kafkaRecord("orders", 0, 1L, null,
-                "{\"status\":\"inactive\",\"id\":\"order-2\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "{\"status\":\"inactive\",\"id\":\"order-2\"}".getBytes(StandardCharsets.UTF_8));
         KafkaRecordDto failing = kafkaRecord("orders", 0, 2L, null,
-                "{\"status\":\"active\",\"id\":\"order-3\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "{\"status\":\"active\",\"id\":\"order-3\"}".getBytes(StandardCharsets.UTF_8));
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, skipped, failing));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
-        org.mockito.Mockito.doNothing()
+        doNothing()
                 .doThrow(new RuntimeException("boom"))
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
