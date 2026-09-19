@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -236,16 +237,17 @@ public class IotMqttWebSocketIntegrationTest {
         try {
             CountDownLatch connected = new CountDownLatch(clients);
             List<Thread> threads = new ArrayList<>();
-            List<Throwable> failures = new java.util.concurrent.CopyOnWriteArrayList<>();
+            List<Throwable> failures = new CopyOnWriteArrayList<>();
             for (int i = 0; i < clients; i++) {
                 String clientId = "ws-fanout-" + i + "-" + System.nanoTime();
                 Thread thread = new Thread(() -> {
+                    WsClient subscriber = null;
                     try {
-                        WsClient subscriber = WsClient.connect(ws("/mqtt"), clientId, null, null);
-                        subscriber.subscribe(topic);
+                        subscriber = WsClient.connect(ws("/mqtt"), clientId, null, null);
                         synchronized (subscribers) {
                             subscribers.add(subscriber);
                         }
+                        subscriber.subscribe(topic);
                     } catch (Exception e) {
                         failures.add(e);
                     } finally {

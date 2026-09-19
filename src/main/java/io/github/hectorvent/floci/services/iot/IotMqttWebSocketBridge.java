@@ -12,6 +12,8 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 /**
  * Serves MQTT over WebSocket at {@code /mqtt} on the HTTP and HTTPS ports, the path and port AWS
  * IoT uses for browser clients, the Device SDK's WebSocket transport and secure tunnelling. Frames
@@ -90,8 +92,7 @@ public class IotMqttWebSocketBridge {
                         socket.close();
                         return;
                     }
-                    wire(ws, socket);
-                    ws.resume();
+                    new BridgeSession(ws, socket).start();
                 })
                 .onFailure(error -> {
                     LOG.warnv("MQTT WebSocket bridge could not reach the broker on {0}:{1}: {2}",
@@ -100,39 +101,86 @@ public class IotMqttWebSocketBridge {
                 });
     }
 
-    private static void wire(ServerWebSocket ws, NetSocket socket) {
-        ws.frameHandler(frame -> {
-            if (ws.isClosed()) {
-                return;
-            }
-            if (frame.isText()) {
-                ws.close(CLOSE_UNSUPPORTED_DATA, "MQTT over WebSocket is binary");
-                return;
-            }
-            if (!frame.isBinary() && !frame.isContinuation()) {
-                return;
-            }
-            socket.write(frame.binaryData());
-            if (socket.writeQueueFull()) {
-                ws.pause();
-                socket.drainHandler(ignored -> ws.resume());
-            }
-        });
-        ws.closeHandler(ignored -> socket.close());
-        ws.exceptionHandler(error -> socket.close());
+    static final class BridgeSession {
 
-        socket.handler(bytes -> {
-            if (ws.isClosed()) {
-                return;
+        private final ServerWebSocket webSocket;
+        private final NetSocket socket;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        BridgeSession(ServerWebSocket webSocket, NetSocket socket) {
+            this.webSocket = webSocket;
+            this.socket = socket;
+        }
+
+        void start() {
+            webSocket.frameHandler(frame -> {
+                if (closed.get() || webSocket.isClosed()) {
+                    return;
+                }
+                if (frame.isText()) {
+                    close(CLOSE_UNSUPPORTED_DATA, "MQTT over WebSocket is binary");
+                    return;
+                }
+                if (!frame.isBinary() && !frame.isContinuation()) {
+                    return;
+                }
+                socket.write(frame.binaryData());
+                if (socket.writeQueueFull()) {
+                    webSocket.pause();
+                    socket.drainHandler(ignored -> {
+                        if (!closed.get()) {
+                            webSocket.resume();
+                        }
+                    });
+                }
+            });
+            webSocket.closeHandler(ignored -> closeSocket());
+            webSocket.exceptionHandler(error -> close(CLOSE_INTERNAL_ERROR, "MQTT WebSocket failed"));
+
+            socket.handler(bytes -> {
+                if (closed.get() || webSocket.isClosed()) {
+                    return;
+                }
+                webSocket.writeBinaryMessage(bytes);
+                if (webSocket.writeQueueFull()) {
+                    socket.pause();
+                    webSocket.drainHandler(ignored -> {
+                        if (!closed.get()) {
+                            socket.resume();
+                        }
+                    });
+                }
+            });
+            socket.closeHandler(ignored -> closeWebSocket());
+            socket.exceptionHandler(error -> close(CLOSE_INTERNAL_ERROR, "MQTT broker connection failed"));
+
+            if (webSocket.isClosed()) {
+                closeSocket();
+            } else {
+                webSocket.resume();
             }
-            ws.writeBinaryMessage(bytes);
-            if (ws.writeQueueFull()) {
-                socket.pause();
-                ws.drainHandler(ignored -> socket.resume());
+        }
+
+        private void close(short code, String reason) {
+            if (closed.compareAndSet(false, true)) {
+                socket.close();
+                if (!webSocket.isClosed()) {
+                    webSocket.close(code, reason);
+                }
             }
-        });
-        socket.closeHandler(ignored -> ws.close());
-        socket.exceptionHandler(error -> ws.close(CLOSE_INTERNAL_ERROR, "MQTT broker connection failed"));
+        }
+
+        private void closeSocket() {
+            if (closed.compareAndSet(false, true)) {
+                socket.close();
+            }
+        }
+
+        private void closeWebSocket() {
+            if (closed.compareAndSet(false, true) && !webSocket.isClosed()) {
+                webSocket.close();
+            }
+        }
     }
 
     /** The broker binds {@code 0.0.0.0} by default, which is not a connect target; loopback is. */
