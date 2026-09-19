@@ -115,6 +115,7 @@ public class AslExecutor {
 
     /** AWS starts no child execution with an input over 256 KiB, batched or not. */
     private static final int MAX_BATCH_INPUT_BYTES = 256 * 1024;
+    private static final int ITEM_READER_MAX_ITEMS = 100_000_000;
 
     private enum MapItemsSource {
         DEFAULT,
@@ -3070,11 +3071,14 @@ public class AslExecutor {
                                                     JsonNode context, boolean jsonata,
                                                     ObjectNode variables) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
-        if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
-            return resolveListObjectsItems(itemReader, input, context, jsonata, variables);
-        }
-        if (!"arn:aws:states:::s3:getObject".equals(resource)) {
+        if (!"arn:aws:states:::s3:listObjectsV2".equals(resource)
+                && !"arn:aws:states:::s3:getObject".equals(resource)) {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
+        }
+
+        int maxItems = resolveItemReaderMaxItems(itemReader, input, jsonata, context, variables);
+        if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems);
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
@@ -3093,24 +3097,24 @@ public class AslExecutor {
         try {
             S3Object object = s3Service.getObject(bucket, key);
             if ("JSONL".equals(inputType)) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, readJsonLines(object.getData())),
+                return new ResolvedMapItems(applyMaxItems(maxItems, readJsonLines(object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);
             }
             if ("CSV".equals(inputType)) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, readCsvRows(itemReader, object.getData())),
+                return new ResolvedMapItems(applyMaxItems(maxItems, readCsvRows(itemReader, object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);
             }
             JsonNode items = objectMapper.readTree(object.getData());
             items = applyItemsPointer(itemReader, items);
             if (items.isObject()) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, normalizeObjectItems(items)),
+                return new ResolvedMapItems(applyMaxItems(maxItems, normalizeObjectItems(items)),
                         MapItemsSource.ITEM_READER_OBJECT);
             }
             if (!items.isArray()) {
                 throw new FailStateException("States.ItemReaderFailed",
                         "Attempting to map over non-iterable node.");
             }
-            return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
+            return new ResolvedMapItems(applyMaxItems(maxItems, items), MapItemsSource.ITEM_READER_ARRAY);
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
         } catch (FailStateException e) {
@@ -3185,6 +3189,54 @@ public class AslExecutor {
         };
     }
 
+    private int resolveItemReaderMaxItems(JsonNode itemReader, JsonNode mapInput, boolean jsonata,
+                                          JsonNode context, ObjectNode variables) {
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        boolean hasMaxItems = readerConfig.has("MaxItems");
+        boolean hasMaxItemsPath = readerConfig.has("MaxItemsPath");
+        if (hasMaxItems && hasMaxItemsPath) {
+            throw new FailStateException("States.Runtime",
+                    "ReaderConfig cannot specify both MaxItems and MaxItemsPath", "MaxItems");
+        }
+        if (jsonata && hasMaxItemsPath) {
+            throw new FailStateException("States.Runtime",
+                    "ReaderConfig.MaxItemsPath is not supported by JSONata state machines", "MaxItemsPath");
+        }
+
+        boolean jsonataExpression = hasMaxItems
+                && jsonata
+                && readerConfig.get("MaxItems").isTextual()
+                && JsonataEvaluator.isExpression(readerConfig.get("MaxItems").asText());
+        if (hasMaxItemsPath) {
+            JsonNode value = resolvePath(readerConfig.get("MaxItemsPath").asText(), mapInput);
+            long maxItems;
+            try {
+                maxItems = Long.parseLong(value.asText());
+            } catch (NumberFormatException e) {
+                throw new FailStateException("States.Runtime",
+                        "MaxItems must resolve to an integer of 0 or more", "MaxItems");
+            }
+            if (maxItems < 0) {
+                throw new FailStateException(
+                        "States.ItemReaderFailed", "field MaxItems must be positive", true);
+            }
+            return (int) Math.min(maxItems, ITEM_READER_MAX_ITEMS);
+        }
+
+        int maxItems = resolveMapIntegerField(
+                readerConfig, "MaxItems", 0, mapInput, jsonata, context, variables);
+        if (maxItems > ITEM_READER_MAX_ITEMS) {
+            if (jsonataExpression) {
+                return ITEM_READER_MAX_ITEMS;
+            }
+            throw new FailStateException(
+                    "States.Runtime",
+                    "MaxItems must resolve to an integer of " + ITEM_READER_MAX_ITEMS + " or less",
+                    "MaxItems");
+        }
+        return maxItems;
+    }
+
     private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,
                                                  boolean jsonata, ObjectNode variables) throws Exception {
         if (jsonata && itemReader.has("Arguments")) {
@@ -3196,7 +3248,8 @@ public class AslExecutor {
     }
 
     private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
-                                                     boolean jsonata, ObjectNode variables) throws Exception {
+                                                     boolean jsonata, ObjectNode variables,
+                                                     int maxItems) throws Exception {
         JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = parameters.path("Bucket").asText(null);
         if (bucket == null) {
@@ -3205,7 +3258,6 @@ public class AslExecutor {
         String prefix = parameters.path("Prefix").asText(null);
 
         ArrayNode items = objectMapper.createArrayNode();
-        int maxItems = maxItems(itemReader);
         try {
             // MaxItems keeps the first keys in order, so the listing itself is capped.
             for (S3Object object : s3Service.listObjects(bucket, prefix, null,
@@ -3260,12 +3312,7 @@ public class AslExecutor {
         return pointedItems;
     }
 
-    private int maxItems(JsonNode itemReader) {
-        return itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
-    }
-
-    private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
-        int maxItems = maxItems(itemReader);
+    private JsonNode applyMaxItems(int maxItems, JsonNode items) {
         if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
             return items;
         }
