@@ -20,12 +20,6 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 
-/**
- * ECC_SECG_P256K1 signs with BC's lightweight {@link ECDSASigner}. BC's {@code SignatureSpi}
- * subclasses extend {@code java.security.SignatureSpi} (not {@code java.security.Signature}), so
- * they cannot be used as a drop-in {@code Signature}. The lightweight API avoids JCA's
- * {@code ClassLoader.loadClass} entirely, so every class it needs stays in the native image.
- */
 final class EccSecgP256k1KeyType implements KmsKeyType {
 
     private static final String CURVE = "secp256k1";

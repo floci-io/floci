@@ -21,11 +21,6 @@ public final class SymmetricKeyType implements KmsKeyType {
         addBackingKey(key);
     }
 
-    /**
-     * Mints a new AES-256 backing key for the AES-GCM ciphertext envelope and makes it the
-     * current one, keeping any earlier backing keys in the map so ciphertext produced under
-     * them keeps decrypting (AWS KMS never discards prior backing keys either).
-     */
     public void addBackingKey(KmsKey key) {
         byte[] material = new byte[KmsKeySpec.SYMMETRIC_DEFAULT.materialByteLength()];
         random.nextBytes(material);

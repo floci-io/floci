@@ -7,9 +7,6 @@ import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 
 import java.security.GeneralSecurityException;
 
-/**
- * The cryptography of one kind of KMS key.
- */
 public interface KmsKeyType {
 
     void generateKeyMaterial(KmsKey key, String region) throws GeneralSecurityException;
@@ -24,7 +21,6 @@ public interface KmsKeyType {
         return false;
     }
 
-    /** Symmetric keys use the ciphertext envelope in KmsService instead. */
     default byte[] encrypt(KmsKey key, KmsKeySpec.Algorithm algorithm, byte[] plaintext) {
         throw new IllegalStateException(key.getKeySpec() + " does not encrypt with " + algorithm);
     }

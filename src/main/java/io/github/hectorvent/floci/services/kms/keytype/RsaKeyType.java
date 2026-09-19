@@ -108,11 +108,7 @@ final class RsaKeyType implements KmsKeyType {
         }
     }
 
-    /**
-     * RSAES-OAEP with an explicit OAEPParameterSpec. The JDK's named OAEP transformations
-     * default MGF1 to SHA-1 whatever the main digest is, while KMS RSAES_OAEP_SHA_256 uses
-     * MGF1 over SHA-256, so the parameters are always spelled out.
-     */
+    // The JDK OAEP transformations default MGF1 to SHA-1. KMS RSAES_OAEP_SHA_256 uses MGF1 over SHA-256.
     private static byte[] oaep(int mode, KmsKey key, KmsKeySpec.Algorithm algorithm, byte[] input) {
         try {
             String digest = algorithm == KmsKeySpec.Algorithm.RSAES_OAEP_SHA_1 ? "SHA-1" : "SHA-256";
@@ -127,9 +123,6 @@ final class RsaKeyType implements KmsKeyType {
             return cipher.doFinal(input);
         } catch (Exception e) {
             if (mode == Cipher.DECRYPT_MODE) {
-                // Real KMS answers any OAEP failure the same way: the padding check hides
-                // whether the bytes were garbage, the wrong length, or made for another key.
-                // The log line keeps broken key material or a missing cipher diagnosable.
                 LOG.debugv(e, "RSA OAEP decrypt failed for key {0}", key.getKeyId());
                 throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
             }
@@ -142,11 +135,7 @@ final class RsaKeyType implements KmsKeyType {
         return algorithm.startsWith("RSASSA_PSS");
     }
 
-    /**
-     * Wraps a pre-computed digest in the ASN.1 {@code DigestInfo} structure that PKCS#1
-     * v1.5 signing prepends before padding (RFC 8017 9.2). Needed for {@code MessageType=DIGEST}
-     * RSA signatures because {@code NONEwithRSA} pads only the bytes it is given.
-     */
+    // NONEwithRSA pads only the bytes it gets, so PKCS#1 v1.5 needs the DigestInfo wrapper (RFC 8017 9.2).
     private static byte[] wrapInDigestInfo(byte[] digest, String algorithm) {
         ASN1ObjectIdentifier hashOid;
         if (algorithm.endsWith("SHA_256")) {
@@ -165,16 +154,7 @@ final class RsaKeyType implements KmsKeyType {
         }
     }
 
-    /**
-     * Signs a pre-computed digest with RSASSA-PSS.
-     *
-     * <p>Real KMS applies the PSS encoding directly to the digest a {@code MessageType=DIGEST}
-     * caller sends. The JDK's {@code RSASSA-PSS} Signature always hashes its input first, so
-     * this uses BouncyCastle's lightweight raw PSS signer, instantiated directly like the
-     * secp256k1 and Ed25519ph paths. The raw signer defaults to MGF1 over the same digest with
-     * a salt as long as that digest, matching the RAW path, so RAW and DIGEST signatures verify
-     * against each other.
-     */
+    // The JDK RSASSA-PSS Signature always hashes its input, so a DIGEST request needs BC's raw PSS signer.
     private byte[] signPssDigest(PrivateKey privateKey, byte[] digest, String algorithm) throws Exception {
         PSSSigner signer = rawPssSigner(algorithm);
         signer.init(true, new ParametersWithRandom(PrivateKeyFactory.createKey(privateKey.getEncoded()), random));

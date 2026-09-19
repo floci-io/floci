@@ -21,12 +21,7 @@ import java.security.KeyPairGenerator;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Base64;
 
-/**
- * EC keys on curves the JDK lacks, through BouncyCastle SPI classes allocated directly. JCA's
- * ClassLoader.loadClass cannot find BC SPI classes in GraalVM native image unless they are
- * allocated directly in code (GraalVM escape analysis eliminates unused allocations, keeping
- * them out of the native image type registry).
- */
+// The BouncyCastle SPI classes are allocated directly. JCA lookup cannot find them in the native image.
 final class BcEcKeys {
 
     private BcEcKeys() {

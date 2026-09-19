@@ -70,16 +70,7 @@ final class AsymmetricKeys {
         return verifier.verify(signature);
     }
 
-    /**
-     * Builds the {@link Signature} for a KMS signing algorithm.
-     *
-     * <p>BouncyCastle names PSS signatures {@code SHAnnnwithRSA/PSS}, and only its provider
-     * answers to that name. The JDK exposes one {@code RSASSA-PSS} Signature whose digest,
-     * mask generation function and salt length come from a parameter spec instead. AWS KMS
-     * RSASSA_PSS_SHA_nnn uses MGF1 over the same digest with a salt as long as that digest,
-     * which is what BouncyCastle's alias defaults to, so a signature made either way verifies
-     * against the other. Every other name Floci asks for is a standard JCA name.
-     */
+    // KMS RSASSA_PSS uses MGF1 over the same digest, with a salt as long as the digest.
     private static Signature signatureFor(String jcaAlgorithm) throws GeneralSecurityException {
         if (!jcaAlgorithm.endsWith("withRSA/PSS")) {
             return Signature.getInstance(jcaAlgorithm);

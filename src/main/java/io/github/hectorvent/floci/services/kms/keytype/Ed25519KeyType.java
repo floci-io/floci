@@ -26,16 +26,7 @@ final class Ed25519KeyType implements KmsKeyType {
         AsymmetricKeys.store(key, KeyPairGenerator.getInstance("Ed25519").generateKeyPair());
     }
 
-    /**
-     * ED25519_SHA_512 is pure Ed25519 over the message. ED25519_PH_SHA_512 is RFC 8032
-     * Ed25519ph, and real KMS applies the SHA-512 pre-hash to the bytes the caller sends rather
-     * than treating them as an already computed digest. That is measurably different from
-     * MessageType=DIGEST on RSA and ECDSA keys, where the bytes are signed as they arrive.
-     *
-     * <p>The JDK has no Ed25519ph, so that branch uses BouncyCastle's lightweight signer,
-     * instantiated directly rather than resolved through a JCA provider, the same way the
-     * secp256k1 path does.
-     */
+    // KMS runs Ed25519ph over the digest the caller sends, so the digest is hashed again.
     @Override
     public byte[] sign(KmsKey key, byte[] message, String algorithm, KmsMessageType messageType)
             throws GeneralSecurityException, CryptoException {
@@ -64,12 +55,6 @@ final class Ed25519KeyType implements KmsKeyType {
         return verifier.verifySignature(signature);
     }
 
-    /**
-     * ED25519_SHA_512 only takes {@code MessageType=RAW} and ED25519_PH_SHA_512 only takes
-     * {@code MessageType=DIGEST}, whose value has to be exactly one SHA-512 digest. Real KMS
-     * rejects the other pairing and a wrong digest length with a ValidationException, and rejects
-     * any other signing algorithm with an InvalidKeyUsageException.
-     */
     private static KmsKeySpec.Algorithm validateRequest(KmsKeySpec spec, String algorithm,
                                                         KmsMessageType messageType, byte[] message) {
         KmsKeySpec.Algorithm algo = AsymmetricKeys.requireSpecAlgorithm(spec, algorithm);
