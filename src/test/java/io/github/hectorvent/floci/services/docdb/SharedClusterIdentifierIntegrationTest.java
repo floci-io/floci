@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.rds.RdsService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -48,11 +49,11 @@ class SharedClusterIdentifierIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
             + "SignedHeaders=content-type;host, Signature=test";
 
-    private static io.restassured.specification.RequestSpecification query(String action) {
+    private static RequestSpecification query(String action) {
         return queryIn("us-east-1", action);
     }
 
-    private static io.restassured.specification.RequestSpecification queryIn(String region, String action) {
+    private static RequestSpecification queryIn(String region, String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/" + region + "/rds/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")

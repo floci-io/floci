@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.docdb;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -36,7 +37,7 @@ class DocDbTagIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
             + "SignedHeaders=content-type;host, Signature=test";
 
-    private static io.restassured.specification.RequestSpecification query(String action) {
+    private static RequestSpecification query(String action) {
         return given().header("Authorization", AUTH)
                 .contentType(URLENC)
                 .formParam("Action", action)

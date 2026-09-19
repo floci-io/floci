@@ -4,9 +4,10 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.quarkus.test.junit.QuarkusTest;
-import jakarta.inject.Inject;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -40,7 +41,7 @@ class DocDbClusterSettingsIntegrationTest {
     @Inject
     Ec2Service ec2Service;
 
-    private static io.restassured.specification.RequestSpecification rds(String action) {
+    private static RequestSpecification rds(String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")
