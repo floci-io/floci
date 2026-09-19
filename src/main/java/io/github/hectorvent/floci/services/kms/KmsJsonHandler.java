@@ -302,7 +302,7 @@ public class KmsJsonHandler {
         Integer numberOfBytes = readNumberOfBytes(request);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
-        Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
+        Map<String, Object> result = service.generateDataKeyWithoutPlaintext(keyId, spec, numberOfBytes, context, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("CiphertextBlob", Base64.getEncoder().encodeToString((byte[]) result.get("CiphertextBlob")));

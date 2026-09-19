@@ -1747,11 +1747,25 @@ public class KmsService implements ResourceProvider {
 
     public Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes,
                                                Map<String, String> encryptionContext, String region) {
+        return generateDataKey(keyId, keySpec, numberOfBytes, encryptionContext, region, "GenerateDataKey");
+    }
+
+    Map<String, Object> generateDataKeyWithoutPlaintext(String keyId, String keySpec, Integer numberOfBytes,
+                                                        Map<String, String> encryptionContext, String region) {
+        Map<String, Object> dataKey = generateDataKey(keyId, keySpec, numberOfBytes, encryptionContext, region,
+                "GenerateDataKeyWithoutPlaintext");
+        dataKey.remove("Plaintext");
+        return dataKey;
+    }
+
+    private Map<String, Object> generateDataKey(String keyId, String keySpec, Integer numberOfBytes,
+                                                Map<String, String> encryptionContext, String region,
+                                                String operation) {
         KmsKey key = resolveKey(keyId, region);
         if ((keySpec == null) == (numberOfBytes == null)) {
             throw new AwsException("ValidationException", "Please specify either number of bytes or key spec.", 400);
         }
-        validateKeyUsage(key, KmsKeyUsage.ENCRYPT_DECRYPT, "GenerateDataKey");
+        validateKeyUsage(key, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
         validateKeyIsUsableForCryptoOperations(key);
         if (KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
             throw new AwsException("InvalidKeyUsageException", "You cannot generate a data key with an asymmetric CMK", 400);
@@ -1761,7 +1775,7 @@ public class KmsService implements ResourceProvider {
         byte[] plaintext = new byte[len];
         ThreadLocalRandom.current().nextBytes(plaintext);
 
-        EncryptResult encrypted = encrypt(keyId, plaintext, encryptionContext, null, region, "GenerateDataKey");
+        EncryptResult encrypted = encrypt(keyId, plaintext, encryptionContext, null, region, operation);
 
         Map<String, Object> result = new HashMap<>();
         result.put("Plaintext", plaintext);

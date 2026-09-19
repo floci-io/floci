@@ -1939,6 +1939,18 @@ class KmsIntegrationTest {
                 .body("message", equalTo("You cannot generate a data key with an asymmetric CMK"));
     }
 
+    @ParameterizedTest
+    @CsvSource({"GenerateDataKey", "GenerateDataKeyWithoutPlaintext"})
+    void generateDataKeyNamesItsOperationInTheKeyUsageError(String operation) {
+        String keyArn = createKeyArn("ECC_NIST_P256", "SIGN_VERIFY");
+
+        callKms(operation, "{\"KeyId\":\"%s\",\"KeySpec\":\"AES_256\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo(keyArn + " key usage is SIGN_VERIFY which is not valid for " + operation + "."));
+    }
+
     @Test
     void generateDataKeyChecksTheKeyStateBeforeTheKeySpec() {
         String keyArn = createKeyArn("RSA_2048", "ENCRYPT_DECRYPT");

@@ -1726,6 +1726,17 @@ class KmsServiceTest {
     }
 
     @Test
+    void generateDataKeyWithoutPlaintextKeepsThePlaintextToItself() {
+        KmsKey key = kmsService.createKey(null, REGION);
+
+        Map<String, Object> result = kmsService.generateDataKeyWithoutPlaintext(key.getKeyId(), "AES_256", null,
+                Map.of(), REGION);
+
+        assertFalse(result.containsKey("Plaintext"));
+        assertNotNull(result.get("CiphertextBlob"));
+    }
+
+    @Test
     void tagResource() {
         KmsKey key = kmsService.createKey(null, REGION);
         kmsService.tagResource(key.getKeyId(), Map.of("env", "test", "team", "platform"), REGION);
