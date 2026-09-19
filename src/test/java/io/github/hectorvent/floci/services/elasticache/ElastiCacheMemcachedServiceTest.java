@@ -19,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ElastiCacheMemcachedServiceTest {
@@ -140,7 +142,6 @@ class ElastiCacheMemcachedServiceTest {
 
         // Delete must not reach for a container that was never created.
         service.deleteCacheCluster("no-docker-cluster");
-        org.mockito.Mockito.verify(containerManager, org.mockito.Mockito.never())
-                .stop(org.mockito.ArgumentMatchers.any());
+        verify(containerManager, never()).stop(any());
     }
 }
