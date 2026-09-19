@@ -744,10 +744,7 @@ public class KmsService implements ResourceProvider {
     private static void validateRotationKeySpec(KmsKey key) {
         if (KmsKeyUsage.ENCRYPT_DECRYPT != key.getKeyUsage()
                 || KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
-            throw new AwsException(
-                    "UnsupportedOperationException",
-                    "You cannot perform this operation on a non-symmetric key or a key with non-ENCRYPT_DECRYPT key usage.",
-                    400);
+            throw new AwsException("UnsupportedOperationException", null, 400);
         }
     }
 

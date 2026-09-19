@@ -2026,6 +2026,23 @@ class KmsIntegrationTest {
                 .body("message", equalTo(keyArn + " is pending deletion."));
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "HMAC_256, GENERATE_VERIFY_MAC, EnableKeyRotation",
+            "HMAC_256, GENERATE_VERIFY_MAC, RotateKeyOnDemand",
+            "RSA_2048, ENCRYPT_DECRYPT, EnableKeyRotation",
+            "RSA_2048, ENCRYPT_DECRYPT, RotateKeyOnDemand",
+    })
+    void rotationRejectsAKeySpecThatDoesNotRotateWithoutAMessage(String keySpec, String keyUsage, String operation) {
+        String keyArn = createKeyArn(keySpec, keyUsage);
+
+        callKms(operation, "{\"KeyId\":\"%s\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("UnsupportedOperationException"))
+                .body("message", nullValue());
+    }
+
     @Test
     void rotateKeyOnDemandRejectsAKeyPendingImport() {
         String keyArn = callKms("CreateKey", "{\"Origin\":\"EXTERNAL\"}")
