@@ -331,6 +331,26 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:s3:::my-bucket/folder/file.json", arn);
     }
 
+    /**
+     * S3VirtualHostFilter rewrites a virtual-hosted bucket-level request (GET /) to
+     * /bucket/. The resource is still the bucket, so the ARN must carry no trailing
+     * slash or a policy naming arn:aws:s3:::bucket stops matching and an allowed
+     * ListBucket is denied for every SDK that defaults to virtual-hosted addressing.
+     */
+    @Test
+    void s3BuildsBucketArnForVirtualHostedRewrittenPath() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/");
+        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:s3:::my-bucket", arn);
+    }
+
+    @Test
+    void s3KeepsTrailingSlashOfAFolderMarkerKey() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/folder/");
+        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:s3:::my-bucket/folder/", arn);
+    }
+
     // ── Lambda ──────────────────────────────────────────────────────────────────
 
     @Test
