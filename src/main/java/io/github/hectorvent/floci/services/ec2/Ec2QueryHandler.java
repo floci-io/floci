@@ -2868,8 +2868,8 @@ public class Ec2QueryHandler {
     // ─── Security Group handlers ───────────────────────────────────────────────
 
     private Response handleCreateSecurityGroup(MultivaluedMap<String, String> p, String region) {
-        String groupName = p.getFirst("GroupName");
-        String description = p.getFirst("GroupDescription");
+        String groupName = requireParameter(p, "GroupName");
+        String description = requireParameter(p, "GroupDescription");
         String vpcId = p.getFirst("VpcId");
         SecurityGroup sg = service.createSecurityGroup(region, groupName, description, vpcId);
         applyResourceTags(p, region, "security-group", sg.getGroupId());
@@ -2880,6 +2880,17 @@ public class Ec2QueryHandler {
                 .elem("return", "true")
                 .end("CreateSecurityGroupResponse");
         return xmlResponse(xml.build());
+    }
+
+    private static String requireParameter(MultivaluedMap<String, String> params, String parameterName) {
+        String value = params.getFirst(parameterName);
+        if (value == null || value.isBlank()) {
+            throw new AwsException(
+                    "MissingParameter",
+                    "The request must contain the parameter " + parameterName,
+                    400);
+        }
+        return value;
     }
 
     private Response handleDescribeSecurityGroups(MultivaluedMap<String, String> p, String region) {

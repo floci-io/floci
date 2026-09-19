@@ -4221,7 +4221,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // Check duplicate
         String finalVpcId = vpcId;
         boolean exists = securityGroups.scan(k -> true).stream()
-                .anyMatch(sg -> sg.getRegion().equals(region) && sg.getGroupName().equals(groupName)
+                .anyMatch(sg -> sg.getRegion().equals(region) && Objects.equals(sg.getGroupName(), groupName)
                         && finalVpcId.equals(sg.getVpcId()));
         if (exists) {
             throw new AwsException("InvalidGroup.Duplicate", "The security group '" + groupName + "' already exists", 400);
