@@ -213,7 +213,8 @@ class KmsIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("NumberOfBytes is required."));
     }
 
     @Test

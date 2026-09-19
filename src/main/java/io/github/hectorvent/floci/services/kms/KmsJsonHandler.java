@@ -571,7 +571,10 @@ public class KmsJsonHandler {
                     "Custom key stores are not supported.",
                     400);
         }
-        int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        if (!request.path("NumberOfBytes").isNumber()) {
+            throw new AwsException("ValidationException", "NumberOfBytes is required.", 400);
+        }
+        int numberOfBytes = request.path("NumberOfBytes").asInt();
         byte[] randomBytes = service.generateRandom(numberOfBytes);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Plaintext", Base64.getEncoder().encodeToString(randomBytes));
