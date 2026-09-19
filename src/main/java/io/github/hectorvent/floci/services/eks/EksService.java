@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.AccessConfig;
@@ -35,19 +37,21 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
-import java.util.Set;
 
 @ApplicationScoped
 public class EksService implements TagHandler, ResourceProvider {
@@ -57,6 +61,9 @@ public class EksService implements TagHandler, ResourceProvider {
     /** The AWS charset for EKS cluster names. It admits no dot, which the Docker-name account
      *  qualifier relies on — see EksClusterManager#accountQualifiedName. */
     static final String CLUSTER_NAME_REGEX = "[0-9A-Za-z][A-Za-z0-9\\-_]*";
+
+    private static final String CLUSTER_SG_DESCRIPTION =
+            "EKS created security group applied to ENI that is attached to EKS Control Plane master nodes, as well as any managed workloads.";
 
     private final StorageBackend<String, Cluster> storage;
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
@@ -93,6 +100,7 @@ public class EksService implements TagHandler, ResourceProvider {
     @PostConstruct
     public void init() {
         backfillOidcIdentities();
+        backfillClusterSecurityGroups();
         if (!config.services().eks().mock()) {
             restorePersistedClusters();
             startReadinessPoller();
@@ -209,6 +217,87 @@ public class EksService implements TagHandler, ResourceProvider {
         storage.put(cluster.getName(), cluster);
     }
 
+    private SecurityGroup createClusterSecurityGroup(String region, String clusterName, String vpcId) {
+        String suffix = randomHex(8);
+        String groupName = "eks-cluster-sg-" + clusterName + "-" + suffix;
+        SecurityGroup sg = ec2Service.createSecurityGroup(region, groupName, CLUSTER_SG_DESCRIPTION, vpcId);
+        List<Tag> tags = List.of(
+                new Tag("Name", groupName),
+                new Tag("kubernetes.io/cluster/" + clusterName, "owned"),
+                new Tag("aws:eks:cluster-name", clusterName)
+        );
+        ec2Service.createTags(region, List.of(sg.getGroupId()), tags);
+        return sg;
+    }
+
+    private void deleteClusterSecurityGroup(Cluster cluster) {
+        if (ec2Service == null || cluster.getResourcesVpcConfig() == null) {
+            return;
+        }
+        String sgId = cluster.getResourcesVpcConfig().getClusterSecurityGroupId();
+        if (sgId == null || sgId.isBlank()) {
+            return;
+        }
+        String region = resolveClusterRegion(cluster);
+        try {
+            ec2Service.deleteSecurityGroup(region, sgId);
+        } catch (AwsException e) {
+            if ("InvalidGroup.NotFound".equals(e.getErrorCode())) {
+                LOG.debugv("Cluster security group {0} already gone, treating as deleted", sgId);
+            } else {
+                throw e;
+            }
+        }
+    }
+
+    private void backfillClusterSecurityGroups() {
+        if (ec2Service == null) {
+            return;
+        }
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+            Cluster cluster = entry.value();
+            String accountId = entry.accountId();
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(accountId);
+            }
+
+            ResourcesVpcConfig vpcConfig = cluster.getResourcesVpcConfig();
+            if (vpcConfig == null) {
+                continue;
+            }
+            if (vpcConfig.getClusterSecurityGroupId() != null && !vpcConfig.getClusterSecurityGroupId().isBlank()) {
+                continue;
+            }
+            if (vpcConfig.getVpcId() == null || vpcConfig.getVpcId().isBlank()) {
+                continue;
+            }
+
+            String region = resolveClusterRegion(cluster);
+            SecurityGroup sg = createClusterSecurityGroup(region, cluster.getName(), vpcConfig.getVpcId());
+            vpcConfig.setClusterSecurityGroupId(sg.getGroupId());
+            putClusterForAccount(accountId, cluster);
+            LOG.infov("Backfilled cluster security group {0} for existing EKS cluster {1} in account {2}",
+                    sg.getGroupId(), cluster.getName(), accountId);
+        }
+    }
+
+    private String resolveClusterRegion(Cluster cluster) {
+        if (cluster.getArn() != null && !cluster.getArn().isBlank()) {
+            try {
+                return AwsArnUtils.parse(cluster.getArn()).region();
+            } catch (IllegalArgumentException ignored) {
+                // Not a valid ARN, fall back to configured region
+            }
+        }
+        return config != null ? config.defaultRegion() : regionResolver.getRegion();
+    }
+
+    private static String randomHex(int len) {
+        byte[] bytes = new byte[(len + 1) / 2];
+        ThreadLocalRandom.current().nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes).substring(0, len);
+    }
+
     @PreDestroy
     public void shutdown() {
         poller.shutdownNow();
@@ -261,7 +350,12 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setCreatedAt(Instant.now());
         cluster.setVersion(request.getVersion() != null ? request.getVersion() : "1.29");
         cluster.setRoleArn(request.getRoleArn());
-        cluster.setResourcesVpcConfig(buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId));
+        ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
+        if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
+            SecurityGroup sg = createClusterSecurityGroup(region, name, vpcConfig.getVpcId());
+            vpcConfig.setClusterSecurityGroupId(sg.getGroupId());
+        }
+        cluster.setResourcesVpcConfig(vpcConfig);
         cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
@@ -329,6 +423,7 @@ public class EksService implements TagHandler, ResourceProvider {
         if (!config.services().eks().mock()) {
             clusterManager.stopCluster(cluster);
         }
+        deleteClusterSecurityGroup(cluster);
         accessEntries.deleteClusterEntries(cluster);
         storage.delete(name);
         oidcService.deleteKey(name);
@@ -601,6 +696,7 @@ public class EksService implements TagHandler, ResourceProvider {
                     request.getEndpointPrivateAccess() != null ? request.getEndpointPrivateAccess() : Boolean.FALSE);
             response.setPublicAccessCidrs(
                     request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : List.of("0.0.0.0/0"));
+            response.setClusterSecurityGroupId("");
         } else {
             response.setSubnetIds(List.of());
             response.setSecurityGroupIds(List.of());
@@ -608,6 +704,7 @@ public class EksService implements TagHandler, ResourceProvider {
             response.setEndpointPublicAccess(Boolean.TRUE);
             response.setEndpointPrivateAccess(Boolean.FALSE);
             response.setPublicAccessCidrs(List.of("0.0.0.0/0"));
+            response.setClusterSecurityGroupId("");
         }
         return response;
     }

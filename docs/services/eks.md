@@ -67,6 +67,39 @@ aws --endpoint-url http://localhost:4566 eks create-access-entry \
   --type EC2_LINUX
 ```
 
+## Cluster security group
+
+When an EKS cluster is created with a VPC (either specified directly or resolved from subnets), Floci provisions a dedicated EC2 cluster security group and populates its ID in `cluster.resourcesVpcConfig.clusterSecurityGroupId` on both `CreateCluster` and `DescribeCluster` responses.
+
+### Naming convention and description
+
+The generated security group name follows the AWS pattern:
+
+```
+eks-cluster-sg-<cluster-name>-<suffix>
+```
+
+where `<suffix>` is an 8-character random hexadecimal string. The security group description is set to:
+
+```
+EKS created security group applied to ENI that is attached to EKS Control Plane master nodes, as well as any managed workloads.
+```
+
+### System tags
+
+Floci tags the cluster security group with the standard AWS system tags:
+
+- `Name`: `eks-cluster-sg-<cluster-name>-<suffix>`
+- `kubernetes.io/cluster/<cluster-name>`: `owned`
+- `aws:eks:cluster-name`: `<cluster-name>`
+
+### Lifecycle management and rules
+
+- **Creation**: The security group is created in the resolved cluster VPC when the cluster is created. Both real and mock clusters receive a security group. If a cluster is created without any VPC or subnets, `clusterSecurityGroupId` defaults to an empty string.
+- **Deletion**: When the cluster is deleted via `DeleteCluster`, Floci deletes the associated cluster security group from EC2. If the security group was already removed out-of-band, the deletion succeeds idempotently without error.
+- **Backfill**: Existing persisted clusters that were created before this feature receive an auto-generated cluster security group during startup backfill if their VPC is present.
+- **Rules**: In accordance with EC2 security group defaults, the group is created with the standard outbound rule. Floci does not synthesize custom ingress or egress rules on the cluster security group.
+
 ## Modes
 
 ### Mock mode (`mock: true`)
