@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.batch.model.BatchJobDefinition;
 import io.github.hectorvent.floci.services.batch.model.BatchJobQueue;
 import io.github.hectorvent.floci.services.batch.model.BatchNodeExecution;
 import io.github.hectorvent.floci.services.batch.model.BatchRunResult;
+import io.github.hectorvent.floci.services.batch.model.BatchStatus;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -23,14 +24,19 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -779,6 +785,138 @@ class BatchServiceTest {
         assertEquals("ClientException", e.getErrorCode());
     }
 
+    @Test
+    void cancelJobFailsRunnableJobWithRequestedReason() throws Exception {
+        InMemoryStorage<String, BatchJob> jobStore = new InMemoryStorage<>();
+        BatchService service = service("immediate", jobStore, mock(BatchDockerRunner.class));
+        BatchJob job = storedJob("cancel-runnable", BatchStatus.RUNNABLE);
+        jobStore.put(job.getJobId(), job);
+
+        service.cancelJob(json("""
+                {"jobId":"cancel-runnable","reason":"No longer needed"}
+                """));
+
+        JsonNode detail = service.describeJobs(json("""
+                {"jobs":["cancel-runnable"]}
+                """)).path("jobs").get(0);
+        assertEquals("FAILED", detail.path("status").asText());
+        assertEquals("No longer needed", detail.path("statusReason").asText());
+        assertTrue(detail.path("stoppedAt").asLong() > 0);
+    }
+
+    @Test
+    void cancelJobDoesNotStopRunningJob() throws Exception {
+        BatchDockerRunner runner = mock(BatchDockerRunner.class);
+        CountDownLatch runStarted = new CountDownLatch(1);
+        CountDownLatch releaseRun = new CountDownLatch(1);
+        when(runner.run(any(BatchJob.class), anyInt())).thenAnswer(invocation -> {
+            runStarted.countDown();
+            assertTrue(releaseRun.await(2, TimeUnit.SECONDS));
+            return new BatchRunResult(0, null, "log-stream", 1L, 2L, false);
+        });
+        BatchService service = dockerService(runner);
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"cancel-running-job",
+                  "type":"container",
+                  "containerProperties":{"image":"job:latest"}
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+        String jobId = service.submitJob(json("""
+                {"jobName":"cancel-running","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(queueArn, definitionArn)), REGION).path("jobId").asText();
+
+        assertTrue(runStarted.await(2, TimeUnit.SECONDS));
+        try {
+            service.cancelJob(json("""
+                    {"jobId":"%s","reason":"Too late to cancel"}
+                    """.formatted(jobId)));
+            JsonNode running = service.describeJobs(json("""
+                    {"jobs":["%s"]}
+                    """.formatted(jobId))).path("jobs").get(0);
+            assertEquals("RUNNING", running.path("status").asText());
+            verify(runner, never()).stopJob(jobId);
+        } finally {
+            releaseRun.countDown();
+        }
+        assertNotNull(waitForJobStatus(service, jobId, "SUCCEEDED"));
+    }
+
+    @Test
+    void terminateJobStopsRunningContainerAndPreservesRequestedReason() throws Exception {
+        BatchDockerRunner runner = mock(BatchDockerRunner.class);
+        CountDownLatch runStarted = new CountDownLatch(1);
+        CountDownLatch stopRequested = new CountDownLatch(1);
+        when(runner.run(any(BatchJob.class), anyInt())).thenAnswer(invocation -> {
+            runStarted.countDown();
+            assertTrue(stopRequested.await(2, TimeUnit.SECONDS));
+            return new BatchRunResult(137, "Job terminated", "log-stream", 1L, 2L, false);
+        });
+        doAnswer(invocation -> {
+            stopRequested.countDown();
+            return null;
+        }).when(runner).stopJob(any(String.class));
+        BatchService service = dockerService(runner);
+        String queueArn = arrayReadyQueue(service);
+        String definitionArn = service.registerJobDefinition(json("""
+                {
+                  "jobDefinitionName":"terminate-running-job",
+                  "type":"container",
+                  "containerProperties":{"image":"job:latest"}
+                }
+                """), REGION).path("jobDefinitionArn").asText();
+        String jobId = service.submitJob(json("""
+                {"jobName":"terminate-running","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(queueArn, definitionArn)), REGION).path("jobId").asText();
+
+        assertTrue(runStarted.await(2, TimeUnit.SECONDS));
+        service.terminateJob(json("""
+                {"jobId":"%s","reason":"Operator requested shutdown"}
+                """.formatted(jobId)));
+
+        JsonNode failed = waitForJobStatus(service, jobId, "FAILED");
+        assertNotNull(failed);
+        assertEquals("Operator requested shutdown", failed.path("statusReason").asText());
+        JsonNode failedWithAttempt = waitForJobAttemptCount(service, jobId, 1);
+        assertNotNull(failedWithAttempt);
+        assertEquals(137, failedWithAttempt.path("attempts").get(0).path("container").path("exitCode").asInt());
+        assertEquals("Operator requested shutdown", failedWithAttempt.path("statusReason").asText());
+        verify(runner).stopJob(jobId);
+    }
+
+    @Test
+    void terminateArrayParentFailsAndStopsEveryNonterminalChild() throws Exception {
+        InMemoryStorage<String, BatchJob> jobStore = new InMemoryStorage<>();
+        BatchDockerRunner runner = mock(BatchDockerRunner.class);
+        BatchService service = service("docker", jobStore, runner);
+        BatchJob parent = storedJob("array-parent", BatchStatus.SUBMITTED);
+        parent.setArraySize(2);
+        BatchJob first = storedJob("array-parent:0", BatchStatus.RUNNABLE);
+        first.setArrayJobId(parent.getJobId());
+        first.setArrayIndex(0);
+        BatchJob second = storedJob("array-parent:1", BatchStatus.RUNNING);
+        second.setArrayJobId(parent.getJobId());
+        second.setArrayIndex(1);
+        jobStore.put(parent.getJobId(), parent);
+        jobStore.put(first.getJobId(), first);
+        jobStore.put(second.getJobId(), second);
+
+        service.terminateJob(json("""
+                {"jobId":"array-parent","reason":"Stop the array"}
+                """));
+
+        JsonNode detail = service.describeJobs(json("""
+                {"jobs":["array-parent","array-parent:0","array-parent:1"]}
+                """)).path("jobs");
+        assertEquals("FAILED", detail.get(0).path("status").asText());
+        assertEquals("Stop the array", detail.get(0).path("statusReason").asText());
+        assertEquals("FAILED", detail.get(1).path("status").asText());
+        assertEquals("FAILED", detail.get(2).path("status").asText());
+        verify(runner, never()).stopJob("array-parent:0");
+        verify(runner).stopJob("array-parent:1");
+    }
+
     private String arrayReadyQueue(BatchService service) throws Exception {
         String suffix = UUID.randomUUID().toString();
         String computeArn = service.createComputeEnvironment(json("""
@@ -794,31 +932,17 @@ class BatchServiceTest {
     }
 
     private BatchService dockerService(BatchDockerRunner runner) {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.BatchServiceConfig batch = mock(EmulatorConfig.BatchServiceConfig.class);
-        when(config.services()).thenReturn(services);
-        when(services.batch()).thenReturn(batch);
-        when(batch.runnerMode()).thenReturn("docker");
-
-        return new BatchService(
-                new InMemoryStorage<String, BatchJobDefinition>(),
-                new InMemoryStorage<String, BatchJobQueue>(),
-                new InMemoryStorage<String, BatchComputeEnvironment>(),
-                new InMemoryStorage<String, BatchJob>(),
-                new RegionResolver(REGION, ACCOUNT),
-                config,
-                objectMapper,
-                runner);
+        return service("docker", new InMemoryStorage<String, BatchJob>(), runner);
     }
 
-    private BatchService immediateService(StorageBackend<String, BatchJob> jobStore) {
+    private BatchService service(String runnerMode, StorageBackend<String, BatchJob> jobStore,
+                                 BatchDockerRunner runner) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.BatchServiceConfig batch = mock(EmulatorConfig.BatchServiceConfig.class);
         when(config.services()).thenReturn(services);
         when(services.batch()).thenReturn(batch);
-        when(batch.runnerMode()).thenReturn("immediate");
+        when(batch.runnerMode()).thenReturn(runnerMode);
 
         return new BatchService(
                 new InMemoryStorage<String, BatchJobDefinition>(),
@@ -828,7 +952,25 @@ class BatchServiceTest {
                 new RegionResolver(REGION, ACCOUNT),
                 config,
                 objectMapper,
-                mock(BatchDockerRunner.class));
+                runner);
+    }
+
+    private BatchService immediateService(StorageBackend<String, BatchJob> jobStore) {
+        return service("immediate", jobStore, mock(BatchDockerRunner.class));
+    }
+
+    private BatchJob storedJob(String jobId, BatchStatus status) {
+        BatchJob job = new BatchJob();
+        job.setJobId(jobId);
+        job.setJobArn("arn:aws:batch:us-east-1:" + ACCOUNT + ":job/" + jobId);
+        job.setJobName(jobId);
+        job.setJobQueue("queue");
+        job.setJobDefinition("definition");
+        job.setStatus(status.name());
+        job.setCreatedAt(1L);
+        job.setRegion(REGION);
+        job.setAccountId(ACCOUNT);
+        return job;
     }
 
     private ObjectNode json(String body) throws Exception {
@@ -841,6 +983,19 @@ class BatchServiceTest {
         for (int i = 0; i < 100; i++) {
             JsonNode job = service.describeJobs(request).path("jobs").get(0);
             if (job != null && status.equals(job.path("status").asText())) {
+                return job;
+            }
+            Thread.sleep(10);
+        }
+        return null;
+    }
+
+    private JsonNode waitForJobAttemptCount(BatchService service, String jobId, int attemptCount) throws Exception {
+        ObjectNode request = objectMapper.createObjectNode();
+        request.putArray("jobs").add(jobId);
+        for (int i = 0; i < 100; i++) {
+            JsonNode job = service.describeJobs(request).path("jobs").get(0);
+            if (job != null && job.path("attempts").size() == attemptCount) {
                 return job;
             }
             Thread.sleep(10);
