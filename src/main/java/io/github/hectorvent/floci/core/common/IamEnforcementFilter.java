@@ -34,7 +34,8 @@ import java.util.regex.Pattern;
 
 /**
  * JAX-RS filter that enforces IAM policies on every incoming request when
- * {@code floci.iam.enforcement-enabled = true}.
+ * {@code floci.services.iam.enforcement-enabled = true}
+ * ({@code FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true} in the environment).
  *
  * <p>Bypass rules (request is always allowed through):
  * <ul>
@@ -236,6 +237,31 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             targetContexts.add(targetContext);
         }
 
+        if (abortIfDenied(ctx, caller, action, credentialScope, resources, targetContexts,
+                region, accountId, akid)) {
+            return;
+        }
+
+        // A PutObject carrying If-Match compares against the object it replaces, and S3 authorizes
+        // that read as s3:GetObject, WITHOUT the object's tags in the request context. Measured
+        // against real AWS (INTENTIUS/choudoufu#1342): under a GetObject allow conditioned on
+        // s3:ExistingObjectTag the conditional write is AccessDenied, under a GetObject allow
+        // scoped by prefix alone it succeeds, and with no GetObject at all it is denied.
+        // If-None-Match needs no such permission.
+        if ("s3:PutObject".equals(action) && ctx.getHeaderString("If-Match") != null) {
+            abortIfDenied(ctx, caller, "s3:GetObject", credentialScope, resources,
+                    withoutObjectTags(targetContexts), region, accountId, akid);
+        }
+    }
+
+    /**
+     * Evaluates one action against every resource and target context, aborting the request with
+     * AccessDenied on the first DENY. Returns true when the request was aborted.
+     */
+    private boolean abortIfDenied(ContainerRequestContext ctx, CallerContext caller, String action,
+                                  String credentialScope, List<String> resources,
+                                  List<Map<String, List<String>>> targetContexts,
+                                  String region, String accountId, String akid) {
         for (String resource : resources) {
             List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(credentialScope, resource);
             String resourceOwnerAccountId = resourcePolicies.isEmpty() ? null : resourcePolicies.getFirst().ownerAccountId();
@@ -267,9 +293,28 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         + " because no identity-based policy allows the " + action + " action";
                 emitS3DenialIfApplicable(akid, action, resource, ctx, region, denyMessage);
                 ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType(), resource));
-                return;
+                return true;
             }
         }
+        return false;
+    }
+
+    /** The same contexts with every object-tag key removed, keeping the principal and global keys. */
+    private static List<Map<String, List<String>>> withoutObjectTags(
+            List<Map<String, List<String>>> targetContexts) {
+        List<Map<String, List<String>>> stripped = new ArrayList<>();
+        for (Map<String, List<String>> targetContext : targetContexts) {
+            if (targetContext == null) {
+                stripped.add(null);
+                continue;
+            }
+            Map<String, List<String>> copy = new HashMap<>(targetContext);
+            copy.keySet().removeIf(key ->
+                    key.startsWith(IamConditionContextResolver.EXISTING_OBJECT_TAG_PREFIX)
+                            || key.startsWith(IamConditionContextResolver.REQUEST_OBJECT_TAG_PREFIX));
+            stripped.add(copy.isEmpty() ? null : copy);
+        }
+        return stripped;
     }
 
     /**
