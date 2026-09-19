@@ -36,7 +36,22 @@ public class KmsJsonHandler {
         this.regionResolver = regionResolver;
     }
 
+    private static final Set<String> KEY_ID_OPERATIONS = Set.of(
+            "GetPublicKey", "DescribeKey", "CreateGrant", "ListGrants", "RevokeGrant", "Encrypt", "GenerateDataKey",
+            "GenerateDataKeyWithoutPlaintext", "Sign", "Verify", "GenerateMac", "VerifyMac", "ScheduleKeyDeletion",
+            "CancelKeyDeletion", "TagResource", "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy",
+            "ListKeyPolicies", "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation",
+            "DisableKeyRotation", "EnableKey", "DisableKey", "RotateKeyOnDemand", "GetParametersForImport",
+            "ImportKeyMaterial", "DeleteImportedKeyMaterial");
+
     public Response handle(String action, JsonNode request, String region) {
+        if (KEY_ID_OPERATIONS.contains(action)) {
+            validateKeyIdMember(request, "KeyId");
+        } else if ("ReEncrypt".equals(action)) {
+            validateKeyIdMember(request, "DestinationKeyId");
+        } else if ("CreateAlias".equals(action) || "UpdateAlias".equals(action)) {
+            validateKeyIdMember(request, "TargetKeyId");
+        }
         return switch (action) {
             case "CreateKey" -> handleCreateKey(request, region);
             case "GenerateRandom" -> handleGenerateRandom(request, region);
@@ -653,6 +668,25 @@ public class KmsJsonHandler {
         if (max < value) {
             throw new AwsException("ValidationException", "1 validation error detected: Value '" + value + "' at '"
                     + member + "' failed to satisfy constraint: Member must have value less than or equal to " + max, 400);
+        }
+    }
+
+    private static void validateKeyIdMember(JsonNode request, String member) {
+        String name = Character.toLowerCase(member.charAt(0)) + member.substring(1);
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value null at '" + name
+                    + "' failed to satisfy constraint: Member must not be null", 400);
+        }
+        String keyId = value.asText();
+        String pattern = "Value '" + keyId + "' at '" + name
+                + "' failed to satisfy constraint: Member must satisfy regular expression pattern: ^\\p{ASCII}+$";
+        if (keyId.isEmpty()) {
+            throw new AwsException("ValidationException", "2 validation errors detected: Value '' at '" + name
+                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1; " + pattern, 400);
+        }
+        if (!keyId.chars().allMatch(c -> c < 128)) {
+            throw new AwsException("ValidationException", "1 validation error detected: " + pattern, 400);
         }
     }
 

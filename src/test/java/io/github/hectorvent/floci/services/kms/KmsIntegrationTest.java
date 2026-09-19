@@ -2024,6 +2024,24 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "DescribeKey|{}|1 validation error detected: Value null at 'keyId' failed to satisfy constraint: Member must not be null",
+            "Sign|{\"Message\":\"bWVzc2FnZQ==\",\"SigningAlgorithm\":\"ECDSA_SHA_256\"}|1 validation error detected: Value null at 'keyId' failed to satisfy constraint: Member must not be null",
+            "ScheduleKeyDeletion|{}|1 validation error detected: Value null at 'keyId' failed to satisfy constraint: Member must not be null",
+            "ReEncrypt|{\"CiphertextBlob\":\"AAAA\"}|1 validation error detected: Value null at 'destinationKeyId' failed to satisfy constraint: Member must not be null",
+            "CreateAlias|{\"AliasName\":\"alias/x\"}|1 validation error detected: Value null at 'targetKeyId' failed to satisfy constraint: Member must not be null",
+            "GetPublicKey|{\"KeyId\":\"\"}|2 validation errors detected: Value '' at 'keyId' failed to satisfy constraint: Member must have length greater than or equal to 1; Value '' at 'keyId' failed to satisfy constraint: Member must satisfy regular expression pattern: ^\\p{ASCII}+$",
+            "DescribeKey|{\"KeyId\":\"\\u30ad\\u30fc\"}|1 validation error detected: Value 'キー' at 'keyId' failed to satisfy constraint: Member must satisfy regular expression pattern: ^\\p{ASCII}+$",
+    })
+    void operationsValidateTheKeyIdMember(String operation, String body, String message) {
+        callKms(operation, body)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest
     @CsvSource({"key/", "alias/floci-missing"})
     void describeKeyRejectsAnArnFromAnotherRegion(String resource) {
         String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
